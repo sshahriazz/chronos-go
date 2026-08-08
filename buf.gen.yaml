@@ -1,0 +1,14 @@
+version: v2
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/chronos/chronos-go/gen/proto
+plugins:
+  - local: protoc-gen-go
+    out: gen/proto
+    opt: paths=source_relative
+  # One handler serves gRPC, gRPC-Web and HTTP/JSON on a single port (ADR-007)
+  - local: protoc-gen-connect-go
+    out: gen/proto
+    opt: paths=source_relative

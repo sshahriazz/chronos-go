@@ -1,0 +1,653 @@
+openapi: 3.1.0
+info:
+  title: Chronos API
+  version: v1
+  summary: Multi-tenant workspace platform — identity, organizations, workspaces and access.
+  description: |
+    Chronos exposes a single API surface over **three protocols on one port**:
+    gRPC, gRPC-Web, and HTTP/JSON. This document describes the HTTP/JSON
+    surface; gRPC clients should generate from the `.proto` sources instead.
+
+    ## Errors
+
+    Clients branch on the machine-readable `reason` field, **never** on the HTTP
+    status or the human-readable message. The status exists for transport
+    handling only.
+
+    Two refusals that look alike and must never be collapsed:
+
+    | reason | means | client should |
+    | --- | --- | --- |
+    | `ACCESS_DENIED` | authenticated, but lacks the relation | ask an admin |
+    | `PLAN_UPGRADE_REQUIRED` | the plan does not include this | offer an upgrade |
+
+    `NOT_FOUND` is deliberately ambiguous: it covers "absent", "invisible to
+    you", and "refused" so identifiers cannot be probed for existence across a
+    tenant boundary. Inside a tenant, errors are specific.
+
+    The full catalogue is published separately — see External Documentation.
+
+    ## Idempotency
+
+    Every mutating call **requires** an `Idempotency-Key` header (a ULID or
+    UUID). Replaying a key with the same body returns the stored response
+    rather than re-executing. Replaying it with a *different* body returns
+    `CONFLICT` — that catches client bugs instead of silently returning
+    someone else's result.
+
+    ## Tenancy
+
+    Every request resolves to exactly one organization. Resource identifiers are
+    prefixed and self-describing (`org_01H8…`, `ws_01H8…`); passing an
+    identifier of the wrong type is rejected as `VALIDATION_FAILED` at the
+    boundary rather than surfacing as a confusing `NOT_FOUND`.
+
+    ## Timestamps
+
+    All timestamps are RFC 3339 in **UTC**. The server's presentation timezone
+    is reported by `SystemService/GetStatus` and never affects stored values.
+  contact:
+    name: Chronos Platform
+    url: https://github.com/chronos/chronos-go
+  license:
+    name: Proprietary
+externalDocs:
+  description: Error catalogue, architecture and domain specifications
+  url: https://github.com/chronos/chronos-go/blob/main/docs/api/errors.md
+servers:
+  - url: http://localhost:8090
+    description: Local development
+  - url: https://api.staging.chronos.example
+    description: Staging
+  - url: https://api.chronos.example
+    description: Production
+security:
+  - bearerAuth: []
+components:
+  securitySchemes:
+    apiKeyAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Machine credential, format `chr_<env>_<keyid>_<secret>`. A key is bound
+        to exactly one organization at creation and cannot be moved. Its
+        effective permission is the intersection of its scopes and its owning
+        principal's access, so it can never exceed its creator.
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Short-lived access token (10 minutes) obtained from the session
+        endpoints. Revocation takes effect immediately on the refresh path and
+        within the token's lifetime otherwise.
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: ULID or UUID. Required on every mutating call.
+      schema:
+        type: string
+  headers:
+    Chronos-Consistency-Token:
+      description: |
+        Commit position of the write. Pass it back on a subsequent read to get
+        read-your-writes; the server waits briefly if projections lag.
+      schema:
+        type: string
+  schemas:
+    base64:
+      type: boolean
+      title: base64
+      description: Specifies if the message query param is base64 encoded, which may be required for binary data
+    chronos.system.v1.Criticality:
+      type: string
+      title: Criticality
+      enum:
+        - CRITICALITY_UNSPECIFIED
+        - CRITICALITY_CRITICAL
+        - CRITICALITY_DEGRADABLE
+        - CRITICALITY_FAIL_CLOSED
+      description: |-
+        Criticality states what happens to the product when a dependency is down.
+         It is fixed per dependency at wiring time, never decided during an incident.
+    chronos.system.v1.Dependency:
+      type: object
+      properties:
+        name:
+          type: string
+          title: name
+          description: Stable identifier, e.g. "postgres" or "openfga". Safe to switch on.
+        health:
+          title: health
+          description: Current observed state.
+          $ref: '#/components/schemas/chronos.system.v1.Health'
+        criticality:
+          title: criticality
+          description: What losing this dependency costs the product.
+          $ref: '#/components/schemas/chronos.system.v1.Criticality'
+        detail:
+          type: string
+          title: detail
+          description: |-
+            Operator-facing detail, such as a connection error. Never contains
+             credentials or personal data.
+        impact:
+          type: string
+          title: impact
+          description: |-
+            Client-facing description of what is unavailable while this dependency is
+             not up, so a UI can explain itself rather than showing a generic error.
+        lastCheckedAt:
+          title: last_checked_at
+          description: When this dependency was last probed, in UTC (ADR-008).
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+        latencyMs:
+          type:
+            - integer
+            - string
+          title: latency_ms
+          format: int64
+          description: Observed latency of the most recent probe, in milliseconds.
+      title: Dependency
+      additionalProperties: false
+      description: |-
+        Dependency is one piece of infrastructure the server relies on, and how it is
+         currently behaving.
+    chronos.system.v1.GetStatusRequest:
+      type: object
+      title: GetStatusRequest
+      additionalProperties: false
+      description: 'GetStatusRequest is empty: the response describes the server, not a resource.'
+    chronos.system.v1.GetStatusResponse:
+      type: object
+      properties:
+        ready:
+          type: boolean
+          title: ready
+          description: True when every CRITICAL dependency is up. Mirrors the /readyz probe.
+        fullyOperational:
+          type: boolean
+          title: fully_operational
+          description: |-
+            True when every dependency is up. A server can be ready without being
+             fully operational — for example with realtime degraded.
+        dependencies:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.system.v1.Dependency'
+          title: dependencies
+          description: One entry per registered dependency, in registration order.
+        version:
+          type: string
+          title: version
+          description: Build version of the running binary.
+        startedAt:
+          title: started_at
+          description: When this process started, in UTC.
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+        timezone:
+          type: string
+          title: timezone
+          description: |-
+            The server's presentation timezone. Storage is always UTC (ADR-008); this
+             is exposed so a misconfigured deployment is visible.
+      title: GetStatusResponse
+      additionalProperties: false
+      description: GetStatusResponse is the full picture of server and dependency state.
+    chronos.system.v1.Health:
+      type: string
+      title: Health
+      enum:
+        - HEALTH_UNSPECIFIED
+        - HEALTH_UP
+        - HEALTH_DEGRADED
+        - HEALTH_DOWN
+      description: Health is a dependency's current state.
+    compression:
+      title: compression
+      enum:
+        - identity
+        - gzip
+        - br
+      description: Which compression algorithm to use for this request
+    connect:
+      title: connect
+      enum:
+        - v1
+      description: Define the version of the Connect protocol
+    connect-protocol-version:
+      type: number
+      title: Connect-Protocol-Version
+      enum:
+        - 1
+      description: Define the version of the Connect protocol
+      const: 1
+    connect-timeout-header:
+      type: number
+      title: Connect-Timeout-Ms
+      description: Define the timeout, in ms
+    connect.error:
+      type: object
+      properties:
+        code:
+          type: string
+          examples:
+            - not_found
+          enum:
+            - canceled
+            - unknown
+            - invalid_argument
+            - deadline_exceeded
+            - not_found
+            - already_exists
+            - permission_denied
+            - resource_exhausted
+            - failed_precondition
+            - aborted
+            - out_of_range
+            - unimplemented
+            - internal
+            - unavailable
+            - data_loss
+            - unauthenticated
+          description: The status code, which should be an enum value of [google.rpc.Code][google.rpc.Code].
+        message:
+          type: string
+          description: A developer-facing error message, which should be in English. Any user-facing error message should be localized and sent in the [google.rpc.Status.details][google.rpc.Status.details] field, or localized by the client.
+        details:
+          type: array
+          items:
+            $ref: '#/components/schemas/connect.error_details.Any'
+          description: A list of messages that carry the error details. There is no limit on the number of messages.
+      title: Connect Error
+      additionalProperties: true
+      description: 'Error type returned by Connect: https://connectrpc.com/docs/go/errors/#http-representation'
+    connect.error_details.Any:
+      type: object
+      properties:
+        type:
+          type: string
+          description: 'A URL that acts as a globally unique identifier for the type of the serialized message. For example: `type.googleapis.com/google.rpc.ErrorInfo`. This is used to determine the schema of the data in the `value` field and is the discriminator for the `debug` field.'
+        value:
+          type: string
+          format: binary
+          description: The Protobuf message, serialized as bytes and base64-encoded. The specific message type is identified by the `type` field.
+        debug:
+          oneOf:
+            - type: object
+              title: Any
+              additionalProperties: true
+              description: Detailed error information.
+            - $ref: '#/components/schemas/google.rpc.ErrorInfo'
+            - $ref: '#/components/schemas/google.rpc.RetryInfo'
+            - $ref: '#/components/schemas/google.rpc.DebugInfo'
+            - $ref: '#/components/schemas/google.rpc.QuotaFailure'
+            - $ref: '#/components/schemas/google.rpc.PreconditionFailure'
+            - $ref: '#/components/schemas/google.rpc.BadRequest'
+            - $ref: '#/components/schemas/google.rpc.RequestInfo'
+            - $ref: '#/components/schemas/google.rpc.ResourceInfo'
+            - $ref: '#/components/schemas/google.rpc.Help'
+            - $ref: '#/components/schemas/google.rpc.LocalizedMessage'
+          discriminator:
+            propertyName: type
+            mapping:
+              type.googleapis.com/google.rpc.ErrorInfo: '#/components/schemas/google.rpc.ErrorInfo'
+              type.googleapis.com/google.rpc.RetryInfo: '#/components/schemas/google.rpc.RetryInfo'
+              type.googleapis.com/google.rpc.DebugInfo: '#/components/schemas/google.rpc.DebugInfo'
+              type.googleapis.com/google.rpc.QuotaFailure: '#/components/schemas/google.rpc.QuotaFailure'
+              type.googleapis.com/google.rpc.PreconditionFailure: '#/components/schemas/google.rpc.PreconditionFailure'
+              type.googleapis.com/google.rpc.BadRequest: '#/components/schemas/google.rpc.BadRequest'
+              type.googleapis.com/google.rpc.RequestInfo: '#/components/schemas/google.rpc.RequestInfo'
+              type.googleapis.com/google.rpc.ResourceInfo: '#/components/schemas/google.rpc.ResourceInfo'
+              type.googleapis.com/google.rpc.Help: '#/components/schemas/google.rpc.Help'
+              type.googleapis.com/google.rpc.LocalizedMessage: '#/components/schemas/google.rpc.LocalizedMessage'
+          title: Debug
+          description: Deserialized error detail payload. The 'type' field indicates the schema. This field is for easier debugging and should not be relied upon for application logic.
+      additionalProperties: true
+      description: Contains an arbitrary serialized message along with a @type that describes the type of the serialized message, with an additional debug field for ConnectRPC error details.
+    encoding:
+      title: encoding
+      enum:
+        - proto
+        - json
+      description: Define which encoding or 'Message-Codec' to use
+    google.protobuf.Timestamp:
+      type: string
+      examples:
+        - "2023-01-15T01:30:15.01Z"
+        - "2024-12-25T12:00:00Z"
+      format: date-time
+      description: |-
+        A Timestamp represents a point in time independent of any time zone or local
+         calendar, encoded as a count of seconds and fractions of seconds at
+         nanosecond resolution. The count is relative to an epoch at UTC midnight on
+         January 1, 1970, in the proleptic Gregorian calendar which extends the
+         Gregorian calendar backwards to year one.
+
+         All minutes are 60 seconds long. Leap seconds are "smeared" so that no leap
+         second table is needed for interpretation, using a [24-hour linear
+         smear](https://developers.google.com/time/smear).
+
+         The range is from 0001-01-01T00:00:00Z to 9999-12-31T23:59:59.999999999Z. By
+         restricting to that range, we ensure that we can convert to and from [RFC
+         3339](https://www.ietf.org/rfc/rfc3339.txt) date strings.
+
+         # Examples
+
+         Example 1: Compute Timestamp from POSIX `time()`.
+
+             Timestamp timestamp;
+             timestamp.set_seconds(time(NULL));
+             timestamp.set_nanos(0);
+
+         Example 2: Compute Timestamp from POSIX `gettimeofday()`.
+
+             struct timeval tv;
+             gettimeofday(&tv, NULL);
+
+             Timestamp timestamp;
+             timestamp.set_seconds(tv.tv_sec);
+             timestamp.set_nanos(tv.tv_usec * 1000);
+
+         Example 3: Compute Timestamp from Win32 `GetSystemTimeAsFileTime()`.
+
+             FILETIME ft;
+             GetSystemTimeAsFileTime(&ft);
+             UINT64 ticks = (((UINT64)ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+
+             // A Windows tick is 100 nanoseconds. Windows epoch 1601-01-01T00:00:00Z
+             // is 11644473600 seconds before Unix epoch 1970-01-01T00:00:00Z.
+             Timestamp timestamp;
+             timestamp.set_seconds((INT64) ((ticks / 10000000) - 11644473600LL));
+             timestamp.set_nanos((INT32) ((ticks % 10000000) * 100));
+
+         Example 4: Compute Timestamp from Java `System.currentTimeMillis()`.
+
+             long millis = System.currentTimeMillis();
+
+             Timestamp timestamp = Timestamp.newBuilder().setSeconds(millis / 1000)
+                 .setNanos((int) ((millis % 1000) * 1000000)).build();
+
+         Example 5: Compute Timestamp from Java `Instant.now()`.
+
+             Instant now = Instant.now();
+
+             Timestamp timestamp =
+                 Timestamp.newBuilder().setSeconds(now.getEpochSecond())
+                     .setNanos(now.getNano()).build();
+
+         Example 6: Compute Timestamp from current time in Python.
+
+             timestamp = Timestamp()
+             timestamp.GetCurrentTime()
+
+         # JSON Mapping
+
+         In JSON format, the Timestamp type is encoded as a string in the
+         [RFC 3339](https://www.ietf.org/rfc/rfc3339.txt) format. That is, the
+         format is "{year}-{month}-{day}T{hour}:{min}:{sec}[.{frac_sec}]Z"
+         where {year} is always expressed using four digits while {month}, {day},
+         {hour}, {min}, and {sec} are zero-padded to two digits each. The fractional
+         seconds, which can go up to 9 digits (i.e. up to 1 nanosecond resolution),
+         are optional. The "Z" suffix indicates the timezone ("UTC"); the timezone
+         is required. A proto3 JSON serializer should always use UTC (as indicated by
+         "Z") when printing the Timestamp type and a proto3 JSON parser should be
+         able to accept both UTC and other timezones (as indicated by an offset).
+
+         For example, "2017-01-15T01:30:15.01Z" encodes 15.01 seconds past
+         01:30 UTC on January 15, 2017.
+
+         In JavaScript, one can convert a Date object to this format using the
+         standard
+         [toISOString()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toISOString)
+         method. In Python, a standard `datetime.datetime` object can be converted
+         to this format using
+         [`strftime`](https://docs.python.org/2/library/time.html#time.strftime) with
+         the time format spec '%Y-%m-%dT%H:%M:%S.%fZ'. Likewise, in Java, one can use
+         the Joda Time's [`ISODateTimeFormat.dateTime()`](
+         http://joda-time.sourceforge.net/apidocs/org/joda/time/format/ISODateTimeFormat.html#dateTime()
+         ) to obtain a formatter capable of generating timestamps in this format.
+    google.rpc.BadRequest:
+      type: object
+      properties:
+        field_violations:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+                description: A path that leads to a field in the request body.
+              description:
+                type: string
+                description: A description of why the request element is bad.
+      title: BadRequest
+      description: A message type used to describe a bad request.
+    google.rpc.DebugInfo:
+      type: object
+      properties:
+        stack_entries:
+          type: array
+          items:
+            type: string
+        detail:
+          type: string
+      title: DebugInfo
+      description: Contains debugging information.
+    google.rpc.ErrorInfo:
+      type: object
+      properties:
+        reason:
+          type: string
+          description: The reason of the error. This is a constant value that identifies the proximate cause of the error. Error reasons are unique within a particular domain of errors. This should be at most 63 characters and match a regular expression of `[A-Z][A-Z0-9_]+[A-Z0-9]`, which represents UPPER_SNAKE_CASE.
+        domain:
+          type: string
+          description: 'The logical grouping to which the "reason" belongs. The error domain is typically the registered service name of the tool or product that generates the error. Example: "pubsub.googleapis.com". If the error is generated by some common infrastructure, the error domain must be a globally unique value that identifies the infrastructure. For Google API infrastructure, the error domain is "googleapis.com".'
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          description: 'Additional structured details about this error. Keys must match a regular expression of `[a-z][a-zA-Z0-9-_]+` but should ideally be lowerCamelCase. Also, they must be limited to 64 characters in length. When identifying the current value of an exceeded limit, the units should be contained in the key, not the value.  For example, rather than `{"instanceLimit": "100/request"}`, should be returned as, `{"instanceLimitPerRequest": "100"}`, if the client exceeds the number of instances that can be created in a single (batch) request.'
+      title: ErrorInfo
+      description: Describes the cause of the error with structured details.
+    google.rpc.Help:
+      type: object
+      properties:
+        links:
+          type: array
+          items:
+            type: object
+            properties:
+              description:
+                type: string
+                description: A description of the link.
+              url:
+                type: string
+                description: The URL of the link.
+      title: Help
+      description: Provides links to documentation or for performing an out-of-band action.
+    google.rpc.LocalizedMessage:
+      type: object
+      properties:
+        locale:
+          type: string
+          description: The locale used following the specification defined at http://www.rfc-editor.org/rfc/bcp/bcp47.txt.
+        message:
+          type: string
+          description: The localized message in the locale.
+      title: LocalizedMessage
+      description: A message type used to provide a localized message.
+    google.rpc.PreconditionFailure:
+      type: object
+      properties:
+        violations:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                description: The type of PreconditionFailure. We recommend using a service-specific enum type to define the supported precondition violation types.
+              subject:
+                type: string
+                description: The subject, relative to the type, that failed the precondition.
+              description:
+                type: string
+                description: A description of how the precondition failed.
+      title: PreconditionFailure
+      description: A message type used to describe a failed precondition.
+    google.rpc.QuotaFailure:
+      type: object
+      properties:
+        violations:
+          type: array
+          items:
+            type: object
+            properties:
+              subject:
+                type: string
+                description: The subject on which the quota check failed.
+              description:
+                type: string
+                description: A description of how the quota check failed.
+      title: QuotaFailure
+      description: Describes how a quota check failed.
+    google.rpc.RequestInfo:
+      type: object
+      properties:
+        request_id:
+          type: string
+          description: An opaque string that could be used by the client to trace the request.
+        serving_data:
+          type: string
+          description: The serving data that were used to process the request.
+      title: RequestInfo
+      description: Contains metadata about the request that clients can attach when filing a bug or providing other forms of feedback.
+    google.rpc.ResourceInfo:
+      type: object
+      properties:
+        resource_type:
+          type: string
+          description: A name for the type of resource being accessed, e.g. "sql table", "cloud storage bucket", etc.
+        resource_name:
+          type: string
+          description: The name of the resource being accessed.
+        owner:
+          type: string
+          description: The owner of the resource (optional).
+        description:
+          type: string
+          description: A description of the resource (optional).
+      title: ResourceInfo
+      description: Describes the resource that is being accessed.
+    google.rpc.RetryInfo:
+      type: object
+      properties:
+        retry_delay:
+          type: string
+          format: duration
+          description: Clients consuming this error should wait at least this long before retrying. The value is a duration string, following the protobuf Duration format (e.g., "1.5s" for one and a half seconds).
+      title: RetryInfo
+      description: Describes when the clients can retry a failed request.
+paths:
+  /chronos.system.v1.SystemService/GetStatus:
+    get:
+      tags:
+        - SystemService
+      summary: |-
+        GetStatus reports per-dependency state so a client can grey out affected
+         features instead of discovering them through failed calls.
+      description: |-
+        Public by design: it must answer while the system is degraded, including
+         when authentication itself is unavailable.
+      operationId: SystemService_GetStatus.get
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+        - name: message
+          in: query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.system.v1.GetStatusRequest'
+        - name: encoding
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/encoding'
+        - name: base64
+          in: query
+          schema:
+            $ref: '#/components/schemas/base64'
+        - name: compression
+          in: query
+          schema:
+            $ref: '#/components/schemas/compression'
+        - name: connect
+          in: query
+          schema:
+            $ref: '#/components/schemas/connect'
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.system.v1.GetStatusResponse'
+    post:
+      tags:
+        - SystemService
+      summary: |-
+        GetStatus reports per-dependency state so a client can grey out affected
+         features instead of discovering them through failed calls.
+      description: |-
+        Public by design: it must answer while the system is degraded, including
+         when authentication itself is unavailable.
+      operationId: SystemService_GetStatus
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.system.v1.GetStatusRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.system.v1.GetStatusResponse'
+tags:
+  - name: SystemService
+    description: SystemService reports server and dependency state.

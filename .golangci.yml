@@ -1,0 +1,108 @@
+# Enforces the import contract from CONVENTIONS.md §2 and ADR-001.
+# These rules are the boundary. A violation fails the build, not the review.
+version: "2"
+
+linters:
+  enable:
+    - depguard
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose
+    - contextcheck
+    - errorlint
+    - gosec
+    - nilerr
+    - noctx
+    - revive
+
+  settings:
+    depguard:
+      rules:
+        # ── The kernel knows nothing about modules, and nothing about drivers ──
+        platform-is-pure:
+          files:
+            - "**/internal/platform/**"
+          deny:
+            - pkg: github.com/chronos/chronos-go/internal/modules
+              desc: "platform is the kernel; it must never import a module (ADR-001)"
+            - pkg: github.com/chronos/chronos-go/internal/adapter
+              desc: "platform declares ports; adapters implement them, not the reverse"
+            - pkg: github.com/chronos/chronos-go/gen
+              desc: "generated wire types are not kernel primitives"
+            - pkg: github.com/jackc/pgx
+              desc: "no drivers in the kernel — declare a port instead"
+            - pkg: github.com/stripe/stripe-go
+              desc: "no vendor SDKs in the kernel"
+            - pkg: go.temporal.io
+              desc: "no vendor SDKs in the kernel"
+
+        # ── Domain is pure: no I/O, no transport, no serialization ──
+        domain-is-pure:
+          files:
+            - "**/internal/modules/*/domain/**"
+          deny:
+            - pkg: encoding/json
+              desc: "a domain type with json tags has let a wire format dictate a business rule; serialize in adapters (ADR-001)"
+            - pkg: net/http
+              desc: "transport does not belong in the domain (ADR-001)"
+            - pkg: database/sql
+              desc: "persistence does not belong in the domain (ADR-001)"
+            - pkg: github.com/chronos/chronos-go/gen
+              desc: "generated protobuf types are DTOs, never domain types (ADR-007)"
+            - pkg: github.com/chronos/chronos-go/internal/adapter
+              desc: "the domain depends inward only"
+            - pkg: connectrpc.com/connect
+              desc: "the domain returns DomainError; the API layer maps it (CONVENTIONS §5)"
+            - pkg: github.com/jackc/pgx
+            - pkg: go.temporal.io
+            - pkg: github.com/stripe/stripe-go
+
+        # ── app/ declares ports; it must not reach for concrete infrastructure ──
+        app-declares-ports:
+          files:
+            - "**/internal/modules/*/app/**"
+          deny:
+            - pkg: github.com/chronos/chronos-go/gen/proto
+              desc: "use cases take domain types; the API layer maps proto (ADR-007)"
+            - pkg: github.com/jackc/pgx
+              desc: "declare a port; the adapter implements it"
+            - pkg: github.com/stripe/stripe-go
+
+        # ── The tenant API must not link the operator plane (ADR-024) ──
+        api-excludes-operator:
+          files:
+            - "**/cmd/api/**"
+            - "**/internal/server/**"
+            - "**/internal/modules/**"
+          deny:
+            - pkg: github.com/chronos/chronos-go/internal/operator
+              desc: "the operator plane is a separate binary; cmd/api must not link it (ADR-024)"
+
+    revive:
+      rules:
+        - name: context-as-argument
+        - name: error-return
+        - name: error-strings
+        - name: exported
+          disabled: true
+
+    gosec:
+      excludes:
+        - G404 # non-crypto rand is fine where we use it deliberately
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+exclusions:
+  rules:
+    - path: _test\.go$
+      linters: [gosec, errcheck, noctx]

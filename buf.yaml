@@ -1,0 +1,22 @@
+version: v2
+modules:
+  - path: proto
+# Re-add when the OpenFGA gRPC adapter is built (ADR-037) — their official Go
+# SDK is HTTP-only, so the gRPC client is generated from their protos:
+#   deps:
+#     - buf.build/openfga/api
+lint:
+  use:
+    - STANDARD
+    # Documentation is part of the API contract (CONVENTIONS §7.1). An
+    # undocumented field ships forever, so this is enforced, not encouraged.
+    - COMMENTS
+  except:
+    # Our package path is chronos.<module>.v1; the directory mirrors it.
+    - PACKAGE_VERSION_SUFFIX
+    # Comments on enum *values* are noise when the name is self-describing;
+    # everything else must be documented.
+    - COMMENT_ENUM_VALUE
+breaking:
+  use:
+    - FILE

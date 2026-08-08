@@ -1,0 +1,59 @@
+# -----------------------------------------------------------------------------
+# Grafana Tempo — trace storage.
+#
+# Traces arrive from the OTel Collector (never directly from apps), so there is
+# exactly one place to change sampling, redaction, or fan-out.
+#
+# The metrics_generator turns spans into RED metrics (rate/errors/duration) and
+# a service graph, then remote-writes them into Prometheus. That means a Go
+# service only has to emit traces to get latency dashboards for free.
+# -----------------------------------------------------------------------------
+
+server:
+  http_listen_port: 3200
+  log_level: warn
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+ingester:
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    block_retention: 48h
+
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+      stack: chronos
+  storage:
+    path: /var/tempo/generator/wal
+    remote_write:
+      - url: http://prometheus:9090/api/v1/write
+        send_exemplars: true
+  traces_storage:
+    path: /var/tempo/generator/traces
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+overrides:
+  defaults:
+    metrics_generator:
+      processors:
+        - service-graphs
+        - span-metrics
+        - local-blocks

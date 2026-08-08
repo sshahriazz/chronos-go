@@ -1,0 +1,65 @@
+{
+  "http_server": {
+    "address": "0.0.0.0",
+    "port": 8000
+  },
+
+  "client": {
+    "allowed_origins": [
+      "http://localhost:*",
+      "http://127.0.0.1:*"
+    ],
+    "token": {}
+  },
+
+  "channel": {
+    "namespaces": [
+      {
+        "name": "doc",
+        "presence": true,
+        "join_leave": true,
+        "history_size": 50,
+        "history_ttl": "300s",
+        "force_recovery": true
+      },
+      {
+        "name": "folder",
+        "history_size": 20,
+        "history_ttl": "120s",
+        "force_recovery": true
+      },
+      {
+        "name": "user",
+        "presence": true,
+        "history_size": 20,
+        "history_ttl": "300s",
+        "force_recovery": true
+      }
+    ]
+  },
+
+  "engine": {
+    "type": "redis",
+    "redis": {
+      "address": "redis://valkey:6379",
+      "prefix": "chronos.centrifugo"
+    }
+  },
+
+  "grpc_api": {
+    "enabled": true,
+    "port": 10000
+  },
+
+  "admin": {
+    "enabled": true
+  },
+
+  "health": {
+    "enabled": true
+  },
+
+  "prometheus": {
+    "enabled": true
+  }
+}

@@ -1,0 +1,20 @@
+# secrets / local config
+.env
+*.local
+
+# go
+/bin/
+/dist/
+*.test
+*.out
+/vendor/
+
+# editors
+.idea/
+.vscode/
+.DS_Store
+
+# local data escaping a bind mount
+/data/
+bin/
+cmd/apidocs/assets/descriptor.binpb

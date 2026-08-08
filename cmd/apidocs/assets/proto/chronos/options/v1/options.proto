@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+// Package options defines the enforcement policy that every RPC must declare
+// (ADR-021).
+//
+// The gates are declarative on purpose. A per-handler design fails in exactly
+// one way: the endpoint nobody remembered to guard is the one that leaks. Here
+// the policy lives beside the method, the interceptors read it, and an RPC with
+// no policy fails at server startup rather than at request time.
+//
+// These options are also rendered into the generated documentation
+// (CONVENTIONS §7.1), so "what permission does this endpoint need?" is answered
+// by the schema instead of by reading the source.
+package chronos.options.v1;
+
+import "google/protobuf/descriptor.proto";
+
+// OperationClass drives the payment gate (organization.md §5.2). The org's
+// lifecycle state decides which classes are permitted.
+enum OperationClass {
+  OPERATION_CLASS_UNSPECIFIED = 0;
+
+  // Reads. Permitted in every org state, including Suspended and Closed.
+  OPERATION_CLASS_READ = 1;
+
+  // Ordinary writes. Blocked once an org is Suspended.
+  OPERATION_CLASS_WRITE = 2;
+
+  // Consumes a seat or a quota unit. Blocked earlier than WRITE — stop them
+  // adding seats before you stop them working.
+  OPERATION_CLASS_GROW = 3;
+
+  // Viewing billing. NEVER blocked: an org admin may always see spend.
+  OPERATION_CLASS_BILLING_VIEW = 4;
+
+  // Changing billing. NEVER blocked: locking a past-due customer out of the
+  // page where they would pay you is self-inflicted revenue loss.
+  OPERATION_CLASS_BILLING_MANAGE = 5;
+
+  // Data export. NEVER blocked: withholding data from a suspended tenant is a
+  // GDPR portability violation, not leverage.
+  OPERATION_CLASS_EXPORT = 6;
+}
+
+// AssuranceLevel is the authentication strength a method requires
+// (identity.md §2). Step-up raises a session for a time-boxed window.
+enum AssuranceLevel {
+  ASSURANCE_LEVEL_UNSPECIFIED = 0;
+  ASSURANCE_LEVEL_1 = 1; // single factor
+  ASSURANCE_LEVEL_2 = 2; // two factors, or a passkey with user verification
+  ASSURANCE_LEVEL_3 = 3; // hardware-bound authenticator
+}
+
+// Authz declares the permission check the authz gate performs.
+message Authz {
+  // The relation required, e.g. "admin".
+  string relation = 1;
+
+  // The resource type the relation applies to, e.g. "organization".
+  string resource_type = 2;
+
+  // Request field holding the resource id. Empty means the request is scoped
+  // to the org already resolved by the org-context gate.
+  string resource_id_field = 3;
+}
+
+extend google.protobuf.MethodOptions {
+  // Required on every method. The server refuses to start without it.
+  chronos.options.v1.Authz authz = 51001;
+
+  // Required on every method.
+  chronos.options.v1.OperationClass operation = 51002;
+
+  // Entitlement key checked by gate 4, e.g. "seats.member". Optional: many
+  // methods consume no entitlement.
+  string entitlement = 51003;
+
+  // Minimum assurance level. Defaults to AAL1 when unset.
+  chronos.options.v1.AssuranceLevel min_aal = 51004;
+
+  // Marks a method as public — no authentication, no gates. Used only by
+  // health and discovery endpoints. Mutually exclusive with authz.
+  bool public = 51005;
+}

@@ -1,0 +1,24 @@
+{
+  "identities": [
+    {
+      "name": "chronos-app",
+      "credentials": [
+        {
+          "accessKey": "chronos",
+          "secretKey": "chronos-secret-key"
+        }
+      ],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    },
+    {
+      "name": "chronos-readonly",
+      "credentials": [
+        {
+          "accessKey": "chronos-ro",
+          "secretKey": "chronos-readonly-key"
+        }
+      ],
+      "actions": ["Read", "List"]
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+# Temporal dynamic config for local development with the SQL (PostgreSQL)
+# visibility store. Mirrors temporalio/docker-compose's development-sql.yaml.
+#
+# Do not copy this file into a production deployment.
+
+limit.maxIDLength:
+  - value: 255
+    constraints: {}
+
+# Dev-only: makes custom search attributes visible immediately instead of after
+# the cache TTL. Never enable in production — it hammers the visibility store.
+system.forceSearchAttributesCacheRefreshOnRead:
+  - value: true
+    constraints: {}

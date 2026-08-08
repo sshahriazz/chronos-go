@@ -1,0 +1,85 @@
+# -----------------------------------------------------------------------------
+# Scrapes every component in the chronos stack.
+#
+# Native /metrics endpoints:  KurrentDB, OpenFGA, Centrifugo, Temporal,
+#                             SeaweedFS, Mailpit
+# Sidecar exporters:          PostgreSQL, Valkey (neither speaks HTTP)
+#
+# All targets are on the `chronos` docker network, addressed by service name.
+# -----------------------------------------------------------------------------
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    stack: chronos
+    env: local
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Event log. Exposes ~500KB of metrics: append/read latency, index lag,
+  # subscription counts, queue depth, GC, plus ASP.NET runtime metrics.
+  - job_name: kurrentdb
+    static_configs:
+      - targets: ["kurrentdb:2113"]
+        labels: { component: event-log }
+
+  # Authorization graph. Check/BatchCheck/ListObjects latency and throughput,
+  # datastore query counts, cache hit rates.
+  - job_name: openfga
+    static_configs:
+      - targets: ["openfga:2112"]
+        labels: { component: authorization }
+
+  # Realtime edge. Connection counts, subscriptions, publish rates, broker RTT.
+  - job_name: centrifugo
+    static_configs:
+      - targets: ["centrifugo:8000"]
+        labels: { component: realtime }
+
+  # Durable execution. Task queue lag, workflow/activity completion rates,
+  # persistence latency, shard health.
+  - job_name: temporal
+    static_configs:
+      - targets: ["temporal:9090"]
+        labels: { component: workflows }
+
+  # Object storage — master, volume, filer and S3 gateway all report here.
+  - job_name: seaweedfs
+    static_configs:
+      - targets: ["seaweedfs:9327"]
+        labels: { component: object-storage }
+
+  # SMTP capture (dev). Message counts, SMTP errors.
+  - job_name: mailpit
+    static_configs:
+      - targets: ["mailpit:8025"]
+        labels: { component: smtp }
+
+  # Read model + OpenFGA + Temporal backing store. auto-discovers all databases.
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+        labels: { component: read-model }
+
+  # Ephemeral state + Centrifugo backplane.
+  - job_name: valkey
+    static_configs:
+      - targets: ["valkey-exporter:9121"]
+        labels: { component: cache }
+
+  # Metrics that arrived over OTLP (from Go services once they export), re-served
+  # by the collector for pull-based scraping.
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8889"]
+        labels: { component: telemetry }
+
+  # Trace backend's own health, plus the metrics-generator's throughput.
+  - job_name: tempo
+    static_configs:
+      - targets: ["tempo:3200"]
+        labels: { component: telemetry }

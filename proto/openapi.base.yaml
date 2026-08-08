@@ -1,0 +1,115 @@
+# Document-level OpenAPI metadata.
+#
+# GENERATOR INPUT — merged into the generated spec by protoc-gen-connect-openapi
+# via `base=`. Never edit docs/api/chronos-openapi.yaml directly; it is output.
+#
+# Paths, schemas, operation summaries and descriptions all come from the .proto
+# comments, so they cannot drift. Only what protobuf has no way to express lives
+# here: contact details, servers, security schemes and prose.
+
+openapi: 3.1.0
+
+info:
+  title: Chronos API
+  version: v1
+  summary: Multi-tenant workspace platform — identity, organizations, workspaces and access.
+  description: |
+    Chronos exposes a single API surface over **three protocols on one port**:
+    gRPC, gRPC-Web, and HTTP/JSON. This document describes the HTTP/JSON
+    surface; gRPC clients should generate from the `.proto` sources instead.
+
+    ## Errors
+
+    Clients branch on the machine-readable `reason` field, **never** on the HTTP
+    status or the human-readable message. The status exists for transport
+    handling only.
+
+    Two refusals that look alike and must never be collapsed:
+
+    | reason | means | client should |
+    | --- | --- | --- |
+    | `ACCESS_DENIED` | authenticated, but lacks the relation | ask an admin |
+    | `PLAN_UPGRADE_REQUIRED` | the plan does not include this | offer an upgrade |
+
+    `NOT_FOUND` is deliberately ambiguous: it covers "absent", "invisible to
+    you", and "refused" so identifiers cannot be probed for existence across a
+    tenant boundary. Inside a tenant, errors are specific.
+
+    The full catalogue is published separately — see External Documentation.
+
+    ## Idempotency
+
+    Every mutating call **requires** an `Idempotency-Key` header (a ULID or
+    UUID). Replaying a key with the same body returns the stored response
+    rather than re-executing. Replaying it with a *different* body returns
+    `CONFLICT` — that catches client bugs instead of silently returning
+    someone else's result.
+
+    ## Tenancy
+
+    Every request resolves to exactly one organization. Resource identifiers are
+    prefixed and self-describing (`org_01H8…`, `ws_01H8…`); passing an
+    identifier of the wrong type is rejected as `VALIDATION_FAILED` at the
+    boundary rather than surfacing as a confusing `NOT_FOUND`.
+
+    ## Timestamps
+
+    All timestamps are RFC 3339 in **UTC**. The server's presentation timezone
+    is reported by `SystemService/GetStatus` and never affects stored values.
+
+  contact:
+    name: Chronos Platform
+    url: https://github.com/chronos/chronos-go
+  license:
+    name: Proprietary
+
+externalDocs:
+  description: Error catalogue, architecture and domain specifications
+  url: https://github.com/chronos/chronos-go/blob/main/docs/api/errors.md
+
+servers:
+  - url: http://localhost:8090
+    description: Local development
+  - url: https://api.staging.chronos.example
+    description: Staging
+  - url: https://api.chronos.example
+    description: Production
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Short-lived access token (10 minutes) obtained from the session
+        endpoints. Revocation takes effect immediately on the refresh path and
+        within the token's lifetime otherwise.
+    apiKeyAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Machine credential, format `chr_<env>_<keyid>_<secret>`. A key is bound
+        to exactly one organization at creation and cannot be moved. Its
+        effective permission is the intersection of its scopes and its owning
+        principal's access, so it can never exceed its creator.
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: ULID or UUID. Required on every mutating call.
+      schema:
+        type: string
+
+  headers:
+    Chronos-Consistency-Token:
+      description: |
+        Commit position of the write. Pass it back on a subsequent read to get
+        read-your-writes; the server waits briefly if projections lag.
+      schema:
+        type: string

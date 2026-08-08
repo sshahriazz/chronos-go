@@ -1,0 +1,786 @@
+{
+  "uid": "chronos-workflows",
+  "title": "Chronos \u2014 Workflows (Temporal)",
+  "description": "Durable execution. Backlog age and scheduled-queue lag are the two numbers that show up as user-visible delay.",
+  "tags": [
+    "chronos",
+    "temporal",
+    "workflows"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "10s",
+      "30s",
+      "1m",
+      "5m",
+      "15m"
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Service",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Request rate by operation",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "chronos-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "gradientMode": "opacity"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "sum(rate(service_requests{job=\"temporal\"}[5m])) by (operation)",
+          "refId": "A",
+          "format": "time_series",
+          "legendFormat": "{{operation}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Service latency p95",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "chronos-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "gradientMode": "opacity"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum(rate(service_latency_bucket{job=\"temporal\"}[5m])) by (le, operation))",
+          "refId": "B",
+          "format": "time_series",
+          "legendFormat": "{{operation}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Errors by type",
+      "description": "Some error types are normal control flow in Temporal (e.g. NotFound on a first poll).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "chronos-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "gradientMode": "opacity"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "sum(rate(service_error_with_type{job=\"temporal\"}[5m])) by (error_type)",
+          "refId": "C",
+          "format": "time_series",
+          "legendFormat": "{{error_type}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "gRPC connections",
+      "description": "Worker connections. Zero here means no Go worker is polling yet.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "chronos-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "gradientMode": "opacity"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "service_grpc_conn_active{job=\"temporal\"}",
+          "refId": "D",
+          "format": "time_series",
+          "legendFormat": "active"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Task queues \u2014 where work waits",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Backlog size",
+      "description": "Tasks waiting for a worker. Sustained growth means too few workers.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "chronos-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "gradientMode": "opacity"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "sum(approximate_backlog_count) by (taskqueue)",
+          "refId": "E",
+          "format": "time_series",
+          "legendFormat": "{{taskqueue}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Backlog age",
+      "description": "How long the oldest queued task has waited. The user-visible number.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "chronos-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "gradientMode": "opacity"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "sum(approximate_backlog_age_seconds) by (taskqueue)",
+          "refId": "F",
+          "format": "time_series",
+          "legendFormat": "{{taskqueue}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Pollers",
+      "description": "Long-poll connections from Go workers.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "chronos-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 26
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "gradientMode": "opacity"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "sum(temporal_num_pollers) by (poller_type)",
+          "refId": "G",
+          "format": "time_series",
+          "legendFormat": "{{poller_type}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Loaded task queue partitions",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "chronos-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 26
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "gradientMode": "opacity"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "loaded_task_queue_partition_count",
+          "refId": "H",
+          "format": "time_series",
+          "legendFormat": "partitions"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Persistence \u2014 Temporal's PostgreSQL usage",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Persistence request rate",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "chronos-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 35
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "gradientMode": "opacity"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "sum(rate(persistence_requests{job=\"temporal\"}[5m])) by (operation)",
+          "refId": "I",
+          "format": "time_series",
+          "legendFormat": "{{operation}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Persistence latency p95",
+      "description": "Temporal shares the PostgreSQL instance with the read model \u2014 watch this when the read model is under load.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "chronos-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 35
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "gradientMode": "opacity"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum(rate(persistence_latency_bucket{job=\"temporal\"}[5m])) by (le))",
+          "refId": "J",
+          "format": "time_series",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "SQL connection pool",
+      "description": "Hitting max is the classic cause of workflow stalls.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "chronos-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 43
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "gradientMode": "opacity"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "sum(persistence_sql_in_use)",
+          "refId": "K",
+          "format": "time_series",
+          "legendFormat": "in use"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "sum(persistence_sql_open_conn)",
+          "refId": "L",
+          "format": "time_series",
+          "legendFormat": "open"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "sum(persistence_sql_max_open_conn)",
+          "refId": "M",
+          "format": "time_series",
+          "legendFormat": "max"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Shard queue lag p95",
+      "description": "Scheduled-queue lag is why a workflow timer might fire late.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "chronos-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 43
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "gradientMode": "opacity"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum(rate(shardinfo_immediate_queue_lag_bucket[5m])) by (le))",
+          "refId": "N",
+          "format": "time_series",
+          "legendFormat": "immediate"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum(rate(shardinfo_scheduled_queue_lag_bucket[5m])) by (le))",
+          "refId": "O",
+          "format": "time_series",
+          "legendFormat": "scheduled"
+        }
+      ]
+    }
+  ],
+  "annotations": {
+    "list": []
+  },
+  "templating": {
+    "list": []
+  }
+}

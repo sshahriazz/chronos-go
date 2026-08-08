@@ -1,0 +1,15 @@
+apiVersion: 1
+
+providers:
+  - name: chronos
+    orgId: 1
+    folder: Chronos
+    type: file
+    disableDeletion: true
+    # Dashboards are code: edits in the UI are overwritten on the next reload.
+    # Change the JSON in infra/grafana/dashboards/ instead.
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

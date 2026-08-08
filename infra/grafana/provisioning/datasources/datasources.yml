@@ -1,0 +1,41 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: chronos-prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
+      httpMethod: POST
+      # Clicking an exemplar on a latency graph jumps straight to the trace.
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: chronos-tempo
+
+  - name: Tempo
+    type: tempo
+    uid: chronos-tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: false
+    jsonData:
+      # Span RED metrics produced by Tempo's metrics-generator live in Prometheus.
+      tracesToMetrics:
+        datasourceUid: chronos-prometheus
+        spanStartTimeShift: -2m
+        spanEndTimeShift: 2m
+        tags:
+          - key: service.name
+            value: service
+      serviceMap:
+        datasourceUid: chronos-prometheus
+      nodeGraph:
+        enabled: true
+      search:
+        hide: false
+      streamingEnabled:
+        search: true

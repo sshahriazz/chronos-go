@@ -1,0 +1,11 @@
+# Human-readable gRPC reference, generated from the same protos the server
+# serves. The REST surface gets Scalar; this is its counterpart for gRPC —
+# every service, method, message, field and enum, with the doc comments that
+# `buf lint` already makes mandatory.
+version: v2
+plugins:
+  - local: protoc-gen-doc
+    out: docs/api
+    opt:
+      - html,grpc.html
+    strategy: all

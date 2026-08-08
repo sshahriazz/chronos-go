@@ -1,0 +1,108 @@
+syntax = "proto3";
+
+// Package system exposes the server's own state — the probe surface the
+// frontend uses to degrade deliberately rather than showing failed requests
+// (ADR-010).
+package chronos.system.v1;
+
+import "chronos/options/v1/options.proto";
+import "google/protobuf/timestamp.proto";
+
+// Health is a dependency's current state.
+enum Health {
+  HEALTH_UNSPECIFIED = 0;
+
+  // Reachable and behaving.
+  HEALTH_UP = 1;
+
+  // Reachable but impaired, or unreachable in a way the system absorbs.
+  // The product keeps working with reduced capability.
+  HEALTH_DEGRADED = 2;
+
+  // Unreachable, and the capability it provides is unavailable.
+  HEALTH_DOWN = 3;
+}
+
+// Criticality states what happens to the product when a dependency is down.
+// It is fixed per dependency at wiring time, never decided during an incident.
+enum Criticality {
+  CRITICALITY_UNSPECIFIED = 0;
+
+  // Readiness fails. The process stays up; it just cannot serve.
+  CRITICALITY_CRITICAL = 1;
+
+  // Some capability is lost; the rest of the product continues.
+  CRITICALITY_DEGRADABLE = 2;
+
+  // Down means DENY, not degrade. Reserved for authorization: an attacker who
+  // can take out the authorization service must not thereby gain access.
+  CRITICALITY_FAIL_CLOSED = 3;
+}
+
+// Dependency is one piece of infrastructure the server relies on, and how it is
+// currently behaving.
+message Dependency {
+  // Stable identifier, e.g. "postgres" or "openfga". Safe to switch on.
+  string name = 1;
+
+  // Current observed state.
+  Health health = 2;
+
+  // What losing this dependency costs the product.
+  Criticality criticality = 3;
+
+  // Operator-facing detail, such as a connection error. Never contains
+  // credentials or personal data.
+  string detail = 4;
+
+  // Client-facing description of what is unavailable while this dependency is
+  // not up, so a UI can explain itself rather than showing a generic error.
+  string impact = 5;
+
+  // When this dependency was last probed, in UTC (ADR-008).
+  google.protobuf.Timestamp last_checked_at = 6;
+
+  // Observed latency of the most recent probe, in milliseconds.
+  int64 latency_ms = 7;
+}
+
+// GetStatusRequest is empty: the response describes the server, not a resource.
+message GetStatusRequest {}
+
+// GetStatusResponse is the full picture of server and dependency state.
+message GetStatusResponse {
+  // True when every CRITICAL dependency is up. Mirrors the /readyz probe.
+  bool ready = 1;
+
+  // True when every dependency is up. A server can be ready without being
+  // fully operational — for example with realtime degraded.
+  bool fully_operational = 2;
+
+  // One entry per registered dependency, in registration order.
+  repeated Dependency dependencies = 3;
+
+  // Build version of the running binary.
+  string version = 4;
+
+  // When this process started, in UTC.
+  google.protobuf.Timestamp started_at = 5;
+
+  // The server's presentation timezone. Storage is always UTC (ADR-008); this
+  // is exposed so a misconfigured deployment is visible.
+  string timezone = 6;
+}
+
+// SystemService reports server and dependency state.
+service SystemService {
+  // GetStatus reports per-dependency state so a client can grey out affected
+  // features instead of discovering them through failed calls.
+  //
+  // Public by design: it must answer while the system is degraded, including
+  // when authentication itself is unavailable.
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse) {
+    // No side effects, so Connect may serve it over GET and it is cacheable.
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (chronos.options.v1.public) = true;
+    option (chronos.options.v1.operation) = OPERATION_CLASS_READ;
+  }
+}

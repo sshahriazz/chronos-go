@@ -1,0 +1,25 @@
+# OpenAPI is generated from the SAME schema the server serves, so the REST
+# documentation cannot drift from behaviour (CONVENTIONS §7.1).
+#
+# Only service protos are included — options.proto is annotations, not an API
+# surface, and including it produced a spec with an empty `paths`.
+version: v2
+plugins:
+  - local: protoc-gen-connect-openapi
+    out: docs/api
+    opt:
+      - path=chronos-openapi.yaml
+      # Document-level metadata protobuf cannot express: info, servers,
+      # security schemes, prose. Versioned generator INPUT, never hand-edited
+      # output.
+      - base=proto/openapi.base.yaml
+      # Idempotent RPCs are exposed as GET so they are cacheable and REST-shaped
+      - allow-get
+      # Drop schemas that no operation references (the options.proto leakage)
+      - trim-unused-types
+      # Readable operationIds and tags for generated clients and docs UIs
+      - short-operation-ids
+      - short-service-tags
+      # Include google.rpc error detail schemas alongside our reason codes
+      - with-google-error-detail
+      - with-streaming

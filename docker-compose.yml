@@ -1,0 +1,513 @@
+# =============================================================================
+# Chronos — local infrastructure stack
+#
+# See docs/INFRA.md for what each component owns and why it is here.
+# Every image is pinned in .env. `make up` is safe to re-run.
+# =============================================================================
+
+name: ${COMPOSE_PROJECT_NAME:-chronos}
+
+x-restart: &restart
+  restart: unless-stopped
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — CQRS read model, plus backing store for OpenFGA and Temporal.
+  # NOTE: PG18 moved the data dir; the declared VOLUME is /var/lib/postgresql.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: ${POSTGRES_IMAGE}
+    container_name: chronos-postgres
+    <<: [*restart, *logging]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      OPENFGA_DB: ${OPENFGA_DB}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    command:
+      - postgres
+      - -c
+      - max_connections=300
+      - -c
+      - shared_buffers=256MB
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [chronos]
+
+  # ---------------------------------------------------------------------------
+  # Valkey — sessions, JWT denylist, rate limiting, Centrifugo PUB/SUB backplane.
+  # Everything stored here must be safe to lose. Every key gets a TTL.
+  # ---------------------------------------------------------------------------
+  valkey:
+    image: ${VALKEY_IMAGE}
+    container_name: chronos-valkey
+    <<: [*restart, *logging]
+    command:
+      - valkey-server
+      - --appendonly
+      - "no"
+      - --save
+      - ""
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - allkeys-lru
+    ports:
+      - "${VALKEY_PORT}:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [chronos]
+
+  # ---------------------------------------------------------------------------
+  # KurrentDB — the append-only event log. Single source of truth.
+  # Server-side JS projections are deliberately OFF; projections are Go code.
+  # ---------------------------------------------------------------------------
+  kurrentdb:
+    image: ${KURRENTDB_IMAGE}
+    # Kurrent publishes no stable arm64 build — all their arm64 tags are
+    # vendor-labelled "experimental". We run the stable x86_64 build under
+    # emulation rather than ship an experimental binary. No-op on amd64 hosts.
+    platform: ${KURRENTDB_PLATFORM:-linux/amd64}
+    container_name: chronos-kurrentdb
+    <<: [*restart, *logging]
+    environment:
+      KURRENTDB_CLUSTER_SIZE: "1"
+      KURRENTDB_NODE_PORT: "2113"
+      KURRENTDB_INSECURE: "true"
+      # Projections live in Go, not in the server's JS runtime.
+      KURRENTDB_RUN_PROJECTIONS: "None"
+      KURRENTDB_START_STANDARD_PROJECTIONS: "false"
+      # Dev convenience only: powers the Admin UI stream browser.
+      KURRENTDB_ENABLE_ATOM_PUB_OVER_HTTP: "true"
+      KURRENTDB_LOG_LEVEL: "Information"
+    ports:
+      - "${KURRENTDB_PORT}:2113"
+    volumes:
+      - kurrentdb-data:/var/lib/kurrentdb
+      - kurrentdb-logs:/var/log/kurrentdb
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:2113/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks: [chronos]
+
+  # ---------------------------------------------------------------------------
+  # OpenFGA — Zanzibar-style relationship graph. Owns every access decision.
+  # Runs schema migrations to completion before the server starts.
+  # ---------------------------------------------------------------------------
+  openfga-migrate:
+    image: ${OPENFGA_IMAGE}
+    container_name: chronos-openfga-migrate
+    <<: *logging
+    restart: "no"
+    command: migrate
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${OPENFGA_DB}?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [chronos]
+
+  openfga:
+    image: ${OPENFGA_IMAGE}
+    container_name: chronos-openfga
+    <<: [*restart, *logging]
+    command: run
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${OPENFGA_DB}?sslmode=disable
+      OPENFGA_DATASTORE_MAX_OPEN_CONNS: "50"
+      OPENFGA_LOG_FORMAT: json
+      OPENFGA_LOG_LEVEL: info
+      # Authenticated from day one, even locally.
+      OPENFGA_AUTHN_METHOD: ${OPENFGA_AUTHN_METHOD:-preshared}
+      OPENFGA_AUTHN_PRESHARED_KEYS: ${OPENFGA_PRESHARED_KEY}
+      # Mutually exclusive with authn: OpenFGA panics with "the playground only
+      # supports authn method 'none'". See .env.example.
+      OPENFGA_PLAYGROUND_ENABLED: ${OPENFGA_PLAYGROUND_ENABLED:-false}
+      OPENFGA_METRICS_ENABLED: "true"
+      # OpenFGA emits OTLP traces natively — the only stack component that does
+      # so without a licence. Every Check/ListObjects becomes a span in Tempo.
+      OPENFGA_TRACE_ENABLED: "true"
+      OPENFGA_TRACE_OTLP_ENDPOINT: otel-collector:4317
+      OPENFGA_TRACE_OTLP_TLS_ENABLED: "false"
+      OPENFGA_TRACE_SAMPLE_RATIO: "1"
+      OPENFGA_TRACE_SERVICE_NAME: openfga
+    ports:
+      - "${OPENFGA_HTTP_PORT}:8080"
+      - "${OPENFGA_GRPC_PORT}:8081"
+      - "${OPENFGA_METRICS_PORT}:2112"
+      # No playground port: it cannot run alongside authentication.
+    depends_on:
+      openfga-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr=localhost:8081"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+      start_period: 10s
+    networks: [chronos]
+
+  # ---------------------------------------------------------------------------
+  # Centrifugo — the realtime edge. Go services never hold a WebSocket.
+  # Redis engine points at Valkey so nodes can scale horizontally.
+  # ---------------------------------------------------------------------------
+  centrifugo:
+    image: ${CENTRIFUGO_IMAGE}
+    container_name: chronos-centrifugo
+    <<: [*restart, *logging]
+    command: centrifugo --config /centrifugo/config.json
+    environment:
+      # Secrets stay in env; structure stays in the config file.
+      CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY: ${CENTRIFUGO_TOKEN_HMAC_SECRET}
+      CENTRIFUGO_HTTP_API_KEY: ${CENTRIFUGO_API_KEY}
+      CENTRIFUGO_ADMIN_PASSWORD: ${CENTRIFUGO_ADMIN_PASSWORD}
+      CENTRIFUGO_ADMIN_SECRET: ${CENTRIFUGO_ADMIN_SECRET}
+      CENTRIFUGO_ENGINE_REDIS_ADDRESS: redis://valkey:6379
+      # gRPC server API has NO auth by default — always set a key.
+      CENTRIFUGO_GRPC_API_KEY: ${CENTRIFUGO_API_KEY}
+    ports:
+      - "${CENTRIFUGO_PORT}:8000"
+      - "${CENTRIFUGO_GRPC_PORT}:10000"
+    volumes:
+      - ./infra/centrifugo/config.json:/centrifugo/config.json:ro
+    depends_on:
+      valkey:
+        condition: service_healthy
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks: [chronos]
+
+  # ---------------------------------------------------------------------------
+  # Temporal — durable execution. auto-setup is a DEV image: it creates the
+  # schema and the default namespace on boot. Production uses temporalio/server
+  # plus an explicit temporal-sql-tool migration step.
+  # ---------------------------------------------------------------------------
+  temporal:
+    image: ${TEMPORAL_IMAGE}
+    container_name: chronos-temporal
+    <<: [*restart, *logging]
+    environment:
+      # "postgres12" is the plugin name for all modern PostgreSQL, not a version.
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_SEEDS: postgres
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD}
+      DBNAME: ${TEMPORAL_DB}
+      VISIBILITY_DBNAME: ${TEMPORAL_VISIBILITY_DB}
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+      DEFAULT_NAMESPACE: ${TEMPORAL_NAMESPACE}
+      DEFAULT_NAMESPACE_RETENTION: 72h
+      # Renders the metrics.prometheus block of the server config template.
+      PROMETHEUS_ENDPOINT: 0.0.0.0:9090
+      PROMETHEUS_TIMER_TYPE: histogram
+    ports:
+      - "${TEMPORAL_PORT}:7233"
+      - "${TEMPORAL_METRICS_PORT}:9090"
+    volumes:
+      - ./infra/temporal/dynamicconfig:/etc/temporal/config/dynamicconfig:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [chronos]
+
+  temporal-ui:
+    image: ${TEMPORAL_UI_IMAGE}
+    container_name: chronos-temporal-ui
+    <<: [*restart, *logging]
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000,http://localhost:5173
+      TEMPORAL_UI_PORT: "8080"
+    ports:
+      # Moved off 8080 — OpenFGA owns that port.
+      - "${TEMPORAL_UI_PORT}:8080"
+    depends_on:
+      - temporal
+    networks: [chronos]
+
+  # Not started by default. `docker compose --profile tools run --rm temporal-admin-tools`
+  temporal-admin-tools:
+    image: ${TEMPORAL_ADMINTOOLS_IMAGE}
+    container_name: chronos-temporal-admin-tools
+    <<: *logging
+    profiles: [tools]
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CLI_ADDRESS: temporal:7233
+    stdin_open: true
+    tty: true
+    depends_on:
+      - temporal
+    networks: [chronos]
+
+  # ---------------------------------------------------------------------------
+  # SeaweedFS — S3-compatible object storage (Haystack-derived, O(1) reads).
+  # `server -filer -s3` runs master + volume + filer + S3 gateway in one process.
+  # That is a local convenience, not the production topology.
+  # ---------------------------------------------------------------------------
+  seaweedfs:
+    image: ${SEAWEEDFS_IMAGE}
+    container_name: chronos-seaweedfs
+    <<: [*restart, *logging]
+    command: >
+      server
+      -dir=/data
+      -ip=seaweedfs
+      -ip.bind=0.0.0.0
+      -master.volumeSizeLimitMB=1024
+      -filer
+      -s3
+      -s3.port=8333
+      -s3.config=/etc/seaweedfs/s3.json
+      -metricsPort=9327
+    ports:
+      - "${SEAWEEDFS_S3_PORT}:8333"
+      - "${SEAWEEDFS_FILER_PORT}:8888"
+      - "${SEAWEEDFS_MASTER_PORT}:9333"
+      - "${SEAWEEDFS_METRICS_PORT}:9327"
+      # gRPC. SeaweedFS convention: gRPC port = HTTP port + 10000.
+      - "${SEAWEEDFS_MASTER_GRPC_PORT}:19333"
+      - "${SEAWEEDFS_FILER_GRPC_PORT}:18888"
+      - "${SEAWEEDFS_S3_GRPC_PORT}:18333"
+      # NOTE: the volume server (:8080 in-container, gRPC :18080) is
+      # intentionally NOT published — 8080 collides with OpenFGA and S3
+      # clients reach data through the filer.
+    volumes:
+      - seaweedfs-data:/data
+      - ./infra/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:9333/cluster/status || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    networks: [chronos]
+
+  # One-shot: create the application bucket. Idempotent — re-running is a no-op.
+  seaweedfs-init:
+    image: ${SEAWEEDFS_IMAGE}
+    container_name: chronos-seaweedfs-init
+    <<: *logging
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        echo "s3.bucket.create -name ${S3_BUCKET}" |
+        weed shell -master=seaweedfs:9333 -filer=seaweedfs:8888 || true
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+    networks: [chronos]
+
+  # ---------------------------------------------------------------------------
+  # OpenBao — key custody (ADR-028). Holds the KEK that wraps per-subject data
+  # keys, so GDPR erasure works by destroying a key (ADR-002).
+  #
+  # DEV MODE ONLY here: in-memory, auto-unsealed, fixed root token. Production
+  # runs sealed with file/raft storage and a real unseal procedure — a dev-mode
+  # OpenBao in production would defeat the entire guarantee.
+  # ---------------------------------------------------------------------------
+  openbao:
+    image: ${OPENBAO_IMAGE}
+    container_name: chronos-openbao
+    <<: [*restart, *logging]
+    command: server -dev -dev-listen-address=0.0.0.0:8200
+    environment:
+      BAO_DEV_ROOT_TOKEN_ID: ${OPENBAO_DEV_TOKEN}
+      BAO_ADDR: http://127.0.0.1:8200
+    ports:
+      - "${OPENBAO_PORT}:8200"
+    cap_add:
+      - IPC_LOCK
+    healthcheck:
+      test: ["CMD-SHELL", "bao status -address=http://127.0.0.1:8200 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks: [chronos]
+
+  # ---------------------------------------------------------------------------
+  # Mailpit — SMTP capture. DEVELOPMENT ONLY: it accepts mail and never delivers.
+  # In production the same SMTP_* vars point at a real relay.
+  # ---------------------------------------------------------------------------
+  mailpit:
+    image: ${MAILPIT_IMAGE}
+    container_name: chronos-mailpit
+    <<: [*restart, *logging]
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+      MP_MAX_MESSAGES: "5000"
+      MP_DATABASE: /data/mailpit.db
+      # Serves /metrics on the existing web UI port (8025).
+      MP_ENABLE_PROMETHEUS: "true"
+    ports:
+      - "${MAILPIT_SMTP_PORT}:1025"
+      - "${MAILPIT_UI_PORT}:8025"
+    volumes:
+      - mailpit-data:/data
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+    networks: [chronos]
+
+  # ===========================================================================
+  # Telemetry
+  #
+  # KurrentDB, OpenFGA, Centrifugo, Temporal, SeaweedFS and Mailpit all expose
+  # Prometheus metrics natively (see docs/INFRA.md §14). PostgreSQL and Valkey
+  # speak no HTTP, so they need sidecar exporters.
+  # ===========================================================================
+
+  postgres-exporter:
+    image: ${POSTGRES_EXPORTER_IMAGE}
+    container_name: chronos-postgres-exporter
+    <<: [*restart, *logging]
+    environment:
+      DATA_SOURCE_NAME: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      PG_EXPORTER_AUTO_DISCOVER_DATABASES: "true"
+    ports:
+      - "${POSTGRES_EXPORTER_PORT}:9187"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [chronos]
+
+  valkey-exporter:
+    image: ${VALKEY_EXPORTER_IMAGE}
+    container_name: chronos-valkey-exporter
+    <<: [*restart, *logging]
+    environment:
+      REDIS_ADDR: redis://valkey:6379
+    ports:
+      - "${VALKEY_EXPORTER_PORT}:9121"
+    depends_on:
+      valkey:
+        condition: service_healthy
+    networks: [chronos]
+
+  prometheus:
+    image: ${PROMETHEUS_IMAGE}
+    container_name: chronos-prometheus
+    <<: [*restart, *logging]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+      # Tempo's metrics-generator remote-writes span RED metrics here.
+      - --web.enable-remote-write-receiver
+      # Exemplars link a Prometheus datapoint to the trace that produced it.
+      - --enable-feature=exemplar-storage
+    ports:
+      - "${PROMETHEUS_PORT}:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks: [chronos]
+
+  # Single OTLP ingress. Apps talk to this, never to Tempo directly.
+  otel-collector:
+    image: ${OTEL_COLLECTOR_IMAGE}
+    container_name: chronos-otel-collector
+    <<: [*restart, *logging]
+    command: ["--config=/etc/otelcol/config.yaml"]
+    ports:
+      - "${OTLP_GRPC_PORT}:4317"
+      - "${OTLP_HTTP_PORT}:4318"
+      - "${OTEL_COLLECTOR_METRICS_PORT}:8889"
+    volumes:
+      - ./infra/otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
+    depends_on:
+      - tempo
+    networks: [chronos]
+
+  tempo:
+    image: ${TEMPO_IMAGE}
+    container_name: chronos-tempo
+    <<: [*restart, *logging]
+    command: ["-config.file=/etc/tempo.yaml"]
+    user: "0:0"
+    ports:
+      - "${TEMPO_PORT}:3200"
+    volumes:
+      - ./infra/tempo/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    depends_on:
+      - prometheus
+    networks: [chronos]
+
+  grafana:
+    image: ${GRAFANA_IMAGE}
+    container_name: chronos-grafana
+    <<: [*restart, *logging]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_FEATURE_TOGGLES_ENABLE: traceToMetrics
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/chronos-overview.json
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT}:3000"
+    depends_on:
+      - prometheus
+      - tempo
+    networks: [chronos]
+
+networks:
+  chronos:
+    name: chronos
+    driver: bridge
+
+volumes:
+  postgres-data:
+  kurrentdb-data:
+  kurrentdb-logs:
+  seaweedfs-data:
+  mailpit-data:
+  prometheus-data:
+  grafana-data:
+  tempo-data:
