@@ -58,23 +58,9 @@ func (s *Store) Append(
 		return eventsourcing.AppendResult{}, nil
 	}
 
-	data := make([]kurrentdb.EventData, 0, len(events))
-	for _, pe := range events {
-		payload, err := s.codec.Marshal(pe.Event)
-		if err != nil {
-			return eventsourcing.AppendResult{}, fmt.Errorf("kurrentdb: marshal %s: %w", pe.Event.EventType(), err)
-		}
-		meta, err := s.codec.MarshalMetadata(pe.Meta)
-		if err != nil {
-			return eventsourcing.AppendResult{}, fmt.Errorf("kurrentdb: marshal metadata: %w", err)
-		}
-		data = append(data, kurrentdb.EventData{
-			EventID:     toUUID(pe.ID),
-			EventType:   pe.Event.EventType(),
-			ContentType: kurrentdb.ContentTypeJson,
-			Data:        payload,
-			Metadata:    meta,
-		})
+	data, err := s.toEventData(events)
+	if err != nil {
+		return eventsourcing.AppendResult{}, err
 	}
 
 	res, err := s.client.AppendToStream(ctx, stream.String(),

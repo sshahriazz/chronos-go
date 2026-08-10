@@ -95,8 +95,8 @@ services:
       KURRENTDB_NODE_PORT: "2113"
       KURRENTDB_INSECURE: "true"
       # Projections live in Go, not in the server's JS runtime.
-      KURRENTDB_RUN_PROJECTIONS: "None"
-      KURRENTDB_START_STANDARD_PROJECTIONS: "false"
+      KURRENTDB_RUN_PROJECTIONS: "System"
+      KURRENTDB_START_STANDARD_PROJECTIONS: "true"
       # Dev convenience only: powers the Admin UI stream browser.
       KURRENTDB_ENABLE_ATOM_PUB_OVER_HTTP: "true"
       KURRENTDB_LOG_LEVEL: "Information"

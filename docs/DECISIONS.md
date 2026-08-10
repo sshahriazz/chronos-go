@@ -442,8 +442,8 @@ anything uncached still deny.
 
 ### Decision
 
-- **Atlas** owns schema: versioned migrations, planned and linted in CI, with
-  drift detection against the live database.
+- **Goose** owns schema: versioned migrations, applied by `cmd/migrate` with the
+  SQL **embedded in the binary**. See the amendment below.
 - **sqlc** generates all query code from `.sql` files into typed Go against
   **pgx/v5**.
 - **No SQL string ever appears in Go source.** No query builder, no ORM, no
@@ -490,6 +490,46 @@ agree.
 - The app's runtime database role is **not** the schema owner and **not**
   superuser.
 - Migration review includes an index review — see ADR-013.
+
+### Amendment (2026-08-08): Goose replaces Atlas
+
+Atlas was chosen for **declarative** schema management — write the desired
+schema, let it plan the diff. That turned out to be unusable here: Atlas
+Community refuses three things we depend on, each behind `atlas login`:
+
+| Needed | Atlas Community |
+| --- | --- |
+| `CREATE ROLE` / `GRANT` | ✗ *"available to logged-in users only"* |
+| **RLS policies** | ✗ *"available to logged-in users only"* |
+| `migrate lint` (destructive-change detection) | ✗ *"available to logged-in users only"* |
+
+RLS is the backbone of tenant isolation (ADR-015), so keeping policies outside
+the migration system was never an option. Atlas therefore degraded to "applies
+versioned SQL files" — which Goose also does, plus two things we will use:
+
+- **Migrations embed in the binary** (`embed.FS`). `cmd/migrate` is
+  self-contained and cannot drift from a mounted directory — the same property
+  `cmd/apidocs` has for documentation, and it matters for Compose-on-VMs
+  (ADR-034). *Verified: the binary applies migrations when run from an empty
+  directory.*
+- **Go migrations** for backfills needing real logic — re-wrapping keys or
+  populating blind indexes for crypto-shredding (ADR-002) is not expressible in
+  SQL.
+
+It is also consistent with every other choice here — OpenBao over Vault, Valkey
+over Redis, SeaweedFS over MinIO — all made to avoid exactly this kind of
+feature gating.
+
+**What we gave up, and the replacement.** Atlas checksums migration files and
+detects tampering; Goose records applied versions but does not hash contents, so
+an edit to an already-applied migration is invisible — the file says one thing,
+the database contains another, and a fresh environment silently diverges from
+production.
+
+Replaced by `scripts/check_migrations.sh`, run in `make check`: migrations are
+**append-only** relative to the base branch. A file may be added; modifying,
+renaming or deleting one fails the build. *Verified: an edit to an applied
+migration is rejected.*
 
 ---
 
@@ -848,6 +888,178 @@ deliverability damage is immediate. The separation must be structural, because
   second time produces zero side effects.
 - Deploying a *new* reactor starts it at the **current** position by default,
   not zero. Backfilling is a deliberate, separately-authorised action.
+
+### Implementation notes — verified 2026-08-08
+
+Built as `internal/platform/projection` and proved end-to-end against the running
+KurrentDB and PostgreSQL in `internal/adapter/projectionit`.
+
+- **Atomicity is the load-bearing property.** `Runner.handle` applies the event
+  and saves the checkpoint in ONE `InSystemTx`. Rows without a checkpoint means
+  the event is reapplied — harmless, because Apply is idempotent. A checkpoint
+  without rows means the event is lost forever and nothing ever notices. One
+  transaction removes the second case; the unit tests assert that the apply and
+  the save carry the same transaction identifier.
+- **Single writer via Postgres advisory lock**, not a lease row. The lock is
+  bound to the connection, so a crashed or partitioned holder loses it when the
+  server drops the connection — no heartbeat, no clock agreement, no fencing
+  token, and no window in which two holders both believe they are the writer.
+  The key is FNV-1a of the projection name: it must be identical across
+  processes, which Go's per-process-seeded map hash is not.
+- **Reset uses `TRUNCATE`, not `DELETE`.** A rebuild empties the table from an
+  *unscoped* system transaction, which under RLS can see no rows and would
+  therefore delete none — leaving a "rebuilt" projection still holding its old
+  contents, with a checkpoint at zero. `TRUNCATE` is a table-level operation and
+  is not filtered by row security. Every read-model table must therefore grant
+  `TRUNCATE` to the application role.
+- **Scope per event, not per run.** A system transaction sees nothing until it
+  scopes itself; the runner applies the event's own `orgId`/`workspaceId` before
+  calling Apply, so projected rows are written *under* policy rather than around
+  it. Events with no org stay unscoped and may only touch tables without RLS.
+- **Typed dispatch.** `projection.On[T]` derives the stored event type and the
+  constructor from the type parameter, so the string literal and the type
+  assertion that used to sit in every projector's `switch` are both gone. A
+  duplicate registration panics at wiring time.
+- **Subscription tuning.** Filtered `$all` subscriptions run with
+  `MaxSearchWindow=4096` and `CheckpointInterval=8` rather than the SDK defaults
+  of 32 and 1: at 32, a projection interested in one module pays a round trip for
+  every 32 events in the entire system.
+- The rebuild proof is the strong one: after `Rebuild`, the projected rows are
+  compared field by field against the rows produced by the original catch-up run
+  and must be identical.
+
+### Measured, 2026-08-08 (Apple M3 Pro, Docker Desktop, `make bench-integration`)
+
+Kernel hot paths, in memory:
+
+| | ns/op | allocs |
+| --- | --- | --- |
+| `Dispatch.Apply` — no handler (the common case) | 13.4 | **0** |
+| `Dispatch.Apply` — handler + JSON decode | 262 | 1 |
+| `Envelope.Tenant()` | 8.3 | **0** |
+| `After` / `IsBeginning` | 0.6 | **0** |
+
+Our own code is not a factor: ~1 µs of CPU per event against a round trip
+measured at 47 µs natively. Everything below is round trips and commits.
+
+**Where the time went, before.** One event cost five round trips — BEGIN,
+`set_config`, the projection's write, the checkpoint upsert, COMMIT:
+
+| | µs/event | events/sec |
+| --- | --- | --- |
+| From the macOS host (Docker Desktop) | 808 | 1,238 |
+| Natively, inside the container (`pgbench`, same SQL, `chronos_app`) | 299 | 3,342 |
+
+The gap is the Docker Desktop VM boundary: a round trip costs 160 µs from the
+host and 47 µs natively. **Roughly 63% of the local number is a development
+environment artifact**, not something production pays.
+
+**Two changes, both measured.**
+
+1. *Pipeline the statements* (`db.BatchTX`). Every statement for one event goes
+   in a single packet with one trailing Sync, which PostgreSQL runs as one
+   implicit transaction. Five round trips become one, and there is no BEGIN or
+   COMMIT to pay for.
+2. *Commit asynchronously* (`db.Replayable`, `synchronous_commit = off`). Safe
+   here for a specific reason: a projection is derived (ADR-013), and its rows
+   and checkpoint are written in the SAME batch, so a crash loses them together.
+   The projection stays self-consistent and simply reapplies those events. Not
+   permitted for the PII vault or anything else with nothing to replay from.
+
+Async commit is worth nothing on its own — 299 µs → 319 µs — because
+round-trip latency was hiding the WAL flush. It only pays once pipelined:
+
+| Native, per event | µs | events/sec |
+| --- | --- | --- |
+| 5 round trips, durable (the original) | 299 | 3,342 |
+| 5 round trips, async commit | 319 | 3,138 |
+| Pipelined, durable | 201 | 4,966 |
+| **Pipelined + async commit (shipped)** | **139** | **7,219** |
+
+Confirmed through the real Go path, from the host: **808 µs → 215 µs, 3.6×**,
+which is 1.3 round trips — essentially the floor. Durable commit for comparison
+costs 267 µs.
+
+**Atomicity is preserved, and that was tested rather than assumed.** The first
+version of the test passed for the wrong reason: a bad column name fails while
+the batch is being *prepared*, before any statement executes, which proves
+nothing about rollback. The test now forces a CHECK-constraint violation — well
+formed SQL that fails only at execution — and asserts the earlier INSERT did not
+survive.
+
+**A design consequence worth having anyway.** `Projection.Apply` receives a
+`db.Writer`, which can only queue statements — it cannot read. That is what
+makes one round trip possible, but it is also the more correct interface: a
+projector that reads its own tables and branches on what it finds is not
+replay-safe, because the same event applied to a different starting state gives
+a different answer, which is exactly what a rebuild must never do.
+Read-modify-write belongs in SQL (`UPDATE ... SET n = n + 1`,
+`INSERT ... SELECT`), where the database evaluates it atomically.
+
+**What is deliberately not done:** batching multiple *events* into one
+transaction. It would be faster still and would trade a structural guarantee for
+one that depends on every projection staying disciplined. At ~7,200 events/sec
+per projection, with projections running concurrently, there is no evidence it
+is needed.
+
+### Reactors, implemented — 2026-08-09
+
+`internal/platform/reactor` plus persistent subscriptions in the KurrentDB
+adapter. The transport differences are what make the rules structural:
+
+- The package exposes **no Rebuild and no Reset**, and a test asserts it never
+  grows one. Replaying a reactor re-sends every effect in history.
+- New groups start at the **END** of the log (`StartFrom: End`), so deploying a
+  notification handler does not email everyone who ever registered.
+- `EnsureGroup` is idempotent and never reconfigures an existing group. Silently
+  changing redelivery behaviour as a side effect of a deploy is its own outage.
+- Handler outcome maps to the transport: `nil` → Ack, an error → Nack(Retry)
+  with the server parking after `MaxRetryCount`, and `ErrPoison` → Nack(Park)
+  immediately for events that can never succeed.
+- Order within `handle` is the OPPOSITE of a projector's: the effect happens
+  first and is recorded second. Recording first means a crash before the effect
+  leaves it permanently unsent, and an unsent password reset is worse than a
+  duplicated one. The residue — effect done, record lost — is a duplicate, which
+  `React` is required to tolerate anyway.
+- `reactor_processed` (migration 00003) filters at-least-once redelivery. It is
+  a filter, not a guarantee; Temporal workflow IDs keyed by event ID are the
+  backstop under it (ADR-017).
+
+### ⚠️ Enabling system projections quadruples delivery if links are resolved
+
+Found while integration-testing reactors, and worth stating plainly because
+nothing about it is obvious.
+
+With `RUN_PROJECTIONS=System`, `$all` carries not only domain events but the
+**link events** that `$streams`, `$et-` and `$ce-` write. Setting
+`ResolveLinkTos` on a `$all` subscription resolves each of those links back to
+the SAME original event, and because the server filter matches on the *resolved*
+stream name, all four copies pass the filter.
+
+Measured: three appended events produced **twelve deliveries**, every one with
+`retryCount = 0` — so nothing looks like a retry, and a reactor sends four
+emails per event.
+
+**Rule: `ResolveLinkTos` belongs on reads of link streams (`$ce-`, `$et-`) and
+nowhere else.** It is off on `$all` catch-up subscriptions and off on persistent
+subscriptions; it is on, and required, in `ReadCategory`. An integration test
+asserts exactly-once delivery to pin this.
+
+### Rebuild reads category streams — 2026-08-09
+
+`Runner.Rebuild` replays `$ce-<category>` instead of scanning `$all`, when the
+projection's filter resolves to exactly **one** category. Measured at **14.8x**
+(253 ms → 17 ms for 1,000 events in a 20,000-event log).
+
+Two or more categories fall back to `$all`, deliberately: reading them in
+sequence would apply every event of the first before any of the second, losing
+global order, and a projection joining across aggregate types would rebuild into
+a different state than it holds live. Merging category streams by commit
+position would fix it and is not worth the complexity until something needs it.
+
+The category read is an optimisation with a fallback at every step — no
+`$by_category`, a lagging projection, a read error — all log and fall through to
+`$all`, which is always correct.
 
 ---
 
@@ -1780,3 +1992,542 @@ A generic function that is instantiated once is worse than a concrete one.
   path exists and the convenient path is honest about its cost.
 - Budgets are ratchets. Raising one is a reviewed decision with a reason, not a
   quiet edit.
+
+---
+
+## ADR-039 — Aggregates snapshot themselves; a bad snapshot degrades to slow
+
+**Date:** 2026-08-09 · **Status:** Accepted · **Refines ADR-001, ADR-029**
+
+### Decision
+
+An aggregate may implement `Snapshotter` — `Snapshot() Event` and
+`Restore(Event) error`. The repository then loads from the latest snapshot and
+replays only what came after it, and writes a new snapshot every
+`SnapshotEvery` (100) events.
+
+**A snapshot is an ordinary domain Event**, not a second serialization path. It
+is a plain struct registered with the codec like any other event, so the domain
+keeps no wire tags (ADR-001) and the upcaster chain applies unchanged (ADR-029).
+
+Snapshots live in their own stream — `<category>Snapshot-<key>` — carrying
+`$maxCount = 1` so the server scavenges superseded ones. The suffix has no dash,
+so `organizationSnapshot-org_1` is its own category and is NOT matched by a
+projector filtering `organization-`.
+
+### Why
+
+`Repository.Load` replayed the entire stream on every command. Measured:
+
+| Aggregate | Replay | Snapshot | |
+| --- | --- | --- | --- |
+| 1,000 events | 13.2 ms · 2.1 MB · 39k allocs | **2.1 ms** · 92 KB · 1.3k allocs | **6.3x** |
+| 5,000 events | 59.3 ms · 12.6 MB · 196k allocs | **3.6 ms** · 942 KB · 5.3k allocs | **16.5x** |
+
+Replay grows linearly and snapshot load stays flat. At 50,000 events replay
+costs roughly 590 ms **per command** and allocates over 100 MB — a long-lived
+organization would get slower forever.
+
+### The safety rule
+
+**Degrading to slow is always allowed; degrading to wrong never is.** Every
+failure path falls back to a full replay:
+
+- no snapshot stream, or no snapshot in it;
+- a snapshot whose event type is no longer registered;
+- a payload that will not decode;
+- an aggregate whose `Restore` rejects it — the correct response to a schema
+  change is to reject the old snapshot;
+- a snapshot describing a stream that does not exist.
+
+Failures are surfaced through `OnSnapshotError` rather than returned, because a
+snapshot must never fail a command: writing one happens AFTER the append, so the
+events are already durable and the only consequence is a slower next load.
+
+### Consequences
+
+- Aggregates that do not implement `Snapshotter` are unaffected; a repository
+  configured with snapshots is inert for them.
+- `Snapshot()` must return COMPLETE state. Anything omitted is silently lost for
+  every load that starts from that snapshot.
+- Verified by 60 randomised trials comparing snapshot-load against full replay —
+  state and version — mutation-tested against an off-by-one in the resume
+  revision and a missing reposition, both of which the test catches.
+
+---
+
+## ADR-040 — Streams carry server-side retention
+
+**Date:** 2026-08-09 · **Status:** Accepted
+
+### Decision
+
+`StreamAdmin` exposes `$maxCount`, `$maxAge` and `$truncateBefore` per stream,
+and `Deleter` exposes soft delete and tombstone.
+
+### Why
+
+Without retention every stream grows forever. Session streams, audit trails and
+snapshot streams all need bounding, and the enforcement belongs in the server:
+it needs no coordination, cannot fall behind, and keeps working when every
+application instance is down. A cleanup job in Go would have none of those
+properties.
+
+`$truncateBefore` is also the mechanism for erasure that must remove events
+rather than re-encrypt them — the fallback when destroying a key is not enough
+(ADR-002). `Tombstone` is permanent and burns the stream name forever, so it is
+reserved for exactly that case.
+
+### Consequences
+
+- Snapshot streams set `$maxCount = 1` on their first write.
+- Retention on a stream with no policy reads back as the zero value, not an
+  error.
+
+---
+
+## ADR-041 — The PII vault caches keys in-process; Valkey carries only the invalidation
+
+**Date:** 2026-08-10 · **Status:** Accepted
+
+### Context
+
+Resolving one subject costs three round trips: read the wrapped data key from
+PostgreSQL, unwrap it at OpenBao, read the sealed values. Every tenant-facing
+notification pays all three, and a fan-out pays them per recipient.
+
+The obvious fix — cache the resolved profile in Valkey — is not available to us.
+A profile is personal data, and no projection may contain a personal-data column
+(compliance.md §1). A cache is a projection with a shorter life, and putting
+names and addresses in Valkey would also make erasure a cache-eviction problem
+layered on top of a key-destruction one.
+
+The other obvious fix — cache the unwrapped DEK — collides with the guarantee
+ADR-002 rests on. A key cached indefinitely in a process is a key that survives
+its own destruction, and erasure is a lie for as long as it does.
+
+### Decision
+
+The vault caches the **unwrapped data key**, in the process, bounded by a TTL and
+a capacity. Valkey stores no key material and no personal data. What travels over
+Valkey is the invalidation message: a `SubjectID`, which is a pseudonym and
+already appears in events, logs and projections.
+
+1. **Cache the key, not the profile.** Collapses two of the three round trips and
+   leaves every byte of personal data sealed in PostgreSQL. The saving is
+   structural rather than disciplinary: there is no code path that could place
+   personal data in the cache.
+2. **In-process only.** An unwrapped DEK is the plaintext of the thing OpenBao
+   exists to protect. Valkey is Degradable, unauthenticated in development, and
+   its contents are disposable by contract.
+3. **An invalidation bus is mandatory, not an optimisation.** `NewKeyCache`
+   refuses to build without one rather than degrading to TTL-only, because a
+   TTL-only key cache is silently incorrect as soon as a second replica exists.
+4. **Tombstones are sticky.** Erasure is terminal, so a cached "erased" can never
+   become wrong. Stickiness also closes the write-back race: a reader that
+   fetched the wrapped key before an erasure cannot cache it afterwards.
+5. **A dropped subscription purges.** A subscriber that missed messages cannot
+   learn which, so every key it holds becomes suspect at once.
+6. **Expiry zeroes, it does not merely hide.** A sweep runs on a ticker; lazy
+   expiry alone would leave destroyed key material resident until somebody
+   happened to ask for that subject again.
+7. **The TTL is capped at five minutes and validated at startup.** It is the
+   window in which an erased subject's key can still decrypt their data in a
+   replica that never received the invalidation. Nothing at runtime reveals a
+   value set too high — no error, no log line, only a guarantee quietly weakened.
+
+### Consequences
+
+- Erasure now has a failure mode that must not be swallowed. `Erase` returns an
+  error when the invalidation cannot be published even though the durable
+  erasure succeeded. The operation is idempotent, so retrying is cheap; leaving
+  another replica holding a destroyed key is not.
+- The composition root gains two duties it cannot skip: running `Watch` and
+  running the sweep. A cache handed to the vault with nobody running `Watch`
+  holds keys no erasure can reach, so `cmd/worker` asserts both in a test.
+- Losing Valkey degrades to the pre-cache behaviour — every resolve unwraps at
+  OpenBao — which is slower and still correct.
+- `internal/platform/cache` also provides a shared, TTL-enforcing `Cache` and a
+  typed `Store` for everything that is genuinely disposable: sessions, rate
+  limits, page caches. Those may use Valkey freely. The rule they inherit is that
+  there is no `Set` without a TTL.
+
+### Rejected
+
+- **Caching the resolved profile in Valkey.** Fastest, and forbidden: personal
+  data in a shared cache.
+- **Caching the wrapped DEK in Valkey.** Ciphertext, so disclosure is bounded —
+  but it moves key material from a store protected by database authentication to
+  one that is unauthenticated in development, and saves only the PostgreSQL read.
+- **TTL-only, no bus.** Works in development, wrong in production, with no signal
+  in between.
+- **Valkey client-side caching (RESP3 tracking).** A second coherence mechanism
+  underneath a security-critical one; its invalidation semantics are Valkey's,
+  not ours.
+
+---
+
+## ADR-042 — A filtered projection advances on the server's checkpoint
+
+**Date:** 2026-08-10 · **Status:** Accepted
+
+### Context
+
+A projector's position advanced only when it APPLIED an event. For a projection
+whose filter matches everything that matters to it, that is fine. For a
+projection filtered to one module — which is every projection in this codebase —
+it means the position stands still while the rest of the system writes.
+
+The consequence is paid on every ordinary restart, not on a deliberate act: the
+server re-scans the whole log since the last MATCH to find nothing. It grows with
+the log and never stops growing.
+
+Measured against the running server with 50k intervening unmatched events:
+
+| Resume from | Time to reach live |
+| --- | --- |
+| the last matched event (previous behaviour) | 866 ms |
+| the server's checkpoint (current behaviour) | 3 ms |
+
+A filtered `$all` subscription already emits `CheckPointReached` for spans it
+scanned and found no match in. The code received it and called `continue`, with a
+comment arguing the checkpoint should always name an event that was projected.
+
+### Decision
+
+Honour it. `SubscribeOptions` gains `OnCheckpoint`, and the projector persists
+the position with `EventsProcessed` unchanged — nothing was projected, so nothing
+is counted.
+
+Three properties make it safe, and each is asserted by a test that fails when the
+property is removed:
+
+1. **The server guarantees no matching event lies in the skipped span.** Resuming
+   at the checkpoint therefore skips no work this projection would have done.
+2. **The position never regresses.** A checkpoint can trail the last applied
+   event; rewinding would replay events already processed. Apply is idempotent so
+   that is not corruption, but it is silent repeated work that looks exactly like
+   the problem being fixed.
+3. **A failed write stops the subscription.** A checkpoint that silently fails to
+   persist reproduces the original behaviour with no signal at all.
+
+### Consequences
+
+- The checkpoint row no longer always names an event that was projected. It names
+  a RESUME POINT, which is what it was always for. `EventsProcessed` remains the
+  count of applied events and is the number to reason about when asking what a
+  projection has done.
+- A checkpoint write is its own system transaction, because by definition there
+  are no rows to batch it with. At the default settings — `MaxSearchWindow=4096`,
+  `CheckpointInterval=8` — that is one small write per ~32k scanned events.
+
+---
+
+## ADR-043 — A push endpoint is unique per organization
+
+**Date:** 2026-08-10 · **Status:** Accepted
+
+### Context
+
+`push_subscription` made `endpoint` globally unique, so that a browser
+re-subscribing collapsed onto one row instead of receiving every notification
+twice. That reasoning is sound and still holds.
+
+What it missed is that a person belongs to several organizations (workspace.md
+§2) and their browser produces ONE endpoint across all of them. The upsert
+conflicted on the endpoint alone, `ON CONFLICT DO UPDATE` has to read the
+conflicting row, and RLS hid that row because it belonged to the other
+organization:
+
+```
+ERROR: new row violates row-level security policy (USING expression)
+       for table "push_subscription"
+```
+
+Not a duplicate and not a warning. The second organization's subscribe failed
+outright, and that person received no web push there at all.
+
+### Decision
+
+The unique index is `(org_id, endpoint)` and the upsert conflicts on the same
+pair (migration 00006). Re-subscribing within one organization still collapses
+onto a single row.
+
+### Consequences
+
+- One row per person per browser per organization is the correct shape, and a
+  send fans out per organization as it already did.
+- The old index also leaked across tenants: the shape of the failure told a
+  caller whether an endpoint existed in some other organization. Scoping the
+  index removes that.
+- `Down` recreates a NON-unique index. Rows that are legitimate under the new
+  rule violate the old one, so a faithful reversal would either fail or delete
+  somebody's subscription to make the constraint fit.
+
+### Rejected
+
+- **Deleting the other organization's row on conflict.** Silently unsubscribing
+  someone from an organization they never touched.
+- **Keying on (subject_id, endpoint).** Correct in practice, but org_id is the
+  RLS predicate; leading with it keeps the index usable for the same reason every
+  other index here leads with it (ADR-013).
+
+---
+
+## ADR-044 — Sharded rebuild partitions by stream; event metadata is flat strings
+
+**Date:** 2026-08-10 · **Status:** Accepted
+
+### Sharded rebuild
+
+A rebuild may apply events through N workers (`PROJECTOR_REBUILD_SHARDS`).
+Partitioning is by **stream hash**, never by revision range.
+
+Revision-range slicing is the obvious design and it is wrong here. Two events for
+the same aggregate land in different ranges; every projection in this codebase
+upserts by row; the surviving row is then whichever range committed last. That is
+a read model wrong in a way nothing detects — no error, no failing test, just a
+value from the middle of an aggregate's history.
+
+Hashing the stream puts every event of one aggregate in one worker, in order.
+Ordering ACROSS aggregates is lost, which is exactly what a rebuild already gives
+up by reading a link stream instead of `$all`.
+
+Consequences:
+
+- **No worker writes a checkpoint.** The position advances out of order by
+  construction, so a per-event checkpoint would name a position whose
+  predecessors have not all been applied, and a crash would resume from it and
+  skip them. The coordinator writes one checkpoint at the end; a crash mid-rebuild
+  restarts the rebuild, which is the correct outcome for a half-rebuilt
+  projection.
+- **Shards are capped at 16 and validated against `POSTGRES_MAX_CONNS`.** Each
+  holds a pooled connection for the whole rebuild — the same exhaustion already
+  verified for projection leases, where a 3-connection pool with 3 leases could
+  not execute `SELECT 1`.
+- **Live consumption is never sharded.** It must preserve the global commit order
+  the `$all` subscription exists to provide.
+- The default is 1. Sharding is a decision, not something a deployment acquires
+  by upgrading.
+
+### Event metadata is written as map[string]string
+
+KurrentDB's v2 append APIs — `MultiStreamAppend` and `AppendRecords` — carry
+event metadata as `map<string,string>` and reject anything else before the
+request leaves the process:
+
+```
+event metadata must be a valid JSON map[string]string:
+json: cannot unmarshal number into Go struct field .schemaVersion of type string
+```
+
+Our metadata had three non-string fields: `schemaVersion`, `snapshotRevision`,
+`subjectIds`. Keeping them typed makes both APIs permanently unusable.
+
+So the wire format is now all strings — integers formatted, `subjectIds`
+comma-joined (a prefixed ULID can never contain a comma, ADR-030).
+
+**Reads accept both shapes, permanently.** An event log is append-only, so the
+typed shape is not a migration to finish; it exists forever and must decode
+forever. `flexInt` and `flexStrings` handle either.
+
+**The one real cost:** a rolled-back deployment running an older binary cannot
+read metadata written after this change. Rolling back across this boundary
+requires the tolerant reader to ship first.
+
+#### Keeping it that way
+
+A constraint that lives only in one function is a constraint that gets broken by
+someone adding an ordinary field a year from now, and discovered much later when
+somebody finally uses a multi-stream append. Three guards make that a failing
+test at the moment the field is added:
+
+- `metadataWireKeys` maps every field of `Metadata` to its wire key, checked by
+  reflection. A new field with no entry fails immediately, with a message saying
+  why the format is what it is.
+- A fully-populated `Metadata` — built by reflection, so new fields are covered
+  automatically — must still encode to `map[string]string`. This is the exact
+  check the SDK performs before sending, so a failure here means "cannot write at
+  all", not "slightly wrong".
+- The same value must survive a round trip, which catches a field that is written
+  but never read back.
+
+A field whose type has no flat-string encoding (a struct, a map) fails the
+populate step with an explicit message rather than producing nested JSON that
+only breaks on the append path.
+
+**`subjectIds` refuses a value containing its own separator.** The type is
+`[]string` and nothing upstream forces entries to be well-formed ids; an entry
+carrying a comma would decode as two subjects, silently widening who an event
+concerns — which drives erasure and notification targeting. There is no
+legitimate value with a comma in it, so it is rejected at the write rather than
+escaped.
+
+### MultiStreamAppend does not relax the aggregate boundary
+
+One aggregate is still one stream and one consistency boundary. If an invariant
+spans two aggregates it belongs in one aggregate, or it is a process — and a
+process is a Temporal workflow (ADR-017).
+
+What it IS for is pairing a claim with the thing that claims it: reserving
+`reservation_email-alice@example.com` with `NoStream` **and** creating
+`user-<id>` with `NoStream`, atomically. As two appends, a crash between them
+leaves a reservation nobody owns and an address unclaimable forever.
+
+Verified against the running server, not assumed: with one precondition already
+violated, the other stream was **not created** — `ReadStream` returned
+`ErrStreamNotFound`. A partial write would make the operation worse than two
+appends, because callers would believe it atomic.
+
+Also verified: the multi-append path reports a precondition failure as
+`ErrorCodeStreamRevisionConflict`, **not** the `ErrorCodeWrongExpectedVersion` a
+single-stream append returns. Mapping only the latter made every contended
+reservation look like an infrastructure fault.
+
+## ADR-045 — Authorization is fail-closed by type, and revocation does not wait for a projector
+
+**Date:** 2026-08-10 · **Status:** Accepted
+
+ADR-006 put the authorization model in OpenFGA and ADR-010 said it fails closed.
+This records how that is made true in Go, because "fails closed" as a rule is
+kept by discipline and lost by the first forgotten branch.
+
+### The zero value denies
+
+```go
+type Decision struct {
+	allowed bool
+	reason  string
+}
+```
+
+`Decision` is a struct with unexported fields and no way to construct an allow
+except `Allow(reason)`. Every zero value, every `var d Decision`, every element of
+a slice that an implementation returned short, and every early return that forgot
+to set an answer is therefore a **denial**. The property is carried by the type,
+not by review.
+
+This is why `Check` returns a `Decision` rather than `(bool, error)`. A bool
+default is `false` too, but a caller who ignores the error still holds a usable
+answer; here there is no answer to hold that is not a deny.
+
+The rule the Guard exists to keep: **an error is a denial, never a skip.** An
+unreachable OpenFGA, a timeout, a malformed query, a batch answered with the
+wrong number of answers — all deny. Anything else makes degrading a dependency a
+way to gain access.
+
+### Grant and revoke use opposite mechanisms
+
+They have opposite risk profiles, so they get opposite designs (access.md §6.1):
+
+| | Late by a second | Mechanism |
+| --- | --- | --- |
+| Grant | user does not yet see their own new access — harmless | contextual tuples, then the access projector |
+| Revoke | a removed member still reads the workspace — a breach | a **tombstone**, consulted on the hot path |
+
+A tombstone can only ever produce a **deny**. There is no shape of the
+`Tombstones` interface that can grant anything, which is what makes consulting an
+eventually-consistent store in the request path safe: the worst a stale or
+duplicated tombstone can do is deny access that was already being removed.
+
+### A tombstone is cleared by confirmation, never by a timer
+
+An earlier formulation had it "expire once the projector has certainly caught
+up." That is a bug with a comfortable-sounding description. If the TTL fires
+before the access projector removes the tuple, access **silently returns** — no
+event, no log line, nothing to notice.
+
+So the access projector deletes the tombstone after it has removed the tuple, by
+positive confirmation. The one-hour TTL is garbage collection for a tombstone
+whose projector died, and a tombstone that reaches it is an alert: it means the
+access projector is broken.
+
+### Only permits are cached, and a revocation invalidates all of them at once
+
+`Decisions` has no method that could store a refusal. A cached deny would outlive
+the grant that fixed it, and unlike a cached permit nothing a user or operator
+does would clear it.
+
+Cached permits are keyed on the principal's **revocation epoch**, a counter
+bumped by any revoke. One `INCR` invalidates every decision cached for that
+principal — including permits for *other* resources, which a per-key eviction
+would miss. That counter has **no expiry**, deliberately: if it expired and reset
+to zero, permits cached under the old epoch would become live again — a
+revocation undone by garbage collection.
+
+Permits also carry a TTL, capped at 15 minutes (`MaxDecisionTTL`), because that
+TTL is the window in which a revocation whose epoch bump was lost still grants
+access. No latency argument outweighs that, so the cap is enforced at
+construction rather than documented.
+
+If the epoch cannot be read, the cache is **skipped**, not used with a guessed
+value. A cache that cannot be reasoned about is a cache that is bypassed.
+
+### The order of operations in `Guard.Check`
+
+1. Validate. A malformed query is never sent on.
+2. Consult the decision cache — permits only.
+3. Ask OpenFGA. Any error denies.
+4. **Only if the answer is allow**, consult the tombstones.
+5. Cache the permit.
+
+Step 4 runs only on allow because a deny needs no second opinion. That keeps the
+extra lookup off the majority path and cannot weaken anything, since a tombstone
+only ever turns an allow into a deny. A cached permit takes the same step 4 — a
+revocation that had to wait for a cache entry to expire would not be immediate.
+
+A batch answered with the wrong number of answers denies the **whole page**.
+Answers shifted by one position attach somebody else's permit to this resource,
+which is worse than denying everything.
+
+### Depth is capped at 15, against OpenFGA's 25
+
+OpenFGA raises a hard error past 25 levels, and a check that errors fails closed.
+A tree allowed to grow too deep therefore does not produce a warning — it
+produces users locked out of resources they own, with no obvious cause.
+
+The cap is enforced where a hierarchy is **built**, not where it is read, so
+breaching it is a rejected write that names the resource and the person doing it.
+The ten-level gap is headroom: hitting ours is a rejected write, hitting theirs is
+an outage. `WouldExceedDepth` covers re-parenting, where each subtree is within
+the limit and the combined tree is not.
+
+Paths are also checked for cycles. A container that transitively contains itself
+makes depth unbounded, and OpenFGA would then answer by exhausting its traversal
+limit rather than by returning a decision.
+
+### The official Go SDK is HTTP-only, so the client is generated
+
+ADR-037 mandates gRPC wherever a service offers it. OpenFGA's server offers gRPC
+on `:8081`, but `openfga/go-sdk` is generated from the OpenAPI spec and speaks
+HTTP only — verified by inspecting the module, not assumed.
+
+The client is therefore generated from `buf.build/openfga/api` into
+`gen/thirdparty/` and wired into `make proto-thirdparty`. Managed mode is
+**disabled** for googleapis, protoc-gen-validate and grpc-gateway: left on, buf
+rewrites those transitive protos into our module path and the generated code no
+longer compiles against the real ones.
+
+Batch answers are correlated by the **id we send**, never by position — OpenFGA
+does not promise response order, and a batch that happens to come back in order
+during testing is not a guarantee.
+
+### What is verified, and how
+
+Every property above is mutation-tested; a test suite that passes against
+deliberately broken code is documenting nothing. Thirteen mutations across the
+kernel, the composition root and the Valkey adapter, all caught.
+
+One initially **survived**, and it is the most useful finding here: swallowing a
+tombstone read error and returning `(false, nil)` passed the entire integration
+suite, because every test ran against a healthy Valkey and no test ever executed
+the error branch. `TestUnreadableTombstoneStoreIsAnError` closes the client
+deliberately. A mutation that survives is the suite naming a path it never runs.
+
+The composition root is asserted separately (`cmd/api/wiring_test.go`), because
+the ports that make revocation immediate are **optional in the kernel and
+invisible at runtime when absent** — checks still work, they just keep permitting
+a principal whose access was revoked seconds ago. Three adapters in this codebase
+were once built, fully tested, and constructed by no binary; a Guard has a worse
+version of that failure, because a Guard nobody holds does not deny, it is
+skipped.

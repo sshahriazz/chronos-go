@@ -36,8 +36,19 @@ fi
 
 echo "migration append-only check (against $BASE)"
 
+# git diff only sees TRACKED files. A brand-new migration is untracked until it
+# is staged, so without this it would silently report "no migration changes" —
+# which reads as a clean bill of health for a directory that just grew a file.
 changes=$(git diff --name-status "$BASE" -- "$DIR" 2>/dev/null)
-if [ -z "$changes" ]; then
+untracked=$(git ls-files --others --exclude-standard -- "$DIR" 2>/dev/null)
+if [ -n "$untracked" ]; then
+  while read -r file; do
+    [ -z "$file" ] && continue
+    changes=$(printf '%s\nA\t%s' "$changes" "$file")
+  done <<< "$untracked"
+fi
+
+if [ -z "${changes//[[:space:]]/}" ]; then
   echo -e "  ${G}OK${X}    no migration changes"
   exit 0
 fi

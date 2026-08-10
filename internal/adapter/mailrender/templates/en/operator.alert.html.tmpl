@@ -1,0 +1,17 @@
+{{define "title"}}{{.Component}} alert{{end}}
+{{define "content"}}
+<p style="margin:0 0 14px;"><strong>{{.Component}}</strong> — {{.Summary}}</p>
+<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;font-size:13px;color:#374151;margin:0 0 16px;">
+  <tr><td style="padding:3px 0;width:120px;color:#6b7280;">Severity</td><td style="padding:3px 0;">{{upper .Severity}}</td></tr>
+  <tr><td style="padding:3px 0;color:#6b7280;">Detected</td><td style="padding:3px 0;">{{datetime .OccurredAt}}</td></tr>
+  {{if .Environment}}<tr><td style="padding:3px 0;color:#6b7280;">Environment</td><td style="padding:3px 0;">{{.Environment}}</td></tr>{{end}}
+</table>
+{{if .Detail}}
+<!--
+  Operator mail carries no tenant personal data (NOTIFICATIONS §4). Detail is
+  operational text produced by us, never an event payload.
+-->
+<pre style="margin:0 0 16px;padding:12px;background:#f6f7f9;border:1px solid #e3e6ea;border-radius:6px;font-size:12px;line-height:1.5;white-space:pre-wrap;color:#1a1d21;">{{.Detail}}</pre>
+{{end}}
+{{if .RunbookURL}}<p style="margin:0;"><a href="{{.RunbookURL}}" style="color:#1a56db;">Runbook</a></p>{{end}}
+{{end}}

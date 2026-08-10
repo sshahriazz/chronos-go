@@ -1,0 +1,10 @@
+Hello{{if .Name}} {{.Name}}{{end}},
+
+Your Chronos account is ready.
+{{if .VerifyURL}}
+Confirm your email address to finish setting up:
+
+  {{.VerifyURL}}
+
+This link expires in {{.ExpiresIn}}.
+{{end}}

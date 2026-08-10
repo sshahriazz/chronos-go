@@ -18,6 +18,7 @@ help: ## Show this help
 .PHONY: up
 up: .env ## Start the whole stack (idempotent)
 	$(COMPOSE) up -d --remove-orphans
+	@$(MAKE) --no-print-directory bao-init
 	@$(MAKE) --no-print-directory status
 
 .PHONY: down
@@ -143,6 +144,39 @@ run: ## Run the tenant API against the local stack
 	@echo "  readyz     http://localhost:$${API_PORT:-8090}/readyz"
 	@go run ./cmd/api -addr :$${API_PORT:-8090}
 
+.PHONY: projector
+projector: ## Run the projector against the local stack
+	@echo "  healthz    http://localhost:$${PROJECTOR_PORT:-8093}/healthz"
+	@echo "  readyz     http://localhost:$${PROJECTOR_PORT:-8093}/readyz"
+	@go run ./cmd/projector -addr :$${PROJECTOR_PORT:-8093}
+
+.PHONY: projector-list
+projector-list: ## List every registered projection
+	@go run ./cmd/projector -list
+
+.PHONY: projector-rebuild
+projector-rebuild: ## Rebuild one projection from zero: make projector-rebuild NAME=identity_users
+	@test -n "$(NAME)" || { echo "NAME is required, e.g. make projector-rebuild NAME=identity_users"; exit 1; }
+	@go run ./cmd/projector -rebuild $(NAME)
+
+.PHONY: worker
+worker: ## Run the reactors (email, push, workflows) against the local stack
+	@echo "  healthz    http://localhost:$${WORKER_PORT:-8094}/healthz"
+	@go run ./cmd/worker -addr :$${WORKER_PORT:-8094}
+
+.PHONY: worker-list
+worker-list: ## List every registered reactor
+	@go run ./cmd/worker -list
+
+.PHONY: worker-stats
+worker-stats: ## Queue depth and parked count per reactor
+	@go run ./cmd/worker -stats
+
+.PHONY: worker-replay
+worker-replay: ## Return a reactor's parked events to the live queue: make worker-replay NAME=welcome_email
+	@test -n "$(NAME)" || { echo "NAME is required, e.g. make worker-replay NAME=welcome_email"; exit 1; }
+	@go run ./cmd/worker -replay-parked $(NAME)
+
 .PHONY: status
 status-api: ## Call GetStatus over HTTP/JSON
 	@curl -s -X POST http://localhost:$${API_PORT:-8090}/chronos.system.v1.SystemService/GetStatus \
@@ -201,6 +235,41 @@ test: ## Run all tests
 bench: ## Benchmarks with allocation reporting (ADR-038)
 	go test ./... -run=XXX -bench=. -benchmem
 
+.PHONY: bao-init
+bao-init: ## Mount the transit engine and create the KEK (ADR-028); idempotent
+	@bash scripts/bootstrap_openbao.sh
+
+.PHONY: proto-thirdparty-check
+proto-thirdparty-check: ## Fail if a vendored third-party proto drifts from the pinned server
+	@bash scripts/check_thirdparty_protos.sh
+
+.PHONY: proto-thirdparty
+proto-thirdparty: ## Regenerate clients for third-party protos (ADR-037)
+	buf generate --template buf.gen.centrifugo.yaml third_party
+	@# OpenFGA's official Go SDK is OpenAPI-generated and speaks HTTP only, so
+	@# ADR-037 means generating a gRPC client. --path openfga keeps the AuthZEN
+	@# service and the transitive well-known protos out of our tree.
+	buf generate buf.build/openfga/api --template buf.gen.openfga.yaml --path openfga
+
+.PHONY: sqlc
+sqlc: ## Regenerate query code from db/query/**.sql
+	sqlc generate
+
+.PHONY: sqlc-check
+sqlc-check: ## Fail if generated query code is stale, or a query no longer matches the schema
+	@sqlc diff >/dev/null 2>&1 || { \
+		echo "generated query code is out of date, or a query no longer matches the schema"; \
+		echo "run: make sqlc"; sqlc diff; exit 1; }
+	@echo "  sqlc OK"
+
+.PHONY: sql-check
+sql-check: ## Fail if SQL appears in Go source outside the kernel carve-out (CONVENTIONS §8)
+	@bash scripts/check_sql.sh
+
+.PHONY: bench-integration
+bench-integration: ## Benchmarks that need the live stack (make up first)
+	go test -tags=integration ./... -run=XXX -bench=. -benchmem -benchtime=2000x
+
 .PHONY: leaks
 leaks: ## Run tests with goroutine-leak detection (Go 1.26)
 	go test ./... -race -count=1 -gcflags=all=-d=checkptr
@@ -219,11 +288,25 @@ lint: ## golangci-lint, including the depguard import contract (CONVENTIONS §2)
 	golangci-lint run ./...
 
 .PHONY: fmt
-fmt: ## Format
+fmt: ## Format in place
 	gofmt -w . && go mod tidy
 
+.PHONY: fmt-check
+fmt-check: ## Fail if anything is unformatted — CI must VERIFY, never rewrite
+	@unformatted="$$(gofmt -l . | grep -v '^cmd/apidocs/assets/' || true)"; \
+	if [ -n "$$unformatted" ]; then \
+		echo "these files are not gofmt'd:"; echo "$$unformatted"; \
+		echo "run: make fmt"; exit 1; \
+	fi
+	@cp go.mod /tmp/go.mod.ci && cp go.sum /tmp/go.sum.ci && go mod tidy; \
+	if ! diff -q go.mod /tmp/go.mod.ci >/dev/null || ! diff -q go.sum /tmp/go.sum.ci >/dev/null; then \
+		cp /tmp/go.mod.ci go.mod; cp /tmp/go.sum.ci go.sum; \
+		echo "go.mod/go.sum are not tidy; run: make fmt"; exit 1; \
+	fi
+	@echo "  formatting OK"
+
 .PHONY: check
-check: fmt proto-lint proto-breaking api-validate migrate-check lint test ## Everything CI runs
+check: fmt-check proto-lint proto-breaking api-validate proto-thirdparty-check migrate-check sqlc-check sql-check lint test ## Everything CI runs
 
 .PHONY: api-validate
 api-validate: ## Validate the generated OpenAPI spec is complete and non-empty

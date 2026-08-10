@@ -460,7 +460,7 @@ graph LR
 This is what stops the classic catastrophe: rebuilding a read model must never
 re-send every welcome email ever generated (ADR-019).
 
-**Category streams are unavailable** — `$ce-` needs system projections, which are
+**Category streams ARE available** (corrected 2026-08-08) — `$ce-` needs system projections, which are
 off (verified: 404). Everything reads `$all` with server-side filters, which also
 gives *global* commit ordering, so cross-aggregate projections can never observe
 effects before causes. Filters **must** exclude `$`-prefixed streams — `$all`

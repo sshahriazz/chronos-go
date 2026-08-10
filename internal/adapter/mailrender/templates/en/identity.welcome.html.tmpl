@@ -1,0 +1,12 @@
+{{define "title"}}Welcome to Chronos{{end}}
+{{define "content"}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 14px;">Your Chronos account is ready.</p>
+{{if .VerifyURL}}
+<p style="margin:0 0 20px;">Confirm your email address to finish setting up:</p>
+<p style="margin:0 0 20px;">
+  <a href="{{.VerifyURL}}" style="display:inline-block;background:#1a1d21;color:#ffffff;text-decoration:none;padding:11px 20px;border-radius:6px;font-size:14px;font-weight:500;">Confirm email address</a>
+</p>
+<p style="margin:0 0 6px;color:#6b7280;font-size:13px;">This link expires in {{.ExpiresIn}}.</p>
+{{end}}
+{{end}}

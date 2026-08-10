@@ -1,0 +1,171 @@
+# Everything this repository claims about itself is verified here.
+#
+# Until this existed, every guarantee — the RLS leak test, the snapshot
+# equivalence proof, exactly-once reactor delivery, the lease-starvation test —
+# held only because someone ran the command locally. That is not a guarantee.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push supersedes an in-flight run on the same branch, except on main
+# where every commit's result matters.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  # Integration tests need the log and the read model. Nothing else.
+  COMPOSE_SERVICES: postgres kurrentdb
+
+jobs:
+  build:
+    name: format, vet, unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # proto-breaking and the migration guard both diff against main.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Formatting and tidiness
+        run: make fmt-check
+
+      - run: go build ./...
+
+      - run: go vet ./...
+
+      # -race, because the projector and reactor runners are concurrent by
+      # design and a data race here corrupts a read model rather than crashing.
+      - name: Unit tests
+        run: go test ./... -race -count=1 -timeout 15m
+
+      # No .env is ever created in this job, so the run above IS the clean-
+      # environment run. That is the case the config tests failed: they passed
+      # locally only because the developer's shell carried POSTGRES_APP_PASSWORD.
+
+  lint:
+    name: lint and import contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The pinned binary, invoked through the same make target developers run.
+      # Going through the action instead would couple us to its own release
+      # cadence and to whether it understands golangci-lint v2 config yet.
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.12.2
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: golangci-lint, including the depguard import contract
+        run: make lint
+
+  proto:
+    name: proto lint, breaking changes, API docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.71.0
+
+      # The COMMENTS category is on, so an undocumented service, RPC, message
+      # or field fails the build (CONVENTIONS §7.1).
+      - run: buf lint
+
+      - name: Breaking change check
+        if: github.event_name == 'pull_request'
+        run: |
+          # Against the LOCAL main. A https:// baseline would need credentials
+          # the moment this repository becomes private.
+          git fetch --no-tags --depth=1 origin main
+          buf breaking --against '.git#ref=origin/main,subdir=.'
+
+      - name: OpenAPI spec is complete
+        run: python3 scripts/check_openapi.py
+
+  migrations:
+    name: migrations are append-only
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # An applied migration must never change. The guard diffs against main,
+      # so it needs full history and an explicit base.
+      - run: bash scripts/check_migrations.sh
+        env:
+          MIGRATION_BASE_REF: origin/main
+
+  integration:
+    name: integration against real infrastructure
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The SAME compose file developers use. A separate CI definition would
+      # drift, and the drift would be invisible until production.
+      - name: Start PostgreSQL and KurrentDB
+        run: |
+          cp .env.example .env
+          docker compose up -d $COMPOSE_SERVICES
+
+      - name: Wait for health
+        run: |
+          # Only the services this job started. A service with no healthcheck
+          # reports an EMPTY status, which would otherwise never satisfy the
+          # loop — grafana is exactly that, and would hang here forever.
+          for i in $(seq 1 60); do
+            pending=""
+            for svc in $COMPOSE_SERVICES; do
+              state=$(docker compose ps --format '{{.Service}} {{.Health}}' \
+                | awk -v s="$svc" '$1 == s {print $2}')
+              [ "$state" = "healthy" ] || pending="$pending $svc($state)"
+            done
+            if [ -z "$pending" ]; then echo "all healthy"; exit 0; fi
+            echo "waiting on:$pending"
+            sleep 5
+          done
+          echo "services never became healthy"
+          docker compose ps
+          docker compose logs --tail=100
+          exit 1
+
+      # Applied with the OWNER credentials; the tests then connect as the
+      # non-privileged chronos_app role, which is what makes the RLS assertions
+      # meaningful (ADR-015).
+      - name: Apply migrations
+        run: set -a && . ./.env && set +a && go run ./cmd/migrate -cmd=up
+
+      - name: Integration tests
+        run: |
+          set -a && . ./.env && set +a
+          go test -tags=integration ./... -race -count=1 -timeout 20m
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker compose logs --tail=200
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

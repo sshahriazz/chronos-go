@@ -1,0 +1,10 @@
+{{.Component}} - {{.Summary}}
+
+Severity:  {{upper .Severity}}
+Detected:  {{datetime .OccurredAt}}
+{{if .Environment}}Environment: {{.Environment}}{{end}}
+{{if .Detail}}
+{{.Detail}}
+{{end}}{{if .RunbookURL}}
+Runbook: {{.RunbookURL}}
+{{end}}

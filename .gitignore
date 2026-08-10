@@ -14,6 +14,9 @@
 .vscode/
 .DS_Store
 
+# local code index (rebuildable via `codegraph index`)
+/.codegraph/
+
 # local data escaping a bind mount
 /data/
 bin/

@@ -10,12 +10,11 @@ import (
 	fgaadapter "github.com/chronos/chronos-go/internal/adapter/openfga"
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
 	valkeyadapter "github.com/chronos/chronos-go/internal/adapter/valkey"
+	"github.com/chronos/chronos-go/internal/platform/authz"
 	"github.com/chronos/chronos-go/internal/platform/config"
+	"github.com/chronos/chronos-go/internal/platform/obs"
 	"github.com/chronos/chronos-go/internal/server/health"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/valkey-io/valkey-go"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // dependencies holds everything the server talks to.
@@ -25,15 +24,42 @@ import (
 // designed outcome. Only genuinely malformed configuration stops startup, and
 // that is caught by config.Load before we get here.
 type dependencies struct {
-	probes []health.Probe
-	closes []func()
+	probes  []health.Probe
+	closes  []func()
+	metrics *obs.Metrics
+
+	// authz is the ONLY authorization surface handlers get. It is never nil: if
+	// OpenFGA is unreachable it is a Guard over DenyAll, so an outage denies
+	// rather than panicking or — far worse — being skipped.
+	authz *authz.Guard
+
+	// authzCache is held so the access projector can CONFIRM a revocation once
+	// it has removed the tuple. Clearing a tombstone on a timer instead would
+	// race the projector, and losing that race restores access to a revoked
+	// principal.
+	authzCache *valkeyadapter.Authz
+}
+
+// tombstonesOrNil and decisionsOrNil avoid the typed-nil trap.
+func tombstonesOrNil(a *valkeyadapter.Authz) authz.Tombstones {
+	if a == nil {
+		return nil
+	}
+	return a
+}
+
+func decisionsOrNil(a *valkeyadapter.Authz) authz.Decisions {
+	if a == nil {
+		return nil
+	}
+	return a
 }
 
 func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func()) {
-	d := &dependencies{}
+	d := &dependencies{metrics: obs.New()}
 
 	// ---- PostgreSQL: lazy pool, no connection attempted here -------------
-	if pool, err := newPGPool(cfg); err != nil {
+	if pool, err := pgadapter.NewPool(context.Background(), cfg.Postgres.AppDSN(), cfg.Postgres.MaxConns); err != nil {
 		// A malformed DSN is a configuration error, but it must not stop the
 		// process — the probe will report it, loudly and continuously.
 		log.Error("postgres pool unavailable", "error", err)
@@ -56,19 +82,82 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 		d.closes = append(d.closes, pool.Close)
 	}
 
+	// ---- Valkey ----------------------------------------------------------
+	//
+	// Dialled BEFORE authorization, because the Guard takes its revocation
+	// tombstones and decision cache from here. Losing Valkey costs latency and a
+	// longer revocation window; it never costs a wrong answer, because every
+	// failure in those ports is reported as an error and the Guard denies on any
+	// error.
+	var authzCache *valkeyadapter.Authz
+	if vk, err := valkey.NewClient(valkey.ClientOption{
+		InitAddress:  cfg.Valkey.Addr,
+		Password:     cfg.Valkey.Password.Expose(),
+		DisableCache: true,
+	}); err != nil {
+		log.Warn("valkey client unavailable; revocations will not take effect until the "+
+			"access projector removes the tuple", "error", err)
+		d.probes = append(d.probes, valkeyadapter.Probe{})
+	} else {
+		authzCache = valkeyadapter.NewAuthz(vk)
+		d.authzCache = authzCache
+		d.probes = append(d.probes, valkeyadapter.Probe{Client: vk})
+		d.closes = append(d.closes, vk.Close)
+	}
+
 	// ---- OpenFGA over gRPC (ADR-037) ------------------------------------
-	// NewClient does not dial; the connection is established lazily and
-	// re-established automatically, which is exactly the behaviour ADR-010 wants.
-	if conn, err := grpc.NewClient(
-		cfg.OpenFGA.Endpoint,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	); err != nil {
-		log.Error("openfga client unavailable", "error", err)
+	//
+	// The official Go SDK is OpenAPI-generated and speaks HTTP only, so the
+	// client here is generated from the server's protos. Dial does not connect:
+	// the connection is established lazily and re-established automatically,
+	// which is what ADR-010 wants — authorization being down must not stop the
+	// process, it must make every check DENY.
+	//
+	// The Guard is built either way. When authorization is unreachable it is
+	// built over DenyAll, so the failure is an explicit object that refuses
+	// rather than a nil that panics on the first request.
+	checker := authz.Checker(authz.DenyAll{Reason: "authorization is not configured"})
+	if conn, err := fgaadapter.Dial(cfg.OpenFGA.Endpoint, cfg.OpenFGA.PresharedKey.Expose()); err != nil {
+		log.Error("openfga client unavailable; EVERY permission check will be denied",
+			"error", err)
 		d.probes = append(d.probes, fgaadapter.Probe{})
 	} else {
 		d.probes = append(d.probes, fgaadapter.Probe{Conn: conn})
 		d.closes = append(d.closes, func() { _ = conn.Close() })
+
+		built, buildErr := fgaadapter.New(conn, fgaadapter.Config{
+			StoreID: cfg.OpenFGA.StoreID,
+			ModelID: cfg.OpenFGA.ModelID,
+		})
+		if buildErr != nil {
+			// Missing store id, almost always. Deliberately not fatal, and
+			// deliberately not silent: the server runs and denies everything.
+			log.Error("openfga checker not constructed; EVERY permission check will be denied",
+				"error", buildErr)
+		} else {
+			checker = built
+		}
 	}
+
+	guard, err := authz.NewGuard(authz.GuardDeps{
+		Checker: checker,
+		// Typed nil is a real hazard: a nil *Authz inside a non-nil interface
+		// passes the Guard's nil check and then fails every call — which denies,
+		// but for a reason that reads as an outage rather than as missing wiring.
+		Tombstones: tombstonesOrNil(authzCache),
+		Decisions:  decisionsOrNil(authzCache),
+		Log:        log,
+		Observer:   d.metrics.Authz(),
+	})
+	if err != nil {
+		// NewGuard refuses only misconfiguration we control — a nil checker or a
+		// decision TTL above the cap. Either is a wiring bug, not an outage.
+		log.Error("authorization guard could not be built; denying everything", "error", err)
+		guard, _ = authz.NewGuard(authz.GuardDeps{
+			Checker: authz.DenyAll{Reason: "guard misconfigured"}, Log: log,
+		})
+	}
+	d.authz = guard
 
 	// ---- KurrentDB: official gRPC client (ADR-037) -----------------------
 	// Dial parses the connection string but does not connect; the client
@@ -79,18 +168,6 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 	} else {
 		d.probes = append(d.probes, kurrentdb.Probe{Client: kc})
 		d.closes = append(d.closes, func() { _ = kc.Close() })
-	}
-
-	// ---- Valkey ----------------------------------------------------------
-	if vk, err := valkey.NewClient(valkey.ClientOption{
-		InitAddress:  []string{envOr("VALKEY_ADDR", "localhost:6379")},
-		DisableCache: true,
-	}); err != nil {
-		log.Warn("valkey client unavailable", "error", err)
-		d.probes = append(d.probes, valkeyadapter.Probe{})
-	} else {
-		d.probes = append(d.probes, valkeyadapter.Probe{Client: vk})
-		d.closes = append(d.closes, vk.Close)
 	}
 
 	// ---- OpenBao: official SDK -------------------------------------------
@@ -106,40 +183,4 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 			c()
 		}
 	}
-}
-
-func newPGPool(cfg *config.Config) (*pgxpool.Pool, error) {
-	pc, err := pgxpool.ParseConfig(pgDSN(cfg))
-	if err != nil {
-		return nil, err
-	}
-	pc.MaxConns = cfg.Postgres.MaxConns
-	pc.MaxConnLifetime = time.Hour
-	pc.HealthCheckPeriod = 30 * time.Second
-
-	// NewWithConfig does not connect: the first acquisition does. That is what
-	// lets the process start while PostgreSQL is still coming up.
-	return pgxpool.NewWithConfig(context.Background(), pc)
-}
-
-// pgDSN builds the APPLICATION connection string. It deliberately uses the
-// non-privileged role: the owner credentials exist only for migrations.
-func pgDSN(cfg *config.Config) string {
-	return "postgres://" + cfg.Postgres.AppUser + ":" + cfg.Postgres.AppPassword.Expose() +
-		"@" + cfg.Postgres.Host + ":" + itoa(cfg.Postgres.Port) +
-		"/" + cfg.Postgres.Database + "?sslmode=disable"
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var b [8]byte
-	n := len(b)
-	for i > 0 {
-		n--
-		b[n] = byte('0' + i%10)
-		i /= 10
-	}
-	return string(b[n:])
 }

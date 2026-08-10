@@ -67,6 +67,10 @@ func run(addr string, log *slog.Logger) error {
 
 	mux := http.NewServeMux()
 
+	// Prometheus scrapes this. It is plain HTTP rather than an RPC because
+	// scrapers speak HTTP and nothing else.
+	mux.Handle("GET /metrics", deps.metrics.Handler())
+
 	// Liveness is never gated on dependencies: the process is alive or it is not.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

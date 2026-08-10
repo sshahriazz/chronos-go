@@ -30,17 +30,46 @@ type Metadata struct {
 	// OrgID is the tenant scope, present on every tenant-scoped event.
 	OrgID string
 
+	// WorkspaceID scopes the event to a workspace within the org, and is empty
+	// for org-level facts.
+	//
+	// It rides in metadata rather than being derived from the stream because
+	// every workspace-owned read model has an RLS policy that checks BOTH
+	// columns (ADR-020), and a projector must be able to scope itself from the
+	// event alone — without a lookup that could return a stale answer, or none
+	// at all during a rebuild.
+	WorkspaceID string
+
 	// Residency tags the region even while there is only one (ADR-035).
 	Residency string
 
 	// SubjectIDs are the data subjects this event concerns — pseudonyms only.
 	SubjectIDs []string
 
+	// ActorID is who CAUSED the event, as a pseudonym. It is often one of the
+	// SubjectIDs and often not: an admin revoking someone else's access is the
+	// actor, the other person is the subject.
+	//
+	// It exists because "notify the actor" and "notify the subject" are
+	// different audiences, and guessing that the actor is the first subject
+	// sends security mail to the wrong person — a worse outcome than sending
+	// none (NOTIFICATIONS §4).
+	ActorID string
+
 	// CorrelationID groups everything caused by one originating request.
 	CorrelationID string
 
 	// CausationID is the event or command that directly produced this one.
 	CausationID string
+
+	// SnapshotRevision is the aggregate revision a SNAPSHOT represents, and is
+	// zero on ordinary events.
+	//
+	// It lives in metadata rather than in the snapshot payload because it is
+	// bookkeeping about the log, not a fact about the business. Without it a
+	// snapshot cannot say which events it already accounts for, and restoring
+	// from one would either replay events twice or skip them.
+	SnapshotRevision Revision
 }
 
 // PendingEvent is an event ready to append: the domain fact plus its metadata

@@ -18,13 +18,13 @@ Everything marked **✅ verified** was measured against the running KurrentDB
 | Correct expected version | `201` | |
 | **Replay: same `eventId` + same expected version** | **`201`, no duplicate** | **command retries are safe** |
 | Second claim on an existing stream with `NoStream` | **`400`** | **atomic uniqueness reservation** |
-| `$ce-<category>` read | **`404`** | category streams need projections — **we have none** |
+| `$ce-<category>` read | **works** | requires `RUN_PROJECTIONS=System` + `ResolveLinkTos` (corrected 2026-08-08) |
 | `$all` contents | includes `$$`/`$` system events | **projector filters must exclude them** |
 | Stream metadata (`$maxCount`) | `201` | snapshot-stream pattern available |
 | Soft delete → append | `204` then `201` | streams are reopenable |
 
-Two of these directly shape the architecture: **no category streams** (§4) and
-**idempotent append** (§3).
+Two of these directly shape the architecture: **link streams are available**
+(§4, corrected) and **idempotent append** (§3).
 
 ---
 
@@ -97,36 +97,58 @@ concurrency, not an error condition.
 
 ---
 
-## 4. Reading: `$all`, not category streams
+## 4. Reading: `$all` live, link streams to rebuild
 
-**✅ Verified**: `$ce-organization` returns `404`. Category streams are produced
-by the `$by_category` system projection, and we run
-`KURRENTDB_RUN_PROJECTIONS=None` deliberately (INFRA.md §1).
+Two different jobs, two different sources.
 
-So every subscriber reads **`$all` with a server-side filter**:
+**Live subscriptions read `$all` with a server-side filter.** The global commit
+ordering is the point: a projection joining `organization` and `workspace` events
+sees them in true commit order, so "member added before workspace created" cannot
+occur — a class of bug per-category ordering would reintroduce.
 
 ```
 subscribe $all
   filter: streamNamePrefix ∈ { "organization-", "workspace-", … }
-       or eventTypePrefix  ∈ { … }
+       or eventType        ∈ { … }          (anchored, whole types)
   from: stored commit position
 ```
 
-| | `$ce-` category streams | **`$all` + filter** |
-| --- | --- | --- |
-| Needs projections | yes | **no** |
-| Ordering | per category | **global** |
-| Extra writes | a link event per event | **none** |
-| Cross-aggregate ordering | not guaranteed | **guaranteed** |
-
-The global ordering is worth more than the convenience. A projection joining
-`organization` and `workspace` events sees them in true commit order, so
-"member added before workspace created" cannot occur — a class of bug that
-category streams would reintroduce.
+**Rebuilds read link streams.** A rebuild replays one projection's own slice and
+does not need cross-aggregate ordering within it, so scanning the whole log is
+pure waste. See "Rebuild reads the narrowest link stream available" below.
 
 > **✅ Verified and load-bearing: `$all` carries system events**, including `$$`
 > metadata streams. Every filter **must** exclude `$`-prefixed streams, or the
 > first projector to run will try to deserialize `$metadata` as a domain event.
+
+### How this section used to read, and why that matters
+
+Until 2026-08-08 this section was titled "**`$all`, not category streams**" and
+stated that `$ce-organization` returns `404`, citing a verified probe.
+
+The probe was real. Its cause was our own compose file setting
+`KURRENTDB_RUN_PROJECTIONS=None`, which disables every projection. The ADR bans
+*user JavaScript* projections, which need `All`; `System` runs only the built-in
+native ones and no JS. With `System`, `$ce-` and `$et-` both work — and reads must
+set `ResolveLinkTos`, because a link stream holds links, not the originals.
+
+So the document verified a misconfiguration and enshrined it as a property of the
+server, and every rebuild paid for it. Measured after the fix, on a 20,000-event
+log where the projection wants 1,000 (5%):
+
+| Strategy | Time | Note |
+| --- | --- | --- |
+| `$all`, filtered client-side | 726 ms | transfers the whole log — never what we shipped |
+| `$all`, filtered server-side | 253 ms | what we shipped |
+| **`$ce-` category read** | **17 ms** | **14.8x faster** |
+
+The first row is kept because the original comparison used it and overstated the
+win as 29x. Server-side filtering already avoids transferring non-matching events;
+the remaining 14.8x is the server not having to *scan* them.
+
+This is the origin of the working rule: **probe the system, do not recall it** —
+and when a probe disagrees with expectation, suspect the configuration before the
+vendor.
 
 ---
 
@@ -197,6 +219,66 @@ COMMIT;
 Atomic with the rows it describes — the property that makes replay idempotent
 and restart safe. A checkpoint in Valkey or in a separate transaction breaks it.
 
+#### Rebuild reads the narrowest link stream available
+
+A rebuild does not need the global commit ordering a live subscription gives, so
+it skips the rest of the log entirely:
+
+| Filter resolves to | Rebuild source |
+| --- | --- |
+| exactly one whole event type | `$et-<type>` |
+| exactly one category | `$ce-<category>` |
+| anything else | `$all`, correct and slow |
+
+Measured on the running server — 2000 events in one category, 200 of the wanted
+type:
+
+| Source | Events read | Time |
+| --- | --- | --- |
+| `$et-<type>` | 200 | 7.1 ms |
+| `$ce-<category>` | 2000 (1800 discarded) | 105.3 ms |
+| `$all` + filter | 200 | 3.17 s |
+
+`$et-` is 14.7x faster than `$ce-` here because a category carries every type its
+aggregate emits. The `$all` figure scales with TOTAL log size, not with the
+projection's slice, which is the whole reason link streams exist.
+
+**Exactly one, in both cases.** Reading two link streams in sequence applies every
+event of the first before any of the second, so a projection that joins across
+types would rebuild into a different state than it holds live.
+
+**Whole types only, never prefixes.** There is no `$et-` stream for a prefix, and
+`x.Created.v1` used as one also selects `x.Created.v10`. `SubscriptionFilter`
+therefore separates `EventTypes` (whole) from `EventTypePrefixes`, and the
+server-side filter for the former is an anchored regex rather than a prefix match.
+
+#### The other kind of checkpoint: scanned, not applied
+
+A filtered `$all` subscription also emits `CheckPointReached` for spans the
+server scanned and found **no match** in. Those are persisted too, on their own,
+because there are no rows to be atomic with — nothing was projected.
+
+This is not an optimisation to skip. Without it a projection's position advances
+only on a match, so a projector filtered to a quiet module stands still while the
+rest of the system writes, and every restart re-scans the whole log since its last
+match to find nothing. The cost grows with the log and never stops growing.
+
+Measured against the running server, 50k intervening unmatched events:
+
+| Resume from | Time to reach live |
+| --- | --- |
+| last matched event | 866 ms |
+| server checkpoint | 3 ms |
+
+Three rules make it safe (ADR-042):
+
+- The server guarantees no matching event lies in the skipped span, so nothing
+  this projection would have applied is skipped.
+- `EventsProcessed` does not move. A checkpoint is not an event, and the count is
+  what answers "what has this projection done?".
+- The position never regresses, and a checkpoint that fails to persist stops the
+  subscription rather than being dropped.
+
 ---
 
 ## 7. Snapshots — only when measured
@@ -226,7 +308,7 @@ Stored alongside the payload, in event metadata:
 {
   "$correlationId": "…",   "$causationId": "…",
   "schemaVersion": 2,
-  "orgId": "org_…",  "residency": "eu",
+  "orgId": "org_…",  "workspaceId": "ws_…",  "residency": "eu",
   "subjectIds": ["sub_…"],
   "occurredAt": "2026-08-08T09:14:22Z"
 }
@@ -235,6 +317,12 @@ Stored alongside the payload, in event metadata:
 `$correlationId` and `$causationId` use KurrentDB's reserved names so its own
 tooling can trace causation chains. `schemaVersion` drives the upcaster chain
 (ADR-029). **No personal data**, ever (ADR-002).
+
+`workspaceId` is present on workspace-scoped events and empty on org-level ones.
+It rides in metadata rather than being parsed back out of the stream name because
+every workspace-owned read model has an RLS policy checking **both** `org_id` and
+`workspace_id` (ADR-020), and a projector must be able to scope itself from the
+event alone — a lookup would be stale during a rebuild, or return nothing at all.
 
 ---
 

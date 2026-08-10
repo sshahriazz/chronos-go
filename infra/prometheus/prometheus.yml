@@ -83,3 +83,37 @@ scrape_configs:
     static_configs:
       - targets: ["tempo:3200"]
         labels: { component: telemetry }
+
+  # ---- Chronos services ----------------------------------------------------
+  # These are the only targets that know anything about the DOMAIN. Everything
+  # above reports on infrastructure; a projection falling behind or mail failing
+  # to send is visible here and nowhere else.
+  #
+  # host.docker.internal because these run on the host during development, not
+  # in compose. In production they are ordinary service discovery targets.
+  - job_name: chronos-projector
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['host.docker.internal:8093']
+        labels:
+          component: projector
+    # A projector that is down is expected during local development, so a
+    # failed scrape must not be noisy — alerting is on chronos_projection_live,
+    # which is absent rather than zero when the process is gone.
+    honor_labels: true
+
+  - job_name: chronos-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['host.docker.internal:8094']
+        labels:
+          component: worker
+    honor_labels: true
+
+  - job_name: chronos-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['host.docker.internal:8090']
+        labels:
+          component: api
+    honor_labels: true

@@ -79,6 +79,16 @@ func rebuild(r Root, events []Event, lastRevision Revision) {
 	b.uncommitted = nil
 }
 
+// positionAt places a restored aggregate at the revision its state accounts
+// for, so the next read starts after it and the append precondition is the
+// revision actually loaded — not the snapshot's own position in some other
+// stream.
+func positionAt(r Root, rev Revision) {
+	b := r.base()
+	b.version = rev
+	b.uncommitted = nil
+}
+
 // ExpectedFor returns the concurrency precondition for saving r: NoStream for a
 // new aggregate, otherwise the exact revision it was loaded at.
 //

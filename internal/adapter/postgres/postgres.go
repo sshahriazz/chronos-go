@@ -5,9 +5,26 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// NewPool builds the connection pool every binary uses.
+//
+// It does NOT connect: the first acquisition does. That is what lets a process
+// start while PostgreSQL is still coming up (ADR-010), and it is why a
+// malformed DSN — a real configuration error — is the only failure here.
+func NewPool(ctx context.Context, dsn string, maxConns int32) (*pgxpool.Pool, error) {
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: %w", err)
+	}
+	cfg.MaxConns = maxConns
+	cfg.MaxConnLifetime = time.Hour
+	cfg.HealthCheckPeriod = 30 * time.Second
+	return pgxpool.NewWithConfig(ctx, cfg)
+}
 
 // VerifyNotPrivileged fails if the connected role can bypass row-level security.
 //

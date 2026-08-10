@@ -1,0 +1,6 @@
+{
+  "exclude": [
+    "third_party/",
+    "esprobe"
+  ]
+}

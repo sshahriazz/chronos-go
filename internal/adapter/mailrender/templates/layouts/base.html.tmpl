@@ -1,0 +1,35 @@
+{{define "base"}}<!doctype html>
+<html lang="{{.Locale}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{block "title" .}}Chronos{{end}}</title>
+</head>
+<!--
+  Inline styles and a table layout, deliberately. Email clients strip <style>
+  blocks (Gmail strips <head> entirely on forward) and support for flex and grid
+  is absent in Outlook's Word renderer. This is the shape that survives.
+-->
+<body style="margin:0;padding:0;background:#f4f5f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;padding:24px 12px;">
+<tr><td align="center">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border-radius:10px;overflow:hidden;border:1px solid #e3e6ea;">
+    <tr><td style="padding:24px 28px 8px;">
+      <span style="font-size:15px;font-weight:600;color:#1a1d21;">Chronos</span>
+    </td></tr>
+    <tr><td style="padding:4px 28px 24px;color:#1a1d21;font-size:15px;line-height:1.55;">
+      {{block "content" .}}{{end}}
+    </td></tr>
+    <tr><td style="padding:16px 28px 24px;border-top:1px solid #eceef1;color:#6b7280;font-size:12px;line-height:1.5;">
+      {{block "footer" .}}
+        <!-- Security and transactional mail carries no unsubscribe: you cannot
+             opt out of being told your password changed. -->
+        {{if .UnsubscribeURL}}<a href="{{.UnsubscribeURL}}" style="color:#6b7280;">Unsubscribe from these updates</a><br>{{end}}
+        &copy; {{.Year}} Chronos
+      {{end}}
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body>
+</html>{{end}}
