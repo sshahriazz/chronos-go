@@ -1,11 +1,11 @@
 package eventcodec_test
 
 import (
-	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
+	jsoncodec "github.com/chronos/chronos-go/internal/platform/codec"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 )
 
@@ -90,7 +90,7 @@ func BenchmarkMarshalMetadataTypedBaseline(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		if _, err := json.Marshal(typedMetadata{
+		if _, err := jsoncodec.Marshal(typedMetadata{
 			SchemaVersion: m.SchemaVersion,
 			OccurredAt:    m.OccurredAt.Format(time.RFC3339Nano),
 			OrgID:         m.OrgID,
@@ -106,3 +106,124 @@ func BenchmarkMarshalMetadataTypedBaseline(b *testing.B) {
 }
 
 var _ = eventcodec.NewJSON
+
+// ---------------------------------------------------------------------------
+// Payload and concurrency
+// ---------------------------------------------------------------------------
+//
+// Metadata is only half the per-event cost. The payload is decoded once per
+// event per consumer, and a rebuild decodes on N goroutines at once (ADR-044) —
+// so the number that matters for a rebuild is the PARALLEL one, not the serial
+// one. A registry read that scales badly does not show up in a single-threaded
+// benchmark at all.
+
+func benchPayload() []byte {
+	c := benchCodec()
+	b, err := c.Marshal(&benchEvent{
+		ID:       "evt_01H8XG5N2QK7VB3C9WPYZR4TFM",
+		Subject:  "sub_01H8XG5N2QK7VB3C9WPYZR4TFP",
+		Name:     "a reasonably typical event payload",
+		Count:    42,
+		Flag:     true,
+		Tags:     []string{"alpha", "beta", "gamma"},
+		Occurred: time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC),
+		Extra:    map[string]string{"k1": "v1", "k2": "v2"},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+func benchCodec() *eventcodec.JSON {
+	c := eventcodec.NewJSON(eventsourcing.NewUpcasterRegistry())
+	eventcodec.Register[benchEvent](c)
+	c.Freeze()
+	return c
+}
+
+func BenchmarkMarshalPayload(b *testing.B) {
+	c := benchCodec()
+	e := &benchEvent{
+		ID: "evt_01H8XG5N2QK7VB3C9WPYZR4TFM", Subject: "sub_01H8XG5N2QK7VB3C9WPYZR4TFP",
+		Name: "a reasonably typical event payload", Count: 42, Flag: true,
+		Tags:     []string{"alpha", "beta", "gamma"},
+		Occurred: time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC),
+		Extra:    map[string]string{"k1": "v1", "k2": "v2"},
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := c.Marshal(e); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkUnmarshalPayload(b *testing.B) {
+	c := benchCodec()
+	payload := benchPayload()
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := c.Unmarshal("bench.event", payload); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// The rebuild-shaped benchmark: N goroutines decoding at once.
+//
+// This is where a mutex-guarded registry shows its cost — RLock is an atomic
+// read-modify-write on one shared word, so every core invalidates the others'
+// cache line on every single event, and the serial benchmark above never sees it.
+func BenchmarkUnmarshalPayloadParallel(b *testing.B) {
+	c := benchCodec()
+	payload := benchPayload()
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if _, err := c.Unmarshal("bench.event", payload); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+func BenchmarkUnmarshalMetadataParallel(b *testing.B) {
+	c := benchCodec()
+	raw, err := c.MarshalMetadata(benchMetadata())
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if _, err := c.UnmarshalMetadata(raw); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+// Types() is read by the notification-catalogue check and by anything listing
+// what the system understands. It must not be on any hot path, but it also must
+// not be quadratic.
+func BenchmarkTypes(b *testing.B) {
+	c := benchCodec()
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = c.Types()
+	}
+}
+
+type benchEvent struct {
+	ID       string            `json:"id"`
+	Subject  string            `json:"subject"`
+	Name     string            `json:"name"`
+	Count    int               `json:"count"`
+	Flag     bool              `json:"flag"`
+	Tags     []string          `json:"tags"`
+	Occurred time.Time         `json:"occurred"`
+	Extra    map[string]string `json:"extra"`
+}
+
+func (*benchEvent) EventType() string { return "bench.event" }

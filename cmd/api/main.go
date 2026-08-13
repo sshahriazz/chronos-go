@@ -20,8 +20,10 @@ import (
 	"github.com/chronos/chronos-go/gen/proto/chronos/system/v1/systemv1connect"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/config"
+	"github.com/chronos/chronos-go/internal/platform/obs"
 	"github.com/chronos/chronos-go/internal/server/connect"
 	"github.com/chronos/chronos-go/internal/server/health"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // version is set at build time: -ldflags "-X main.version=$(git rev-parse --short HEAD)"
@@ -31,7 +33,11 @@ func main() {
 	addr := flag.String("addr", ":"+envOr("API_PORT", "8090"), "listen address")
 	flag.Parse()
 
-	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// Wrapped so every context-aware line carries the trace it belongs to.
+	// Correlating logs and traces by timestamp stops working the moment two
+	// requests overlap; an id turns it into a lookup.
+	log := slog.New(obs.NewTraceHandler(
+		slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	slog.SetDefault(log)
 
 	if err := run(*addr, log); err != nil {
@@ -49,6 +55,23 @@ func run(addr string, log *slog.Logger) error {
 	}
 	log.Info("configuration loaded",
 		"env", cfg.Env, "timezone", cfg.Timezone, "version", version)
+
+	// Tracing first, so every span this process creates — including the ones
+	// libraries open during wiring — belongs to a provider that can export them.
+	// It never fails a boot: an observability outage must not become a service
+	// outage (ADR-010).
+	stopTracing, err := obs.StartTracing(context.Background(), obs.TracingConfig{
+		Endpoint:    cfg.Tracing.Endpoint,
+		Service:     "chronos-api",
+		Version:     version,
+		Environment: string(cfg.Env),
+		Enabled:     cfg.Tracing.Enabled,
+	}, log)
+	if err != nil {
+		log.Error("tracing unavailable; continuing without it", "error", err)
+		stopTracing = func(context.Context) {}
+	}
+	defer stopTracing(context.Background())
 
 	clk := clock.System{}
 	startedAt := clk.Now()
@@ -101,16 +124,96 @@ func run(addr string, log *slog.Logger) error {
 	mux.Handle(grpcreflect.NewHandlerV1(reflector))
 	mux.Handle(grpcreflect.NewHandlerV1Alpha(reflector))
 
-	srv := connect.New(connect.DefaultConfig(addr), mux, log)
+	// otelhttp EXTRACTS the incoming W3C trace context and opens the server
+	// span. It is what makes a caller's trace id available to the idempotency
+	// gate, which writes it into every event this request produces as the
+	// correlation id — so a span in Tempo and an event in the log line up with
+	// no join table.
+	//
+	// It wraps the mux rather than each handler: a route added later is
+	// instrumented by construction, and an uninstrumented route is invisible in
+	// exactly the way tracing exists to prevent.
+	handler := otelhttp.NewHandler(mux, "chronos-api",
+		// The span name is the Connect procedure, not the raw path. Paths here
+		// are procedures already, but this keeps one span name per RPC when a
+		// route gains parameters.
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+			return r.Method + " " + r.URL.Path
+		}),
+		// The health endpoints are polled every few seconds by Kubernetes and by
+		// the local stack. Tracing them buries every real request under probe
+		// spans and tells nobody anything.
+		otelhttp.WithFilter(func(r *http.Request) bool {
+			return r.URL.Path != "/healthz" && r.URL.Path != "/readyz" && r.URL.Path != "/metrics"
+		}),
+	)
+
+	srv := connect.New(connect.DefaultConfig(addr), handler, log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	for _, task := range backgroundTasks(deps) {
+		go task.run(ctx, deps, log.With("task", task.name))
+	}
 
 	// Report what we can reach at boot — informational only. Nothing here can
 	// prevent startup (ADR-010).
 	logInitialHealth(ctx, registry, log)
 
 	return srv.Run(ctx)
+}
+
+// backgroundTask is a duty this binary owns beyond serving requests.
+type backgroundTask struct {
+	name string
+	run  func(context.Context, *dependencies, *slog.Logger)
+}
+
+// backgroundTasks is the list main starts, and the list a test can assert.
+//
+// A list rather than a `go` statement inline, for the reason cmd/worker learned
+// the hard way: a duty nobody starts is invisible. Dedup.Forget was written,
+// documented and indexed for, and called by no binary at all — while its unit
+// test passed. A test that calls the function directly reproduces exactly that
+// blind spot, so the composition root has to expose WHAT IT STARTS.
+func backgroundTasks(*dependencies) []backgroundTask {
+	return []backgroundTask{
+		{name: "idempotency-retention", run: sweepIdempotency},
+	}
+}
+
+// sweepIdempotency deletes expired idempotency records.
+//
+// idempotency_key gains a row per mutating request and the read path already
+// refuses to replay an expired one — so nothing here is about correctness. It is
+// about RETENTION: a stored response is a serialized reply and can contain
+// personal data, which makes an unswept table a compliance problem rather than a
+// full disk (ADR-002).
+func sweepIdempotency(ctx context.Context, d *dependencies, log *slog.Logger) {
+	if d.idempotency == nil {
+		log.Warn("idempotency retention is not running: expired records, and the personal " +
+			"data in their stored responses, will never be deleted")
+		return
+	}
+	t := time.NewTicker(d.sweepEvery)
+	defer t.Stop()
+	for {
+		removed, err := d.idempotency.Sweep(ctx)
+		switch {
+		case err != nil && ctx.Err() == nil:
+			// Degradable: a failed sweep costs disk and retention, never
+			// correctness. Requests keep being gated with a larger table.
+			log.Error("idempotency retention sweep failed", "error", err)
+		case removed > 0:
+			log.Info("idempotency retention swept", "rows", removed)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }
 
 func logInitialHealth(ctx context.Context, r *health.Registry, log *slog.Logger) {

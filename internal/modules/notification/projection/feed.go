@@ -8,12 +8,16 @@ package projection
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
 	notificationdb "github.com/chronos/chronos-go/gen/sqlc/notification"
 	"github.com/chronos/chronos-go/internal/modules/notification/contract"
+
+	// Aliased: every projection constructor in this module takes a parameter
+	// named `codec` for the event codec, which would shadow the package inside
+	// the handler bodies below.
+	jsoncodec "github.com/chronos/chronos-go/internal/platform/codec"
 	"github.com/chronos/chronos-go/internal/platform/db"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/platform/projection"
@@ -38,7 +42,14 @@ func NewFeed(codec eventsourcing.Codec) *Feed {
 	projection.On[contract.NotificationCreated](d, func(
 		ctx context.Context, w db.Writer, env projection.Envelope, e *contract.NotificationCreated,
 	) error {
-		data, err := json.Marshal(e.Data)
+		// No NullEmpty, deliberately. A notification with no template data has
+		// e.Data nil, which v1 wrote as JSON `null` — into a column declared
+		// `jsonb NOT NULL DEFAULT '{}'`. The v2 shape, `{}`, is the one the
+		// schema already calls "no data", so a row inserted here and a row that
+		// took the default finally agree, and `data->>'x'` behaves the same on
+		// both. The table is rebuildable from position zero, so old `null` rows
+		// converge on the next rebuild rather than needing a migration.
+		data, err := jsoncodec.Marshal(e.Data)
 		if err != nil {
 			// Template input that will not serialise is a bug in whatever
 			// raised the notification, and it can never become serialisable.
@@ -118,7 +129,10 @@ func (f *Feed) Emit(env projection.Envelope) []realtime.Message {
 		return nil
 	}
 
-	payload, err := json.Marshal(feedAnnouncement{
+	// Every field is a string, so the v2 nil-slice change cannot alter what
+	// Centrifugo forwards to a browser; no NullEmpty is needed to keep this
+	// third-party wire shape stable.
+	payload, err := jsoncodec.Marshal(feedAnnouncement{
 		Type:           "notification.created",
 		NotificationID: created.NotificationID,
 		Template:       created.Template,

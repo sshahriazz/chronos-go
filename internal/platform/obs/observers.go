@@ -23,6 +23,13 @@ func (o ProjectionObserver) Failed(name string) {
 	o.m.ProjectionErrors.WithLabelValues(name).Inc()
 }
 
+// AnnouncementsDropped counts MESSAGES, not drop events: one full queue can
+// discard a batch of them, and "how many updates did browsers miss" is the
+// question worth answering.
+func (o ProjectionObserver) AnnouncementsDropped(name string, messages int) {
+	o.m.ProjectionAnnouncementsDropped.WithLabelValues(name).Add(float64(messages))
+}
+
 func (o ProjectionObserver) Live(name string, live bool) {
 	v := 0.0
 	if live {

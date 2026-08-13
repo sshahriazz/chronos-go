@@ -4,7 +4,6 @@ package centrifugo_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"strings"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/chronos/chronos-go/internal/adapter/centrifugo"
 	"github.com/chronos/chronos-go/internal/platform/clock"
+	"github.com/chronos/chronos-go/internal/platform/codec"
 	"github.com/chronos/chronos-go/internal/platform/realtime"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -34,7 +34,7 @@ func TestPublish(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	payload, _ := json.Marshal(map[string]any{"type": "notification", "id": uuid.NewString()})
+	payload, _ := codec.Marshal(map[string]any{"type": "notification", "id": uuid.NewString()})
 	err := p.Publish(ctx, realtime.Message{
 		Channel:        realtime.UserChannel("sub_" + uuid.NewString()[:8]),
 		Type:           "notification.created",
@@ -55,7 +55,7 @@ func TestPublishManyIsOneRoundTrip(t *testing.T) {
 
 	msgs := make([]realtime.Message, 0, 5)
 	for range 5 {
-		payload, _ := json.Marshal(map[string]any{"id": uuid.NewString()})
+		payload, _ := codec.Marshal(map[string]any{"id": uuid.NewString()})
 		msgs = append(msgs, realtime.Message{
 			Channel: realtime.UserChannel("sub_" + uuid.NewString()[:8]),
 			Type:    "notification.created",

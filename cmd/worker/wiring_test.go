@@ -86,3 +86,52 @@ func slicesContains(haystack []notify.Channel, needle notify.Channel) bool {
 	}
 	return false
 }
+
+// Durable work is off by default, and the binary must say so rather than
+// pretend. A starter without a running worker is the failure Temporal makes
+// hardest to see: the run is created, the caller is told it started, and the
+// task sits in a queue nothing polls.
+func TestDurableWorkIsAbsentUntilEnabled(t *testing.T) {
+	cfg := testConfig(t)
+	log := slog.New(slog.DiscardHandler)
+
+	d, closeAll := newDependencies(cfg, log, newCodec())
+	defer closeAll()
+
+	if d.temporal != nil || d.temporalWorker != nil {
+		t.Fatal("a Temporal client was built with TEMPORAL_ENABLED=false")
+	}
+}
+
+// The enabled-path assertions live in wiring_integration_test.go.
+//
+// TEMPORAL_ENABLED=true makes newDependencies DIAL, so asserting on the client
+// here would make this suite require a running Temporal — it passes on a machine
+// with the stack up and fails in CI, which is the same shape of mistake the key
+// cache test in that file already documents. Verified rather than assumed: with
+// the container stopped this test failed with "TEMPORAL_ENABLED=true built no
+// client", and passed again once it was started.
+//
+// What stays here is the DISABLED path, which needs no infrastructure and is the
+// half that silently ships wrong.
+
+// With durable work off, the reactor must still deliver — inline, through the
+// same dispatcher. A deployment without Temporal that silently sends nothing is
+// the worst outcome available here.
+func TestWithoutDurableWorkTheReactorStillDelivers(t *testing.T) {
+	cfg := testConfig(t)
+	log := slog.New(slog.DiscardHandler)
+
+	d, closeAll := newDependencies(cfg, log, newCodec())
+	defer closeAll()
+
+	for _, r := range reactors(newCodec(), d) {
+		er, ok := r.(*notify.EventReactor)
+		if !ok {
+			continue
+		}
+		if er.Durable() {
+			t.Fatal("the reactor claims durable delivery with no Temporal client wired")
+		}
+	}
+}

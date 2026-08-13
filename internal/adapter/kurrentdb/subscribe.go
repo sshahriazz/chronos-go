@@ -47,9 +47,14 @@ func (s *Store) SubscribeAll(
 	sopts eventsourcing.SubscribeOptions,
 	h eventsourcing.Handler,
 ) error {
+	filter, err := toFilter(sopts.Filter)
+	if err != nil {
+		return err
+	}
+
 	opts := kurrentdb.SubscribeToAllOptions{
 		From:               allStart(from),
-		Filter:             toFilter(sopts.Filter),
+		Filter:             filter,
 		MaxSearchWindow:    searchWindow,
 		CheckpointInterval: checkpointInterval,
 	}
@@ -88,7 +93,12 @@ func (s *Store) SubscribeAll(
 			// The server says we have reached the head of the log. This is the
 			// only reliable way to distinguish "idle" from "far behind".
 			if sopts.OnLive != nil {
-				sopts.OnLive()
+				// A caller that buffers while catching up commits here, so a
+				// failure is fatal to the subscription: continuing would leave
+				// applied rows above a checkpoint that never advanced past them.
+				if err := sopts.OnLive(ctx); err != nil {
+					return fmt.Errorf("kurrentdb: reaching the head of the log: %w", err)
+				}
 			}
 
 		case ev.FellBehind != nil:
@@ -157,7 +167,19 @@ func allStart(from eventsourcing.StartFrom) kurrentdb.AllPosition {
 // an unfiltered $all subscription ships every event in the system to every
 // projector over the wire, so a filter is the difference between one module's
 // traffic and all of it.
-func toFilter(f eventsourcing.SubscriptionFilter) *kurrentdb.SubscriptionFilter {
+//
+// It returns an error rather than picking a winner when a filter names more than
+// one dimension. A KurrentDB filter matches streams OR event types, so the
+// switch below can only honour one — and honouring one silently is a projection
+// that never sees half the events it declared, with a checkpoint advancing
+// happily past them. Validate is called here as well as at consumer startup
+// because this is the last point before the wire, and the check that matters is
+// the one no code path can go around.
+func toFilter(f eventsourcing.SubscriptionFilter) (*kurrentdb.SubscriptionFilter, error) {
+	if err := f.Validate(); err != nil {
+		return nil, fmt.Errorf("kurrentdb: %w", err)
+	}
+
 	switch {
 	case len(f.EventTypes) > 0:
 		// A regex anchored at both ends, not a prefix. "notification.Created.v1"
@@ -170,7 +192,7 @@ func toFilter(f eventsourcing.SubscriptionFilter) *kurrentdb.SubscriptionFilter 
 		return &kurrentdb.SubscriptionFilter{
 			Type:  kurrentdb.EventFilterType,
 			Regex: "^(" + strings.Join(alts, "|") + ")$",
-		}
+		}, nil
 
 	case len(f.StreamPrefixes) > 0:
 		// A stream-prefix filter also excludes system streams for free: no
@@ -178,16 +200,16 @@ func toFilter(f eventsourcing.SubscriptionFilter) *kurrentdb.SubscriptionFilter 
 		return &kurrentdb.SubscriptionFilter{
 			Type:     kurrentdb.StreamFilterType,
 			Prefixes: f.StreamPrefixes,
-		}
+		}, nil
 	case len(f.EventTypePrefixes) > 0:
 		return &kurrentdb.SubscriptionFilter{
 			Type:     kurrentdb.EventFilterType,
 			Prefixes: f.EventTypePrefixes,
-		}
+		}, nil
 	default:
 		// Everything except KurrentDB's own events. A projection that declares
 		// no filter still must not be handed $stats or $scavenge records, so
 		// the empty case is the SDK's exclude-system filter and never nil.
-		return kurrentdb.ExcludeSystemEventsFilter()
+		return kurrentdb.ExcludeSystemEventsFilter(), nil
 	}
 }

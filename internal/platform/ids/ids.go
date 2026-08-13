@@ -34,11 +34,13 @@ type Kind interface{ Prefix() string }
 // The registry. Every prefix is permanent: it is part of the public API
 // (ADR-030), so changing one is a breaking change for every stored reference.
 type (
-	Org          struct{}
-	Workspace    struct{}
-	User         struct{}
-	Team         struct{}
-	Session      struct{}
+	Org        struct{}
+	Workspace  struct{}
+	User       struct{}
+	Team       struct{}
+	Session    struct{}
+	Credential struct{}
+
 	Invitation   struct{}
 	APIKey       struct{}
 	Subscription struct{}
@@ -49,11 +51,18 @@ type (
 	Subject      struct{}
 )
 
-func (Org) Prefix() string          { return "org" }
-func (Workspace) Prefix() string    { return "ws" }
-func (User) Prefix() string         { return "usr" }
-func (Team) Prefix() string         { return "team" }
-func (Session) Prefix() string      { return "sess" }
+func (Org) Prefix() string       { return "org" }
+func (Workspace) Prefix() string { return "ws" }
+func (User) Prefix() string      { return "usr" }
+func (Team) Prefix() string      { return "team" }
+func (Session) Prefix() string   { return "sess" }
+
+// Credential is one authentication method belonging to a user — a password, a
+// TOTP secret, a passkey. One kind rather than three because the invariant that
+// matters ("at least one usable method") spans all of them, and a per-method id
+// type would let a caller pass a passkey id where a password id was expected.
+func (Credential) Prefix() string { return "cred" }
+
 func (Invitation) Prefix() string   { return "inv" }
 func (APIKey) Prefix() string       { return "key" }
 func (Subscription) Prefix() string { return "sub" } // matches Stripe's convention
@@ -69,8 +78,9 @@ func Registry() map[string]string {
 	return map[string]string{
 		"Org": Org{}.Prefix(), "Workspace": Workspace{}.Prefix(),
 		"User": User{}.Prefix(), "Team": Team{}.Prefix(),
-		"Session": Session{}.Prefix(), "Invitation": Invitation{}.Prefix(),
-		"APIKey": APIKey{}.Prefix(), "Subscription": Subscription{}.Prefix(),
+		"Session": Session{}.Prefix(), "Credential": Credential{}.Prefix(),
+		"Invitation": Invitation{}.Prefix(),
+		"APIKey":     APIKey{}.Prefix(), "Subscription": Subscription{}.Prefix(),
 		"Plan": Plan{}.Prefix(), "PlanVersion": PlanVersion{}.Prefix(),
 		"Notification": Notification{}.Prefix(), "Event": Event{}.Prefix(),
 		"Subject": Subject{}.Prefix(),
@@ -89,6 +99,7 @@ type (
 	UserID         = ID[User]
 	TeamID         = ID[Team]
 	SessionID      = ID[Session]
+	CredentialID   = ID[Credential]
 	InvitationID   = ID[Invitation]
 	APIKeyID       = ID[APIKey]
 	SubscriptionID = ID[Subscription]

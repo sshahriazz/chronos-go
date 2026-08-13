@@ -34,6 +34,7 @@ import (
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/config"
 	"github.com/chronos/chronos-go/internal/platform/notify"
+	"github.com/chronos/chronos-go/internal/platform/obs"
 	"github.com/chronos/chronos-go/internal/platform/reactor"
 	"github.com/chronos/chronos-go/internal/server/health"
 )
@@ -48,7 +49,11 @@ func main() {
 	stats := flag.Bool("stats", false, "print each reactor's queue depth and parked count, then exit")
 	flag.Parse()
 
-	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// Wrapped so every context-aware line carries the trace it belongs to.
+	// Correlating logs and traces by timestamp stops working the moment two
+	// requests overlap; an id turns it into a lookup.
+	log := slog.New(obs.NewTraceHandler(
+		slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	slog.SetDefault(log)
 
 	if err := run(*addr, *list, *replay, *stats, log); err != nil {
@@ -62,6 +67,22 @@ func run(addr string, list bool, replay string, stats bool, log *slog.Logger) er
 	if err != nil {
 		return err
 	}
+
+	// Tracing is installed before anything else builds a client, so spans opened
+	// during wiring belong to a provider that can export them. It never fails a
+	// boot: an observability outage must not become a service outage (ADR-010).
+	stopTracing, err := obs.StartTracing(context.Background(), obs.TracingConfig{
+		Endpoint:    cfg.Tracing.Endpoint,
+		Service:     "chronos-worker",
+		Version:     version,
+		Environment: string(cfg.Env),
+		Enabled:     cfg.Tracing.Enabled,
+	}, log)
+	if err != nil {
+		log.Error("tracing unavailable; continuing without it", "error", err)
+		stopTracing = func(context.Context) {}
+	}
+	defer stopTracing(context.Background())
 
 	codec := newCodec()
 
@@ -79,6 +100,11 @@ func run(addr string, list bool, replay string, stats bool, log *slog.Logger) er
 	defer closeAll()
 
 	rs := reactors(codec, d)
+	for _, r := range rs {
+		// Same reason as the projector: a reactor with a parked backlog and no
+		// series is indistinguishable from a healthy one.
+		d.metrics.InitReactor(r.Name())
+	}
 	log.Info("configuration loaded", "env", cfg.Env, "version", version, "reactors", len(rs))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -324,6 +350,18 @@ func serveHealth(ctx context.Context, addr string, d *dependencies, log *slog.Lo
 // handlers are where a mapping drifts: two disagree about a class, a third
 // forgets an audience, and nothing compares them.
 func reactors(codec *eventcodec.JSON, d *dependencies) []reactor.Reactor {
+	var opts []notify.ReactorOption
+	if d.temporal != nil {
+		// Durable delivery: the reactor starts a workflow per recipient and the
+		// workflow owns the retry. Inline, an SMTP server that is out for twenty
+		// minutes becomes a parked backlog a human has to replay; as a workflow
+		// it keeps retrying for an hour across process restarts (ADR-017).
+		//
+		// Conditional because the client is nil when TEMPORAL_ENABLED is false,
+		// and a deployment without it must still deliver — inline, through the
+		// same dispatcher.
+		opts = append(opts, notify.WithWorkflows(d.temporal))
+	}
 	return []reactor.Reactor{
 		notify.NewEventReactor(
 			notificationReactorName,
@@ -331,6 +369,7 @@ func reactors(codec *eventcodec.JSON, d *dependencies) []reactor.Reactor {
 			codec,
 			audiences(d.operator),
 			d.Notify(),
+			opts...,
 		),
 	}
 }

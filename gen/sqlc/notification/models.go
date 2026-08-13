@@ -8,6 +8,30 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+// AUTHORITATIVE, not a projection. Verifiers never enter events, so a rebuild cannot restore this.
+type Credential struct {
+	CredentialID  string
+	SubjectID     string
+	Kind          string
+	Verifier      *string
+	PepperVersion *int32
+	EnabledAt     pgtype.Timestamptz
+	DisabledAt    pgtype.Timestamptz
+	CreatedAt     pgtype.Timestamptz
+	LastUsedAt    pgtype.Timestamptz
+	Failures      int32
+}
+
+// PROJECTION. The lapse sweep's work list; enforces nothing — the stream does that.
+type EmailReservationView struct {
+	EmailIndex string
+	SubjectID  string
+	Verified   bool
+	ExpiresAt  pgtype.Timestamptz
+	ReservedAt pgtype.Timestamptz
+	ReleasedAt pgtype.Timestamptz
+}
+
 // One row per (principal, operation, Idempotency-Key). NULL response = claim in flight.
 type IdempotencyKey struct {
 	Principal   string
@@ -17,6 +41,28 @@ type IdempotencyKey struct {
 	Response    []byte
 	ClaimedAt   pgtype.Timestamptz
 	ExpiresAt   pgtype.Timestamptz
+}
+
+// AUTHORITATIVE, not a projection. Single-use emailed secrets, as digests.
+type IdentityToken struct {
+	Digest    []byte
+	Purpose   string
+	SubjectID string
+	IssuedAt  pgtype.Timestamptz
+	ExpiresAt pgtype.Timestamptz
+}
+
+// Authentication outcomes. subject_id is NULL when the identifier matched no account.
+type LoginHistoryView struct {
+	ID         int64
+	SubjectID  *string
+	EmailIndex *string
+	Succeeded  bool
+	Reason     *string
+	Methods    []string
+	Aal        *int32
+	DeviceID   *string
+	OccurredAt pgtype.Timestamptz
 }
 
 type NotificationFeed struct {
@@ -96,6 +142,38 @@ type ReactorProcessed struct {
 	ProcessedAt pgtype.Timestamptz
 }
 
+// AUTHORITATIVE, not a projection. Single-use code digests.
+type RecoveryCode struct {
+	SubjectID    string
+	CredentialID string
+	Digest       []byte
+	ConsumedAt   pgtype.Timestamptz
+	CreatedAt    pgtype.Timestamptz
+}
+
+// AUTHORITATIVE, not a projection. Bearer-token digests and the idle deadline, which move outside the log.
+type SessionToken struct {
+	TokenDigest   []byte
+	SessionID     string
+	IdleExpiresAt pgtype.Timestamptz
+	LastSeenAt    pgtype.Timestamptz
+	CreatedAt     pgtype.Timestamptz
+}
+
+// PROJECTION. Rebuildable from the log; holds no secret and nothing that moves per request.
+type SessionView struct {
+	SessionID                  string
+	SubjectID                  string
+	DeviceID                   *string
+	Aal                        int32
+	AbsoluteExpiresAt          pgtype.Timestamptz
+	RequiresCredentialRotation bool
+	ElevatedScope              *string
+	ElevatedUntil              pgtype.Timestamptz
+	CreatedAt                  pgtype.Timestamptz
+	RevokedAt                  pgtype.Timestamptz
+}
+
 type TenantProbe struct {
 	ID          string
 	OrgID       string
@@ -103,4 +181,25 @@ type TenantProbe struct {
 	Residency   string
 	Label       string
 	CreatedAt   pgtype.Timestamptz
+}
+
+// Spent TOTP time steps. The primary key IS the replay guard, not a backstop for it.
+type TotpReplay struct {
+	CredentialID string
+	Step         int64
+	UsedAt       pgtype.Timestamptz
+	ExpiresAt    pgtype.Timestamptz
+}
+
+// Account projection. No personal data: subject_id and a keyed email index only.
+type UserView struct {
+	SubjectID     string
+	UserID        string
+	EmailIndex    string
+	State         string
+	EmailVerified bool
+	RegisteredAt  pgtype.Timestamptz
+	ActivatedAt   pgtype.Timestamptz
+	DeactivatedAt pgtype.Timestamptz
+	SuspendedAt   pgtype.Timestamptz
 }

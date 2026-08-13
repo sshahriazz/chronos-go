@@ -79,16 +79,24 @@ func newShardedReplay(r *Runner, shards int) *shardedReplay {
 }
 
 // start launches the workers.
+//
+// Each worker owns its own buffer. A rebuild is entirely "behind" by
+// definition, so the same amortisation the sequential path gets applies here —
+// and it applies per shard, because a buffer shared across workers would need a
+// lock on the hot path and would mix streams from different partitions into one
+// transaction for no gain.
 func (s *shardedReplay) start(ctx context.Context) {
 	for i := range s.shards {
 		s.wg.Add(1)
 		go func(shard int) {
 			defer s.wg.Done()
+
+			w := &shardWorker{replay: s}
 			for e := range s.work[shard] {
 				if ctx.Err() != nil {
 					return
 				}
-				if err := s.applyOne(ctx, e); err != nil {
+				if err := w.offer(ctx, e); err != nil {
 					if s.errs[shard] == nil {
 						s.errs[shard] = err
 					}
@@ -97,13 +105,32 @@ func (s *shardedReplay) start(ctx context.Context) {
 					continue
 				}
 			}
+			// The tail of the partition. Without this the last partial batch is
+			// never written, and the coordinator would checkpoint a position
+			// whose rows are still in memory.
+			if err := w.flush(ctx); err != nil && s.errs[shard] == nil {
+				s.errs[shard] = err
+			}
 		}(i)
 	}
 }
 
-// applyOne writes one event's rows WITHOUT a checkpoint.
-func (s *shardedReplay) applyOne(ctx context.Context, e eventsourcing.RecordedEvent) error {
-	r := s.runner
+// shardWorker applies one partition, buffering rows the way the sequential
+// catch-up path does. It is owned by exactly one goroutine; only the counters it
+// publishes on flush are shared.
+type shardWorker struct {
+	replay  *shardedReplay
+	pending batch
+}
+
+// offer decodes an event and adds it to the worker's buffer, flushing first when
+// the tenant changes or the buffer is full.
+//
+// No checkpoint is ever written here. During a sharded rebuild the position
+// advances out of order by construction, so the coordinator writes one position
+// at the end — see the type comment on shardedReplay.
+func (w *shardWorker) offer(ctx context.Context, e eventsourcing.RecordedEvent) error {
+	r := w.replay.runner
 	if e.IsSystem() {
 		return nil
 	}
@@ -119,20 +146,63 @@ func (s *shardedReplay) applyOne(ctx context.Context, e eventsourcing.RecordedEv
 		Live: false,
 	}
 
-	started := r.deps.Clock.Now()
-	if err := r.deps.Batch.InTenantBatch(ctx, ScopeOf(env.Meta), db.Replayable,
-		func(w db.Writer) error { return r.proj.Apply(ctx, w, env) }); err != nil {
-		r.deps.Metrics.Failed(r.name)
-		return fmt.Errorf("%w: %s at %s#%d: %w", errApply, e.Type, e.Stream, e.Revision, err)
+	if !w.pending.accepts(ScopeOf(env.Meta)) {
+		if err := w.flush(ctx); err != nil {
+			return err
+		}
 	}
-	r.deps.Metrics.Applied(r.name, r.deps.Clock.Now().Sub(started).Seconds())
+	w.pending.add(env)
+	if w.pending.len() >= r.batchSize() {
+		return w.flush(ctx)
+	}
+	return nil
+}
 
-	s.mu.Lock()
-	if e.Position.After(s.furthest) {
-		s.furthest = e.Position
+// flush writes the buffered rows in ONE transaction, WITHOUT a checkpoint.
+func (w *shardWorker) flush(ctx context.Context) error {
+	n := w.pending.len()
+	if n == 0 {
+		return nil
 	}
-	s.applied++
-	s.mu.Unlock()
+	r := w.replay.runner
+	last := w.pending.last()
+	culprit := last
+
+	started := r.deps.Clock.Now()
+	err := r.deps.Batch.InTenantBatch(ctx, w.pending.scope, db.Replayable, func(bw db.Writer) error {
+		for _, env := range w.pending.events {
+			if err := r.proj.Apply(ctx, bw, env); err != nil {
+				culprit = env
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		w.pending.reset()
+		r.deps.Metrics.Failed(r.name)
+		return fmt.Errorf("%w: %s at %s#%d (in a batch of %d): %w",
+			errApply, culprit.Type, culprit.Stream, culprit.Revision, n, err)
+	}
+
+	// One transaction's duration split across its events, so the histogram stays
+	// comparable with the unbatched path.
+	per := r.deps.Clock.Now().Sub(started).Seconds() / float64(n)
+	for range n {
+		r.deps.Metrics.Applied(r.name, per)
+	}
+
+	// Published under the lock because every shard reports into the same pair,
+	// and the coordinator reads them once the workers have finished.
+	replay := w.replay
+	replay.mu.Lock()
+	if last.Position.After(replay.furthest) {
+		replay.furthest = last.Position
+	}
+	replay.applied += int64(n)
+	replay.mu.Unlock()
+
+	w.pending.reset()
 	return nil
 }
 
@@ -210,13 +280,15 @@ func (r *Runner) replaySharded(
 			errShardsUnsafe, shards, MaxRebuildShards)
 	}
 
-	r.deps.Log.Info("rebuilding from the "+kind+" stream", kind, name, "shards", shards)
+	r.deps.Log.InfoContext(ctx, "rebuilding from the "+kind+" stream", kind, name, "shards", shards)
 	start := r.deps.Clock.Now()
 
 	s := newShardedReplay(r, shards)
 	s.start(ctx)
 
-	readErr := read(s.dispatch)
+	// Paced at the READ, so the limit covers every shard together: N workers
+	// against one pool is exactly the pressure the limit exists to bound.
+	readErr := read(r.throttled(s.dispatch, newThrottle(r.deps.RebuildEventsPerSecond, r.deps.Clock)))
 	pos, applied, workErr := s.finish()
 
 	switch {
@@ -233,7 +305,7 @@ func (r *Runner) replaySharded(
 		// projection is still marked un-rebuilt and $all starts from zero — which
 		// is correct, if slow. Writing a partial position here would strand the
 		// rows already applied above a checkpoint that skips their predecessors.
-		r.deps.Log.Warn("link-stream read failed mid-rebuild; the checkpoint was not "+
+		r.deps.Log.WarnContext(ctx, "link-stream read failed mid-rebuild; the checkpoint was not "+
 			"advanced, so the rebuild restarts from $all",
 			kind, name, "applied", applied, "error", readErr)
 		return nil
@@ -241,14 +313,14 @@ func (r *Runner) replaySharded(
 
 	if applied == 0 {
 		// Nothing matched. Leave the checkpoint cleared so $all does the work.
-		r.deps.Log.Info("replay complete", kind, name, "events", 0)
+		r.deps.Log.InfoContext(ctx, "replay complete", kind, name, "events", 0)
 		return nil
 	}
 	if err := s.commit(ctx, pos, applied); err != nil {
 		return err
 	}
 
-	r.deps.Log.Info("replay complete", kind, name,
+	r.deps.Log.InfoContext(ctx, "replay complete", kind, name,
 		"events", applied, "shards", shards,
 		"elapsed", r.deps.Clock.Now().Sub(start).String())
 	return nil

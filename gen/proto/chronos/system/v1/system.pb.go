@@ -408,9 +408,9 @@ const file_chronos_system_v1_system_proto_rawDesc = "" +
 	"\x17CRITICALITY_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14CRITICALITY_CRITICAL\x10\x01\x12\x1a\n" +
 	"\x16CRITICALITY_DEGRADABLE\x10\x02\x12\x1b\n" +
-	"\x17CRITICALITY_FAIL_CLOSED\x10\x032q\n" +
-	"\rSystemService\x12`\n" +
-	"\tGetStatus\x12#.chronos.system.v1.GetStatusRequest\x1a$.chronos.system.v1.GetStatusResponse\"\b\xd0\xf3\x18\x01\xe8\xf3\x18\x01B\xce\x01\n" +
+	"\x17CRITICALITY_FAIL_CLOSED\x10\x032t\n" +
+	"\rSystemService\x12c\n" +
+	"\tGetStatus\x12#.chronos.system.v1.GetStatusRequest\x1a$.chronos.system.v1.GetStatusResponse\"\v\xd0\xf3\x18\x01\xe8\xf3\x18\x01\x90\x02\x01B\xce\x01\n" +
 	"\x15com.chronos.system.v1B\vSystemProtoP\x01ZBgithub.com/chronos/chronos-go/gen/proto/chronos/system/v1;systemv1\xa2\x02\x03CSX\xaa\x02\x11Chronos.System.V1\xca\x02\x11Chronos\\System\\V1\xe2\x02\x1dChronos\\System\\V1\\GPBMetadata\xea\x02\x13Chronos::System::V1b\x06proto3"
 
 var (

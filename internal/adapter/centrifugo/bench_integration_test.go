@@ -4,12 +4,12 @@ package centrifugo_test
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"strings"
 	"testing"
 
 	pb "github.com/chronos/chronos-go/gen/thirdparty/centrifugo"
+	"github.com/chronos/chronos-go/internal/platform/codec"
 	"github.com/chronos/chronos-go/internal/platform/realtime"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -38,7 +38,7 @@ func grpcClient(b *testing.B) (pb.CentrifugoApiClient, context.Context) {
 }
 
 func payload(size int) []byte {
-	body, _ := json.Marshal(map[string]any{
+	body, _ := codec.Marshal(map[string]any{
 		"type": "notification.created",
 		"id":   "01J8Z9ABCDEF",
 		"pad":  strings.Repeat("x", size),

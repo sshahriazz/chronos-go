@@ -4,8 +4,8 @@ package smtp_test
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -14,6 +14,7 @@ import (
 	"github.com/chronos/chronos-go/internal/adapter/mailrender"
 	smtpadapter "github.com/chronos/chronos-go/internal/adapter/smtp"
 	"github.com/chronos/chronos-go/internal/platform/clock"
+	"github.com/chronos/chronos-go/internal/platform/codec"
 	"github.com/chronos/chronos-go/internal/platform/mail"
 	"github.com/chronos/chronos-go/internal/platform/notify"
 )
@@ -115,12 +116,23 @@ func findMessageID(t *testing.T, to string) string {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	var out struct {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ""
+	}
+	// TOLERANT, and it has to be: this is Mailpit's response, and it carries a
+	// dozen fields this test does not model. A strict decode would reject every
+	// one of them and report "no message arrived" for mail that arrived fine.
+	//
+	// The tags spell the keys exactly as Mailpit writes them — v2 matches
+	// case-sensitively, so `messages` and `ID` are no longer interchangeable
+	// with any other casing.
+	out, err := codec.Tolerant[struct {
 		Messages []struct {
 			ID string `json:"ID"`
 		} `json:"messages"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	}](body)
+	if err != nil {
 		return ""
 	}
 	if len(out.Messages) == 0 {
@@ -137,12 +149,18 @@ func fetchMessage(t *testing.T, id string) mailpitMessage {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	var out struct {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading message: %v", err)
+	}
+	// TOLERANT for the same reason as above: Mailpit returns the whole message
+	// record, and only three of its fields are asserted here.
+	out, err := codec.Tolerant[struct {
 		Subject string `json:"Subject"`
 		Text    string `json:"Text"`
 		HTML    string `json:"HTML"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	}](body)
+	if err != nil {
 		t.Fatalf("decoding message: %v", err)
 	}
 	return mailpitMessage{Subject: out.Subject, Text: out.Text, HTML: out.HTML}

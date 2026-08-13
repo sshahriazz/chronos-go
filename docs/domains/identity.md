@@ -130,18 +130,63 @@ one. Compromise revokes everything including the current one.
 
 - **argon2id**, tuned parameters stored *with* the hash so they can be raised
   later; transparent rehash on next successful login.
-- Policy per ASVS L2: minimum length, Unicode allowed, no forced composition, no
-  forced periodic rotation, paste allowed.
-- Reuse prevention against the last N hashes.
-- Reset: single-use, expiring, constant-time token lookup, invalidated on use and
-  on any password change; **response identical whether or not the account
-  exists**.
+- **Minimum 8 characters, and at least 64 accepted.** Eight is permitted because
+  a second factor is mandatory (§2) — a password is never a single factor here.
+  Rejecting a long passphrase because of a column width is a common and
+  embarrassing violation, so the upper bound is a floor, not a target.
+- No forced composition, no forced periodic rotation, paste and password managers
+  allowed.
+- **Unicode NFC normalization, applied identically at set and at verify.** Not
+  optional and not a detail: a password typed on macOS decomposes (NFD) and will
+  not verify against a hash created on Windows or Linux without it. NFC — not
+  NFKC — per RFC 8265 §4's `OpaqueString` profile, which also mandates **no case
+  mapping and no width folding**, because folding a password reduces its entropy
+  and causes false accepts. The form is baked into every stored hash, so changing
+  it later invalidates every credential.
+- Reset: single-use, expiring, **stored as `SHA-256(token)` — never the raw
+  token** — looked up by that hash and then compared in constant time.
+  A fast hash is correct here: against 256 bits of uniform randomness there is
+  nothing to guess, so a slow KDF per lookup would be pure DoS surface. Single
+  use is enforced as one atomic conditional update, never read-then-write.
+  Invalidated on use, on any password change, and on email change; every other
+  outstanding token for the subject dies with it. **The link is always sent to
+  the stored verified address, never to the address the request supplied.**
+  Response and timing identical whether or not the account exists.
 - Optional by design — a passwordless account is a first-class state, not a
   degraded one (§5, §7).
-- **Peppered**: the stored value is `argon2id(password ‖ pepper)` where the
-  pepper lives outside the database (ADR-012). An attacker with a database dump
-  and no application secret cannot mount an offline attack at all — and, more
-  importantly, cannot *write* a hash whose password they know (§4.2).
+- **Peppered by encrypting the digest, not by concatenating a secret into it:**
+
+  ```
+  digest = argon2id(NFC(password), salt, m, t, p)
+  stored = AES-256-GCM(pepper_key_v, nonce, digest,
+                       AAD = user_id ‖ credential_id)
+  ```
+
+  An attacker with a database dump and no application secret cannot mount an
+  offline attack at all. Two properties follow that `argon2id(password ‖ pepper)`
+  cannot give:
+
+  **It can be rotated.** Concatenation and HMAC are one-way, so re-deriving under
+  a new pepper needs the plaintext password — which exists only during a login.
+  A pepper that cannot be rotated cannot be rotated *in response to a
+  compromise*, which is the one moment it matters. Encryption makes rotation a
+  batch job: decrypt with `v`, re-encrypt with `v+1`, no plaintext and no forced
+  reset. The key is transit-wrapped and cached in-process under a capped TTL,
+  exactly as ADR-041 does for subject keys — never an environment variable, which
+  would be a second key-custody system beside the one ADR-028 exists to be.
+
+  **The AAD binds the row.** §4.2's claim that an attacker with write access
+  "cannot construct a hash that will verify" holds only with it. They need not
+  forge anything: they can copy their *own* valid credential row onto the
+  victim's and log in with a password they chose. GCM authentication fails when
+  the ciphertext moves to a different `user_id`, and that is what actually
+  prevents it.
+
+  Every credential row carries `pepper_key_version`. Rehash-on-login treats a
+  stale version as degraded, so the batch job has a mop-up path for accounts it
+  missed. **The old transit key must not be destroyed until that job reports zero
+  rows at the old version** — destroying it early permanently locks out every
+  un-migrated user, and unlike an erasure that is not a feature.
 
 ### 4.1 Compromised-credential detection — a lifecycle, not a signup check
 
@@ -286,17 +331,29 @@ The browser holds N independent sessions plus a pointer to the active one.
 
 **Providers:** Google, Microsoft, Apple (OIDC) · GitHub (OAuth2 + user API).
 
-All flows use authorization code + **PKCE**, `state` (CSRF), `nonce` (replay),
-and a strict redirect-URI allowlist.
+All flows use authorization code + **PKCE** (S256 only, never `plain`), `state`
+(CSRF), `nonce` (replay), the **`iss` parameter (RFC 9207)**, and a strict
+redirect-URI allowlist with exact string matching.
+
+`iss` is not optional here. Chronos federates to four authorization servers from
+one client, which is exactly the multi-AS condition RFC 9700 §4.4.2 addresses:
+without binding the intended issuer to the user agent for each request, a mix-up
+attack redirects a code issued by one provider into an exchange with another.
+
+PKCE and `nonce` defend different attacks and neither replaces the other. `nonce`
+is a client-side check on an ID token; PKCE is enforced by the authorization
+server and is the only thing binding a stolen code to the session that requested
+it. GitHub issues no ID token at all, so PKCE is the only code binding available
+there.
 
 ### Provider-specific realities that must be coded for
 
 | Provider | What bites you |
 | --- | --- |
 | **GitHub** | No OIDC `id_token`. Email comes from the user API and **may be unverified or private** — must call the emails endpoint and read the `verified` flag. |
-| **Apple** | Returns `email` and `name` **only on first authorization** — persist immediately or they are gone forever. Email may be a **private relay** address, unique per app. |
-| **Microsoft** | Multi-tenant issuer validation; `email` may be absent — fall back to `preferred_username` carefully. |
-| **Google** | `email_verified` is reliable; hosted-domain (`hd`) claim is useful for org domain matching. |
+| **Apple** | **`name` only on first authorization**, in the form-POST body, never in the ID token — persist immediately or it is gone forever. `email` returns on every sign-in, but only if the `email` scope was requested on the *first* authorization; otherwise never. Email may be a **private relay** address, unique per app and **revocable**, after which mail to it bounces permanently. `email_verified` serialises as string *or* boolean — parse both. Requesting scopes forces `response_mode=form_post`, so the redirect arrives as a **cross-site POST** and needs its own `SameSite=None; Secure` state cookie. The `client_secret` is an **ES256 JWT expiring within 6 months** and must be regenerated on a schedule. |
+| **Microsoft** | **`email` is NOT verified and `email_verified` is not trustworthy** — see the rule below. Identity is **`tid` + `oid`**, never `sub` (pairwise per-app), never `upn`, never `email`. `preferred_username` is user-mutable and reassignable; there is no safe fallback to it. |
+| **Google** | `email_verified` is reliable for consumer accounts; for Workspace it means "the domain admin says so". Identity is `sub` — it survives an email change, and email does not. Hosted-domain (`hd`) claim is useful for org domain matching. |
 
 ### Account linking — the takeover vulnerability
 
@@ -313,14 +370,46 @@ them the victim's account.
 
 1. Auto-link **only** when the provider asserts `email_verified = true` **and**
    the local account's email is already verified **and** the provider is on the
-   trusted-verification list. Google and Microsoft qualify; **GitHub's
-   unverified emails never do**.
+   trusted-verification list.
+
+   **The trusted list is: Google, and Microsoft Entra only when the optional
+   `xms_edov` claim is true.** Nothing else.
+
+   > **Microsoft does not qualify on its standard claims, and believing it does
+   > is an account-takeover path.** Entra's `email` claim is not verified and
+   > Entra emits no trustworthy `email_verified`. Anyone can create a free Entra
+   > tenant, set `mail` on a user they control to the victim's address, and be
+   > handed the victim's account. This is **nOAuth**, disclosed in June 2023 and
+   > still found in 9 of 104 Entra Gallery applications in 2025. The victim's
+   > MFA, conditional access and Zero Trust policies are all irrelevant, because
+   > the attack never touches their tenant. `xms_edov` (email-domain-owner
+   > verified) is the only verification signal Entra offers, and it must be
+   > configured on the app registration to be emitted at all.
+
+   GitHub's unverified emails never qualify, and neither do its
+   `@users.noreply.github.com` addresses — those are `verified: true` but are not
+   deliverable mail. Apple private-relay addresses never qualify as a contact
+   address, because the user can revoke them.
 2. Otherwise, sign-in creates **no link**. The user must authenticate with an
    existing method and link explicitly from settings.
-3. Linking while authenticated requires **step-up**.
+3. Linking while authenticated requires **step-up** and a **fresh
+   re-authentication** — not an elevated session inherited from earlier in the
+   session's life.
 4. A provider identity (`issuer` + `subject`) links to **at most one** user.
-5. Matching is on immutable `subject`, never on email — emails at the provider
-   can change hands.
+5. Matching is on the provider's immutable identifier, never on email. That
+   identifier is `sub` for Google and Apple, the numeric `id` for GitHub, and the
+   **`tid` + `oid` tuple** for Entra. Apple's `sub` is scoped to the developer
+   *team*, so one person across two teams is two subjects.
+6. **`email_verified` is tri-state, not a boolean**: `verified`, `unverified`, or
+   `not asserted`. Entra and GitHub-noreply are "not asserted", which is not the
+   same as `false` and must never silently become it.
+7. **When an identifier transitions to verified — and on any password reset or
+   recovery — void every session, every pending identifier change, and every
+   authentication method not proven by the acting party.** This closes the
+   *pre-account-takeover* ordering attack, where the attacker registers on the
+   victim's address first and waits: without this rule they retain a live
+   session, a planted recovery identifier, or a pending email change that
+   survives the victim taking ownership.
 
 ### De-linking
 

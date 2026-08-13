@@ -1,11 +1,11 @@
 package webpush
 
 import (
-	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/chronos/chronos-go/internal/platform/codec"
 	"github.com/chronos/chronos-go/internal/platform/notify"
 )
 
@@ -28,7 +28,7 @@ func TestBuiltPayloadExcludesTheRecipient(t *testing.T) {
 		IdempotencyKey: "evt_1:0",
 	}
 
-	encoded, err := json.Marshal(buildPayload(n,
+	encoded, err := codec.Marshal(buildPayload(n,
 		"Your password was changed", "If this wasn't you, secure your account.",
 		"https://app.chronos.test"))
 	if err != nil {

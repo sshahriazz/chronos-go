@@ -566,6 +566,158 @@ def storage():
                      p, ["postgres", "seaweedfs", "mailpit"])
 
 
+# ===========================================================================
+# 7. Application — the Go services themselves
+# ===========================================================================
+def application():
+    """The chronos_* metrics the Go binaries publish.
+
+    Every other dashboard here watches a dependency. This one watches OUR code,
+    and it is the one that answers the two questions an operator actually asks:
+    is the read model current, and did anything we tried to send go nowhere.
+
+    A panel that renders "No data" here is usually correct rather than broken:
+    the Go services run on the host and are not always up during local work.
+    """
+    reset_layout()
+    p = [
+        row("Is the read model current?"),
+        stat("Projections live", "sum(chronos_projection_live)",
+             desc="Projections caught up to the head of the log. Compare against the "
+                  "number of projections the projector registers: a projection that is "
+                  "BEHIND serves stale reads while looking healthy by every other measure.",
+             steps=[{"color": "red", "value": None}, {"color": "green", "value": 1}]),
+        stat("Projections stopped", "sum(increase(chronos_projection_errors_total[1h]))",
+             desc="Applies that failed in the last hour. A projector does not retry "
+                  "(ADR-019), so anything above zero means a read model has STOPPED and "
+                  "is falling further behind with every event.",
+             steps=[{"color": "green", "value": None}, {"color": "red", "value": 1}]),
+        stat("Parked events", "sum(chronos_reactor_parked)",
+             desc="Events that exhausted every redelivery and are waiting for a human. "
+                  "Parked mail is mail nobody received.",
+             steps=[{"color": "green", "value": None},
+                    {"color": "orange", "value": 1}, {"color": "red", "value": 10}]),
+        stat("Announcements dropped", "sum(increase(chronos_projection_announcements_dropped_total[1h]))",
+             desc="Realtime messages discarded because the publisher was behind. Dropping "
+                  "is deliberate — the read model never waits on Centrifugo — so this is "
+                  "not an error rate. It is the only sign that live updates are failing "
+                  "while every row stays correct.",
+             steps=[{"color": "green", "value": None}, {"color": "orange", "value": 1}]),
+
+        row("Projections"),
+        ts("Live",
+           [target("chronos_projection_live", "{{projection}}")],
+           desc="1 = caught up. This is the metric to alert on.",
+           minval=0),
+        ts("Events applied",
+           [target("sum(rate(chronos_projection_events_total[5m])) by (projection)",
+                   "{{projection}}")],
+           unit="ops",
+           desc="Applied per second. A projection at zero while others move is either "
+                "filtered to a quiet module or stuck."),
+        ts("Apply latency p95",
+           [target("histogram_quantile(0.95, sum(rate(chronos_projection_batch_seconds_bucket[5m])) by (le, projection))",
+                   "{{projection}}")],
+           unit="s",
+           desc="One event's rows and checkpoint in a single round trip. While a projector "
+                "is BEHIND many events share one transaction, so this falls sharply during "
+                "catch-up — that is the batching working, not a measurement error."),
+        ts("Commit position",
+           [target("chronos_projection_commit_position", "{{projection}}")],
+           desc="Position in $all. Two projections diverging means one is behind; flat "
+                "while others climb means stopped."),
+        ts("Events skipped",
+           [target("sum(rate(chronos_projection_skipped_total[5m])) by (projection)",
+                   "{{projection}}")],
+           unit="ops",
+           desc="Offered and not handled. Dwarfing the applied rate means the filter is "
+                "too wide and the projection pays for events it never wanted."),
+        table("Single-writer leases",
+              [target("chronos_projection_lease_held", instant=True, fmt="table")],
+              desc="Which process holds each projection's lease. Two holders for one "
+                   "projection would mean two writers racing on the same checkpoint."),
+
+        row("Reactors — effects on the outside world"),
+        ts("Effects performed",
+           [target("sum(rate(chronos_reactor_handled_total[5m])) by (reactor)", "{{reactor}}")],
+           unit="ops"),
+        ts("Effect latency p95",
+           [target("histogram_quantile(0.95, sum(rate(chronos_reactor_seconds_bucket[5m])) by (le, reactor))",
+                   "{{reactor}}")],
+           unit="s",
+           desc="For mail this is dominated by the SMTP conversation."),
+        ts("Failures and poison",
+           [target("sum(rate(chronos_reactor_failures_total[5m])) by (reactor)", "failed {{reactor}}"),
+            target("sum(rate(chronos_reactor_poison_total[5m])) by (reactor)", "poison {{reactor}}")],
+           unit="ops",
+           desc="A failure is retried; poison is parked immediately because it can never "
+                "succeed. A rising poison rate is a bug, not an outage."),
+        ts("Parked backlog",
+           [target("chronos_reactor_parked", "{{reactor}}")],
+           desc="Server-side parked count, polled. Alert on this one."),
+        ts("Duplicates suppressed",
+           [target("sum(rate(chronos_reactor_duplicates_total[5m])) by (reactor)", "{{reactor}}")],
+           unit="ops",
+           desc="Redeliveries the dedup table caught. A rising rate means acks are being "
+                "lost or handlers are timing out — the effect still happened once, but "
+                "the transport does not know it."),
+
+        row("Notifications"),
+        ts("Delivered by channel",
+           [target("sum(rate(chronos_notify_delivered_total[5m])) by (channel)", "{{channel}}")],
+           unit="ops", stack=True,
+           desc="A channel flat at zero while others move is usually a channel that was "
+                "built and wired into nothing."),
+        ts("Suppressed by reason",
+           [target("sum(rate(chronos_notify_suppressed_total[5m])) by (reason)", "{{reason}}")],
+           unit="ops", stack=True,
+           desc="Suppression is the system WORKING — a preference switched off, an in-app "
+                "read, an erased subject. Never alert on this as if it were a failure."),
+        ts("Delivery failures",
+           [target("sum(rate(chronos_notify_failed_total[5m])) by (channel)", "{{channel}}")],
+           unit="ops", desc="Alert on this one."),
+        ts("Mail",
+           [target("sum(rate(chronos_mail_sent_total[5m]))", "sent"),
+            target("sum(rate(chronos_mail_failed_total[5m]))", "failed"),
+            target("sum(rate(chronos_mail_skipped_total[5m]))", "skipped")],
+           unit="ops",
+           desc="Skipped includes a subject whose personal data has been erased, which is "
+                "a correct outcome and must not read as a failure."),
+
+        row("Authorization and cache"),
+        ts("Authorization decisions",
+           [target("sum(rate(chronos_authz_allowed_total[5m])) by (source)", "allowed ({{source}})"),
+            target("sum(rate(chronos_authz_denied_total[5m]))", "denied"),
+            target("sum(rate(chronos_authz_failed_total[5m]))", "FAILED")],
+           unit="ops",
+           desc="Denied is the system working. FAILED is the one to alert on: every one of "
+                "those denied too, so a rising rate is users losing access to resources "
+                "they own (ADR-010)."),
+        ts("Cache hit rate",
+           [target("sum(rate(chronos_cache_hits_total[5m])) by (cache) / "
+                   "clamp_min(sum(rate(chronos_cache_hits_total[5m])) by (cache) + "
+                   "sum(rate(chronos_cache_misses_total[5m])) by (cache), 1)",
+                   "{{cache}}")],
+           unit="percentunit", minval=0,
+           desc="A cache near zero costs a round trip and saves nothing."),
+        ts("Cache faults",
+           [target("sum(rate(chronos_cache_errors_total[5m])) by (op)", "{{op}}")],
+           unit="ops",
+           desc="Every one was survived by falling through to the source, so this is not "
+                "alertable on its own. A sustained rate means the cache is effectively absent."),
+        ts("Cache invalidations",
+           [target("sum(rate(chronos_cache_invalidations_total[5m])) by (cache)", "{{cache}}")],
+           unit="ops",
+           desc="For the PII key cache this is the erasure-propagation signal: erasures "
+                "happening with NO invalidations recorded means destroyed keys are still "
+                "cached somewhere (ADR-041)."),
+    ]
+    return dashboard("chronos-application", "Chronos — Application",
+                     "The Go services' own metrics. Projection liveness and parked events "
+                     "are the two numbers worth paging on.",
+                     p, ["application", "projections", "reactors"])
+
+
 DASHBOARDS = {
     "chronos-overview.json": overview,
     "chronos-eventlog.json": eventlog,
@@ -573,6 +725,7 @@ DASHBOARDS = {
     "chronos-workflows.json": workflows,
     "chronos-realtime.json": realtime,
     "chronos-storage.json": storage,
+    "chronos-application.json": application,
 }
 
 

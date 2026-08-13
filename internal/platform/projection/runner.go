@@ -72,12 +72,58 @@ type Deps struct {
 	// Live consumption is never sharded: it must preserve the global commit
 	// order the $all subscription exists to provide.
 	RebuildShards int
+
+	// CatchUpBatch is how many events share one transaction while the projection
+	// is BEHIND the head of the log. Zero takes the default; 1 disables batching
+	// and commits every event on its own.
+	//
+	// Behind is the only place this is safe, and it is also the only place it
+	// matters. A catching-up projector's cost is dominated by the round trip per
+	// event — measured earlier in this project at 63% of per-event latency — and
+	// that cost is per TRANSACTION, not per statement. Once live, events arrive
+	// one at a time anyway and batching would only add latency between a write
+	// landing in the log and appearing in the read model.
+	//
+	// Atomicity is unchanged: the batch still carries the rows AND the
+	// checkpoint that describes them, so a crash loses the whole batch together
+	// and the projection reapplies it. Apply must be idempotent regardless — it
+	// already must be.
+	CatchUpBatch int
+
+	// RebuildEventsPerSecond paces a REBUILD. Zero is unthrottled.
+	//
+	// A rebuild reads as fast as the event store will serve and writes through
+	// the same PostgreSQL pool the API uses, so at full speed it is a load test
+	// against production run at an inconvenient moment. This is the knob that
+	// makes it a background job instead.
+	//
+	// It does NOT pace a projector catching up after downtime: there the goal is
+	// to become current, and slowing it down keeps every read stale for longer.
+	RebuildEventsPerSecond int
+
+	// AnnounceBuffer is how many realtime announcements may queue behind the
+	// projector. Zero takes the default.
+	//
+	// Announcements are published from their own goroutine so a slow Centrifugo
+	// cannot put network latency into the loop that advances the read model. The
+	// queue is BOUNDED and drops when full: an announcement is a hint that a row
+	// changed, the row is already durable, and a browser that misses the hint
+	// recovers by reading. Blocking the projector to guarantee a toast would
+	// trade the system of record for a cosmetic one.
+	AnnounceBuffer int
 }
 
 const (
 	defaultLeaseRetry     = 5 * time.Second
 	defaultSubscribeRetry = 2 * time.Second
+	defaultCatchUpBatch   = 64
+	defaultAnnounceBuffer = 256
 )
+
+// MaxCatchUpBatch bounds one transaction's size. A batch holds every event's
+// decoded envelope in memory and holds one pooled connection for as long as it
+// takes to send, so an unbounded batch trades a round trip for a stall.
+const MaxCatchUpBatch = 512
 
 // Runner drives one projection.
 //
@@ -90,15 +136,21 @@ type Runner struct {
 
 	name string
 
-	// state and resume are owned by the goroutine running consume. Nothing
-	// else may read them: the checkpoint row in Postgres is the observable
-	// position, and reading these from a health handler would be a data race.
-	state  Checkpoint
-	resume eventsourcing.StartFrom
+	// state, resume and pending are owned by the goroutine running consume.
+	// Nothing else may read them: the checkpoint row in Postgres is the
+	// observable position, and reading these from a health handler would be a
+	// data race.
+	state   Checkpoint
+	resume  eventsourcing.StartFrom
+	pending batch
 
 	// live is written from the subscription goroutine and read by health
 	// endpoints, so it is atomic rather than a plain bool.
 	live atomic.Bool
+
+	// ann is the realtime publisher's goroutine, alive only for the duration of
+	// a Run or Rebuild. Nil means announcements publish inline.
+	ann *announcer
 }
 
 func NewRunner(p Projection, deps Deps) *Runner {
@@ -107,6 +159,15 @@ func NewRunner(p Projection, deps Deps) *Runner {
 	}
 	if deps.SubscribeRetry <= 0 {
 		deps.SubscribeRetry = defaultSubscribeRetry
+	}
+	if deps.CatchUpBatch <= 0 {
+		deps.CatchUpBatch = defaultCatchUpBatch
+	}
+	if deps.CatchUpBatch > MaxCatchUpBatch {
+		deps.CatchUpBatch = MaxCatchUpBatch
+	}
+	if deps.AnnounceBuffer <= 0 {
+		deps.AnnounceBuffer = defaultAnnounceBuffer
 	}
 	if deps.Log == nil {
 		deps.Log = slog.Default()
@@ -129,13 +190,23 @@ func NewRunner(p Projection, deps Deps) *Runner {
 // when the projection itself rejects an event, which is a bug that must be
 // loud.
 func (r *Runner) Run(ctx context.Context) error {
+	// Refused before the lease is taken, not on the first event. A filter that
+	// mixes selectors cannot be expressed server-side, so one dimension of it
+	// would be dropped and the projection would run looking healthy while never
+	// receiving events it declared (eventsourcing.SubscriptionFilter.Validate).
+	if err := r.proj.Filter().Validate(); err != nil {
+		return fmt.Errorf("projection %s: %w", r.name, err)
+	}
+
+	defer r.startAnnouncer(ctx)()
+
 	for {
 		rel, held, err := r.deps.Lease.Acquire(ctx, r.name)
 		switch {
 		case err != nil:
-			r.deps.Log.Warn("lease acquisition failed", "error", err)
+			r.deps.Log.WarnContext(ctx, "lease acquisition failed", "error", err)
 		case !held:
-			r.deps.Log.Debug("lease held elsewhere; standing by")
+			r.deps.Log.DebugContext(ctx, "lease held elsewhere; standing by")
 		default:
 			err := r.consume(ctx)
 			rel(context.WithoutCancel(ctx))
@@ -160,6 +231,22 @@ func (r *Runner) Run(ctx context.Context) error {
 // identical whether the system is quiet or it is a day behind.
 func (r *Runner) Live() bool { return r.live.Load() }
 
+// goLive commits whatever was buffered while behind, then reports the
+// projection caught up.
+//
+// The order is the whole point. Events buffered while catching up are NOT live —
+// they must not announce — and the position they carry has to be durable before
+// anything treats this projection as current. A readiness probe answering yes
+// over a batch that is still only in memory is the one thing "live" must never
+// mean.
+func (r *Runner) goLive(ctx context.Context) error {
+	if err := r.flush(ctx); err != nil {
+		return err
+	}
+	r.setLive(true)
+	return nil
+}
+
 func (r *Runner) setLive(live bool) {
 	if r.live.Swap(live) == live {
 		return
@@ -178,6 +265,12 @@ func (r *Runner) setLive(live bool) {
 // them is impossible: either the projection is empty AND at zero, or neither
 // happened. This is the operation that reactors deliberately do not have.
 func (r *Runner) Rebuild(ctx context.Context) error {
+	if err := r.proj.Filter().Validate(); err != nil {
+		return fmt.Errorf("projection %s: %w", r.name, err)
+	}
+
+	defer r.startAnnouncer(ctx)()
+
 	rel, held, err := r.deps.Lease.Acquire(ctx, r.name)
 	if err != nil {
 		return fmt.Errorf("projection %s: acquiring lease to rebuild: %w", r.name, err)
@@ -235,7 +328,7 @@ func (r *Runner) rebuildFromLinkStreams(ctx context.Context) error {
 		})
 	}
 
-	r.deps.Log.Info("rebuilding via $all",
+	r.deps.Log.InfoContext(ctx, "rebuilding via $all",
 		"reason", "the filter does not resolve to exactly one event type or category")
 	return nil
 }
@@ -251,10 +344,15 @@ func (r *Runner) replay(ctx context.Context, kind, name string, read func(events
 		return r.replaySharded(ctx, kind, name, read)
 	}
 
-	r.deps.Log.Info("rebuilding from the "+kind+" stream", kind, name)
+	r.deps.Log.InfoContext(ctx, "rebuilding from the "+kind+" stream", kind, name,
+		"events_per_second", r.deps.RebuildEventsPerSecond)
 	start := r.deps.Clock.Now()
 
-	if err := read(r.handle); err != nil {
+	if err := read(r.throttled(r.handle, newThrottle(r.deps.RebuildEventsPerSecond, r.deps.Clock))); err != nil {
+		// Whatever is still buffered belongs to a replay that did not finish.
+		// Dropping it leaves the checkpoint behind those events, so $all reapplies
+		// them — slow and correct, which is the only acceptable pair here.
+		r.pending.reset()
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -263,12 +361,18 @@ func (r *Runner) replay(ctx context.Context, kind, name string, read func(events
 			// slower source — it would reject the same event again.
 			return err
 		}
-		r.deps.Log.Warn("link-stream read failed; continuing from $all",
+		r.deps.Log.WarnContext(ctx, "link-stream read failed; continuing from $all",
 			kind, name, "error", err)
 		return nil
 	}
 
-	r.deps.Log.Info("replay complete", kind, name,
+	// A replay is entirely "behind", so every event went through the batch. The
+	// tail of it is still uncommitted until here.
+	if err := r.flush(ctx); err != nil {
+		return err
+	}
+
+	r.deps.Log.InfoContext(ctx, "replay complete", kind, name,
 		"events", r.state.EventsProcessed,
 		"elapsed", r.deps.Clock.Now().Sub(start).String())
 	return nil
@@ -278,17 +382,22 @@ func (r *Runner) replay(ctx context.Context, kind, name string, read func(events
 // subscription drops or ctx ends.
 func (r *Runner) consume(ctx context.Context) error {
 	for {
+		// Anything buffered by a previous attempt belongs to a position the
+		// checkpoint about to be loaded does not cover. Dropping it is not a
+		// loss: the subscription redelivers from the checkpoint.
+		r.pending.reset()
+
 		if err := r.loadCheckpoint(ctx); err != nil {
 			return err
 		}
-		r.deps.Log.Info("subscribing",
+		r.deps.Log.InfoContext(ctx, "subscribing",
 			"from_beginning", r.resume.IsBeginning(),
 			"from_commit", r.resume.Position().Commit,
 			"events_processed", r.state.EventsProcessed)
 
 		err := r.deps.Subscriber.SubscribeAll(ctx, r.resume, eventsourcing.SubscribeOptions{
 			Filter:       r.proj.Filter(),
-			OnLive:       func() { r.setLive(true) },
+			OnLive:       r.goLive,
 			OnBehind:     func() { r.setLive(false) },
 			OnCheckpoint: r.skipTo,
 		}, r.handle)
@@ -302,7 +411,7 @@ func (r *Runner) consume(ctx context.Context) error {
 			return err
 		default:
 			r.setLive(false)
-			r.deps.Log.Warn("subscription dropped; reconnecting", "error", err)
+			r.deps.Log.WarnContext(ctx, "subscription dropped; reconnecting", "error", err)
 			if !sleep(ctx, r.deps.SubscribeRetry) {
 				return ctx.Err()
 			}
@@ -314,8 +423,9 @@ func (r *Runner) loadCheckpoint(ctx context.Context) error {
 	return r.deps.TX.InSystemTx(ctx, func(ctx context.Context, q db.Querier) error {
 		cp, err := r.deps.Checkpoints.Load(ctx, q, r.name)
 		if errors.Is(err, ErrNoCheckpoint) {
-			// Never run, or just rebuilt. Start at the head of the log — which
-			// is NOT the same as resuming after position zero.
+			// Never run, or just rebuilt. Start at the BEGINNING of the log —
+			// which is not the same as resuming after position zero, and is the
+			// opposite end of the log from "live".
 			r.state, r.resume = Checkpoint{}, eventsourcing.FromBeginning()
 			return nil
 		}
@@ -327,12 +437,36 @@ func (r *Runner) loadCheckpoint(ctx context.Context) error {
 	})
 }
 
-// announce publishes a projection's realtime messages, AFTER its rows commit.
+// startAnnouncer brings up the realtime publisher's goroutine and returns the
+// function that shuts it down.
+//
+// It is a no-op when the projection announces nothing or there is no realtime
+// service, so a deployment without Centrifugo starts no goroutine at all.
+func (r *Runner) startAnnouncer(ctx context.Context) func() {
+	if _, ok := r.proj.(Emitter); !ok || r.deps.Realtime == nil {
+		return func() {}
+	}
+	a := newAnnouncer(ctx, r.name, r.deps.Realtime, r.deps.Log, r.deps.Metrics, r.deps.AnnounceBuffer)
+	a.start()
+	r.ann = a
+	return func() {
+		a.stop()
+		r.ann = nil
+	}
+}
+
+// announce hands a projection's realtime messages to the publisher, AFTER its
+// rows commit.
 //
 // Deliberately best-effort and deliberately last. A failed publish must not fail
 // the projection: the rows are already durable, the browser recovers by reading
 // them, and treating a missed toast as a projection error would stop a read
 // model over a cosmetic failure (ADR-010).
+//
+// The publish itself happens on the announcer's goroutine, so Centrifugo's
+// latency never lands in the loop that advances the read model. Emit still runs
+// here, inline: it is pure, and running it here means a projection that emits
+// nothing costs nothing.
 //
 // Nothing is announced while catching up. Replaying history to a connected
 // browser would fire one notification per event that user ever received.
@@ -345,8 +479,14 @@ func (r *Runner) announce(ctx context.Context, env Envelope) {
 	if len(msgs) == 0 {
 		return
 	}
+	if r.ann != nil {
+		r.ann.enqueue(msgs)
+		return
+	}
+	// No announcer: a caller driving the runner directly rather than through Run
+	// or Rebuild. Publishing inline keeps the behaviour identical, just slower.
 	if err := r.deps.Realtime.PublishMany(ctx, msgs); err != nil {
-		r.deps.Log.Warn("realtime announcement failed; the change is still in the read model",
+		r.deps.Log.WarnContext(ctx, "realtime announcement failed; the change is still in the read model",
 			"event_type", env.Type, "messages", len(msgs), "error", err)
 	}
 }
@@ -383,6 +523,14 @@ var errApply = errors.New("projection: apply failed")
 // It is written in its own system transaction rather than batched with rows,
 // because by definition there are no rows to batch it with.
 func (r *Runner) skipTo(ctx context.Context, p eventsourcing.Position) error {
+	// Buffered events come FIRST. A server checkpoint names a position beyond
+	// them, so writing it while they are still in memory would leave a
+	// checkpoint that claims work no transaction ever performed — the one way a
+	// projection can silently lose an event rather than reapply it.
+	if err := r.flush(ctx); err != nil {
+		return err
+	}
+
 	// Never move backwards. A server checkpoint can trail the last event already
 	// applied — the checkpoint interval and event delivery are independent — and
 	// rewinding the position would replay events this projection has processed.
@@ -463,6 +611,32 @@ func (r *Runner) handle(ctx context.Context, e eventsourcing.RecordedEvent) erro
 		Meta:     meta,
 		Payload:  e.Payload,
 		Live:     r.live.Load(),
+	}
+
+	// Behind the head: buffer, and let one transaction carry many events. The
+	// scope must match — every statement runs under a SET LOCAL scope, so two
+	// tenants cannot share a transaction — and the batch is flushed the moment
+	// it fills, the scope changes, the server checkpoints, or the projection
+	// catches up.
+	if !env.Live && r.batchSize() > 1 {
+		if !r.pending.accepts(ScopeOf(env.Meta)) {
+			if err := r.flush(ctx); err != nil {
+				return err
+			}
+		}
+		r.pending.add(env)
+		if r.pending.len() >= r.batchSize() {
+			return r.flush(ctx)
+		}
+		return nil
+	}
+
+	// Live: commit immediately, because latency to the read model is now the
+	// thing that matters. Anything still buffered is committed first so events
+	// never commit out of order — goLive normally did it already, and a
+	// subscriber that never reports live is why this is not an assertion.
+	if err := r.flush(ctx); err != nil {
+		return err
 	}
 
 	next := Checkpoint{

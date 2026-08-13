@@ -62,6 +62,14 @@ func NewRunner(r Reactor, deps Deps) *Runner {
 // retry policy and parks what keeps failing, so one bad event cannot halt every
 // notification in the system.
 func (r *Runner) Run(ctx context.Context) error {
+	// Refused up front. A filter naming more than one dimension cannot be
+	// expressed server-side, so one of them would be dropped — and for a reactor
+	// the symptom is not a stale row, it is mail nobody receives, with no error
+	// anywhere to say so.
+	if err := r.reactor.Filter().Validate(); err != nil {
+		return fmt.Errorf("reactor %s: %w", r.name, err)
+	}
+
 	for {
 		r.consumeOnce(ctx)
 		if !sleep(ctx, r.deps.Retry) {
@@ -79,7 +87,7 @@ func (r *Runner) consumeOnce(ctx context.Context) {
 	if err == nil || ctx.Err() != nil || errors.Is(err, context.Canceled) {
 		return
 	}
-	r.deps.Log.Warn("subscription ended; reconnecting", "error", err)
+	r.deps.Log.WarnContext(ctx, "subscription ended; reconnecting", "error", err)
 }
 
 // handle decodes one event, skips it if already done, and reacts.
@@ -101,7 +109,7 @@ func (r *Runner) handle(ctx context.Context, e eventsourcing.RecordedEvent) erro
 	}
 	if seen {
 		r.deps.Metrics.Duplicate(r.name)
-		r.deps.Log.Debug("already handled; skipping redelivery", "event_id", e.ID.String())
+		r.deps.Log.DebugContext(ctx, "already handled; skipping redelivery", "event_id", e.ID.String())
 		return nil
 	}
 
@@ -123,6 +131,12 @@ func (r *Runner) handle(ctx context.Context, e eventsourcing.RecordedEvent) erro
 		Payload:  e.Payload,
 	}
 
+	// Everything this reaction writes inherits the chain: the same correlation
+	// id, and this event as its cause. Attached here, once, rather than left to
+	// each reactor — a reactor that forgot would emit an event whose origin is
+	// unrecoverable, because the log cannot be amended afterwards.
+	ctx = eventsourcing.WithTrace(ctx, eventsourcing.CausedBy(env))
+
 	started := r.deps.Clock.Now()
 	if err := r.reactor.React(ctx, env); err != nil {
 		if errors.Is(err, eventsourcing.ErrPoison) {
@@ -137,7 +151,7 @@ func (r *Runner) handle(ctx context.Context, e eventsourcing.RecordedEvent) erro
 	if err := r.deps.Dedup.MarkSeen(ctx, r.name, e.ID); err != nil {
 		// The effect already happened. Failing here asks for redelivery, which
 		// repeats it — so report rather than retry, and let the ack stand.
-		r.deps.Log.Error("effect performed but not recorded; a redelivery would repeat it",
+		r.deps.Log.ErrorContext(ctx, "effect performed but not recorded; a redelivery would repeat it",
 			"event_id", e.ID.String(), "error", err)
 	}
 	return nil

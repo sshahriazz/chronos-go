@@ -57,10 +57,18 @@ func (s *Store) EnsureGroup(ctx context.Context, group string, filter eventsourc
 	// streams ($ce-), never here.
 	settings.ResolveLinkTos = false
 
-	err := s.client.CreatePersistentSubscriptionToAll(ctx, group, kurrentdb.PersistentAllSubscriptionOptions{
+	// A filter that names more than one dimension is refused rather than
+	// silently narrowed. For a reactor the consequence of silence is not a stale
+	// row: it is mail that is never sent, with no error anywhere.
+	sf, err := toFilter(filter)
+	if err != nil {
+		return fmt.Errorf("creating subscription group %q: %w", group, err)
+	}
+
+	err = s.client.CreatePersistentSubscriptionToAll(ctx, group, kurrentdb.PersistentAllSubscriptionOptions{
 		Settings:  &settings,
 		StartFrom: kurrentdb.End{},
-		Filter:    toFilter(filter),
+		Filter:    sf,
 	})
 	if err == nil {
 		return nil

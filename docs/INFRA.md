@@ -114,9 +114,12 @@ question.
 
 - Write events first, always. The event log is the source of truth; PostgreSQL is
   derived and disposable.
-- **Projections stay off** (`KURRENTDB_RUN_PROJECTIONS=None`). Server-side
-  JavaScript projections are a separate runtime with its own failure modes and no
-  type safety. Projections are Go code, versioned in this repo.
+- **JavaScript projections stay off**; the built-in native ones run
+  (`KURRENTDB_RUN_PROJECTIONS=System`, which is what the compose file sets).
+  `System` enables `$by_category` and `$by_event_type` — the link streams a
+  rebuild reads — and no JS runtime. `All` would add user JavaScript: a separate
+  runtime with its own failure modes and no type safety, and it stays banned.
+  Read-model projections are Go code, versioned in this repo.
 - Each Go projector persists its own `$all` commit position in PostgreSQL, in the
   same transaction as the rows it writes. That makes replay idempotent and
   restart-safe.

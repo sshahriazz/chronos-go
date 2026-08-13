@@ -3,6 +3,7 @@ package eventsourcing
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -46,8 +47,10 @@ type StreamAppend struct {
 // # What it IS for
 //
 // Pairing a claim with the thing that claims it. Registration must reserve
-// `reservation_email-alice@example.com` with NoStream AND create `user-<id>`
-// with NoStream. As two appends, a crash between them leaves a reservation
+// `reservation_email-<hex(HMAC(k_res, email))>` with NoStream AND create
+// `user-<id>` with NoStream. The reservation value is HMACed rather than the
+// raw address: a stream name is permanent, appears in the $streams index and in
+// category streams, and has no ciphertext for erasure to destroy (ADR-048). As two appends, a crash between them leaves a reservation
 // nobody owns, which is why the pattern needed compensation or a workflow. As
 // one append, the gap does not exist.
 //
@@ -55,6 +58,48 @@ type StreamAppend struct {
 // the other stream's events back — nothing was written.
 type MultiAppender interface {
 	AppendToMany(ctx context.Context, appends []StreamAppend) ([]AppendResult, error)
+}
+
+// Event size limits.
+//
+// KurrentDB caps an APPEND at roughly 1 MiB by default, and the cap counts the
+// whole append rather than one event, so a command emitting several events has
+// less headroom than the number below suggests. MaxEventBytes is deliberately
+// under the server's limit: being refused by our own code names the problem,
+// while being refused by the server surfaces as a generic write failure in the
+// middle of a command that has already reserved uniqueness.
+//
+// The real answer to a large payload is not a larger limit. Bytes go to
+// SeaweedFS and the event carries a reference (EVENT-SOURCING §10) — an event is
+// a fact about what happened, not a container for the thing it happened to.
+const (
+	// MaxEventBytes is the hard ceiling on one event's encoded payload.
+	MaxEventBytes = 768 << 10 // 768 KiB
+
+	// LargeEventBytes is the point at which an event is worth complaining about
+	// while still writing it. Throughput on the log is a function of payload
+	// size, and an event this big is nearly always a blob that belongs in object
+	// storage or a projection that belongs in a read model.
+	LargeEventBytes = 50 << 10 // 50 KiB
+)
+
+// ErrEventTooLarge is returned instead of attempting an append that the server
+// would reject, or that would leave no room for the events beside it.
+var ErrEventTooLarge = errors.New("eventsourcing: event payload is too large")
+
+// CheckEventSize reports whether an encoded payload may be appended, and whether
+// it is large enough to be worth reporting.
+//
+// It lives in the kernel so both append paths — single-stream and multi-stream —
+// share one limit, and so the limit is stated where the rules are rather than
+// inside a driver.
+func CheckEventSize(eventType string, payload []byte) (large bool, err error) {
+	if len(payload) > MaxEventBytes {
+		return true, fmt.Errorf("%w: %s is %d bytes, over the %d-byte limit; "+
+			"put the bytes in object storage and reference them from the event",
+			ErrEventTooLarge, eventType, len(payload), MaxEventBytes)
+	}
+	return len(payload) > LargeEventBytes, nil
 }
 
 // SubscriptionFilter narrows a global subscription server-side.
@@ -87,6 +132,59 @@ type SubscriptionFilter struct {
 	// the type stream on rebuild. Declaring the intent here is what makes that
 	// choice available.
 	EventTypes []string
+}
+
+// ErrAmbiguousFilter marks a filter that selects on more than one dimension.
+var ErrAmbiguousFilter = errors.New("eventsourcing: subscription filter mixes selectors")
+
+// Validate rejects a filter the server cannot express.
+//
+// A KurrentDB filter is EITHER a stream filter OR an event-type filter, never
+// both. A filter naming stream prefixes and event types therefore has to lose
+// one of them, and the loss is silent: the subscription runs, the projection
+// looks healthy, and the events it declared but never received simply never
+// appear in the read model. Nothing detects that — not a test, not a metric, not
+// a checkpoint, because the checkpoint advances perfectly well over events the
+// filter excluded.
+//
+// So it is refused at startup instead. A projection that genuinely needs two
+// dimensions must widen to one of them and discard the rest in Apply, which is
+// correct and merely wasteful — the opposite trade to the one silence makes.
+//
+// An EMPTY filter is valid: it means "every domain event", which the subscriber
+// renders as KurrentDB's exclude-system filter.
+func (f SubscriptionFilter) Validate() error {
+	selectors := 0
+	if len(f.StreamPrefixes) > 0 {
+		selectors++
+	}
+	if len(f.EventTypePrefixes) > 0 {
+		selectors++
+	}
+	if len(f.EventTypes) > 0 {
+		selectors++
+	}
+	if selectors > 1 {
+		return fmt.Errorf("%w: stream_prefixes=%d event_type_prefixes=%d event_types=%d; "+
+			"a KurrentDB filter matches streams OR event types, so one of these would be "+
+			"dropped and the events it selects would never arrive",
+			ErrAmbiguousFilter, len(f.StreamPrefixes), len(f.EventTypePrefixes), len(f.EventTypes))
+	}
+
+	for _, group := range [][]string{f.StreamPrefixes, f.EventTypePrefixes, f.EventTypes} {
+		for _, v := range group {
+			if v == "" {
+				// An empty prefix matches everything, which makes the filter a lie
+				// rather than a narrowing.
+				return fmt.Errorf("%w: an empty selector matches every event", ErrAmbiguousFilter)
+			}
+			if strings.HasPrefix(v, "$") {
+				return fmt.Errorf("%w: %q selects system streams, which no consumer may handle",
+					ErrAmbiguousFilter, v)
+			}
+		}
+	}
+	return nil
 }
 
 // ExactTypes reports the whole event types this filter selects, when types are
@@ -197,7 +295,9 @@ func FromBeginning() StartFrom { return StartFrom{} }
 // After resumes strictly after a position — the event at p is NOT redelivered.
 func After(p Position) StartFrom { return StartFrom{pos: p, resuming: true} }
 
-// IsBeginning reports whether this starts at the head of the log.
+// IsBeginning reports whether this starts at the FIRST event in the log, rather
+// than resuming from a stored position. It is the opposite end of the log from
+// "live", which is what a caught-up subscription reaches.
 func (s StartFrom) IsBeginning() bool { return !s.resuming }
 
 // Position is the resume point, meaningful only when IsBeginning is false.
@@ -213,7 +313,13 @@ type SubscribeOptions struct {
 	Filter SubscriptionFilter
 
 	// OnLive fires when the subscription reaches the head of the log.
-	OnLive func()
+	//
+	// It takes a context and returns an error for the same reason OnCheckpoint
+	// does: reaching the head is the moment a consumer that has been buffering
+	// work while behind must commit it, and a commit that fails must stop the
+	// subscription rather than be swallowed inside a callback that cannot
+	// report.
+	OnLive func(context.Context) error
 
 	// OnBehind fires when it falls behind again.
 	OnBehind func()

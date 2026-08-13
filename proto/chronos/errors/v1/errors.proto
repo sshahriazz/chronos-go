@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+// Package errors carries the machine-readable part of a failed response.
+//
+// A transport code is not enough. `PERMISSION_DENIED` covers being refused by
+// the authz gate, by the subscription gate and by the entitlement gate, and a
+// client shows completely different UI for each: "ask an admin for access",
+// "your organization is suspended", "upgrade your plan". Without a stable
+// reason, every client ends up branching on message strings scraped from live
+// responses, and changing a message silently breaks them (CONVENTIONS §5.1).
+//
+// The reason enum here is generated INTO the error catalogue, and a test fails
+// if the server declares a reason with no catalogue entry — so the published
+// docs and the server's behaviour cannot disagree.
+package chronos.errors.v1;
+
+// ErrorDetail travels as a Connect error detail on every failed RPC.
+//
+// It is deliberately small and closed. A map of arbitrary server state would
+// eventually carry something that is not safe to disclose; these two fields are
+// the entire outward contract (ADR-015).
+message ErrorDetail {
+  // The stable, machine-readable reason. One of the values in the error
+  // catalogue, e.g. "PLAN_UPGRADE_REQUIRED". Clients branch on this and never
+  // on the message.
+  string reason = 1;
+
+  // Client-safe structured detail: the limit that was exceeded, the field that
+  // failed validation, the plan that would satisfy the request. Never personal
+  // data, never SQL, never driver text (ADR-002, ADR-015).
+  map<string, string> metadata = 2;
+
+  // The correlation id for this request. An operator can find the full
+  // server-side cause — which is NOT in this message — by searching traces for
+  // it, so a user can paste it into a support ticket and lose nothing.
+  string trace_id = 3;
+}

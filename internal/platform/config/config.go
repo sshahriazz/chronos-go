@@ -66,9 +66,37 @@ type Config struct {
 	Valkey    ValkeyConfig
 	Projector ProjectorConfig
 	Reactor   ReactorConfig
+	Temporal  TemporalConfig
+	Tracing   TracingConfig
+	API       APIConfig
 
 	location *time.Location
 }
+
+// APIConfig tunes the request pipeline.
+type APIConfig struct {
+	// IdempotencyTTL is how long a mutation's response stays replayable
+	// (CONVENTIONS §6). It is a RETENTION bound, not a cache hint: a stored
+	// response can contain personal data (ADR-002).
+	IdempotencyTTL time.Duration `env:"API_IDEMPOTENCY_TTL" envDefault:"24h"`
+
+	// IdempotencySweepEvery is how often expired records are deleted. The
+	// records are what make a retry safe, so the sweep is what keeps the table —
+	// and the personal data in it — bounded.
+	IdempotencySweepEvery time.Duration `env:"API_IDEMPOTENCY_SWEEP_EVERY" envDefault:"1h"`
+
+	// IdempotencyWait is how long a duplicate arriving mid-flight waits for the
+	// first request to finish before being refused. Zero does not wait, which
+	// turns a double-click into an error the user sees rather than the answer
+	// they were about to get.
+	IdempotencyWait time.Duration `env:"API_IDEMPOTENCY_WAIT" envDefault:"5s"`
+}
+
+// MaxIdempotencyTTL is the ceiling for API_IDEMPOTENCY_TTL. It mirrors
+// cqrs.MaxTTL, which the kernel enforces again at construction — this one exists
+// so the failure is a refusal to BOOT with a named environment variable, rather
+// than an error from a constructor at some later point in wiring.
+const MaxIdempotencyTTL = 7 * 24 * time.Hour
 
 type KurrentDBConfig struct {
 	// ConnectionString is the kurrentdb:// URI. tls=false is refused outside
@@ -255,6 +283,50 @@ type ReactorConfig struct {
 // replay what parked.
 const MinDedupRetentionDays = 7
 
+// TracingConfig is distributed tracing (ADR-034).
+//
+// Services export to the COLLECTOR, never to Tempo directly: sampling and
+// attribute scrubbing live in infra/otel-collector/config.yaml, and the
+// scrubbing is what keeps personal data out of spans (ADR-002). A service that
+// exported straight to the backend would bypass both.
+type TracingConfig struct {
+	// Endpoint is the OTLP gRPC collector.
+	Endpoint string `env:"OTEL_EXPORTER_OTLP_ENDPOINT" envDefault:"http://localhost:4317"`
+
+	// Enabled turns exporting on. Off still installs the W3C propagator, so an
+	// incoming trace id still reaches the code that writes it into an event's
+	// correlation id — turning tracing off must not change what lands in a
+	// permanent log.
+	Enabled bool `env:"OTEL_ENABLED" envDefault:"false"`
+}
+
+// TemporalConfig points at the durable-work service (ADR-017).
+//
+// Work that spans several effects, needs timers, or must survive the process
+// dying halfway runs here. The banned alternatives — a cron table, a
+// time.AfterFunc, an ad-hoc goroutine — all share one flaw: none of them
+// outlives the process that created them.
+type TemporalConfig struct {
+	// HostPort is the frontend address.
+	HostPort string `env:"TEMPORAL_HOSTPORT" envDefault:"localhost:7233"`
+
+	// Namespace isolates one deployment's workflows from another's.
+	Namespace string `env:"TEMPORAL_NAMESPACE" envDefault:"default"`
+
+	// Queue is the task queue starters write to and workers poll.
+	//
+	// Both sides must agree: work queued where no worker listens is CREATED and
+	// then never runs, and the caller sees a successful start. It is also the
+	// versioning boundary — a workflow change that is not replay-safe moves to a
+	// new queue rather than breaking in-flight executions.
+	Queue string `env:"TEMPORAL_TASK_QUEUE" envDefault:"chronos"`
+
+	// Enabled starts the worker and the client. Off by default while the
+	// workflow set is small: a binary that dials a service it never uses reports
+	// a DOWN probe for a dependency nothing needs.
+	Enabled bool `env:"TEMPORAL_ENABLED" envDefault:"false"`
+}
+
 // ProjectorConfig tunes the read-side.
 type ProjectorConfig struct {
 	// RebuildShards is how many workers a rebuild applies events through.
@@ -267,7 +339,42 @@ type ProjectorConfig struct {
 	// rebuild, and a rebuild that drains the pool starves the live projectors
 	// sharing it.
 	RebuildShards int `env:"PROJECTOR_REBUILD_SHARDS" envDefault:"1"`
+
+	// CatchUpBatch is how many events share ONE transaction while a projector is
+	// behind the head of the log. 1 commits every event separately.
+	//
+	// The round trip dominates a catching-up projector, and it is paid per
+	// transaction rather than per statement — measured at 364.8 µs/event
+	// unbatched against 16.7 µs/event at 64. Atomicity is unchanged: the rows
+	// and the checkpoint that describes them are still in the same transaction,
+	// so a crash loses the batch as a unit and the projector reapplies it.
+	//
+	// It does not apply once a projector is LIVE: there an event commits on its
+	// own, because latency to the read model is what matters.
+	CatchUpBatch int `env:"PROJECTOR_CATCHUP_BATCH" envDefault:"64"`
+
+	// RebuildEventsPerSecond paces a REBUILD. 0 is unthrottled.
+	//
+	// A rebuild writes through the same pool the API uses, so at full speed it
+	// is a load test against production run at the worst moment. This makes it a
+	// background job instead. It does not pace ordinary catch-up, where being
+	// slow means every read stays stale for longer.
+	RebuildEventsPerSecond int `env:"PROJECTOR_REBUILD_EVENTS_PER_SECOND" envDefault:"0"`
+
+	// AnnounceBuffer is how many realtime announcements may queue behind a
+	// projector before the oldest are dropped.
+	//
+	// Dropping is correct: the row is already committed and a browser recovers
+	// by reading it, whereas blocking would put Centrifugo's latency back into
+	// the loop that advances the read model. Drops are counted in
+	// chronos_projection_announcements_dropped_total.
+	AnnounceBuffer int `env:"PROJECTOR_ANNOUNCE_BUFFER" envDefault:"256"`
 }
+
+// MaxCatchUpBatch caps PROJECTOR_CATCHUP_BATCH. Repeated rather than imported
+// for the same reason as MaxRebuildShards: config sits beneath the kernel in the
+// import contract (CONVENTIONS §2).
+const MaxCatchUpBatch = 512
 
 // MaxRebuildShards caps PROJECTOR_REBUILD_SHARDS. It matches the kernel's own
 // cap; the value is repeated rather than imported because the config package
@@ -413,6 +520,70 @@ func (c *Config) validate() error {
 		add("PROJECTOR_REBUILD_SHARDS %d needs POSTGRES_MAX_CONNS above it (currently %d): "+
 			"each shard holds a connection for the whole rebuild",
 			c.Projector.RebuildShards, c.Postgres.MaxConns)
+	}
+
+	// A batch holds every event's decoded payload in memory and holds one pooled
+	// connection for as long as it takes to send, so an unbounded batch trades a
+	// round trip for a stall.
+	if c.Projector.CatchUpBatch < 1 {
+		add("PROJECTOR_CATCHUP_BATCH must be at least 1, got %d (1 disables batching)",
+			c.Projector.CatchUpBatch)
+	}
+	if c.Projector.CatchUpBatch > MaxCatchUpBatch {
+		add("PROJECTOR_CATCHUP_BATCH %d exceeds the %d cap", c.Projector.CatchUpBatch, MaxCatchUpBatch)
+	}
+	if c.Projector.RebuildEventsPerSecond < 0 {
+		add("PROJECTOR_REBUILD_EVENTS_PER_SECOND cannot be negative, got %d (0 is unthrottled)",
+			c.Projector.RebuildEventsPerSecond)
+	}
+	// A zero-length announcement queue would drop every announcement while still
+	// paying for the goroutine — silently turning realtime off.
+	if c.Projector.AnnounceBuffer < 1 {
+		add("PROJECTOR_ANNOUNCE_BUFFER must be at least 1, got %d: a zero-length queue "+
+			"drops every announcement and turns realtime off without saying so",
+			c.Projector.AnnounceBuffer)
+	}
+
+	if c.Tracing.Enabled && strings.TrimSpace(c.Tracing.Endpoint) == "" {
+		add("OTEL_EXPORTER_OTLP_ENDPOINT is required when OTEL_ENABLED is true")
+	}
+
+	// A task queue nobody agrees on is the failure mode Temporal makes hardest to
+	// see: the run is created, the caller is told it started, and it sits in a
+	// queue no worker polls.
+	if c.Temporal.Enabled {
+		if strings.TrimSpace(c.Temporal.HostPort) == "" {
+			add("TEMPORAL_HOSTPORT is required when TEMPORAL_ENABLED is true")
+		}
+		if strings.TrimSpace(c.Temporal.Queue) == "" {
+			add("TEMPORAL_TASK_QUEUE is required when TEMPORAL_ENABLED is true: work queued " +
+				"where no worker listens is created and then never runs")
+		}
+		if strings.TrimSpace(c.Temporal.Namespace) == "" {
+			add("TEMPORAL_NAMESPACE is required when TEMPORAL_ENABLED is true")
+		}
+	}
+
+	// The idempotency TTL is how long a stored response stays replayable, and a
+	// stored response can carry personal data — so it is a retention bound, and
+	// an unbounded one is a compliance problem rather than a tuning mistake.
+	if c.API.IdempotencyTTL <= 0 {
+		add("API_IDEMPOTENCY_TTL must be positive, got %s: a record with no expiry is "+
+			"replayable forever", c.API.IdempotencyTTL)
+	}
+	if c.API.IdempotencyTTL > MaxIdempotencyTTL {
+		add("API_IDEMPOTENCY_TTL %s exceeds the %s cap: a mutation's response would be "+
+			"retained past any use for it", c.API.IdempotencyTTL, MaxIdempotencyTTL)
+	}
+	// A sweep slower than the TTL leaves expired records — and the personal data
+	// in them — sitting in the table between runs. The read path already refuses
+	// to replay them, so this is about retention, not correctness.
+	if c.API.IdempotencySweepEvery <= 0 {
+		add("API_IDEMPOTENCY_SWEEP_EVERY must be positive, got %s: nothing would ever delete "+
+			"an expired record", c.API.IdempotencySweepEvery)
+	}
+	if c.API.IdempotencyWait < 0 {
+		add("API_IDEMPOTENCY_WAIT must not be negative, got %s", c.API.IdempotencyWait)
 	}
 
 	// A dedup window shorter than the redelivery gap means a reactor forgets it

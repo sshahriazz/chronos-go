@@ -2,17 +2,17 @@ package cache
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/chronos/chronos-go/internal/platform/codec"
 	"golang.org/x/sync/singleflight"
 )
 
 // Codec turns a value into bytes and back.
 //
-// A port rather than a hard dependency on encoding/json, because the thing worth
+// A port rather than a hard dependency on JSON, because the thing worth
 // caching most often — a rendered page, a protobuf message — already has a
 // cheaper encoding than JSON, and paying JSON's cost to save a database round
 // trip can undo the saving.
@@ -24,13 +24,21 @@ type Codec[T any] interface {
 // JSONCodec is the default. Correct for anything, optimal for nothing.
 type JSONCodec[T any] struct{}
 
-func (JSONCodec[T]) Encode(v T) ([]byte, error) { return json.Marshal(v) }
+// Encode writes the cache entry.
+//
+// No NullEmpty: a cache entry is written and read by this process alone and
+// never leaves it, so the v2 shape for a nil slice — `[]` rather than v1's
+// `null` — is observed by nothing but the matching Decode below.
+func (JSONCodec[T]) Encode(v T) ([]byte, error) { return codec.Marshal(v) }
 
-func (JSONCodec[T]) Decode(b []byte) (T, error) {
-	var v T
-	err := json.Unmarshal(b, &v)
-	return v, err
-}
+// Decode reads a cache entry, STRICTLY.
+//
+// A cached value is a document this build wrote, so an unrecognised member
+// means the entry predates a shape change. Tolerating it would silently serve a
+// half-populated value under whatever the old field meant; rejecting it makes
+// Store.Get drop the entry and reload from the source, which is the only outcome
+// that is correct in both directions.
+func (JSONCodec[T]) Decode(b []byte) (T, error) { return codec.Unmarshal[T](b) }
 
 // Store is a typed view of a Cache for one namespace.
 //

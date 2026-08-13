@@ -65,6 +65,7 @@ func NewSystemServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			httpClient,
 			baseURL+SystemServiceGetStatusProcedure,
 			connect.WithSchema(systemServiceMethods.ByName("GetStatus")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 			connect.WithClientOptions(opts...),
 		),
 	}
@@ -101,6 +102,7 @@ func NewSystemServiceHandler(svc SystemServiceHandler, opts ...connect.HandlerOp
 		SystemServiceGetStatusProcedure,
 		svc.GetStatus,
 		connect.WithSchema(systemServiceMethods.ByName("GetStatus")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 		connect.WithHandlerOptions(opts...),
 	)
 	return "/chronos.system.v1.SystemService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

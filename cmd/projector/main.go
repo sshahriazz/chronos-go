@@ -25,10 +25,13 @@ import (
 	"time"
 
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
+	"github.com/chronos/chronos-go/internal/modules/identity"
+	identityprojection "github.com/chronos/chronos-go/internal/modules/identity/projection"
 	"github.com/chronos/chronos-go/internal/modules/notification/contract"
 	notificationprojection "github.com/chronos/chronos-go/internal/modules/notification/projection"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/config"
+	"github.com/chronos/chronos-go/internal/platform/obs"
 	"github.com/chronos/chronos-go/internal/platform/projection"
 	"github.com/chronos/chronos-go/internal/server/health"
 )
@@ -42,7 +45,11 @@ func main() {
 	list := flag.Bool("list", false, "list registered projections and exit")
 	flag.Parse()
 
-	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// Wrapped so every context-aware line carries the trace it belongs to.
+	// Correlating logs and traces by timestamp stops working the moment two
+	// requests overlap; an id turns it into a lookup.
+	log := slog.New(obs.NewTraceHandler(
+		slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	slog.SetDefault(log)
 
 	if err := run(*addr, *rebuild, *list, log); err != nil {
@@ -72,11 +79,36 @@ func run(addr, rebuild string, list bool, log *slog.Logger) error {
 	// The registry is built BEFORE the dependencies because the lease pool is
 	// sized from it: every running projection pins one connection for its
 	// lifetime, so a shared pool would deadlock at scale (see newDependencies).
+	// Tracing is installed before anything else builds a client, so spans opened
+	// during wiring belong to a provider that can export them. It never fails a
+	// boot: an observability outage must not become a service outage (ADR-010).
+	stopTracing, err := obs.StartTracing(context.Background(), obs.TracingConfig{
+		Endpoint:    cfg.Tracing.Endpoint,
+		Service:     "chronos-projector",
+		Version:     version,
+		Environment: string(cfg.Env),
+		Enabled:     cfg.Tracing.Enabled,
+	}, log)
+	if err != nil {
+		log.Error("tracing unavailable; continuing without it", "error", err)
+		stopTracing = func(context.Context) {}
+	}
+	defer stopTracing(context.Background())
+
 	codec := newCodec()
 	views := projections(codec)
 
 	d, closeAll := newDependencies(cfg, log, codec, len(views))
 	defer closeAll()
+
+	// Publish every projection's series at zero before any of them runs. A
+	// Prometheus vector exports nothing for a label it has never seen, so a
+	// projection that has applied no events would be ABSENT — and absent and
+	// broken look identical on a dashboard, while `rate(...) == 0` never fires
+	// for a series that does not exist.
+	for _, v := range views {
+		d.metrics.InitProjection(v.Name())
+	}
 
 	if len(views) == 0 {
 		// Not an error. Until the first module ships a read model there is
@@ -217,6 +249,10 @@ func projections(codec *eventcodec.JSON) []projection.Projection {
 		// order undefined (CONVENTIONS §8).
 		notificationprojection.NewFeed(codec),
 		notificationprojection.NewPushSubscriptions(codec),
+
+		identityprojection.NewUser(codec),
+		identityprojection.NewSession(codec),
+		identityprojection.NewReservation(codec),
 	}
 }
 
@@ -235,6 +271,11 @@ func registerEvents(codec *eventcodec.JSON) {
 	eventcodec.Register[contract.PushSubscribed](codec)
 	eventcodec.Register[contract.PushSubscriptionExpired](codec)
 	eventcodec.Register[contract.PushSent](codec)
+
+	// Identity registers its own types, from the module's composition surface.
+	// Listing them here as well would be a second place to forget one, and the
+	// module test that guards the schema registry checks that list, not this file.
+	identity.RegisterEvents(codec)
 }
 
 func envOr(key, def string) string {

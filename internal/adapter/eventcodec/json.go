@@ -4,17 +4,38 @@
 // domain type carrying json tags has let a wire format dictate a business rule
 // (ADR-001). Domain events are plain structs, and the mapping from stored type
 // name to Go type lives here.
+//
+// # Why this file is the one to be careful with
+//
+// An event log is append-only and permanent. Every other format in this
+// codebase can be changed by deploying a new binary; this one has to decode
+// bytes written by every binary that ever ran, forever. Three consequences run
+// through the design:
+//
+//   - Reading is TOLERANT of unknown fields and STRICT about everything else. A
+//     newer producer adds a field, and during a rolling deploy the older binary
+//     must keep working — but a payload that is corrupt, duplicated or of the
+//     wrong type must stop the projector rather than silently produce a
+//     half-populated event.
+//   - Both stored shapes decode forever. The metadata format changed to
+//     all-strings (ADR-044); the typed shape that preceded it is not a migration
+//     to finish, it is a shape that exists for the life of the log.
+//   - The registry is written once at wiring and read on every event after. It
+//     is copy-on-write so the read path is a single atomic load, because a
+//     sharded rebuild decodes on N goroutines at once and a shared lock there is
+//     N cores contending on one cache line.
 package eventcodec
 
 import (
-	"encoding/json"
 	"fmt"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/chronos/chronos-go/internal/platform/codec"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 )
 
@@ -25,16 +46,40 @@ import (
 // quietly ignore facts it does not understand and build a read model that is
 // wrong in a way nothing detects.
 type JSON struct {
-	mu        sync.RWMutex
-	factories map[string]func() eventsourcing.Event
+	// table is the read path, and it is never mutated in place.
+	//
+	// An atomic load rather than a mutex because this is read once per EVENT and
+	// written a few dozen times at wiring. sync.RWMutex.RLock is an atomic
+	// read-modify-write on one shared word, so a rebuild running N shard workers
+	// (ADR-044) has N cores invalidating each other's cache line on every single
+	// event. A pointer that is never written after startup stays valid in every
+	// core's cache.
+	table atomic.Pointer[table]
+
+	// writes serialises registration. It is never taken on the read path.
+	writes sync.Mutex
+
+	// frozen closes the registry. Registering after the first event has been
+	// decoded is a real bug — a projector that started earlier already failed on
+	// those types — and it is invisible without this.
+	frozen atomic.Bool
+
 	upcasters *eventsourcing.UpcasterRegistry
 }
 
+// table is one immutable snapshot of the registry.
+type table struct {
+	factories map[string]func() eventsourcing.Event
+
+	// names is precomputed and sorted, so Types() allocates nothing and cannot
+	// disagree with factories.
+	names []string
+}
+
 func NewJSON(up *eventsourcing.UpcasterRegistry) *JSON {
-	return &JSON{
-		factories: make(map[string]func() eventsourcing.Event),
-		upcasters: up,
-	}
+	c := &JSON{upcasters: up}
+	c.table.Store(&table{factories: map[string]func() eventsourcing.Event{}})
+	return c
 }
 
 // Register associates a stored event type with a constructor for its Go type.
@@ -43,9 +88,57 @@ func NewJSON(up *eventsourcing.UpcasterRegistry) *JSON {
 // the event type string, and a typo in it produces a codec that decodes
 // nothing while looking perfectly correct.
 func (c *JSON) Register(eventType string, newFn func() eventsourcing.Event) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.factories[eventType] = newFn
+	c.register(eventType, newFn)
+}
+
+// Freeze closes the registry.
+//
+// Called by the composition root once every module has registered. After it, a
+// late registration panics at the call site instead of producing a codec whose
+// behaviour depends on when a package happened to initialise — a projector that
+// started before the registration already treated those events as unknown and
+// stopped, and nothing connects that failure to the cause.
+//
+// Optional: a codec that is never frozen still works. Freezing is what turns a
+// wiring mistake into a stack trace.
+func (c *JSON) Freeze() { c.frozen.Store(true) }
+
+// Frozen reports whether the registry is closed, so the composition root can be
+// asserted rather than assumed.
+func (c *JSON) Frozen() bool { return c.frozen.Load() }
+
+func (c *JSON) register(eventType string, newFn func() eventsourcing.Event) {
+	if eventType == "" {
+		panic("eventcodec: refusing to register an empty event type")
+	}
+	if newFn == nil {
+		panic(fmt.Sprintf("eventcodec: %q registered with a nil constructor", eventType))
+	}
+	if c.frozen.Load() {
+		panic(fmt.Sprintf("eventcodec: %q registered after the codec was frozen; anything "+
+			"already consuming the log treated it as an unknown type and stopped", eventType))
+	}
+
+	c.writes.Lock()
+	defer c.writes.Unlock()
+
+	old := c.table.Load()
+	if _, dup := old.factories[eventType]; dup {
+		panic(fmt.Sprintf("eventcodec: %q is already registered", eventType))
+	}
+
+	// Copy on write. Mutating the live map would be a data race against every
+	// in-flight decode, and the race detector only catches it if a test happens
+	// to register while decoding.
+	next := &table{factories: make(map[string]func() eventsourcing.Event, len(old.factories)+1)}
+	for k, v := range old.factories {
+		next.factories[k] = v
+	}
+	next.factories[eventType] = newFn
+	next.names = append(slices.Clone(old.names), eventType)
+	slices.Sort(next.names)
+
+	c.table.Store(next)
 }
 
 // Register binds an event type to the codec, deriving both the stored type name
@@ -58,13 +151,7 @@ func (c *JSON) Register(eventType string, newFn func() eventsourcing.Event) {
 // time, because the alternative is one event type silently shadowing another.
 func Register[T any, PT eventsourcing.EventPtr[T]](c *JSON) {
 	eventType := eventsourcing.TypeOf[T, PT]()
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, dup := c.factories[eventType]; dup {
-		panic(fmt.Sprintf("eventcodec: %q is already registered", eventType))
-	}
-	c.factories[eventType] = func() eventsourcing.Event { return PT(new(T)) }
+	c.register(eventType, func() eventsourcing.Event { return PT(new(T)) })
 }
 
 // Types lists every registered event type, sorted.
@@ -73,29 +160,40 @@ func Register[T any, PT eventsourcing.EventPtr[T]](c *JSON) {
 // system can DECODE must have a notification decision recorded against it, and
 // a test compares the two lists (notify.Catalogue.Verify).
 func (c *JSON) Types() []string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	out := make([]string, 0, len(c.factories))
-	for t := range c.factories {
-		out = append(out, t)
-	}
-	sort.Strings(out)
-	return out
+	return slices.Clone(c.table.Load().names)
 }
 
+// Marshal encodes an event payload.
+//
+// Deterministic, via the codec kernel: the same event must produce the same
+// bytes every time, or a replay writing an event a second time would store a
+// different document for the same fact.
 func (c *JSON) Marshal(e eventsourcing.Event) ([]byte, error) {
-	return json.Marshal(e)
+	b, err := codec.Marshal(e)
+	if err != nil {
+		return nil, fmt.Errorf("eventcodec: marshal %s: %w", e.EventType(), err)
+	}
+	return b, nil
 }
 
+// Unmarshal decodes a stored payload into its registered Go type.
+//
+// TOLERANT of unknown members, and only here. A payload written by a newer
+// producer carries fields this binary has never heard of, and during a rolling
+// deploy both versions are running — rejecting the unknown field would stop a
+// projector on an event that is perfectly valid (ADR-029).
+//
+// Everything else is still strict. A duplicate member, a wrong type, a truncated
+// document: all errors, because those are corruption rather than evolution, and
+// a projector that half-decodes an event builds a read model that is wrong with
+// nothing detecting it.
 func (c *JSON) Unmarshal(eventType string, payload []byte) (eventsourcing.Event, error) {
-	c.mu.RLock()
-	newFn, ok := c.factories[eventType]
-	c.mu.RUnlock()
+	newFn, ok := c.table.Load().factories[eventType]
 	if !ok {
 		return nil, fmt.Errorf("eventcodec: no type registered for %q", eventType)
 	}
 	e := newFn()
-	if err := json.Unmarshal(payload, e); err != nil {
+	if err := codec.IntoTolerant(payload, e); err != nil {
 		return nil, fmt.Errorf("eventcodec: unmarshal %s: %w", eventType, err)
 	}
 	return e, nil
@@ -117,7 +215,7 @@ func (c *JSON) MarshalMetadata(m eventsourcing.Metadata) ([]byte, error) {
 	// JSON — a flat object whose values are all strings — and nothing requires
 	// marshalling from a map. Measured: the map form cost 1554 ns and 15 allocs
 	// against 718 ns and 4 for a struct, because a map adds a hash table and
-	// forces encoding/json to sort the keys on every append.
+	// forces the encoder to sort the keys on every append.
 	w := stringMetadata{
 		SchemaVersion: strconv.Itoa(m.SchemaVersion),
 		OccurredAt:    m.OccurredAt.UTC().Format(time.RFC3339Nano),
@@ -156,7 +254,7 @@ func (c *JSON) MarshalMetadata(m eventsourcing.Metadata) ([]byte, error) {
 		}
 		w.SubjectIDs = strings.Join(m.SubjectIDs, string(subjectSeparator))
 	}
-	return json.Marshal(w)
+	return codec.Marshal(w)
 }
 
 // stringMetadata is the ON-DISK shape: a flat JSON object whose every value is a
@@ -183,12 +281,17 @@ type stringMetadata struct {
 	SnapshotRevision string `json:"snapshotRevision,omitempty"`
 }
 
+// UnmarshalMetadata reads either stored shape.
+//
+// Tolerant of unknown members for the same reason payloads are: KurrentDB's own
+// tooling and a newer producer both add keys we do not model, and metadata that
+// cannot be read parks the event.
 func (c *JSON) UnmarshalMetadata(b []byte) (eventsourcing.Metadata, error) {
 	if len(b) == 0 {
 		return eventsourcing.Metadata{}, nil
 	}
-	var w wireMetadata
-	if err := json.Unmarshal(b, &w); err != nil {
+	w, err := codec.Tolerant[wireMetadata](b)
+	if err != nil {
 		return eventsourcing.Metadata{}, fmt.Errorf("eventcodec: unmarshal metadata: %w", err)
 	}
 	m := eventsourcing.Metadata{
@@ -243,6 +346,11 @@ const subjectSeparator = ','
 // accept it (ADR-044). Events written before that carry real JSON numbers and
 // must keep decoding — an event log is append-only, so "the old shape" is not a
 // migration to finish but a shape that exists forever.
+//
+// It implements UnmarshalJSON([]byte), which BOTH encoding/json v1 and v2
+// honour. The v2-native UnmarshalJSONFrom would avoid a copy, but it exists only
+// under v2 — and a type on the read path of a permanent log should not be
+// decodable by exactly one library version.
 type flexInt int64
 
 func (f *flexInt) UnmarshalJSON(b []byte) error {
@@ -250,8 +358,8 @@ func (f *flexInt) UnmarshalJSON(b []byte) error {
 		return nil
 	}
 	if b[0] == '"' {
-		var s string
-		if err := json.Unmarshal(b, &s); err != nil {
+		s, err := unquote(b)
+		if err != nil {
 			return err
 		}
 		if s == "" {
@@ -264,9 +372,9 @@ func (f *flexInt) UnmarshalJSON(b []byte) error {
 		*f = flexInt(n)
 		return nil
 	}
-	var n int64
-	if err := json.Unmarshal(b, &n); err != nil {
-		return err
+	n, err := strconv.ParseInt(string(b), 10, 64)
+	if err != nil {
+		return fmt.Errorf("eventcodec: %q is not a number: %w", b, err)
 	}
 	*f = flexInt(n)
 	return nil
@@ -281,22 +389,36 @@ func (f *flexStrings) UnmarshalJSON(b []byte) error {
 		return nil
 	}
 	if b[0] == '"' {
-		var s string
-		if err := json.Unmarshal(b, &s); err != nil {
+		s, err := unquote(b)
+		if err != nil {
 			return err
 		}
 		if s == "" {
 			return nil
 		}
-		*f = strings.Split(s, ",")
+		*f = strings.Split(s, string(subjectSeparator))
 		return nil
 	}
-	var out []string
-	if err := json.Unmarshal(b, &out); err != nil {
+	out, err := codec.Tolerant[[]string](b)
+	if err != nil {
 		return err
 	}
 	*f = out
 	return nil
+}
+
+// unquote reads a JSON string value.
+//
+// Both callers have already established that b starts with '"', so there is no
+// kind check here — re-deriving it would need the low-level jsontext package,
+// and the whole point of routing every decode through the codec kernel is that
+// one package knows which JSON library this codebase is on (ADR-047).
+func unquote(b []byte) (string, error) {
+	var s string
+	if err := codec.Into(b, &s); err != nil {
+		return "", fmt.Errorf("eventcodec: %q is not a JSON string: %w", b, err)
+	}
+	return s, nil
 }
 
 // parseUTC accepts RFC 3339 and normalises to UTC. Storage is always UTC

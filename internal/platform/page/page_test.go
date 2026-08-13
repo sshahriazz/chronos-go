@@ -2,13 +2,13 @@ package page_test
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/chronos/chronos-go/internal/platform/codec"
 	"github.com/chronos/chronos-go/internal/platform/page"
 )
 
@@ -112,12 +112,14 @@ func TestATokenFromAnotherVersionIsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	var wire map[string]any
-	if err := json.Unmarshal(raw, &wire); err != nil {
+	// Into a map, so the forgery below can change one member and leave every
+	// other byte the token already carried alone.
+	wire, err := codec.Unmarshal[map[string]any](raw)
+	if err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	wire["v"] = 99
-	bumped, err := json.Marshal(wire)
+	bumped, err := codec.Marshal(wire)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -130,7 +132,7 @@ func TestATokenFromAnotherVersionIsRejected(t *testing.T) {
 			"rather than rejected, and the client gets rows from the wrong position")
 	}
 	wire["v"] = 1
-	restored, err := json.Marshal(wire)
+	restored, err := codec.Marshal(wire)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}

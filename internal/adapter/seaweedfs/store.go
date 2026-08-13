@@ -12,7 +12,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -24,6 +23,7 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/chronos/chronos-go/internal/platform/blob"
 	"github.com/chronos/chronos-go/internal/platform/clock"
+	"github.com/chronos/chronos-go/internal/platform/codec"
 )
 
 // Config describes the object store.
@@ -116,7 +116,14 @@ func (s *Store) GrantUpload(ctx context.Context, req blob.UploadRequest) (blob.G
 			map[string]string{"x-amz-date": amzDate},
 		},
 	}
-	raw, err := json.Marshal(policy)
+	// SeaweedFS parses these bytes, so the shape matters — but every map and
+	// slice above is built here and non-nil, so the v2 rendering of a nil
+	// slice as `[]` rather than v1's `null` cannot arise and NullEmpty would
+	// change nothing. The deterministic key order is a bonus rather than a
+	// requirement: the signature covers the base64 of exactly these bytes, so
+	// any order verifies, but a stable one makes a rejected policy comparable
+	// between two runs.
+	raw, err := codec.Marshal(policy)
 	if err != nil {
 		return blob.Grant{}, fmt.Errorf("seaweedfs: encoding upload policy: %w", err)
 	}

@@ -2,12 +2,12 @@ package eventsourcing_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand/v2"
 	"testing"
 
+	"github.com/chronos/chronos-go/internal/platform/codec"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 )
 
@@ -442,7 +442,7 @@ func (m *memStore) SaveSnapshot(
 // otherwise the equivalence test would pass on aliasing alone.
 type memCodec struct{}
 
-func (memCodec) Marshal(e eventsourcing.Event) ([]byte, error) { return json.Marshal(e) }
+func (memCodec) Marshal(e eventsourcing.Event) ([]byte, error) { return codec.Marshal(e) }
 
 func (memCodec) Unmarshal(eventType string, payload []byte) (eventsourcing.Event, error) {
 	var e eventsourcing.Event
@@ -458,24 +458,30 @@ func (memCodec) Unmarshal(eventType string, payload []byte) (eventsourcing.Event
 	default:
 		return nil, fmt.Errorf("mem: unknown type %q", eventType)
 	}
-	if err := json.Unmarshal(payload, e); err != nil {
+	// TOLERANT, because the real codec is: a payload comes off an append-only
+	// log and may carry a newer producer's fields (ADR-029). A double that was
+	// stricter than the thing it stands in for would pass on payloads the real
+	// system rejects, and fail on ones it accepts.
+	if err := codec.IntoTolerant(payload, e); err != nil {
 		return nil, err
 	}
 	return e, nil
 }
 
 func (memCodec) MarshalMetadata(m eventsourcing.Metadata) ([]byte, error) {
-	return json.Marshal(map[string]any{"snapshotRevision": int64(m.SnapshotRevision)})
+	return codec.Marshal(map[string]any{"snapshotRevision": int64(m.SnapshotRevision)})
 }
 
 func (memCodec) UnmarshalMetadata(b []byte) (eventsourcing.Metadata, error) {
 	if len(b) == 0 {
 		return eventsourcing.Metadata{}, nil
 	}
-	var w struct {
+	// Tolerant for the same reason as the payload above: stored metadata gains
+	// keys over time, and the real codec reads them all.
+	w, err := codec.Tolerant[struct {
 		SnapshotRevision int64 `json:"snapshotRevision"`
-	}
-	if err := json.Unmarshal(b, &w); err != nil {
+	}](b)
+	if err != nil {
 		return eventsourcing.Metadata{}, err
 	}
 	return eventsourcing.Metadata{SnapshotRevision: eventsourcing.Revision(w.SnapshotRevision)}, nil

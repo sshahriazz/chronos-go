@@ -1,12 +1,12 @@
 package eventcodec_test
 
 import (
-	"encoding/json"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
+	jsoncodec "github.com/chronos/chronos-go/internal/platform/codec"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 )
 
@@ -30,8 +30,8 @@ func TestMetadataIsWrittenAsFlatStrings(t *testing.T) {
 	}
 
 	// The exact check the SDK performs before it will send anything.
-	var flat map[string]string
-	if err := json.Unmarshal(raw, &flat); err != nil {
+	flat, err := jsoncodec.Unmarshal[map[string]string](raw)
+	if err != nil {
 		t.Fatalf("metadata is not a map[string]string, so every v2 append will be "+
 			"rejected before it leaves this process: %v\nraw: %s", err, raw)
 	}
@@ -208,8 +208,8 @@ func TestMetadataStaysFlatWithEveryFieldPopulated(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	var flat map[string]string
-	if err := json.Unmarshal(raw, &flat); err != nil {
+	flat, err := jsoncodec.Unmarshal[map[string]string](raw)
+	if err != nil {
 		t.Fatalf("metadata is no longer a flat map[string]string, so MultiStreamAppend "+
 			"and AppendRecords will both reject every write:\n%v\nraw: %s", err, raw)
 	}

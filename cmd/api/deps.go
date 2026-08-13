@@ -12,8 +12,10 @@ import (
 	valkeyadapter "github.com/chronos/chronos-go/internal/adapter/valkey"
 	"github.com/chronos/chronos-go/internal/platform/authz"
 	"github.com/chronos/chronos-go/internal/platform/config"
+	"github.com/chronos/chronos-go/internal/platform/cqrs"
 	"github.com/chronos/chronos-go/internal/platform/obs"
 	"github.com/chronos/chronos-go/internal/server/health"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/valkey-io/valkey-go"
 )
 
@@ -38,6 +40,26 @@ type dependencies struct {
 	// race the projector, and losing that race restores access to a revoked
 	// principal.
 	authzCache *valkeyadapter.Authz
+
+	// once is the idempotency gate every mutating RPC passes through
+	// (CONVENTIONS §6). Nil when Postgres is unreachable, and the interceptor
+	// must REFUSE mutations rather than wave them through — a gate that is
+	// skipped during an outage is skipped exactly when clients are retrying
+	// hardest.
+	once *cqrs.Once
+
+	// idempotency is the same store, held so the retention sweep can run. A
+	// stored response can carry personal data, so nothing deleting it is a
+	// compliance problem rather than a full disk (ADR-002).
+	idempotency *pgadapter.Idempotency
+
+	// pool is held for readiness probing and for the sweep's lifetime.
+	pool *pgxpool.Pool
+
+	// sweepEvery is how often expired idempotency records are deleted. A field
+	// rather than a constant so a test can observe the sweep without waiting an
+	// hour for it.
+	sweepEvery time.Duration
 }
 
 // tombstonesOrNil and decisionsOrNil avoid the typed-nil trap.
@@ -78,9 +100,35 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 				log.Info("postgres role verified", "rls_enforced", true)
 			}
 		}()
+		d.pool = pool
 		d.probes = append(d.probes, pgadapter.Probe{Pool: pool})
 		d.closes = append(d.closes, pool.Close)
+
+		// ---- The idempotency gate (CONVENTIONS §6) -----------------------
+		//
+		// Built here rather than beside the interceptors, because it is the
+		// database that makes it work: the claim is atomic because
+		// `INSERT … ON CONFLICT` is one statement, not because of anything in
+		// Go. Without Postgres there is no gate, and the interceptor must
+		// refuse mutations rather than let them through — a gate skipped
+		// during an outage is skipped exactly when clients retry hardest.
+		d.idempotency = pgadapter.NewIdempotency(pgadapter.New(pool))
+		once, err := cqrs.NewOnce(cqrs.OnceDeps{
+			Store: d.idempotency,
+			TTL:   cfg.API.IdempotencyTTL,
+			Wait:  cfg.API.IdempotencyWait,
+		})
+		if err != nil {
+			// Config validation already bounds the TTL, so reaching this means
+			// the two disagree — report it rather than shipping a nil gate
+			// nobody notices.
+			log.Error("idempotency gate not constructed; EVERY mutation will be refused",
+				"error", err)
+		} else {
+			d.once = once
+		}
 	}
+	d.sweepEvery = cfg.API.IdempotencySweepEvery
 
 	// ---- Valkey ----------------------------------------------------------
 	//

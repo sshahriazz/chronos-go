@@ -1,11 +1,11 @@
 package ids_test
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/chronos/chronos-go/internal/platform/codec"
 	"github.com/chronos/chronos-go/internal/platform/ids"
 )
 
@@ -105,15 +105,17 @@ func TestJSON_UsesThePrefixedForm(t *testing.T) {
 		Org ids.OrgID `json:"org"`
 	}
 	in := payload{Org: ids.New[ids.Org](at, ent)}
-	b, err := json.Marshal(in)
+	b, err := codec.Marshal(in)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 	if want := `{"org":"` + in.Org.String() + `"}`; string(b) != want {
 		t.Fatalf("json: got %s want %s", b, want)
 	}
-	var out payload
-	if err := json.Unmarshal(b, &out); err != nil {
+	// Strict: an id document is ours end to end, so an unrecognised member is a
+	// typo rather than a newer producer's field.
+	out, err := codec.Unmarshal[payload](b)
+	if err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if out.Org != in.Org {
@@ -126,7 +128,7 @@ func TestJSON_RejectsTheWrongType(t *testing.T) {
 		Org ids.OrgID `json:"org"`
 	}
 	ws := ids.New[ids.Workspace](at, ent).String()
-	if err := json.Unmarshal([]byte(`{"org":"`+ws+`"}`), &out); err == nil {
+	if err := codec.Into([]byte(`{"org":"`+ws+`"}`), &out); err == nil {
 		t.Fatal("unmarshalling a workspace id into an OrgID must fail")
 	}
 }

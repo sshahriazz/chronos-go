@@ -2,6 +2,7 @@ package eventsourcing
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/chronos/chronos-go/internal/platform/ids"
@@ -115,31 +116,9 @@ var eventIDNamespace = uuid.MustParse("6f1e5d3a-2c47-5a9b-8e10-3f7c9d24b5a1")
 //
 // It must be deterministic, so it must not use randomness or the clock.
 func DeriveEventID(idempotencyKey string, seq int) ids.EventID {
-	name := idempotencyKey + ":" + itoa(seq)
+	name := idempotencyKey + ":" + strconv.Itoa(seq)
 	u := uuid.NewSHA1(eventIDNamespace, []byte(name))
 	return ids.FromUUID[ids.Event](u)
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	neg := i < 0
-	if neg {
-		i = -i
-	}
-	var b [20]byte
-	n := len(b)
-	for i > 0 {
-		n--
-		b[n] = byte('0' + i%10)
-		i /= 10
-	}
-	if neg {
-		n--
-		b[n] = '-'
-	}
-	return string(b[n:])
 }
 
 // EventTypeOf is a small helper for building type names consistently.

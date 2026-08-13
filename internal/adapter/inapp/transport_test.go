@@ -2,7 +2,6 @@ package inapp_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/chronos/chronos-go/internal/adapter/inapp"
 	"github.com/chronos/chronos-go/internal/platform/clock"
+	"github.com/chronos/chronos-go/internal/platform/codec"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/platform/notify"
 )
@@ -55,7 +55,7 @@ func TestFeedItemCarriesNoPersonalData(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	encoded, err := json.Marshal(store.appended[0].Event)
+	encoded, err := codec.Marshal(store.appended[0].Event)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestFeedItemCarriesTheTenantScope(t *testing.T) {
 	if err := tr.Deliver(context.Background(), notification()); err != nil {
 		t.Fatal(err)
 	}
-	encoded, _ := json.Marshal(store.appended[0].Event)
+	encoded, _ := codec.Marshal(store.appended[0].Event)
 	if !strings.Contains(string(encoded), "org_1") {
 		t.Errorf("the feed event lost its org, so the projected row cannot pass RLS:\n%s", encoded)
 	}

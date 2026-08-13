@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -14,8 +16,10 @@ import (
 	"github.com/chronos/chronos-go/internal/adapter/piivault"
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
 	smtpadapter "github.com/chronos/chronos-go/internal/adapter/smtp"
+	temporaladapter "github.com/chronos/chronos-go/internal/adapter/temporal"
 	valkeyadapter "github.com/chronos/chronos-go/internal/adapter/valkey"
 	"github.com/chronos/chronos-go/internal/adapter/webpush"
+	"github.com/chronos/chronos-go/internal/modules/identity/app"
 	notificationpg "github.com/chronos/chronos-go/internal/modules/notification/adapter/postgres"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/config"
@@ -78,6 +82,45 @@ type dependencies struct {
 	// called by no binary.
 	dedupDays  int
 	dedupEvery time.Duration
+
+	// temporal is durable work (ADR-017): effects that span several steps, need
+	// timers, or must survive this process dying halfway. Nil when
+	// TEMPORAL_ENABLED is false — a binary that dials a service it never uses
+	// reports a DOWN probe for a dependency nothing needs.
+	//
+	// worker is the half that RUNS workflows. Holding it here rather than in a
+	// local is what lets a composition-root test assert the binary registered
+	// them: a workflow nobody registered is queued where nothing listens, the
+	// caller is told the run started, and the work never happens.
+	temporal       *temporaladapter.Client
+	temporalWorker *temporaladapter.Worker
+
+	// temporalWorkflows is what the worker was actually registered with, in the
+	// order it was registered. Recorded rather than recomputed so a
+	// composition-root test can assert the set WITHOUT starting a worker or
+	// reaching Temporal — a registration that exists only in a log line at
+	// startup is a registration nothing can check.
+	temporalWorkflows []string
+
+	// reservations releases email reservations whose unverified lease has run
+	// out. It is a security control, not a retention job: without it, anyone can
+	// register with an address they do not control and hold it forever, and the
+	// real owner can never register (ADR-044, IDENTITY-SLICE-1).
+	//
+	// Built whether or not Temporal is enabled, so that the gap is visible as
+	// "the sweep could not be constructed" rather than as nothing at all.
+	reservations *app.ReservationSweep
+
+	// retention deletes identity rows that can no longer affect a decision:
+	// spent TOTP steps, expired token digests, the secret half of dead sessions,
+	// and two projections past their horizon. Housekeeping rather than a security
+	// control — nothing is waiting on it — which is why it runs daily where the
+	// sweep above runs every fifteen minutes.
+	//
+	// Built whether or not Temporal is enabled, for the same reason: the gap must
+	// be visible as "retention could not be constructed" rather than as nothing at
+	// all. Nothing else in this system reports a table that stopped being swept.
+	retention *app.Retention
 
 	closes []func()
 }
@@ -255,12 +298,203 @@ func newDependencies(cfg *config.Config, log *slog.Logger, codec *eventcodec.JSO
 		Observer:  d.metrics.Notifications(),
 	})
 
+	// The lapsed email-reservation sweep. Constructed before the worker, because
+	// the worker registers it: a sweep that exists but is registered nowhere is
+	// exactly the failure this repository has already shipped three times, and
+	// for a security control it is invisible until somebody cannot register with
+	// an address that is theirs.
+	if sweep, err := newReservationSweep(d, log); err != nil {
+		log.Error("the lapsed email-reservation sweep is NOT wired; an abandoned "+
+			"registration holds its address permanently and its owner can never register",
+			"error", err)
+	} else {
+		d.reservations = sweep
+	}
+
+	// Identity retention. Constructed before the worker for the same reason the
+	// sweep is — the worker registers it — and constructed whether or not durable
+	// work is enabled, so that a deployment without Temporal logs why retention is
+	// not running instead of logging nothing.
+	if retention, err := newIdentityRetention(d, log); err != nil {
+		log.Error("identity retention is NOT wired; spent TOTP steps, expired token digests "+
+			"and the secret half of dead sessions are retained for the lifetime of the "+
+			"deployment", "error", err)
+	} else {
+		d.retention = retention
+	}
+
+	// Durable work. Built LAST because its activities need the dispatcher above:
+	// the reference workflow's whole job is to send a notification, and one wired
+	// without a dispatcher would fail every run after a full hour of retries.
+	d.startTemporal(cfg, log)
+
 	return d, func() {
 		for _, c := range d.closes {
 			c()
 		}
 	}
 }
+
+// startTemporal builds the client, registers the workflows and starts polling.
+//
+// Every failure here is LOUD but not fatal, as elsewhere in this binary
+// (ADR-010): a worker that cannot reach Temporal still runs every reactor, and
+// the probe reports which half is down. What must never happen quietly is a
+// STARTER without a worker — durable work would be accepted and never run — so
+// the client is only published once its worker is polling.
+func (d *dependencies) startTemporal(cfg *config.Config, log *slog.Logger) {
+	if !cfg.Temporal.Enabled {
+		log.Info("durable work is disabled; no workflows will run", "reason", "TEMPORAL_ENABLED=false")
+		// Registered even here — especially here. With durable work off, the
+		// lapsed-reservation sweep does not run at all, and mail is the only
+		// workflow with an inline fallback. A probe carrying a nil client reports
+		// exactly that, so the state appears on the status surface instead of
+		// being a line in a startup log nobody reads again.
+		d.probes = append(d.probes,
+			temporaladapter.SweepReservationsProbe(nil),
+			temporaladapter.PurgeRetentionProbe(nil))
+		return
+	}
+
+	client, err := temporaladapter.Dial(temporaladapter.Config{
+		HostPort:  cfg.Temporal.HostPort,
+		Namespace: cfg.Temporal.Namespace,
+		Queue:     cfg.Temporal.Queue,
+	})
+	if err != nil {
+		log.Error("temporal client unavailable; NO durable work can run", "error", err)
+		d.probes = append(d.probes, temporaladapter.Probe{})
+		return
+	}
+
+	w, names, err := d.newTemporalWorker(client)
+	if err != nil {
+		log.Error("temporal worker could not be built; durable work would be accepted "+
+			"and never run", "error", err)
+		client.Close()
+		d.probes = append(d.probes, temporaladapter.Probe{})
+		return
+	}
+	d.temporalWorkflows = names
+	if err := w.Start(); err != nil {
+		log.Error("temporal worker did not start", "error", err)
+		client.Close()
+		d.probes = append(d.probes, temporaladapter.Probe{})
+		return
+	}
+
+	d.temporal, d.temporalWorker = client, w
+	d.probes = append(d.probes, temporaladapter.Probe{Client: client})
+	d.closes = append(d.closes, w.Stop, client.Close)
+	log.Info("durable work enabled",
+		"queue", cfg.Temporal.Queue, "namespace", cfg.Temporal.Namespace,
+		"workflows", d.temporalWorkflows)
+
+	d.scheduleSweep(log)
+	d.scheduleRetention(log)
+
+	// After scheduling, not before: a probe asks the server whether the schedule
+	// exists, and asking before the attempt would report a state this process was
+	// about to change. Registered whether or not the create succeeded — a failed
+	// create is the case the probes are for.
+	d.probes = append(d.probes,
+		temporaladapter.SweepReservationsProbe(d.temporal),
+		temporaladapter.PurgeRetentionProbe(d.temporal))
+}
+
+// newTemporalWorker builds the worker and registers EVERYTHING this binary can
+// run, returning the workflow names it now answers to.
+//
+// Separated from startTemporal so a composition-root test can drive the exact
+// production registration path without starting a worker or reaching Temporal.
+// Registration itself performs no I/O; Start is what dials, and Start is what
+// stays out of here.
+//
+// A failure to register any half is FATAL to the worker rather than degraded:
+// a worker that polls the queue while answering to only some of its names looks
+// healthy, and the tasks it cannot serve fail one at a time, forever.
+func (d *dependencies) newTemporalWorker(
+	client *temporaladapter.Client,
+) (*temporaladapter.Worker, []string, error) {
+	notifications, err := temporaladapter.NewNotificationActivities(d.notify)
+	if err != nil {
+		return nil, nil, fmt.Errorf("notification activities: %w", err)
+	}
+
+	w, err := temporaladapter.NewWorker(temporaladapter.WorkerDeps{
+		Client: client, Notifications: notifications,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	names := w.Registered()
+
+	// Checked here rather than left to the activity set's own nil check: a
+	// sweepAdapter wrapping a nil use case is a NON-nil interface, so it would
+	// pass that check and panic on the first run instead — the typed-nil trap
+	// prefsOrNil exists for, one layer up.
+	if d.reservations == nil {
+		return nil, nil, errors.New("the lapsed email-reservation sweep was not constructed; " +
+			"registering it would queue runs that panic")
+	}
+	sweep, err := temporaladapter.NewReservationActivities(sweepAdapter{sweep: d.reservations})
+	if err != nil {
+		return nil, nil, fmt.Errorf("reservation sweep activities: %w", err)
+	}
+	swept, err := w.RegisterReservationSweep(sweep)
+	if err != nil {
+		return nil, nil, fmt.Errorf("registering the reservation sweep: %w", err)
+	}
+	names = append(names, swept...)
+
+	// Identity retention, checked the same way and for the same typed-nil reason.
+	if d.retention == nil {
+		return nil, nil, errors.New("identity retention was not constructed; registering it " +
+			"would queue runs that panic")
+	}
+	retention, err := temporaladapter.NewRetentionActivities(retentionAdapter{retention: d.retention})
+	if err != nil {
+		return nil, nil, fmt.Errorf("identity retention activities: %w", err)
+	}
+	retained, err := w.RegisterIdentityRetention(retention)
+	if err != nil {
+		return nil, nil, fmt.Errorf("registering identity retention: %w", err)
+	}
+	return w, append(names, retained...), nil
+}
+
+// scheduleSweep makes the lapsed-reservation sweep recur.
+//
+// Loud but not fatal, like every other dependency failure in this binary
+// (ADR-010) — except that this one deserves the strongest wording available,
+// because nothing else in the system reports it. A registered workflow that no
+// schedule ever starts is indistinguishable from a working one: the worker is
+// healthy, the queue is empty, every metric is green, and email addresses stay
+// held by people who never proved they own them.
+func (d *dependencies) scheduleSweep(log *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), scheduleTimeout)
+	defer cancel()
+
+	created, err := temporaladapter.EnsureSweepSchedule(ctx, d.temporal,
+		temporaladapter.SweepReservationsInput{}, temporaladapter.DefaultSweepInterval)
+	switch {
+	case err != nil:
+		log.Error("the lapsed email-reservation sweep is NOT scheduled; lapsed claims "+
+			"will never be released and nothing else will report it",
+			"schedule", temporaladapter.SweepReservationsScheduleID, "error", err)
+	case created:
+		log.Info("lapsed email-reservation sweep scheduled",
+			"schedule", temporaladapter.SweepReservationsScheduleID,
+			"every", temporaladapter.DefaultSweepInterval)
+	default:
+		log.Info("lapsed email-reservation sweep already scheduled",
+			"schedule", temporaladapter.SweepReservationsScheduleID)
+	}
+}
+
+// scheduleTimeout bounds the one blocking call in startup. The client is lazy,
+// so this is the only place a dead Temporal could stall the boot.
+const scheduleTimeout = 10 * time.Second
 
 // prefsOrNil and readStateOrNil avoid the typed-nil trap: a nil *Reader inside a
 // non-nil interface passes the dispatcher's nil check and panics on first use.

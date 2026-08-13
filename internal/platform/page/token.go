@@ -2,11 +2,12 @@ package page
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"strconv"
 	"time"
+
+	"github.com/chronos/chronos-go/internal/platform/codec"
 )
 
 // Token is an opaque page cursor. It is the `next_page_token` on the wire.
@@ -70,7 +71,11 @@ func Encode(k Keyset, q QueryID) (Token, error) {
 		}
 		w.K = append(w.K, wireKey{C: key.Column, T: t, X: x})
 	}
-	raw, err := json.Marshal(w)
+	// K is always allocated above, so the v2 change that renders a nil slice as
+	// `[]` instead of `null` cannot reach the wire here. No NullEmpty: nothing
+	// but this file parses a page token, and a client that tried would be
+	// relying on a shape documented as opaque.
+	raw, err := codec.Marshal(w)
 	if err != nil {
 		return "", fmt.Errorf("page: encoding cursor: %w", err)
 	}
@@ -95,8 +100,13 @@ func Decode(tok Token, q QueryID) (Keyset, error) {
 	if err != nil {
 		return Keyset{}, fmt.Errorf("%w: page token is not valid base64: %w", ErrInvalid, err)
 	}
-	var w wireToken
-	if err := json.Unmarshal(raw, &w); err != nil {
+	// STRICT. A page token is a document this file wrote and only this file
+	// reads, so a member it does not recognise is a forged or corrupted token,
+	// never a newer producer's legitimate field. Tolerating it would drop that
+	// member and hand back a cursor that names a position in a list nobody
+	// asked for — the exact failure the query fingerprint below exists to stop.
+	w, err := codec.Unmarshal[wireToken](raw)
+	if err != nil {
 		return Keyset{}, fmt.Errorf("%w: page token is not readable: %w", ErrInvalid, err)
 	}
 	if w.V != tokenVersion {

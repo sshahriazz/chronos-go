@@ -67,6 +67,14 @@ type dependencies struct {
 	// shard holds a pooled connection for the whole rebuild.
 	rebuildShards int
 
+	// catchUpBatch is how many events share one transaction while a projector is
+	// behind; rebuildRate paces a rebuild (0 is unthrottled); announceBuf bounds
+	// the realtime queue that sits between the projector and Centrifugo. All
+	// three are validated in config.
+	catchUpBatch int
+	rebuildRate  int
+	announceBuf  int
+
 	closes []func()
 }
 
@@ -76,6 +84,9 @@ func newDependencies(
 	d := &dependencies{
 		status: newStatuses(), holder: holderName(), codec: codec, metrics: obs.New(),
 		rebuildShards: cfg.Projector.RebuildShards,
+		catchUpBatch:  cfg.Projector.CatchUpBatch,
+		rebuildRate:   cfg.Projector.RebuildEventsPerSecond,
+		announceBuf:   cfg.Projector.AnnounceBuffer,
 	}
 
 	if pool, err := pgadapter.NewPool(context.Background(), cfg.Postgres.AppDSN(), cfg.Postgres.MaxConns); err != nil {
@@ -210,20 +221,23 @@ func newDependencies(
 // what differs between them is the projection itself.
 func (d *dependencies) deps(log *slog.Logger) projection.Deps {
 	return projection.Deps{
-		Subscriber:    d.store,
-		Codec:         d.codec,
-		Categories:    d.store,
-		Types:         d.store,
-		RebuildShards: d.rebuildShards,
-		Batch:         d.tx,
-		TX:            d.tx,
-		Realtime:      d.realtimePublisher(),
-		Checkpoints:   pgadapter.Checkpoints{},
-		Lease:         pgadapter.NewLease(d.leases),
-		Clock:         clock.System{},
-		Log:           log,
-		Metrics:       d.metrics.Projections(),
-		Holder:        d.holder,
+		Subscriber:             d.store,
+		Codec:                  d.codec,
+		Categories:             d.store,
+		Types:                  d.store,
+		RebuildShards:          d.rebuildShards,
+		CatchUpBatch:           d.catchUpBatch,
+		RebuildEventsPerSecond: d.rebuildRate,
+		AnnounceBuffer:         d.announceBuf,
+		Batch:                  d.tx,
+		TX:                     d.tx,
+		Realtime:               d.realtimePublisher(),
+		Checkpoints:            pgadapter.Checkpoints{},
+		Lease:                  pgadapter.NewLease(d.leases),
+		Clock:                  clock.System{},
+		Log:                    log,
+		Metrics:                d.metrics.Projections(),
+		Holder:                 d.holder,
 	}
 }
 

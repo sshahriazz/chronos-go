@@ -45,11 +45,12 @@ func TestServerReportsCaughtUp(t *testing.T) {
 		_ = store.SubscribeAll(subCtx, eventsourcing.FromBeginning(),
 			eventsourcing.SubscribeOptions{
 				Filter: eventsourcing.SubscriptionFilter{StreamPrefixes: []string{string(cat) + "-"}},
-				OnLive: func() {
+				OnLive: func(context.Context) error {
 					live.Store(true)
 					if once.CompareAndSwap(false, true) {
 						close(caughtUp)
 					}
+					return nil
 				},
 			},
 			func(context.Context, eventsourcing.RecordedEvent) error { return nil })
@@ -83,10 +84,11 @@ func TestServerReportsCaughtUpUnfiltered(t *testing.T) {
 	go func() {
 		_ = store.SubscribeAll(subCtx, eventsourcing.FromBeginning(),
 			eventsourcing.SubscribeOptions{
-				OnLive: func() {
+				OnLive: func(context.Context) error {
 					if once.CompareAndSwap(false, true) {
 						close(caughtUp)
 					}
+					return nil
 				},
 			},
 			func(context.Context, eventsourcing.RecordedEvent) error { return nil })

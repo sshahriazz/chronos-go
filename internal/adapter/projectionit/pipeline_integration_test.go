@@ -461,14 +461,14 @@ func kurrentDSN() string {
 
 var sinkErr error
 
-// The number that governs projector throughput: one event = one transaction
-// containing SET LOCAL, the projection's own write, and the checkpoint upsert.
+// The number that governs LIVE projector throughput: one event = one
+// transaction containing SET LOCAL, the projection's own write, and the
+// checkpoint upsert.
 //
-// It is deliberately per-event rather than batched. Batching would be faster
-// and would also mean a crash mid-batch reapplies the whole batch — fine while
-// Apply is idempotent, but it trades a property that is currently structural
-// for one that depends on every projection staying disciplined. This measures
-// what we actually ship.
+// Live is deliberately unbatched. Once caught up, events arrive one at a time
+// and batching would only add latency between a write landing in the log and
+// appearing in the read model. Catching up is the opposite case and is measured
+// by BenchmarkProjectBatchOfEvents below.
 func BenchmarkProjectOneEvent(b *testing.B) {
 	h := newHarness(b)
 	view := newProbeView(h.viewName, h.category, h.codec)
@@ -499,6 +499,56 @@ func BenchmarkProjectOneEvent(b *testing.B) {
 			b.Fatalf("project: %v", sinkErr)
 		}
 	}
+}
+
+// The catch-up path: CatchUpBatch events and ONE checkpoint in a single
+// transaction, priced per event.
+//
+// The comparison against BenchmarkProjectOneEvent is the whole justification for
+// batching a projector that is behind. Atomicity is unchanged — rows and
+// checkpoint still commit together — and the only property traded is that a
+// crash reapplies the batch rather than one event, which Apply already has to
+// tolerate for restarts and rebuilds.
+func BenchmarkProjectBatchOfEvents(b *testing.B) {
+	const batch = 64
+
+	h := newHarness(b)
+	view := newProbeView(h.viewName, h.category, h.codec)
+	org, ws := "org_"+h.suffix, "ws_"+h.suffix
+	meta := eventsourcing.Metadata{OrgID: org, WorkspaceID: ws, Residency: "eu"}
+
+	envs := make([]projection.Envelope, batch)
+	for i := range envs {
+		envs[i] = projection.Envelope{
+			Type:     "probe.ThingRecorded.v1",
+			Stream:   eventsourcing.StreamID(string(h.category) + "-bench"),
+			Revision: eventsourcing.Revision(i),
+			Position: eventsourcing.Position{Commit: uint64(i + 1), Prepare: uint64(i + 1)},
+			Meta:     meta,
+			Payload:  []byte(`{"id":"` + h.suffix + `_bench","name":"benchmark"}`),
+		}
+	}
+	cp := projection.Checkpoint{Position: envs[batch-1].Position, EventsProcessed: batch}
+	ctx := context.Background()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		sinkErr = h.pg.InTenantBatch(ctx, projection.ScopeOf(meta), db.Replayable, func(w db.Writer) error {
+			for j := range envs {
+				if err := view.Apply(ctx, w, envs[j]); err != nil {
+					return err
+				}
+			}
+			pgadapter.Checkpoints{}.Save(ctx, w, h.viewName, cp, "bench")
+			return nil
+		})
+		if sinkErr != nil {
+			b.Fatalf("project: %v", sinkErr)
+		}
+	}
+	// Per EVENT, so it compares directly with BenchmarkProjectOneEvent.
+	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*batch), "ns/event")
 }
 
 // The same event with a DURABLE commit, to price what Replayable buys. Both

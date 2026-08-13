@@ -20,6 +20,16 @@ type Metrics interface {
 	// Live records whether the projection has caught up to the head of the log.
 	Live(projection string, live bool)
 
+	// AnnouncementsDropped records realtime messages discarded because the
+	// publisher was behind.
+	//
+	// Dropping is by design — the read model must not wait on Centrifugo, and a
+	// browser recovers by reading the row — so this is not an error counter. It
+	// is the signal that the realtime path is failing, which is otherwise
+	// invisible: every row is correct, every checkpoint advances, and users
+	// simply stop seeing updates arrive.
+	AnnouncementsDropped(projection string, messages int)
+
 	// Position records the $all commit position reached.
 	Position(projection string, commit uint64)
 }
@@ -28,8 +38,9 @@ type Metrics interface {
 // guarded by a nil check that will eventually be forgotten.
 type noMetrics struct{}
 
-func (noMetrics) Applied(string, float64) {}
-func (noMetrics) Skipped(string)          {}
-func (noMetrics) Failed(string)           {}
-func (noMetrics) Live(string, bool)       {}
-func (noMetrics) Position(string, uint64) {}
+func (noMetrics) Applied(string, float64)          {}
+func (noMetrics) AnnouncementsDropped(string, int) {}
+func (noMetrics) Skipped(string)                   {}
+func (noMetrics) Failed(string)                    {}
+func (noMetrics) Live(string, bool)                {}
+func (noMetrics) Position(string, uint64)          {}

@@ -2370,8 +2370,10 @@ spans two aggregates it belongs in one aggregate, or it is a process — and a
 process is a Temporal workflow (ADR-017).
 
 What it IS for is pairing a claim with the thing that claims it: reserving
-`reservation_email-alice@example.com` with `NoStream` **and** creating
-`user-<id>` with `NoStream`, atomically. As two appends, a crash between them
+`reservation_email-<hex(HMAC-SHA256(k_res, email))>` with `NoStream` **and**
+creating `user-<id>` with `NoStream`, atomically. (The reservation value is
+HMACed, never the raw address — a stream name is permanent and unshreddable,
+ADR-048.) As two appends, a crash between them
 leaves a reservation nobody owns and an address unclaimable forever.
 
 Verified against the running server, not assumed: with one precondition already
@@ -2531,3 +2533,435 @@ a principal whose access was revoked seconds ago. Three adapters in this codebas
 were once built, fully tested, and constructed by no binary; a Guard has a worse
 version of that failure, because a Guard nobody holds does not deny, it is
 skipped.
+
+## ADR-046 — The idempotency claim is one SQL statement, scoped to the principal
+
+**Date:** 2026-08-10 · **Status:** Accepted
+
+CONVENTIONS §6 and ADR-021 say every mutating RPC carries an `Idempotency-Key`
+and that a replay returns the stored response. This records how that is made
+true, because two of the three failure modes here are silent.
+
+### The claim is atomic in SQL, not in Go
+
+```sql
+INSERT INTO idempotency_key (principal, operation, key, fingerprint, expires_at)
+VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5::double precision))
+ON CONFLICT (principal, operation, key) DO UPDATE SET ...
+WHERE idempotency_key.expires_at <= now();
+```
+
+A `SELECT` followed by an `INSERT` lets two concurrent requests both read
+"nothing stored" and both proceed — reintroducing the double-click the gate
+exists to stop, by way of the check meant to stop it. One statement makes that
+impossible: rows-affected 1 means this caller owns the claim, 0 means somebody
+else does.
+
+**This cannot be verified against a fake.** The atomicity is Postgres behaviour,
+so a check-then-act implementation passes every unit test. The test that matters
+runs 16 concurrent claims against a real database and asserts exactly one is told
+to execute.
+
+The `ON CONFLICT` branch takes over an EXPIRED row rather than refusing it, so a
+request that died mid-flight does not hold its key until the retention sweep
+runs — with the client, correctly retrying with the same key, refused the whole
+time.
+
+### The scope is (principal, operation, key)
+
+The principal is not decoration. Keyed on the key alone, one tenant sending
+another's key is handed that request's stored response — a cross-tenant read
+through a header, reachable by anyone who can guess a ULID. `cqrs.Scope` refuses
+to be built without one, and the refusal happens before anything reaches the
+database.
+
+The operation covers the milder version: the same key on two different RPCs.
+
+`|` separates the parts of the stored key and is rejected in all three, for the
+same reason `:` is rejected in an authorization reference — a value carrying the
+separator addresses a scope the caller did not name.
+
+### Same key, different body, never returns the stored response
+
+A reused key is a client bug and is refused with `CONFLICT`. What must NOT happen
+is returning the stored response: that tells the client its request succeeded
+when a different request is what actually ran.
+
+The check is a SHA-256 of the request body, stored beside the response. SHA-256
+rather than something cheaper because a collision here does not fail — it
+returns a different request's answer as though it were this one's.
+
+The same refusal applies while the first request is still RUNNING, not only once
+it has completed. Without that, a reused key falls through to the in-flight path
+and the caller waits for — and then receives — somebody else's response.
+
+### Only successes are recorded; failures release the claim
+
+A failed handler releases its claim so a retry can run. Keeping it would turn a
+transient error into a permanent one for the whole TTL, and the client's retries
+— correctly using the same key — would all be refused.
+
+`response IS NULL` marks a row as an in-flight claim, which makes two things
+true by construction: `Release` can only ever delete an *uncompleted* claim
+(deleting a completed one would let the mutation run twice — the gate failing
+open), and `Complete` cannot overwrite an answer a client has already been given.
+
+A `Complete` affecting zero rows is an ERROR. It means the claim expired or was
+taken over while the handler ran, so the response was not stored — and a caller
+told "recorded" would believe a retry will replay it.
+
+### A store that cannot answer denies
+
+An unreachable idempotency store does not let the mutation through. Executing
+anyway defeats the gate exactly when it matters most: a struggling store is a
+store under the retry storm the gate exists for. This is the same rule as
+ADR-010's authorization exception, for the same reason.
+
+### The TTL is a retention bound
+
+A stored response is a serialized reply and can contain personal data (ADR-002),
+so the 24-hour default is not a cache setting. It is capped at 7 days and
+validated **twice**: config refuses to boot above the cap with a named
+environment variable, and `cqrs.NewOnce` refuses again at construction. The first
+gives a precise startup failure; the second means no code path can build an
+unbounded gate.
+
+The sweep is registered in `cmd/api`'s `backgroundTasks` list rather than started
+by a bare `go` statement. That is `Dedup.Forget`'s failure in its original shape:
+written, documented, indexed for, and called by no binary at all while its unit
+test passed. A test asserting on the list catches it; a test calling `Sweep`
+directly reproduces the blind spot.
+
+### The table carries no RLS, deliberately
+
+The gate runs BEFORE the request is authorized, so there is no tenant scope to
+set and a policy on this table could never be satisfied. Isolation comes from the
+principal being part of the primary key instead — which is why the scope refuses
+to exist without one. `principal` is a pseudonymous subject id, never an email or
+a name.
+
+### Verification
+
+Fifteen mutations across the SQL, the adapter and the composition root; thirteen
+caught, one an equivalent mutant, one a genuine gap that is now covered.
+
+The equivalent mutant is worth recording so nobody "fixes" it later:
+`GetIdempotencyKey`'s `expires_at > now()` is unreachable, because `Claim` takes
+over an expired row before that read happens and `now()` is the transaction
+timestamp, so the two statements cannot disagree about which side of the expiry a
+row falls on. Removing that predicate alone changes nothing; removing it AND the
+claim's expiry check is caught. It stays as the second line of defence if the
+takeover is ever loosened.
+
+## ADR-047 — All JSON goes through one kernel package, on encoding/json/v2
+
+**Date:** 2026-08-10 · **Status:** Accepted
+
+Every encode and decode in this codebase goes through `internal/platform/codec`,
+which wraps `encoding/json/v2` (Go 1.26, `GOEXPERIMENT=jsonv2`, already on by
+default in this toolchain). No other package imports a JSON library.
+
+Three reasons, none of them speed. The strictness decision is **forced to be made
+at the call site** rather than inherited from whatever default a library happens
+to ship. Determinism is required here and v2 can provide it, which v1 could not
+for maps. And v2 changes observable behaviour, so a single wrapper is what keeps
+those changes reviewable in one file instead of scattered across every decode.
+
+### Strict for what we wrote; tolerant for what somebody else wrote
+
+`Unmarshal`, `Into` and `DecodeFrom` REJECT unknown members. Their inputs are
+ours — a page cursor, a cache entry, a config document — and an unknown member
+there is a typo or a version mismatch. Ignoring it silently produces a setting
+that never took effect, which is worse than a startup error, because nothing ever
+reports it.
+
+`Tolerant` and `IntoTolerant` ignore unknown members, and they are the ONLY
+sanctioned leniency. They exist for the event log and for third-party payloads. A
+newer producer adds a field; during a rolling deploy both versions are running;
+rejecting the unknown member would stall a projector on an event that is
+perfectly valid (ADR-029). That is not a hypothetical — it is the normal state of
+a deploy.
+
+The function NAME carries the answer, so "does this one tolerate junk?" is
+settled by reading the call, not the body. A boolean option would have put the
+same decision somewhere nobody looks.
+
+### Determinism is on by default, not on request
+
+Map ordering is stable in every encode. Anything that is hashed, fingerprinted or
+compared byte-for-byte needs that, and the concrete dependency is ADR-046's
+idempotency gate: the fingerprint is a SHA-256 of the request body, so a
+non-deterministic marshal makes a client's legitimate retry — same key, same body
+— hash differently and come back as `CONFLICT`, a reused key that was never
+reused. The cost is a key sort, paid only by values that contain maps.
+
+### `Marshal` never returns nil
+
+An empty value encodes to zero bytes, and a nil slice is how several stores here
+spell "nothing recorded". Conflating the two was a real bug, not a tidiness
+concern: an empty idempotency response became indistinguishable from an
+unfinished claim, and the replay path refused every retry of a method whose reply
+is an empty message.
+
+### The four v1→v2 behaviour changes
+
+Each of these is a silent-data-corruption risk. None of them is a style
+difference:
+
+- A nil slice or map marshals as `[]` / `{}`, where v1 emitted `null`.
+  `codec.NullEmpty` restores the v1 shape, and is only for a format a third party
+  already parses. For anything we own the v2 default is better.
+- **Field matching is case-sensitive.** v1 matched case-insensitively, so a
+  stored `{"occurredat":...}` populated `OccurredAt`; under v2 the field stays
+  zero and there is no error. This is the one that reaches back into data already
+  written.
+- **Duplicate object members are an error**, where v1 took the last. Two parsers
+  disagreeing about which value is real is a security problem, not a parsing
+  nicety.
+- `time.Duration` marshals as a string, not integer nanoseconds.
+
+### The event codec's registry is copy-on-write, and only the parallel benchmark shows why
+
+`internal/adapter/eventcodec` moved its type registry from `sync.RWMutex` to
+`atomic.Pointer` copy-on-write. Measured on Go 1.26.5, Apple M3 Pro:
+
+| Registry lookup     | mutex  | atomic  |
+| ------------------- | ------ | ------- |
+| serial              | 13.2ns | 10.8ns  |
+| parallel, 11 cores  | 110ns  | 1.27ns  |
+
+Serial, this is noise and nobody would ship a change for it. Parallel it is 87x,
+because `RLock` is a contended atomic read-modify-write on one shared word, so
+every core invalidates every other core's cache line on every event. The mutex
+gets roughly 8x SLOWER under parallelism while the atomic gets faster. Against a
+487 ns parallel payload decode, the lock was about 20% of the total.
+
+That matters here specifically because a sharded rebuild decodes on N workers at
+once (ADR-044) — the parallel column is the production shape, and the serial one
+is not. **Record this as the lesson, not the number: a benchmark suite with only
+the serial case would have dismissed the change as noise, which is exactly how a
+contention point survives a benchmark suite.**
+
+`Freeze()` closes the registry once the composition root has finished wiring.
+After it, a late registration panics at the call site rather than producing a
+codec whose behaviour depends on package initialisation order — where a projector
+that started earlier has already treated those events as unknown and stopped, and
+nothing connects that failure to its cause.
+
+v2 honours the v1 `Marshaler`/`Unmarshaler` interfaces — the method names are
+identical — so the `flexInt` and `flexStrings` readers, which decode both stored
+metadata shapes (ADR-044), needed no signature change. They were deliberately
+left on the v1 interface rather than moved to v2's `UnmarshalJSONFrom`: a type on
+the read path of a permanent log should not be decodable by exactly one library
+version.
+
+### The other measured numbers, and where the win lands
+
+Go 1.26.5, Apple M3 Pro:
+
+- metadata `Unmarshal`: 1500 ns → 1195 ns (−20%)
+- legacy typed-shape metadata `Unmarshal`: 1430 ns → 1030 ns (−28%, 4 allocs → 3)
+- metadata `Marshal`: 760 ns → 778 ns (flat)
+
+The gain is entirely on the read path, which is the right side: an event is
+written once and spent many times.
+
+### How the migration was verified — round-tripping proves nothing here
+
+A marshal-then-unmarshal round-trip test passes identically under v1 and v2,
+because it never reads a byte the current code did not just write. For an
+append-only permanent log the question is not "can we read what we write", it is
+**"can we read what we wrote"** — by binaries that no longer exist, under a JSON
+library whose field matching has since changed.
+
+So the test (`internal/adapter/kurrentdb/codecmigration_integration_test.go`)
+reads 5000 events from the live KurrentDB `$all` and decodes each one's metadata:
+1348 non-system events decoded, and 1315 timestamps compared against their RAW
+STORED BYTES using an **independent parser** (`encoding/json` v1). The
+independence is the point — producing the expected value with the codec under
+test would make both sides fail identically and the test would pass through the
+exact corruption it exists to catch.
+
+The first version of that test asserted `OccurredAt` was non-zero and reported
+715 failures. **That was the test being wrong, not the codec:**
+`snaptest.RosterSnapshot.v1` legitimately stores `"0001-01-01T00:00:00Z"`.
+Probing the raw bytes rather than "fixing" the codec to satisfy the assertion is
+what caught it. The lesson is worth more than the fix: the assertion has to
+compare against what is actually on disk, because "non-zero" and "decoded
+correctly" are not the same property, and only one of them is the property we
+need.
+
+### The accepted risk
+
+`encoding/json/v2` is EXPERIMENTAL and explicitly outside the Go 1 compatibility
+promise. It exists only under `GOEXPERIMENT=jsonv2`. `gopls` reports every v2
+symbol as "requires go1.27", although `go build`, `go vet` and `golangci-lint`
+all pass — so the editor is noisy in a way that is easy to mistake for a real
+error.
+
+The hedge is the whole reason the kernel package exists: `internal/platform/codec`
+is the only package that imports it, so if the API changes, one file changes with
+it. Rejected alternative — importing `encoding/json/v2` directly at each call
+site — makes the blast radius the whole codebase and loses the strict/tolerant
+naming at the same time.
+
+Reconsider if the experiment is withdrawn, or if any release changes read-path
+behaviour for events already stored. Neither would be a refactor; both would be a
+correctness incident, which is why the read path is verified against the live log
+rather than against freshly-marshalled bytes.
+
+## ADR-049 — TOTP replay state is authoritative, in PostgreSQL, and fails closed
+
+**Date:** 2026-08-13 · **Status:** Accepted
+
+RFC 6238 codes are valid for a whole time step, and this authenticator accepts a
+skew of one step either side (`totp.Skew = 1`), so any single six-digit code
+validates across three steps — a 90-second window. Without a replay guard, a code
+that has been OBSERVED once — a shoulder-surf, a screenshot, a log line, a
+phishing relay that forwards the victim's code to the real login — can be
+presented a second time inside that window and will validate. The second factor
+is then not a second factor; it is a 90-second bearer token.
+
+This records where the "already used" state lives, and why the three properties
+that make it a control rather than a decoration — authoritative storage, an
+atomic claim, and failing closed — are each non-negotiable.
+
+### The state lives in PostgreSQL, and Valkey is disqualified by its own rules
+
+`app.TOTPReplayGuard` is backed by `totp_replay` (migration `00008_identity.sql`)
+and nothing else. Two alternatives were rejected.
+
+An **in-process map** is wrong at any scale above one pod: the attacker replays
+the observed code against a different instance and it works. The failure is
+invisible, because every test passes — the map is consulted, it is just not the
+same map.
+
+**Valkey** is the tempting answer, and it is disqualified by the exact property
+that makes it good at everything else it does here. Everything in Valkey carries
+a TTL and `FLUSHALL` must be survivable (ADR-010 lists it as *degraded, fall back
+to source*). There is no source to fall back to for "was this code already
+spent", and "the entry was evicted under memory pressure" is not an acceptable
+reason to accept a replayed code. A cache that may forget is fine for a
+projection; it is a silent removal of a security control here.
+
+### It is authoritative, not projected
+
+`totp_replay` is one of the few tables in this system that is NOT derived from
+the event log. Spending a time step produces no event and cannot: the fact is
+created by a verification attempt, is meaningful for at most 90 seconds, and
+carries no business history worth replaying. Rebuilding the read model from
+position zero (ADR-013) therefore does not reconstruct this table, and must not
+try — a rebuild that emptied it would un-spend every live step.
+
+It is also not personal data. A `credential_id` and an integer step say that a
+credential verified at an instant; that is the same thing the login history
+already records, and ADR-002 is untouched.
+
+### The primary key IS the guard
+
+```sql
+INSERT INTO totp_replay (credential_id, step, expires_at)
+VALUES ($1, $2, $3)
+ON CONFLICT (credential_id, step) DO NOTHING;
+```
+
+`PRIMARY KEY (credential_id, step)` is not a backstop for application logic; it
+is the atomicity the port contract demands. `ClaimTOTPStep` is `:execrows` and
+the affected-row count IS the answer — 1 means this caller spent the step, 0
+means somebody already had, and `Guards.Claim` translates the 0 into
+`app.ErrCodeReplayed`. Nothing reads first.
+
+The obvious implementation — `SELECT`, then `INSERT` if absent — races two
+simultaneous presentations of the same code and both observe it as unused, so
+both win. That concurrency is not a thought experiment; it is precisely what an
+attacker relaying a code produces, and it defeats the guard through the check
+written to enforce it. As in ADR-046, **a check-then-act implementation passes
+every unit test against a fake**, so the property is only demonstrable against a
+real database: eight concurrent executions for one step, exactly one winner.
+
+Keying on `(credential_id, step)` rather than on the step alone matters for the
+same reason the guard exists at all — a step-only key would let one user's login
+consume every other user's step at that instant, turning the control into a
+denial-of-service on everyone.
+
+### Validate first, then claim
+
+`Authenticator.Verify` finds WHICH step matched and only then claims it. A
+validator that answers "valid somewhere in the window" cannot prevent replay at
+all, because the step is what the claim is keyed on. The order is also the
+security property in the other direction: claiming before validating would let an
+attacker burn a step with a WRONG code and deny the legitimate user their next 30
+seconds.
+
+### Failing closed — the second deliberate exception to ADR-010
+
+ADR-010 says the server stays up and degrades per dependency, and names OpenFGA
+as the one deliberate exception. **This is the second.** When the guard cannot be
+consulted, `Verify` returns an error and the verification fails; it does not fall
+through to "the code looked right".
+
+The reasoning is ADR-010's own, applied to a different store. Accepting a code
+without claiming its step IS the compromise — it is not a reduced-functionality
+mode, it is the control switched off — so there is no safe degraded behaviour to
+choose. An attacker who can make the replay store unreachable would otherwise
+have turned the second factor off for everybody, which makes resilience an
+escalation path. A failed login during a PostgreSQL outage is the cheaper
+failure, and PostgreSQL is already **critical** in ADR-010's table, so nothing is
+being served at that moment anyway.
+
+`totp.New(issuer, guard)` REFUSES a nil guard rather than accepting one and
+running unguarded, and `postgres.NewGuards` refuses a nil transaction for the
+same reason. An authenticator that silently has no guard is the worst version of
+this failure: every code still validates exactly as expected, and nothing
+anywhere reports that replay protection is absent.
+
+### Row count, expiry, and why the rows still need sweeping
+
+The claim's expiry is the end of the last step that could still accept the code:
+`(step + Skew + 1) * Period`, so at most 90 seconds from the start of the matched
+step. Keeping it longer stores nothing useful; keeping it shorter reopens the
+window it exists to close.
+
+With a one-step skew, a credential can hold at most three unexpired rows at once,
+so the LIVE working set is bounded at roughly 3 × (credentials verifying in the
+last 90 seconds) — trivial. **The rows do not remove themselves.** PostgreSQL has
+no TTL, so `expires_at` is a predicate, not a mechanism, and without a sweep the
+table grows by one row per successful TOTP verification for the lifetime of the
+deployment. `SweepTOTPReplay` (`DELETE FROM totp_replay WHERE expires_at <=
+now()`, served by `totp_replay_expiry_idx`) is retention, not correctness: an
+expired step cannot validate anyway, so the row protects nothing once it is past.
+`ON DELETE CASCADE` from `credential` handles the other direction — deleting a
+credential takes its spent steps with it.
+
+### Consequences
+
+- **Every successful TOTP verification costs a database write, on the login hot
+  path.** That is the price and it is paid deliberately. It is one indexed insert
+  in a system transaction, next to a password verify that is already an
+  intentionally expensive KDF, so it is not the cost that matters here — the
+  cost that matters is the coupling: TOTP verification now requires PostgreSQL
+  to be writable, and a read-only database means nobody with MFA can log in.
+- Identity's tables carry no RLS, so this runs through `db.SystemTX`, never a
+  tenant transaction. A user exists before any organization does, so a tenant
+  policy on these tables could never be satisfied.
+- It rules out verifying a TOTP code in any context that cannot reach PostgreSQL
+  — an edge validator, an offline check, a read-replica-only path. There is no
+  cache tier to add in front of it: a cache that can answer "not yet spent" from
+  stale state is the exact hole this closes.
+- `ErrCodeReplayed` is distinct from a wrong code and must stay that way. A wrong
+  code is a typo; a replayed one means somebody has OBSERVED a genuine code. It
+  is recorded as `contract.ReasonReplayedCode` and is worth alerting on — it is
+  one of the few signals in this system that names an attack rather than a fault.
+- **Two things this decision requires are not yet wired.** `SweepTOTPReplay` has
+  no scheduled caller — the retention job does not exist — and no binary
+  constructs `totp.Authenticator` at all, because slice 1 stops short of the MFA
+  verification flow. Both are stated here rather than left implied, because the
+  failure mode of the second is precisely the one ADR-045 records: a control that
+  is built, tested, and held by nobody.
+
+### Reconsider if
+
+The skew widens. Every extra step lengthens the window in which an observed code
+is replayable, which is the window this guard has to cover; the row count and the
+claim's expiry follow from `Skew` and would need to be re-derived, not just
+re-tuned.

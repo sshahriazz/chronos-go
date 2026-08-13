@@ -2,7 +2,6 @@ package reactor_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -10,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chronos/chronos-go/internal/platform/codec"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/platform/ids"
 	"github.com/chronos/chronos-go/internal/platform/reactor"
@@ -172,7 +172,7 @@ func runUntilDrained(t *testing.T, r *reactor.Runner, sub *fakeSub) {
 func mustID(seed string) ids.EventID { return eventsourcing.DeriveEventID(seed, 0) }
 
 func recorded(seed, stream string) eventsourcing.RecordedEvent {
-	meta, _ := json.Marshal(map[string]string{"orgId": "org_A"})
+	meta, _ := codec.Marshal(map[string]string{"orgId": "org_A"})
 	return eventsourcing.RecordedEvent{
 		ID: mustID(seed), Type: "identity.UserRegistered.v1",
 		Stream: eventsourcing.StreamID(stream), Metadata: meta,
@@ -283,8 +283,76 @@ func (metaCodec) UnmarshalMetadata(b []byte) (eventsourcing.Metadata, error) {
 	var w struct {
 		OrgID string `json:"orgId"`
 	}
-	if err := json.Unmarshal(b, &w); err != nil {
+	// Tolerant, matching the real codec: stored metadata carries keys this
+	// double does not model, and a reactor must not park an event over one.
+	if err := codec.IntoTolerant(b, &w); err != nil {
 		return eventsourcing.Metadata{}, err
 	}
 	return eventsourcing.Metadata{OrgID: w.OrgID}, nil
+}
+
+// ---------------------------------------------------------------------------
+// causation and filters
+// ---------------------------------------------------------------------------
+
+// tracingReactor records the causation chain its context carried.
+type tracingReactor struct {
+	mu    sync.Mutex
+	trace eventsourcing.Trace
+}
+
+func (*tracingReactor) Name() string { return "tracing" }
+func (*tracingReactor) Filter() eventsourcing.SubscriptionFilter {
+	return eventsourcing.SubscriptionFilter{StreamPrefixes: []string{"identity-"}}
+}
+
+func (r *tracingReactor) React(ctx context.Context, _ eventsourcing.Envelope) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.trace = eventsourcing.TraceFrom(ctx)
+	return nil
+}
+
+// Anything a reaction writes must name the event that caused it. Left to each
+// reactor to remember, this is forgotten once and the resulting event's origin
+// is unrecoverable — the log cannot be amended.
+func TestReactionCarriesTheCausationChain(t *testing.T) {
+	spy := &tracingReactor{}
+	e := recorded("evt_trace", "identity-u1")
+	sub := newSub(e)
+
+	runUntilDrained(t, reactor.NewRunner(spy, deps(sub, newMemDedup())), sub)
+
+	spy.mu.Lock()
+	defer spy.mu.Unlock()
+	if got := spy.trace.CausationID; got != e.ID.String() {
+		t.Errorf("causation %q, want the handled event's id %s", got, e.ID)
+	}
+	// This event carries no correlation of its own, so it roots the chain.
+	if got := spy.trace.CorrelationID; got != e.ID.String() {
+		t.Errorf("correlation %q, want the handled event's id %s", got, e.ID)
+	}
+}
+
+type mixedFilterReactor struct{ spyReactor }
+
+func (*mixedFilterReactor) Filter() eventsourcing.SubscriptionFilter {
+	return eventsourcing.SubscriptionFilter{
+		StreamPrefixes: []string{"identity-"}, EventTypes: []string{"identity.X.v1"},
+	}
+}
+
+// A filter naming two dimensions cannot be expressed server-side, so one half
+// would be dropped. For a reactor that means mail nobody receives, with no
+// error anywhere — so it refuses to start.
+func TestReactorRefusesAFilterThatMixesSelectors(t *testing.T) {
+	sub := newSub()
+	r := reactor.NewRunner(&mixedFilterReactor{spyReactor: spyReactor{name: "mixed"}}, deps(sub, newMemDedup()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := r.Run(ctx); !errors.Is(err, eventsourcing.ErrAmbiguousFilter) {
+		t.Fatalf("got %v, want ErrAmbiguousFilter", err)
+	}
 }

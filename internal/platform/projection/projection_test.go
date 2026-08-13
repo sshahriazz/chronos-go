@@ -2,7 +2,6 @@ package projection_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chronos/chronos-go/internal/platform/codec"
 	"github.com/chronos/chronos-go/internal/platform/db"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/platform/projection"
@@ -124,26 +124,153 @@ func TestRunnerAppliesAndCheckpointsAtomically(t *testing.T) {
 	if got := cps.saved.EventsProcessed; got != 2 {
 		t.Errorf("events processed %d, want 2", got)
 	}
-	// The property the whole design rests on: for each event, the rows and the
-	// checkpoint were written by the SAME transaction.
-	if len(proj.applyTxs) != len(cps.saveTxs) {
-		t.Fatalf("%d applies but %d checkpoint saves", len(proj.applyTxs), len(cps.saveTxs))
+	// The property the whole design rests on: every event's rows were written by
+	// a transaction that ALSO carried a checkpoint. Not one checkpoint per event
+	// — while catching up, many events share a transaction — but never rows in a
+	// transaction that checkpointed nothing, which is how an event is lost
+	// forever rather than reapplied.
+	checkpointed := make(map[int]bool, len(cps.saveTxs))
+	for _, tx := range cps.saveTxs {
+		checkpointed[tx] = true
 	}
-	for i := range proj.applyTxs {
-		if proj.applyTxs[i] != cps.saveTxs[i] {
-			t.Errorf("event %d: applied in tx %d but checkpointed in tx %d — a crash between them loses the event forever",
-				i, proj.applyTxs[i], cps.saveTxs[i])
+	for i, tx := range proj.applyTxs {
+		if !checkpointed[tx] {
+			t.Errorf("event %d applied in tx %d, which never checkpointed — a crash after it loses the event forever", i, tx)
 		}
 	}
 	if cps.savedOutsideTx {
 		t.Error("the checkpoint was saved outside the batch that applied the rows")
 	}
-	// Both statements must ride in ONE batch: that is what makes them atomic
-	// and what makes it a single round trip.
-	for i, b := range tx.batches {
-		if len(b.queued) != 2 {
-			t.Errorf("batch %d queued %d statements, want 2 (the write and the checkpoint)", i, len(b.queued))
+	// Both events were behind the head of the log, so they share ONE
+	// transaction: two writes plus the single checkpoint that covers them.
+	if len(tx.batches) != 1 {
+		t.Fatalf("%d transactions for two catch-up events, want 1", len(tx.batches))
+	}
+	if got := len(tx.batches[0].queued); got != 3 {
+		t.Errorf("batch queued %d statements, want 3 (two writes and the checkpoint)", got)
+	}
+}
+
+// Batching is for catching up only. Once live, an event must reach the read
+// model without waiting for the next 63 to arrive.
+func TestRunnerCommitsEachEventOnItsOwnWhenLive(t *testing.T) {
+	proj := &spyProjection{name: "test_view"}
+	cps := &fakeCheckpoints{}
+	tx := &fakeTX{}
+	sub := newSubscriber(
+		recorded("test-1", 0, 10, "org_A"),
+		recorded("test-1", 1, 20, "org_A"),
+	)
+	sub.liveBeforeDelivery = true
+
+	r := newRunner(t, proj, sub, tx, cps)
+	runUntilDrained(t, r, sub)
+
+	if len(tx.batches) != 2 {
+		t.Fatalf("%d transactions for two live events, want one each", len(tx.batches))
+	}
+	if got := cps.saved.Position.Commit; got != 20 {
+		t.Errorf("checkpoint at commit %d, want 20", got)
+	}
+}
+
+// The point of batching, stated as a number: a catching-up projector pays one
+// round trip per BATCH, not per event. The round trip is 63% of per-event
+// latency here, so this is the difference between a rebuild that takes minutes
+// and one that takes seconds.
+func TestCatchUpCostsOneRoundTripPerBatch(t *testing.T) {
+	const events = 1000
+	const batch = 64
+
+	proj := &spyProjection{name: "test_view"}
+	tx := &fakeTX{}
+	sub := &fakeSubscriber{drained: make(chan struct{})}
+	for i := range events {
+		sub.events = append(sub.events, recorded("test-1", int64(i), uint64(i+1)*10, "org_A"))
+	}
+
+	r := projection.NewRunner(proj, projection.Deps{
+		Subscriber: sub, Codec: fakeCodec{}, Batch: tx, TX: tx,
+		Checkpoints: &fakeCheckpoints{}, Lease: grantingLease{}, Log: quiet(),
+		CatchUpBatch: batch,
+	})
+	runUntilDrained(t, r, sub)
+
+	if len(proj.applied) != events {
+		t.Fatalf("applied %d events, want %d", len(proj.applied), events)
+	}
+	want := events / batch // 1000/64 = 15 full batches, and the tail flushes at OnLive
+	if got := len(tx.batches); got < want || got > want+1 {
+		t.Errorf("%d transactions for %d events at a batch of %d, want %d or %d",
+			got, events, batch, want, want+1)
+	}
+}
+
+// A batch may not span tenants: every statement runs under a scope set by SET
+// LOCAL, so two orgs in one transaction would project one org's event under the
+// other's policy.
+func TestCatchUpBatchNeverSpansTenants(t *testing.T) {
+	proj := &spyProjection{name: "test_view"}
+	tx := &fakeTX{}
+	sub := newSubscriber(
+		recorded("test-1", 0, 10, "org_A"),
+		recorded("test-2", 0, 20, "org_A"),
+		recorded("test-3", 0, 30, "org_B"),
+		recorded("test-4", 0, 40, "org_A"),
+	)
+
+	r := projection.NewRunner(proj, projection.Deps{
+		Subscriber: sub, Codec: fakeCodec{}, Batch: tx, TX: tx,
+		Checkpoints: &fakeCheckpoints{}, Lease: grantingLease{}, Log: quiet(),
+	})
+	runUntilDrained(t, r, sub)
+
+	// A, A | B | A — the scope change ends the batch, and the next one starts a
+	// new scope rather than inheriting it.
+	want := []string{"org_A", "org_B", "org_A"}
+	if len(tx.batches) != len(want) {
+		t.Fatalf("%d transactions, want %d (one per contiguous tenant run)", len(tx.batches), len(want))
+	}
+	for i, w := range want {
+		if got := tx.batches[i].tenant.OrgID; got != w {
+			t.Errorf("transaction %d scoped to %q, want %q", i, got, w)
 		}
+	}
+}
+
+// A server checkpoint names a position PAST the events buffered behind it.
+// Writing it while they are still in memory would leave a checkpoint claiming
+// work no transaction ever did — the one way a projection loses an event
+// instead of reapplying it.
+func TestAServerCheckpointNeverLeapsOverBufferedEvents(t *testing.T) {
+	proj := &spyProjection{name: "test_view"}
+	cps := &fakeCheckpoints{}
+	tx := &fakeTX{}
+	sub := newSubscriber(recorded("test-1", 0, 10, "org_A"))
+	// The server scanned to 99 and found nothing else this projection wants.
+	sub.checkpointAt = 99
+
+	r := newRunner(t, proj, sub, tx, cps)
+	runUntilDrained(t, r, sub)
+
+	if len(proj.applied) != 1 {
+		t.Fatalf("applied %d events, want 1", len(proj.applied))
+	}
+	// The buffered event's rows were committed before the skip was recorded, so
+	// the checkpoint that ends at 99 sits above work that actually happened.
+	cps.mu.Lock()
+	order := append([]uint64(nil), cps.order...)
+	cps.mu.Unlock()
+	if len(order) != 2 || order[0] != 10 || order[1] != 99 {
+		t.Errorf("checkpoint positions committed in order %v, want [10 99] — the event's rows "+
+			"must commit before the scan that jumps past them", order)
+	}
+	if got := cps.saved.Position.Commit; got != 99 {
+		t.Errorf("final checkpoint at %d, want the scanned position 99", got)
+	}
+	// A scan is not an event: it moves the resume point and nothing else.
+	if got := cps.saved.EventsProcessed; got != 1 {
+		t.Errorf("events processed %d, want 1 — a checkpoint is not an event", got)
 	}
 }
 
@@ -277,8 +404,12 @@ func TestRunnerStopsWhenTheProjectionRejectsAnEvent(t *testing.T) {
 	if !errors.Is(err, boom) {
 		t.Fatalf("got %v, want the projection's own error", err)
 	}
-	if got := cps.saved.Position.Commit; got != 10 {
-		t.Errorf("checkpoint advanced to %d past the failing event; it must stay at 10", got)
+	// The checkpoint must never reach the failing event. It may sit BEHIND the
+	// event before it — that event shared the rolled-back transaction, so its
+	// rows are gone too and the pair is replayed together — but a checkpoint at
+	// or past 20 would mean the read model skipped an event nothing applied.
+	if got := cps.saved.Position.Commit; got >= 20 {
+		t.Errorf("checkpoint at %d covers the failing event at 20; it must stay behind it", got)
 	}
 	if tx.rolledBack != 1 {
 		t.Errorf("%d transactions rolled back, want 1", tx.rolledBack)
@@ -398,7 +529,7 @@ func runUntilDrained(t *testing.T, r *projection.Runner, sub *fakeSubscriber) {
 }
 
 func recorded(stream string, rev int64, commit uint64, org string) eventsourcing.RecordedEvent {
-	meta, _ := json.Marshal(map[string]any{"orgId": org, "residency": "eu"})
+	meta, _ := codec.Marshal(map[string]any{"orgId": org, "residency": "eu"})
 	return eventsourcing.RecordedEvent{
 		Type:     "test.ThingHappened.v1",
 		Stream:   eventsourcing.StreamID(stream),
@@ -448,7 +579,10 @@ func (fakeCodec) Marshal(eventsourcing.Event) ([]byte, error) { return nil, nil 
 
 func (fakeCodec) Unmarshal(_ string, payload []byte) (eventsourcing.Event, error) {
 	e := &thingHappened{}
-	if err := json.Unmarshal(payload, e); err != nil {
+	// TOLERANT, matching the real codec: a stored payload may carry a newer
+	// producer's fields (ADR-029). A stricter double would let a projector pass
+	// here and stall against the real one.
+	if err := codec.IntoTolerant(payload, e); err != nil {
 		return nil, err
 	}
 	return e, nil
@@ -462,7 +596,9 @@ func (fakeCodec) UnmarshalMetadata(b []byte) (eventsourcing.Metadata, error) {
 		Residency string `json:"residency"`
 	}
 	if len(b) > 0 {
-		if err := json.Unmarshal(b, &w); err != nil {
+		// Tolerant: stored metadata carries keys this double does not model —
+		// KurrentDB adds its own — and the real codec reads it that way.
+		if err := codec.IntoTolerant(b, &w); err != nil {
 			return eventsourcing.Metadata{}, err
 		}
 	}
@@ -567,11 +703,14 @@ func (q *fakeQuerier) QueryRow(context.Context, string, ...any) db.Row { return 
 
 type fakeCheckpoints struct {
 	// mu guards the fields a sharded rebuild writes from its worker goroutines.
-	mu             sync.Mutex
-	saves          int
-	stored         projection.Checkpoint
-	hasValue       bool
-	saved          projection.Checkpoint
+	mu       sync.Mutex
+	saves    int
+	stored   projection.Checkpoint
+	hasValue bool
+	saved    projection.Checkpoint
+	// order is every position that actually COMMITTED, in the order it did, so a
+	// test can assert that rows land before the scan that jumps past them.
+	order          []uint64
 	saveTxs        []int
 	savedOutsideTx bool
 	cleared        bool
@@ -597,6 +736,7 @@ func (c *fakeCheckpoints) Save(_ context.Context, w db.Writer, _ string, cp proj
 		w.Exec("INSERT INTO projection_checkpoint ...")
 		c.mu.Lock()
 		c.saved, c.stored, c.hasValue = cp, cp, true
+		c.order = append(c.order, cp.Position.Commit)
 		c.saves++
 		c.mu.Unlock()
 		return
@@ -606,6 +746,7 @@ func (c *fakeCheckpoints) Save(_ context.Context, w db.Writer, _ string, cp proj
 	b.onSend = append(b.onSend, func() {
 		c.mu.Lock()
 		c.saved, c.stored, c.hasValue = cp, cp, true
+		c.order = append(c.order, cp.Position.Commit)
 		c.saves++
 		c.mu.Unlock()
 	})
@@ -636,10 +777,13 @@ type fakeSubscriber struct {
 	// liveBeforeDelivery signals caught-up BEFORE delivering, which is the
 	// steady state; the default signals after, which is a replay.
 	liveBeforeDelivery bool
-	events             []eventsourcing.RecordedEvent
-	from               eventsourcing.StartFrom
-	calls              int
-	drained            chan struct{}
+	// checkpointAt, when non-zero, is a position the server scanned past without
+	// finding a match — reported after the events, as the real one does.
+	checkpointAt uint64
+	events       []eventsourcing.RecordedEvent
+	from         eventsourcing.StartFrom
+	calls        int
+	drained      chan struct{}
 }
 
 func newSubscriber(events ...eventsourcing.RecordedEvent) *fakeSubscriber {
@@ -653,7 +797,9 @@ func (s *fakeSubscriber) SubscribeAll(
 	s.calls++
 	s.from = from
 	if s.liveBeforeDelivery && opts.OnLive != nil {
-		opts.OnLive()
+		if err := opts.OnLive(ctx); err != nil {
+			return err
+		}
 	}
 	for _, e := range s.events {
 		if !from.IsBeginning() && e.Position.Commit <= from.Position().Commit {
@@ -663,10 +809,22 @@ func (s *fakeSubscriber) SubscribeAll(
 			return err
 		}
 	}
+	if s.checkpointAt > 0 && opts.OnCheckpoint != nil {
+		if err := opts.OnCheckpoint(ctx, eventsourcing.Position{
+			Commit: s.checkpointAt, Prepare: s.checkpointAt,
+		}); err != nil {
+			return err
+		}
+	}
 	// A real subscription reports reaching the head of the log before going
 	// quiet, which is what tells a projector it is current.
 	if opts.OnLive != nil {
-		opts.OnLive()
+		// Reaching the head is where a projector commits whatever it buffered
+		// while behind, so a failure here ends the subscription exactly as it
+		// does against the real server.
+		if err := opts.OnLive(ctx); err != nil {
+			return err
+		}
 	}
 	close(s.drained)
 	// A live subscription does not end when it catches up.
@@ -684,6 +842,31 @@ type refusingLease struct{}
 
 func (refusingLease) Acquire(context.Context, string) (projection.Release, bool, error) {
 	return nil, false, nil
+}
+
+// countingMetrics records only what the announcement tests assert on; every
+// other method is inert.
+type countingMetrics struct {
+	mu      sync.Mutex
+	dropped int
+}
+
+func (*countingMetrics) Applied(string, float64) {}
+func (*countingMetrics) Skipped(string)          {}
+func (*countingMetrics) Failed(string)           {}
+func (*countingMetrics) Live(string, bool)       {}
+func (*countingMetrics) Position(string, uint64) {}
+
+func (m *countingMetrics) AnnouncementsDropped(_ string, messages int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dropped += messages
+}
+
+func (m *countingMetrics) drops() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.dropped
 }
 
 // ---------------------------------------------------------------------------
@@ -765,6 +948,51 @@ func TestFailedAnnouncementDoesNotStopTheProjection(t *testing.T) {
 	}
 }
 
+// A publisher that has stopped answering must not stop the read model. The
+// queue fills, further announcements are DROPPED and counted, and events keep
+// being applied — which is the whole reason publishing left the per-event path.
+func TestAStalledPublisherDropsRatherThanBlocksTheProjection(t *testing.T) {
+	// The publisher hangs long enough to fill the queue, then recovers. Hanging
+	// forever would instead test announceDrainTimeout, which is a different
+	// property with its own cost in wall-clock time.
+	stuck := make(chan struct{})
+	time.AfterFunc(200*time.Millisecond, func() { close(stuck) })
+
+	pub := &spyPublisher{block: stuck}
+	metrics := &countingMetrics{}
+	proj := &emittingProjection{spyProjection: spyProjection{name: "test_view"}}
+
+	const events = 40
+	sub := &fakeSubscriber{drained: make(chan struct{}), liveBeforeDelivery: true}
+	for i := range events {
+		sub.events = append(sub.events, recorded("test-1", int64(i), uint64(i+1)*10, "org_A"))
+	}
+	tx := &fakeTX{}
+	cps := &fakeCheckpoints{}
+
+	r := projection.NewRunner(proj, projection.Deps{
+		Subscriber: sub, Codec: fakeCodec{}, Batch: tx, TX: tx,
+		Checkpoints: cps, Lease: grantingLease{}, Realtime: pub, Log: quiet(),
+		Metrics: metrics,
+		// One in flight, one queued: everything after that has nowhere to go.
+		AnnounceBuffer: 1,
+	})
+	runUntilDrained(t, r, sub)
+
+	if len(proj.applied) != events {
+		t.Fatalf("applied %d of %d events; a stalled publisher held up the read model",
+			len(proj.applied), events)
+	}
+	if got := cps.saved.Position.Commit; got != events*10 {
+		t.Errorf("checkpoint at %d, want %d — announcements must not gate the position",
+			got, events*10)
+	}
+	if metrics.drops() == 0 {
+		t.Error("announcements were discarded without being counted; a failing realtime " +
+			"path would leave no signal at all")
+	}
+}
+
 // A projection with no Emitter must be unaffected by a configured publisher.
 func TestProjectionWithoutAnEmitterAnnouncesNothing(t *testing.T) {
 	pub := &spyPublisher{}
@@ -796,9 +1024,12 @@ func (e *emittingProjection) Emit(env projection.Envelope) []realtime.Message {
 }
 
 type spyPublisher struct {
-	mu  sync.Mutex
-	n   int
-	err error
+	mu sync.Mutex
+	n  int
+	// block holds the publisher inside PublishMany until it is closed, standing
+	// in for a Centrifugo that has stopped answering.
+	block <-chan struct{}
+	err   error
 }
 
 func (p *spyPublisher) Publish(_ context.Context, _ realtime.Message) error {
@@ -806,6 +1037,9 @@ func (p *spyPublisher) Publish(_ context.Context, _ realtime.Message) error {
 }
 
 func (p *spyPublisher) PublishMany(_ context.Context, msgs []realtime.Message) error {
+	if p.block != nil {
+		<-p.block
+	}
 	return p.record(len(msgs))
 }
 
@@ -898,13 +1132,6 @@ func TestRebuildPicksTheNarrowestSource(t *testing.T) {
 			name:   "an event-type PREFIX falls back to $all",
 			filter: eventsourcing.SubscriptionFilter{EventTypePrefixes: []string{"probe."}},
 		},
-		{
-			// Mixed selectors describe a set no single link stream contains.
-			name: "mixed selectors fall back to $all",
-			filter: eventsourcing.SubscriptionFilter{
-				EventTypes: []string{"a.v1"}, StreamPrefixes: []string{"probe-"},
-			},
-		},
 	}
 
 	for _, tc := range cases {
@@ -940,6 +1167,43 @@ func TestRebuildPicksTheNarrowestSource(t *testing.T) {
 				t.Errorf("category streams read = %v, want %v", got, tc.wantCats)
 			}
 		})
+	}
+}
+
+// A filter naming two dimensions cannot be expressed server-side: KurrentDB
+// matches streams OR event types. The adapter would honour one and drop the
+// other, and the projection would run looking perfectly healthy while never
+// receiving the events it declared — so the runner refuses to start at all.
+func TestRunnerRefusesAFilterThatMixesSelectors(t *testing.T) {
+	mixed := eventsourcing.SubscriptionFilter{
+		EventTypes: []string{"a.v1"}, StreamPrefixes: []string{"probe-"},
+	}
+	tx := &fakeTX{}
+	sub := newSubscriber()
+	proj := &filteredProjection{name: "sel_view", filter: mixed}
+
+	newFor := func() *projection.Runner {
+		return projection.NewRunner(proj, projection.Deps{
+			Subscriber: sub, Codec: fakeCodec{}, Batch: tx, TX: tx,
+			Checkpoints: &fakeCheckpoints{}, Lease: grantingLease{},
+			Log: quiet(), Holder: "test",
+		})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	for name, run := range map[string]func(*projection.Runner) error{
+		"Run":     func(r *projection.Runner) error { return r.Run(ctx) },
+		"Rebuild": func(r *projection.Runner) error { return r.Rebuild(ctx) },
+	} {
+		err := run(newFor())
+		if !errors.Is(err, eventsourcing.ErrAmbiguousFilter) {
+			t.Errorf("%s returned %v, want ErrAmbiguousFilter", name, err)
+		}
+	}
+	if sub.calls != 0 {
+		t.Errorf("subscribed %d times with a filter that cannot be expressed; it must never reach the server", sub.calls)
 	}
 }
 
@@ -1100,6 +1364,136 @@ func TestShardedRebuildCheckpointsOnceAtTheEnd(t *testing.T) {
 	}
 	if got := cps.lastSaved().EventsProcessed; got != int64(len(events)) {
 		t.Fatalf("EventsProcessed = %d, want %d", got, len(events))
+	}
+}
+
+// A sharded rebuild buffers per worker, so it pays one round trip per shard per
+// batch — not one per event. Without this the shard path is the slowest way to
+// run the operation that needs speed most.
+func TestShardedRebuildBatchesPerWorker(t *testing.T) {
+	const events, shards = 200, 4
+
+	var recs []eventsourcing.RecordedEvent
+	for i := range events {
+		recs = append(recs, eventsourcing.RecordedEvent{
+			Type:     "probe.Thing.v1",
+			Stream:   eventsourcing.StreamID(fmt.Sprintf("probe-%d", i%shards)),
+			Revision: eventsourcing.Revision(i / shards),
+			Position: eventsourcing.Position{Commit: uint64(i + 1), Prepare: uint64(i + 1)},
+			Payload:  []byte(`{}`),
+			Metadata: []byte(`{"schema_version":1,"org_id":"org_1","workspace_id":"ws_1"}`),
+		})
+	}
+
+	rec := newOrderRecorder()
+	tx := &fakeTX{}
+	cps := &fakeCheckpoints{}
+	r := projection.NewRunner(rec, projection.Deps{
+		Subscriber: newSubscriber(), Codec: fakeCodec{}, Batch: tx, TX: tx,
+		Categories:  &staticCategoryReader{events: recs},
+		Checkpoints: cps, Lease: grantingLease{}, Log: quiet(), Holder: "test",
+		RebuildShards: shards, CatchUpBatch: 64,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Rebuild(ctx) }()
+	waitFor(t, func() bool { return rec.count() == len(recs) })
+	waitFor(t, func() bool { return cps.saveCount() > 0 })
+	cancel()
+	<-done
+
+	// 200 events over 4 shards at 64 per batch: one batch each, plus the tail
+	// flush. Anything near 200 means the workers went back to one transaction
+	// per event.
+	tx.mu.Lock()
+	got := len(tx.batches)
+	tx.mu.Unlock()
+	if got > shards*2 {
+		t.Errorf("%d transactions for %d events across %d shards, want at most %d",
+			got, len(recs), shards, shards*2)
+	}
+}
+
+// A rebuild writes through the same pool the API uses, so it has to be
+// pace-able. The limit is an average: this asserts the replay took at least as
+// long as the configured rate allows, not that each event was evenly spaced.
+func TestRebuildIsPacedByTheConfiguredRate(t *testing.T) {
+	const events, perSecond = 60, 300 // 60 events at 300/s ≈ 200ms
+
+	var recs []eventsourcing.RecordedEvent
+	for i := range events {
+		recs = append(recs, eventsourcing.RecordedEvent{
+			Type:     "probe.Thing.v1",
+			Stream:   eventsourcing.StreamID(fmt.Sprintf("probe-%d", i%3)),
+			Revision: eventsourcing.Revision(i / 3),
+			Position: eventsourcing.Position{Commit: uint64(i + 1), Prepare: uint64(i + 1)},
+			Payload:  []byte(`{}`),
+			Metadata: []byte(`{"schema_version":1,"org_id":"org_1","workspace_id":"ws_1"}`),
+		})
+	}
+
+	rec := newOrderRecorder()
+	tx := &fakeTX{}
+	r := projection.NewRunner(rec, projection.Deps{
+		Subscriber: newSubscriber(), Codec: fakeCodec{}, Batch: tx, TX: tx,
+		Categories:  &staticCategoryReader{events: recs},
+		Checkpoints: &fakeCheckpoints{}, Lease: grantingLease{}, Log: quiet(), Holder: "test",
+		RebuildEventsPerSecond: perSecond,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	started := time.Now()
+	done := make(chan error, 1)
+	go func() { done <- r.Rebuild(ctx) }()
+	waitFor(t, func() bool { return rec.count() == len(recs) })
+	elapsed := time.Since(started)
+	cancel()
+	<-done
+
+	// The floor, with slack for the sub-millisecond deficits the throttle
+	// deliberately does not sleep on.
+	floor := time.Duration(float64(events)/float64(perSecond)*float64(time.Second)) / 2
+	if elapsed < floor {
+		t.Errorf("replayed %d events in %s at a %d/s limit; the throttle did not pace it (floor %s)",
+			events, elapsed, perSecond, floor)
+	}
+}
+
+// Unthrottled is the default, and it must cost nothing: a rebuild nobody
+// configured a limit for must not be slowed by the mechanism that limits one.
+func TestRebuildIsUnthrottledByDefault(t *testing.T) {
+	var recs []eventsourcing.RecordedEvent
+	for i := range 200 {
+		recs = append(recs, eventsourcing.RecordedEvent{
+			Type:     "probe.Thing.v1",
+			Stream:   eventsourcing.StreamID(fmt.Sprintf("probe-%d", i%3)),
+			Revision: eventsourcing.Revision(i / 3),
+			Position: eventsourcing.Position{Commit: uint64(i + 1), Prepare: uint64(i + 1)},
+			Payload:  []byte(`{}`),
+			Metadata: []byte(`{"schema_version":1,"org_id":"org_1","workspace_id":"ws_1"}`),
+		})
+	}
+
+	rec := newOrderRecorder()
+	tx := &fakeTX{}
+	r := projection.NewRunner(rec, projection.Deps{
+		Subscriber: newSubscriber(), Codec: fakeCodec{}, Batch: tx, TX: tx,
+		Categories:  &staticCategoryReader{events: recs},
+		Checkpoints: &fakeCheckpoints{}, Lease: grantingLease{}, Log: quiet(), Holder: "test",
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	started := time.Now()
+	done := make(chan error, 1)
+	go func() { done <- r.Rebuild(ctx) }()
+	waitFor(t, func() bool { return rec.count() == len(recs) })
+	elapsed := time.Since(started)
+	cancel()
+	<-done
+
+	if elapsed > 2*time.Second {
+		t.Errorf("an unthrottled rebuild of %d events took %s", len(recs), elapsed)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"log/slog"
 
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/kurrent-io/KurrentDB-Client-Go/kurrentdb"
@@ -119,6 +120,22 @@ func (s *Store) toEventData(events []eventsourcing.PendingEvent) ([]kurrentdb.Ev
 		payload, err := s.codec.Marshal(pe.Event)
 		if err != nil {
 			return nil, fmt.Errorf("kurrentdb: marshal %s: %w", pe.Event.EventType(), err)
+		}
+		// Checked HERE, after encoding and before the wire, because the encoded
+		// size is the only one that matters and this is the single place both
+		// append paths pass through. Refusing our own oversized append names the
+		// event; the server's refusal is a generic write failure arriving after
+		// the command has already reserved uniqueness.
+		large, err := eventsourcing.CheckEventSize(pe.Event.EventType(), payload)
+		if err != nil {
+			return nil, err
+		}
+		if large {
+			slog.Warn("event payload is large; log throughput is a function of payload size, "+
+				"and bytes this size usually belong in object storage with the event carrying a reference",
+				"event_type", pe.Event.EventType(),
+				"bytes", len(payload),
+				"threshold", eventsourcing.LargeEventBytes)
 		}
 		meta, err := s.codec.MarshalMetadata(pe.Meta)
 		if err != nil {

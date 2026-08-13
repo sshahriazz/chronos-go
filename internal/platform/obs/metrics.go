@@ -55,6 +55,13 @@ type Metrics struct {
 	// ProjectionHolder reports which process holds each projection's lease.
 	ProjectionHolder *prometheus.GaugeVec
 
+	// ProjectionAnnouncementsDropped counts realtime messages discarded because
+	// the publisher was behind. Dropping is deliberate — the read model never
+	// waits on Centrifugo — so this is not an error rate; it is the only sign
+	// that the realtime path is failing, since the rows and checkpoints stay
+	// perfectly healthy while browsers stop seeing updates.
+	ProjectionAnnouncementsDropped *prometheus.CounterVec
+
 	// ---- reactors --------------------------------------------------------
 
 	// ReactorHandled counts effects actually performed.
@@ -182,6 +189,8 @@ func New() *Metrics {
 			"projection"),
 		ProjectionHolder: gauge(reg, "chronos_projection_lease_held",
 			"1 on the instance holding a projection's single-writer lease.", "projection", "holder"),
+		ProjectionAnnouncementsDropped: counter(reg, "chronos_projection_announcements_dropped_total",
+			"Realtime messages discarded because the publisher was behind.", "projection"),
 
 		ReactorHandled: counter(reg, "chronos_reactor_handled_total",
 			"Effects performed by a reactor.", "reactor"),
@@ -242,6 +251,44 @@ func New() *Metrics {
 
 // Registry exposes the collector set for an HTTP handler.
 func (m *Metrics) Registry() *prometheus.Registry { return m.registry }
+
+// InitProjection publishes a projection's series at zero, before it has done
+// anything.
+//
+// A Prometheus *Vec exports NOTHING for a label value it has never seen, so a
+// projection that has applied no events is ABSENT rather than zero — and absent
+// and broken look identical on a dashboard and in an alert rule. `rate(...) == 0`
+// never fires for a series that does not exist, which is precisely the case
+// worth alerting on: a projector that started and then applied nothing.
+//
+// Called from the composition root, where the set of projections is known, so
+// every panel renders a number from the first scrape.
+func (m *Metrics) InitProjection(name string) {
+	m.ProjectionEvents.WithLabelValues(name)
+	m.ProjectionSkipped.WithLabelValues(name)
+	m.ProjectionErrors.WithLabelValues(name)
+	m.ProjectionAnnouncementsDropped.WithLabelValues(name)
+	m.ProjectionBatchSeconds.WithLabelValues(name)
+	// Gauges are published explicitly rather than left at their zero value: a
+	// projection that has not yet reported live IS behind, and saying so is the
+	// honest answer while it catches up.
+	m.ProjectionLive.WithLabelValues(name).Set(0)
+	m.ProjectionPosition.WithLabelValues(name).Set(0)
+}
+
+// InitReactor does the same for a reactor.
+//
+// The parked gauge matters most here: a reactor with a parked backlog and no
+// series is indistinguishable from a healthy one, and parked mail is mail
+// nobody received.
+func (m *Metrics) InitReactor(name string) {
+	m.ReactorHandled.WithLabelValues(name)
+	m.ReactorDuplicates.WithLabelValues(name)
+	m.ReactorFailures.WithLabelValues(name)
+	m.ReactorPoison.WithLabelValues(name)
+	m.ReactorSeconds.WithLabelValues(name)
+	m.ReactorParked.WithLabelValues(name).Set(0)
+}
 
 func counter(reg prometheus.Registerer, name, help string, labels ...string) *prometheus.CounterVec {
 	c := prometheus.NewCounterVec(prometheus.CounterOpts{Name: name, Help: help}, labels)

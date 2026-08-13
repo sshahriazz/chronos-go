@@ -39,6 +39,30 @@ linters:
             - pkg: go.temporal.io
               desc: "no vendor SDKs in the kernel"
 
+        # ── One JSON library, one place (ADR-047) ──
+        #
+        # encoding/json v1 and v2 disagree about things that silently corrupt
+        # data rather than failing: v1 matches field names case-insensitively
+        # and v2 does not, v1 takes the last of duplicate object members and v2
+        # rejects them, v1 writes nil slices as null and v2 as []. Two libraries
+        # in one binary means two answers to "what does this document mean", and
+        # the disagreement is invisible until it is already in the event log.
+        #
+        # So v1 is reachable from exactly two places: the kernel that wraps v2,
+        # and the one test that deliberately uses v1 as an INDEPENDENT parser to
+        # check stored bytes — producing the expected value with the codec under
+        # test would make both sides fail identically.
+        json-goes-through-the-codec:
+          files:
+            - "**/*.go"
+            - "!**/internal/platform/codec/**"
+            - "!**/internal/adapter/kurrentdb/codecmigration_integration_test.go"
+          deny:
+            - pkg: encoding/json
+              desc: "use internal/platform/codec, which wraps encoding/json/v2 and forces the strict-vs-tolerant choice into the function name (ADR-047)"
+            - pkg: encoding/json/v2
+              desc: "import the codec kernel, not the experimental package directly: it is outside the Go 1 compatibility promise, and the kernel is what keeps the blast radius at one file (ADR-047)"
+
         # ── Domain is pure: no I/O, no transport, no serialization ──
         domain-is-pure:
           files:

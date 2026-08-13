@@ -33,9 +33,17 @@ type Envelope = eventsourcing.Envelope
 type Projection interface {
 	Name() string
 
-	// Filter narrows $all server-side. Category streams are unavailable to us
-	// (see eventsourcing.SubscriptionFilter), so this is the only way to avoid
-	// shipping every event in the system to every projector.
+	// Filter narrows $all server-side: without it every event in the system is
+	// shipped to every projector over the wire.
+	//
+	// It must select on ONE dimension — stream prefixes, event-type prefixes, or
+	// whole event types — because a KurrentDB filter matches streams or types
+	// and never both. A mixed filter is refused at startup rather than silently
+	// reduced to whichever half the adapter honours; see
+	// eventsourcing.SubscriptionFilter.Validate.
+	//
+	// The narrower it is, the cheaper a REBUILD becomes: one whole category
+	// reads $ce-, one whole event type reads $et-, and anything else scans $all.
 	Filter() eventsourcing.SubscriptionFilter
 
 	// Apply queues one event's effect. It runs inside a batch already scoped to

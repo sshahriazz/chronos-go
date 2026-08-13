@@ -126,8 +126,16 @@ type GetIdempotencyKeyRow struct {
 
 // Read the record held by whoever won the claim.
 //
-// Expired rows are treated as absent. Returning one would replay a response past
-// the TTL that bounds how long it may be kept.
+// Reached only when ClaimIdempotencyKey found a LIVE row — an expired one is
+// taken over there and never gets this far, and `now()` is the transaction
+// timestamp, so the two statements cannot disagree about which side of the
+// expiry a row falls on.
+//
+// The predicate is therefore unreachable defence, and that is deliberate rather
+// than accidental: verified by deleting it and watching the tests still pass,
+// then by deleting the claim's expiry check as well and watching them fail. If
+// the takeover above is ever loosened, this is what stops a response being
+// replayed past the TTL that bounds how long it may be kept.
 func (q *Queries) GetIdempotencyKey(ctx context.Context, arg GetIdempotencyKeyParams) (GetIdempotencyKeyRow, error) {
 	row := q.db.QueryRow(ctx, GetIdempotencyKey, arg.Principal, arg.Operation, arg.Key)
 	var i GetIdempotencyKeyRow

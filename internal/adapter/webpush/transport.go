@@ -12,13 +12,13 @@ package webpush
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
 	webpushgo "github.com/SherClockHolmes/webpush-go"
+	"github.com/chronos/chronos-go/internal/platform/codec"
 	"github.com/chronos/chronos-go/internal/platform/notify"
 )
 
@@ -167,7 +167,11 @@ func (t *Transport) Deliver(ctx context.Context, n notify.Notification) error {
 		return nil
 	}
 
-	payload, err := json.Marshal(buildPayload(n, title, body, t.baseURL))
+	// These bytes are decrypted and parsed by a service worker we do not own, so
+	// the wire shape is not ours to change casually — but Payload is four
+	// strings with no slice or map in it, so v2's `[]`-instead-of-`null`
+	// difference cannot reach the browser and NullEmpty would be a no-op.
+	payload, err := codec.Marshal(buildPayload(n, title, body, t.baseURL))
 	if err != nil {
 		return fmt.Errorf("webpush: encoding payload: %w", err)
 	}

@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Design complete; the platform kernel is under construction.** Read in this
 order before touching anything:
 
-1. [docs/DECISIONS.md](docs/DECISIONS.md) — 45 ADRs. Settled; do not relitigate.
+1. [docs/DECISIONS.md](docs/DECISIONS.md) — 47 ADRs. Settled; do not relitigate.
 2. [docs/CONVENTIONS.md](docs/CONVENTIONS.md) — **layout, import contract, event
    schema, IDs, errors, idempotency, API and test conventions.** Read before
    writing any Go.
@@ -194,7 +194,15 @@ PostgreSQL hosts four isolated databases on one server: `chronos` (read model),
 - **No business meaning in S3 keys or bucket names.** Object↔tenant mapping lives
   in PostgreSQL; permission lives in OpenFGA. Objects are immutable — a new
   version is a new key plus a new event.
-- **Mail is sent from a Temporal Activity**, never inline in a handler.
+- **Mail is sent from a Temporal Activity**, never inline in a handler. The
+  notification reactor starts `chronos.notification.Send.v1` per recipient, keyed
+  by `<event id>:<index>` so a redelivery is refused rather than sent twice. With
+  `TEMPORAL_ENABLED=false` it falls back to inline dispatch through the same
+  dispatcher — correct, but the retry is then the subscription's, and an SMTP
+  outage becomes a parked backlog instead of an hour of durable retries.
+- **Nothing personal enters workflow history.** It is durable and replicated, so
+  ADR-002 applies exactly as it does to the event log: a workflow carries a
+  `SubjectID`, and the activity resolves the address from the vault at send time.
 - **Go services export OTLP to the collector, never to Tempo directly.** Set
   `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317`. Sampling and attribute
   scrubbing belong in `infra/otel-collector/config.yaml`, not in service code.

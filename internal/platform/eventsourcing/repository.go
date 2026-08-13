@@ -120,18 +120,11 @@ func (r *Repository[T]) Load(ctx context.Context, key string) (T, error) {
 		return agg, nil
 	}
 
-	events := make([]Event, 0, len(recorded))
-	for _, rec := range recorded {
-		// $all and stream reads can surface system events; a domain aggregate
-		// must never try to decode one.
-		if rec.IsSystem() {
-			continue
-		}
-		e, err := r.decode(rec)
-		if err != nil {
-			return agg, fmt.Errorf("loading %s at revision %d: %w", stream, rec.Revision, err)
-		}
-		events = append(events, e)
+	// decodeAll skips system events: $all and stream reads can surface them, and
+	// a domain aggregate must never try to decode one.
+	events, err := r.decodeAll(stream, recorded)
+	if err != nil {
+		return agg, err
 	}
 
 	rebuild(agg, events, recorded[len(recorded)-1].Revision)
@@ -323,6 +316,13 @@ func (r *Repository[T]) Save(
 	if err != nil {
 		return AppendResult{}, err
 	}
+
+	// The causation chain, resolved ONCE for the whole append so every event of
+	// one command shares a correlation id. Resolved here rather than at the call
+	// site because a handler that forgets it produces an event whose origin can
+	// never be reconstructed — the log is append-only.
+	meta = applyTrace(meta, TraceFrom(ctx),
+		DeriveEventID(idempotencyKey, 0).String(), idempotencyKey)
 
 	events := make([]PendingEvent, 0, len(pending))
 	for i, e := range pending {
