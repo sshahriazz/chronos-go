@@ -1,0 +1,11 @@
+Hello{{if .Name}} {{.Name}}{{end}},
+
+Your last recovery code was used on {{datetime .OccurredAt}}. You have none
+left.
+
+If you lose your authenticator now, there is no second way back into this
+account. Generate a new set, and consider adding another authenticator:
+
+  {{url "/settings/security"}}
+
+If you did not use these codes yourself, somebody else has been using them.

@@ -178,7 +178,9 @@ one. Compromise revokes everything including the current one.
 - Optional by design — a passwordless account is a first-class state, not a
   degraded one (§5, §7). **Every account passes through it.** Registration takes
   an address and nothing else; the first password is supplied to `VerifyEmail`,
-  by whoever follows the link that was mailed to that address. See §4.3.
+  by whoever follows the link that was mailed to that address. See §4.3. A reset
+  cannot substitute for that link: it changes an existing password and refuses an
+  account that has none.
 
 - **Peppered by encrypting the digest, not by concatenating a secret into it:**
 
@@ -283,31 +285,90 @@ pre-verification account has no credential, so no session can exist — and that
 precisely why it was written now. The rule is free while it is a no-op and
 expensive to retrofit once it is not.
 
-The three variants are currently **unreachable, and only because the flows they
-attack do not exist**: there is no password reset, no email change and no
-federated linking in this module — no RPC, no use case, no event. That is not a
-mitigation, it is an absence, and it expires the day any of them is built. Each
-one carries the requirement in its own section (§4.5, §7, §12) rather than only
-here, because a rule recorded far from the code that must obey it is a rule that
-gets missed.
+**The password reset is now built, and it obeys this rule in full** — see §4.5.
+That is the first flow to make the three variants reachable, and it closes all
+three at the point they become reachable: it voids every session with no
+exception, every outstanding token of every purpose, and any pending identifier
+change, in the same command as the credential change.
 
-### 4.5 Password reset — NOT BUILT, and what it must do on arrival
+The remaining two flows — email change and federated linking — still do not exist
+in this module: no RPC, no use case, no event. That is not a mitigation, it is an
+absence, and it expires the day either is built. Each carries the requirement in
+its own section (§7, §12) rather than only here, because a rule recorded far from
+the code that must obey it is a rule that gets missed.
 
-There is no reset flow. When one is written it MUST, in the same transaction as
-the credential change:
+### 4.5 Password reset — BUILT, and what it does
 
-- **Void every session for the subject**, including the one performing the reset
-  if it predates the proof. A reset exists because control may have been lost;
-  keeping any prior session is assuming the opposite.
-- **Void every pending identifier change**, or an attacker's queued email change
-  survives the recovery and re-takes the account afterwards.
+Two RPCs, both public, both reached by somebody who cannot sign in:
+`RequestPasswordReset` takes an address and answers nothing, and `ResetPassword`
+takes the emailed token and the new password and answers nothing. The
+implementation is `internal/modules/identity/app/passwordreset.go`; the reasoning
+behind the three decisions the specification below did not settle is ADR-053.
+
+The five rules this section demanded before the flow existed, and where each one
+now lives:
+
+- **Void every session for the subject**, including the one performing the reset.
+  `RevokeAllSessions` with a zero `Except`, under
+  `RevokeReasonPasswordReset`. Unlike `VerifyEmail`'s call this one is not a
+  no-op: a resettable account has a password and can therefore have sessions.
+- **Void every pending identifier change.**
+  `domain.User.VoidPendingIdentifierChange` is called on every reset and records
+  nothing, because no flow in this module can create a pending change yet — the
+  same reason `VerifyEmail`'s revocation was written before any session could
+  exist. What actually enforces it today is the next rule: a pending change
+  cannot be completed without its live verification token.
 - **Void every outstanding token of every purpose** for that subject, not only
-  reset tokens.
-- **Never bypass the second factor** (ASVS 5.0 V6.4.3). This is the most commonly
-  broken requirement in the set, and breaking it converts "attacker controls the
-  mailbox" into full account takeover.
-- **Send the link to the STORED verified address**, never to an address the
-  request supplied.
+  reset tokens. One statement scoped by the subject
+  (`RevokeAllTokensForSubject`), never a loop over the known purposes — a loop is
+  correct until somebody adds a purpose and forgets it, and the symptom is a live
+  token that survives a reset with nothing to say so.
+- **Never bypass the second factor** (ASVS 5.0 V6.4.3). `ResetPasswordResponse`
+  is empty: no session, no bearer token, no identifiers. The reset changes one
+  credential; the caller then signs in normally, presenting whatever factors the
+  account has, unchanged. It does not disable TOTP, consume a recovery code,
+  activate a Pending account, or re-enable a locked-out authenticator.
+- **Send the link to the STORED verified address**, never one the request
+  supplied. The request's address is a LOOKUP key and nothing else: the appended
+  `PasswordResetRequested` carries a `SubjectID` pseudonym and a blind index, and
+  the issuer resolves the address from the vault at send time. Nothing in the
+  request path can address mail at all.
+
+**The credential compare-and-set is the flow's only serialization point.** Two
+reset links can be redeemed at the same instant and both consume their own token
+successfully, because they are different digests in different rows. Exactly one
+wins the `ResetCredentialPassword` update, and the loser writes nothing and
+appends nothing.
+
+**Order of destruction.** Tokens, sessions, then the verifier, then the event.
+Revoking first means a failure leaves the password unchanged and nothing granted;
+the opposite order can leave a new password live beside the attacker's surviving
+session. The verifier moves before the event for the same reason in the other
+direction — appending first and failing to write would leave the OLD password
+working after the log and the user were both told it was replaced. A failure
+between the two is visible: §4.2's reconciliation reports a verifier the log
+cannot account for, and the append itself retries a lost expected-revision race
+three times before giving up, because a login writing to the same account stream
+is an ordinary event.
+
+**Enumeration.** Five outcomes — no account, resettable, passwordless,
+deactivated, suspended — produce byte-identical responses. Both mail ceilings are
+spent BEFORE the account lookup, so the request at which a caller is refused says
+nothing about which addresses have accounts, and the per-address counter is the
+SAME one verification mail spends (NOTIFICATIONS.md §4: "an hourly ceiling per
+address across all classes").
+
+**What is still missing.** Nothing consumes `PasswordResetRequested`. The
+reset-mail issuer is the component the verification reactor was before
+`cmd/worker` grew one: the token cannot travel in an event (ADR-002), so whoever
+sends the mail must mint it. Until that reactor is registered, a reset link is
+appended to the log and never delivered.
+
+**Known gap.** A password credential that has been locked out by consecutive
+failures (`AuthenticatorDisabled`) cannot be reset — the statement requires
+`disabled_at IS NULL`, and `UsablePasswordCredential` skips it. Re-enabling a
+locked-out authenticator belongs to §11's anomaly response, not to a flow reached
+by anyone who can trigger mail to the address.
 
 ### 4.1 Compromised-credential detection — a lifecycle, not a signup check
 

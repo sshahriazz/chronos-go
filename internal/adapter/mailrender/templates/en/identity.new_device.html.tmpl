@@ -1,0 +1,11 @@
+{{define "title"}}New sign-in from a device we haven't seen before{{end}}
+{{define "content"}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 14px;">Your Chronos account was signed in to from a device we have not seen
+  before, on <strong>{{datetime .OccurredAt}}</strong>.</p>
+<p style="margin:0 0 14px;">If that was you — a new phone, a new browser, a reinstall — nothing
+  further is needed. This message is sent only the first time a device is used, not on every sign-in.</p>
+<p style="margin:0 0 20px;">
+  <a href="{{url "/settings/sessions"}}" style="display:inline-block;background:#1a1d21;color:#ffffff;text-decoration:none;padding:11px 20px;border-radius:6px;font-size:14px;font-weight:500;">Review your devices</a>
+</p>
+{{end}}

@@ -1,0 +1,7 @@
+{{define "title"}}Your Chronos account has been suspended{{end}}
+{{define "content"}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 14px;">Your Chronos account was suspended on <strong>{{datetime .OccurredAt}}</strong>.
+  You cannot sign in, and you cannot lift this yourself.</p>
+<p style="margin:0 0 20px;">Contact support if you believe this is a mistake. Nothing has been deleted.</p>
+{{end}}

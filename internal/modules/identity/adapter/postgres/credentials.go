@@ -274,6 +274,54 @@ func (c *Credentials) Rehash(
 	})
 }
 
+// Replace swaps a password verifier from a reset, but only if the row still
+// holds the one the reset was decided against.
+//
+// The guard is the reset flow's only serialization point; see
+// app.PasswordCredentials.Replace and the ResetCredentialPassword statement for
+// the concurrency it exists to make impossible.
+func (c *Credentials) Replace(
+	ctx context.Context, cred ids.CredentialID, expected, replacement string, pepperVersion int32,
+) error {
+	switch {
+	case cred.IsZero():
+		return errors.New("identity/postgres: replacing a password needs a credential id")
+	case expected == "":
+		// Without it the statement degenerates into an unconditional write, and
+		// the losing half of two simultaneous resets would silently overwrite the
+		// winning one.
+		return errors.New("identity/postgres: replacing a password needs the verifier the " +
+			"reset was decided against, or two simultaneous resets both write and the " +
+			"account keeps whichever committed last")
+	case replacement == "":
+		return errors.New("identity/postgres: replacing a password needs a replacement verifier")
+	case replacement == expected:
+		// Two different passwords cannot produce one verifier — the salt alone
+		// makes that impossible — so this means the caller passed the stored value
+		// back as the replacement, and writing it would report a reset that
+		// changed nothing.
+		return errors.New("identity/postgres: the replacement verifier is the stored one")
+	case pepperVersion < 1:
+		return fmt.Errorf("identity/postgres: pepper version %d is not a real version; "+
+			"the rotation job would never find this row", pepperVersion)
+	}
+
+	return c.tx.InSystemTx(ctx, func(ctx context.Context, q db.Querier) error {
+		rows, err := q.Exec(ctx, identitydb.ResetCredentialPassword,
+			replacement, pepperVersion, cred.String(), expected)
+		if err != nil {
+			return fmt.Errorf("identity/postgres: replacing a password verifier: %w", err)
+		}
+		if rows == 0 {
+			// Changed, disabled, gone, or not a password. Under contention this is
+			// the NORMAL outcome for the losing reset, and it must abort: whoever
+			// won wrote a password a person deliberately chose.
+			return app.ErrCredentialMoved
+		}
+		return nil
+	})
+}
+
 // RecordSuccess stamps the credential as used and clears its failure count.
 func (c *Credentials) RecordSuccess(ctx context.Context, cred ids.CredentialID) error {
 	if cred.IsZero() {

@@ -1,0 +1,20 @@
+Hello{{if .Name}} {{.Name}}{{end}},
+
+Two-factor authentication was turned OFF on your Chronos account on
+{{datetime .OccurredAt}}{{if .ByAnotherParty}}, by an administrator rather than by you{{end}}.
+
+Your account is now protected by your password alone.
+
+If you did not do this, someone else has access to your account. Disabling a
+second factor is the first thing an attacker does after taking one over.
+{{if .RevokeURL}}
+Use this link to sign out every session and require a new password:
+
+  {{.RevokeURL}}
+
+It does not sign you in.
+{{else}}
+Sign in and re-enable two-factor authentication straight away:
+
+  {{url "/settings/security"}}
+{{end}}

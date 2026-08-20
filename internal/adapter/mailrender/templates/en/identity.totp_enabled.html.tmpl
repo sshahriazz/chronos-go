@@ -1,0 +1,9 @@
+{{define "title"}}Two-factor authentication is on{{end}}
+{{define "content"}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 14px;">Two-factor authentication was enabled on your Chronos account on
+  <strong>{{datetime .OccurredAt}}</strong>. Signing in now needs a code from your authenticator
+  app as well as your password.</p>
+<p style="margin:0 0 20px;">If this wasn't you,
+  <a href="{{url "/settings/security"}}" style="color:#1a1d21;">review your security settings</a>.</p>
+{{end}}

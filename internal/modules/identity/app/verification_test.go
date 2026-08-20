@@ -49,6 +49,12 @@ func (s *sequencedTokens) Consume(
 	return s.live.Consume(ctx, purpose, digest, now)
 }
 
+// RevokeAllPurposes belongs to the reset. An issuer voids one purpose, never
+// every purpose, so this fails loudly rather than quietly widening the sweep.
+func (s *sequencedTokens) RevokeAllPurposes(context.Context, string) (int, error) {
+	return 0, errors.New("not used by the verification issuer")
+}
+
 func (s *sequencedTokens) RevokeAll(
 	ctx context.Context, purpose TokenPurpose, subjectID string,
 ) error {

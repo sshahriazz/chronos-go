@@ -1,0 +1,11 @@
+{{define "title"}}Your Chronos account was reactivated{{end}}
+{{define "content"}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 14px;">Your Chronos account was reactivated on <strong>{{datetime .OccurredAt}}</strong>{{if .ByAnotherParty}},
+  by an administrator rather than by you{{end}}. You can sign in again.</p>
+<p style="margin:0 0 20px;">If you deactivated this account deliberately and did not turn it back on,
+  somebody else has your credentials.</p>
+<p style="margin:0 0 20px;">
+  <a href="{{url "/settings/security"}}" style="display:inline-block;background:#b42318;color:#ffffff;text-decoration:none;padding:11px 20px;border-radius:6px;font-size:14px;font-weight:500;">Change your password</a>
+</p>
+{{end}}

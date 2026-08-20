@@ -1,0 +1,52 @@
+# Hot reload for cmd/projector. Run with: make dev-projector
+#
+# Watching is deliberately narrow. The rule is: watch only what a Go rebuild
+# depends on AND a human edits by hand.
+root = "."
+tmp_dir = "bin/air"
+
+[build]
+  cmd = "go build -o ./bin/air/projector ./cmd/projector"
+  bin = "./bin/air/projector"
+  args_bin = ["-addr", ":${PROJECTOR_PORT:-8093}"]
+
+  # Go sources only. A .sql, .proto or .json change does not rebuild anything
+  # by itself — it needs `make sqlc` / `make api` first, and those write into
+  # gen/, which is excluded below for the reason given there.
+  include_ext = ["go"]
+
+  exclude_regex = ["_test\\.go"]
+
+  exclude_dir = [
+    # Build output. Watching it means every build triggers the next one.
+    "bin",
+    # 1.2 MB of GENERATED code. It is still compiled — exclusion only stops it
+    # TRIGGERING rebuilds. `make api`/`make sqlc` rewrite it wholesale, so a
+    # watcher here turns one regeneration into a rebuild storm.
+    "gen",
+    # Nothing a Go build reads.
+    "docs", "infra", "proto", "scripts", "db", "cmd/apidocs/assets",
+    ".git", ".github", ".codegraph", ".claude", "node_modules", "testdata",
+  ]
+
+  # Debounce: an editor "save all" or a `gofmt -w` across a package arrives as
+  # a burst of writes, and each one would otherwise start its own build.
+  delay = 1000
+
+  # Leave the last good binary running when a build fails, so a syntax error
+  # mid-edit does not also take the service down.
+  stop_on_error = true
+
+  # SIGINT, not SIGKILL. These services hold KurrentDB subscriptions and a
+  # Postgres pool, and their shutdown path is 5s (cmd/*/main.go). A hard kill
+  # mid-checkpoint is how a projector loses its resume point.
+  send_interrupt = true
+  kill_delay = "6s"
+
+  log = "bin/air/projector-build-errors.log"
+
+[misc]
+  clean_on_exit = true
+
+[screen]
+  clear_on_rebuild = false

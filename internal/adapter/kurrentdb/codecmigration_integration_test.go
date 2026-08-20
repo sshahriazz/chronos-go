@@ -14,6 +14,7 @@ import (
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
 	kdb "github.com/chronos/chronos-go/internal/adapter/kurrentdb"
 	es "github.com/chronos/chronos-go/internal/platform/eventsourcing"
+	"github.com/chronos/chronos-go/internal/platform/ids"
 	"github.com/kurrent-io/KurrentDB-Client-Go/kurrentdb"
 )
 
@@ -47,6 +48,21 @@ func TestEveryStoredEventStillDecodes(t *testing.T) {
 	c := eventcodec.NewJSON(es.NewUpcasterRegistry())
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+
+	// Seed one event of our own, carrying a known occurredAt, BEFORE scanning.
+	//
+	// Without this the test is order-dependent: on a freshly nuked log it read
+	// 107 events of which 84 were system and none carried an occurredAt, so it
+	// failed its own "the check ran on nothing" guard — and passed only because
+	// `identityit` happened to run earlier and leave events behind. A test that
+	// needs another package to have run first is not a test of the log, it is a
+	// test of `go test`'s ordering (CONVENTIONS §9: tests MUST NOT depend on
+	// execution order).
+	//
+	// Seeding does not weaken the guard. The scan still reads the WHOLE log, so
+	// every event any earlier run wrote is still checked; this only guarantees
+	// the sample is never empty of the one shape the assertion needs.
+	seedOccurredAt(ctx, t, conn)
 
 	stream, err := client.ReadAll(ctx, kurrentdb.ReadAllOptions{
 		From:      kurrentdb.Start{},
@@ -152,3 +168,44 @@ func rawString(b []byte, key string) (string, bool) {
 	s, ok := m[key].(string)
 	return s, ok
 }
+
+// seedOccurredAt appends one event whose metadata carries an occurredAt, so the
+// scan above always has at least one timestamp to compare against its stored
+// bytes.
+//
+// Deliberately its own stream per run: it must never contend with anything, and
+// a unique name means repeated runs accumulate harmlessly rather than needing a
+// precondition on revision.
+func seedOccurredAt(ctx context.Context, t *testing.T, conn string) {
+	t.Helper()
+
+	client, err := kdb.Dial(conn)
+	if err != nil {
+		t.Fatalf("seed dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	codec := eventcodec.NewJSON(es.NewUpcasterRegistry())
+	codec.Register("codecmigration.Seeded.v1", func() es.Event { return &seeded{} })
+	store := kdb.NewStore(client, codec)
+
+	stream, err := es.NewStreamID("codecmigration", uniqueSuffix(t))
+	if err != nil {
+		t.Fatalf("seed stream id: %v", err)
+	}
+	if _, err := store.Append(ctx, stream, es.NoStream(), []es.PendingEvent{{
+		ID:    ids.New[ids.Event](time.Now(), ids.Entropy()),
+		Event: &seeded{Note: "codec migration probe"},
+		// OccurredAt is the whole point: it is the field whose case-sensitive
+		// matching this test exists to detect.
+		Meta: es.Metadata{SchemaVersion: 1, OccurredAt: time.Now().UTC()},
+	}}); err != nil {
+		t.Fatalf("seed append: %v", err)
+	}
+}
+
+type seeded struct {
+	Note string `json:"note"`
+}
+
+func (*seeded) EventType() string { return "codecmigration.Seeded.v1" }

@@ -1,0 +1,25 @@
+{{define "title"}}Two-factor authentication was turned off{{end}}
+{{define "content"}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 14px;">Two-factor authentication was turned <strong>off</strong> on your Chronos
+  account on <strong>{{datetime .OccurredAt}}</strong>{{if .ByAnotherParty}}, by an administrator rather than by you{{end}}.</p>
+<p style="margin:0 0 14px;">Your account is now protected by your password alone.</p>
+<p style="margin:0 0 20px;">If you did not do this, someone else has access to your account —
+  disabling a second factor is the first thing an attacker does after taking one over.</p>
+<!--
+  The "this wasn't me" link triggers a protective action and NEVER authenticates
+  the person clicking it (NOTIFICATIONS §4). A leaked alert email therefore
+  cannot become an account takeover. Absent it, the message sends the reader to
+  a page that makes them sign in, which is the safe degradation.
+-->
+{{if .RevokeURL}}
+<p style="margin:0 0 20px;">
+  <a href="{{.RevokeURL}}" style="display:inline-block;background:#b42318;color:#ffffff;text-decoration:none;padding:11px 20px;border-radius:6px;font-size:14px;font-weight:500;">This wasn't me</a>
+</p>
+<p style="margin:0;color:#6b7280;font-size:13px;">This signs out every session and requires a new password. It does not sign you in.</p>
+{{else}}
+<p style="margin:0 0 20px;">
+  <a href="{{url "/settings/security"}}" style="display:inline-block;background:#b42318;color:#ffffff;text-decoration:none;padding:11px 20px;border-radius:6px;font-size:14px;font-weight:500;">Re-enable two-factor authentication</a>
+</p>
+{{end}}
+{{end}}

@@ -1,0 +1,9 @@
+Hello{{if .Name}} {{.Name}}{{end}},
+
+Two-factor authentication was enabled on your Chronos account on
+{{datetime .OccurredAt}}. Signing in now needs a code from your authenticator
+app as well as your password.
+
+If this wasn't you, sign in and review your security settings:
+
+  {{url "/settings/security"}}

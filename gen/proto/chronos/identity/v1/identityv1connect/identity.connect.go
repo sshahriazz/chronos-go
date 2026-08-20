@@ -99,6 +99,12 @@ const (
 	// IdentityServiceResendEmailVerificationProcedure is the fully-qualified name of the
 	// IdentityService's ResendEmailVerification RPC.
 	IdentityServiceResendEmailVerificationProcedure = "/chronos.identity.v1.IdentityService/ResendEmailVerification"
+	// IdentityServiceRequestPasswordResetProcedure is the fully-qualified name of the IdentityService's
+	// RequestPasswordReset RPC.
+	IdentityServiceRequestPasswordResetProcedure = "/chronos.identity.v1.IdentityService/RequestPasswordReset"
+	// IdentityServiceResetPasswordProcedure is the fully-qualified name of the IdentityService's
+	// ResetPassword RPC.
+	IdentityServiceResetPasswordProcedure = "/chronos.identity.v1.IdentityService/ResetPassword"
 	// IdentityServiceAuthenticateProcedure is the fully-qualified name of the IdentityService's
 	// Authenticate RPC.
 	IdentityServiceAuthenticateProcedure = "/chronos.identity.v1.IdentityService/Authenticate"
@@ -174,6 +180,40 @@ type IdentityServiceClient interface {
 	// A WRITE: the successful path appends EmailVerificationRequested to the
 	// account's stream, and the verification reactor does the rest.
 	ResendEmailVerification(context.Context, *connect.Request[v1.ResendEmailVerificationRequest]) (*connect.Response[v1.ResendEmailVerificationResponse], error)
+	// RequestPasswordReset sends a reset link to the address a registered account
+	// holds.
+	//
+	// Public, and the choice is forced rather than preferred: the population that
+	// needs this call is exactly the population that cannot sign in.
+	//
+	// The cost of being public is that it is an unauthenticated mail trigger
+	// pointed at a third party's mailbox, so it is rate limited on TWO axes before
+	// anything is looked up — per address, which bounds mail-bombing one victim,
+	// and per caller, which bounds an enumeration sweep. Both counters are
+	// consumed whether or not an account exists, so the ceiling itself is not an
+	// oracle. The per-address counter is the SAME one verification mail spends
+	// (NOTIFICATIONS.md §4: "an hourly ceiling per address across all classes"), so
+	// an attacker cannot double a victim's mail by alternating between the two
+	// endpoints.
+	//
+	// A WRITE: the successful path appends PasswordResetRequested to the account's
+	// stream, and the reset-mail issuer does the rest.
+	RequestPasswordReset(context.Context, *connect.Request[v1.RequestPasswordResetRequest]) (*connect.Response[v1.RequestPasswordResetResponse], error)
+	// ResetPassword redeems a reset link and replaces the account's password.
+	//
+	// Public: it is reached from a link in a mailbox, by a browser that has never
+	// authenticated. The token IS the authentication, and it is single-use.
+	//
+	// It grants NOTHING beyond the credential change. No session is created, no
+	// bearer token is returned, the second factor is untouched, and a Pending
+	// account is not activated — so a reset cannot be used to bypass the second
+	// factor (ASVS 5.0 V6.4.3). The caller's next act is an ordinary
+	// CreateSession.
+	//
+	// In the same request it voids every session for the account including any
+	// held by whoever is resetting, every outstanding token of every purpose, and
+	// any pending identifier change (identity.md §4.4, §4.5).
+	ResetPassword(context.Context, *connect.Request[v1.ResetPasswordRequest]) (*connect.Response[v1.ResetPasswordResponse], error)
 	// Authenticate verifies the factors presented and reports what remains
 	// (ADR-050).
 	//
@@ -324,6 +364,18 @@ func NewIdentityServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(identityServiceMethods.ByName("ResendEmailVerification")),
 			connect.WithClientOptions(opts...),
 		),
+		requestPasswordReset: connect.NewClient[v1.RequestPasswordResetRequest, v1.RequestPasswordResetResponse](
+			httpClient,
+			baseURL+IdentityServiceRequestPasswordResetProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("RequestPasswordReset")),
+			connect.WithClientOptions(opts...),
+		),
+		resetPassword: connect.NewClient[v1.ResetPasswordRequest, v1.ResetPasswordResponse](
+			httpClient,
+			baseURL+IdentityServiceResetPasswordProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("ResetPassword")),
+			connect.WithClientOptions(opts...),
+		),
 		authenticate: connect.NewClient[v1.AuthenticateRequest, v1.AuthenticateResponse](
 			httpClient,
 			baseURL+IdentityServiceAuthenticateProcedure,
@@ -402,6 +454,8 @@ type identityServiceClient struct {
 	register                *connect.Client[v1.RegisterRequest, v1.RegisterResponse]
 	verifyEmail             *connect.Client[v1.VerifyEmailRequest, v1.VerifyEmailResponse]
 	resendEmailVerification *connect.Client[v1.ResendEmailVerificationRequest, v1.ResendEmailVerificationResponse]
+	requestPasswordReset    *connect.Client[v1.RequestPasswordResetRequest, v1.RequestPasswordResetResponse]
+	resetPassword           *connect.Client[v1.ResetPasswordRequest, v1.ResetPasswordResponse]
 	authenticate            *connect.Client[v1.AuthenticateRequest, v1.AuthenticateResponse]
 	createSession           *connect.Client[v1.CreateSessionRequest, v1.CreateSessionResponse]
 	getUser                 *connect.Client[v1.GetUserRequest, v1.GetUserResponse]
@@ -428,6 +482,16 @@ func (c *identityServiceClient) VerifyEmail(ctx context.Context, req *connect.Re
 // ResendEmailVerification calls chronos.identity.v1.IdentityService.ResendEmailVerification.
 func (c *identityServiceClient) ResendEmailVerification(ctx context.Context, req *connect.Request[v1.ResendEmailVerificationRequest]) (*connect.Response[v1.ResendEmailVerificationResponse], error) {
 	return c.resendEmailVerification.CallUnary(ctx, req)
+}
+
+// RequestPasswordReset calls chronos.identity.v1.IdentityService.RequestPasswordReset.
+func (c *identityServiceClient) RequestPasswordReset(ctx context.Context, req *connect.Request[v1.RequestPasswordResetRequest]) (*connect.Response[v1.RequestPasswordResetResponse], error) {
+	return c.requestPasswordReset.CallUnary(ctx, req)
+}
+
+// ResetPassword calls chronos.identity.v1.IdentityService.ResetPassword.
+func (c *identityServiceClient) ResetPassword(ctx context.Context, req *connect.Request[v1.ResetPasswordRequest]) (*connect.Response[v1.ResetPasswordResponse], error) {
+	return c.resetPassword.CallUnary(ctx, req)
 }
 
 // Authenticate calls chronos.identity.v1.IdentityService.Authenticate.
@@ -526,6 +590,40 @@ type IdentityServiceHandler interface {
 	// A WRITE: the successful path appends EmailVerificationRequested to the
 	// account's stream, and the verification reactor does the rest.
 	ResendEmailVerification(context.Context, *connect.Request[v1.ResendEmailVerificationRequest]) (*connect.Response[v1.ResendEmailVerificationResponse], error)
+	// RequestPasswordReset sends a reset link to the address a registered account
+	// holds.
+	//
+	// Public, and the choice is forced rather than preferred: the population that
+	// needs this call is exactly the population that cannot sign in.
+	//
+	// The cost of being public is that it is an unauthenticated mail trigger
+	// pointed at a third party's mailbox, so it is rate limited on TWO axes before
+	// anything is looked up — per address, which bounds mail-bombing one victim,
+	// and per caller, which bounds an enumeration sweep. Both counters are
+	// consumed whether or not an account exists, so the ceiling itself is not an
+	// oracle. The per-address counter is the SAME one verification mail spends
+	// (NOTIFICATIONS.md §4: "an hourly ceiling per address across all classes"), so
+	// an attacker cannot double a victim's mail by alternating between the two
+	// endpoints.
+	//
+	// A WRITE: the successful path appends PasswordResetRequested to the account's
+	// stream, and the reset-mail issuer does the rest.
+	RequestPasswordReset(context.Context, *connect.Request[v1.RequestPasswordResetRequest]) (*connect.Response[v1.RequestPasswordResetResponse], error)
+	// ResetPassword redeems a reset link and replaces the account's password.
+	//
+	// Public: it is reached from a link in a mailbox, by a browser that has never
+	// authenticated. The token IS the authentication, and it is single-use.
+	//
+	// It grants NOTHING beyond the credential change. No session is created, no
+	// bearer token is returned, the second factor is untouched, and a Pending
+	// account is not activated — so a reset cannot be used to bypass the second
+	// factor (ASVS 5.0 V6.4.3). The caller's next act is an ordinary
+	// CreateSession.
+	//
+	// In the same request it voids every session for the account including any
+	// held by whoever is resetting, every outstanding token of every purpose, and
+	// any pending identifier change (identity.md §4.4, §4.5).
+	ResetPassword(context.Context, *connect.Request[v1.ResetPasswordRequest]) (*connect.Response[v1.ResetPasswordResponse], error)
 	// Authenticate verifies the factors presented and reports what remains
 	// (ADR-050).
 	//
@@ -672,6 +770,18 @@ func NewIdentityServiceHandler(svc IdentityServiceHandler, opts ...connect.Handl
 		connect.WithSchema(identityServiceMethods.ByName("ResendEmailVerification")),
 		connect.WithHandlerOptions(opts...),
 	)
+	identityServiceRequestPasswordResetHandler := connect.NewUnaryHandler(
+		IdentityServiceRequestPasswordResetProcedure,
+		svc.RequestPasswordReset,
+		connect.WithSchema(identityServiceMethods.ByName("RequestPasswordReset")),
+		connect.WithHandlerOptions(opts...),
+	)
+	identityServiceResetPasswordHandler := connect.NewUnaryHandler(
+		IdentityServiceResetPasswordProcedure,
+		svc.ResetPassword,
+		connect.WithSchema(identityServiceMethods.ByName("ResetPassword")),
+		connect.WithHandlerOptions(opts...),
+	)
 	identityServiceAuthenticateHandler := connect.NewUnaryHandler(
 		IdentityServiceAuthenticateProcedure,
 		svc.Authenticate,
@@ -750,6 +860,10 @@ func NewIdentityServiceHandler(svc IdentityServiceHandler, opts ...connect.Handl
 			identityServiceVerifyEmailHandler.ServeHTTP(w, r)
 		case IdentityServiceResendEmailVerificationProcedure:
 			identityServiceResendEmailVerificationHandler.ServeHTTP(w, r)
+		case IdentityServiceRequestPasswordResetProcedure:
+			identityServiceRequestPasswordResetHandler.ServeHTTP(w, r)
+		case IdentityServiceResetPasswordProcedure:
+			identityServiceResetPasswordHandler.ServeHTTP(w, r)
 		case IdentityServiceAuthenticateProcedure:
 			identityServiceAuthenticateHandler.ServeHTTP(w, r)
 		case IdentityServiceCreateSessionProcedure:
@@ -791,6 +905,14 @@ func (UnimplementedIdentityServiceHandler) VerifyEmail(context.Context, *connect
 
 func (UnimplementedIdentityServiceHandler) ResendEmailVerification(context.Context, *connect.Request[v1.ResendEmailVerificationRequest]) (*connect.Response[v1.ResendEmailVerificationResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.ResendEmailVerification is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) RequestPasswordReset(context.Context, *connect.Request[v1.RequestPasswordResetRequest]) (*connect.Response[v1.RequestPasswordResetResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.RequestPasswordReset is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) ResetPassword(context.Context, *connect.Request[v1.ResetPasswordRequest]) (*connect.Response[v1.ResetPasswordResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.ResetPassword is not implemented"))
 }
 
 func (UnimplementedIdentityServiceHandler) Authenticate(context.Context, *connect.Request[v1.AuthenticateRequest]) (*connect.Response[v1.AuthenticateResponse], error) {

@@ -1,0 +1,13 @@
+Hello{{if .Name}} {{.Name}}{{end}},
+
+There were {{.Failures}} failed attempts against one of the ways you sign in to
+Chronos, so we have locked that method. This happened on {{datetime .OccurredAt}}.
+
+Your account is not locked — only that one credential is, and your other ways in
+still work. That is deliberate: locking the whole account would let anyone who
+knows your address lock you out at will.
+
+If this wasn't you, somebody is guessing at your credentials. Change your
+password and check your second factor:
+
+  {{url "/settings/security"}}

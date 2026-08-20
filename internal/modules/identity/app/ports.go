@@ -386,6 +386,27 @@ type TokenStore interface {
 	// every other outstanding token. Without it, two reset links can be live at
 	// once and using one leaves the other usable.
 	RevokeAll(ctx context.Context, purpose TokenPurpose, subjectID string) error
+
+	// RevokeAllPurposes drops every outstanding token for a subject, whatever it
+	// was issued for.
+	//
+	// identity.md §4.5 requires a completed reset to void every outstanding token
+	// of EVERY purpose, not only reset tokens, and this is the method that
+	// obeys it. The variant it closes is the "trojan token": an attacker who
+	// triggered a verification mail — by registering, or through
+	// ResendEmailVerification — holds a live link that the victim's recovery does
+	// not touch, and redeems it afterwards.
+	//
+	// It is a separate method rather than a loop over TokenPurpose in the caller
+	// for a reason that only shows up later: a loop is correct exactly until
+	// somebody adds a purpose and forgets the loop, and the symptom is a token
+	// that survives a reset with nothing anywhere to say so. One statement
+	// scoped by the subject cannot acquire that gap.
+	//
+	// Returns how many were dropped, so a caller can record the fact rather than
+	// assume it. Zero is an ordinary outcome — the reset token that was just
+	// consumed is already gone.
+	RevokeAllPurposes(ctx context.Context, subjectID string) (int, error)
 }
 
 // ErrTokenNotFound covers unknown, spent and expired digests alike.

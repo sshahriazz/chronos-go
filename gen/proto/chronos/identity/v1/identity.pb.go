@@ -687,6 +687,257 @@ func (*ResendEmailVerificationResponse) Descriptor() ([]byte, []int) {
 	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{5}
 }
 
+// RequestPasswordResetRequest asks for a password-reset link.
+//
+// It names an ADDRESS rather than an account, and it has to: the population that
+// needs this call is exactly the population that cannot sign in, so there is no
+// principal to read from the context and no identifier available to the caller
+// other than the address they typed into the login form.
+//
+// The address is used to FIND an account and never to address the mail. The link
+// goes to the address the vault holds for the account that was found — never to
+// the one this request supplied (identity.md §4.5) — which is what stops this
+// message from being a way to have somebody else's reset link delivered to you.
+type RequestPasswordResetRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The address as typed. Reduced to a blind index server-side; neither the raw
+	// nor the normalized form reaches an event, a log line or an error message.
+	//
+	// The rules are RegisterRequest.email's and
+	// ResendEmailVerificationRequest.email's, character for character, and the
+	// duplication is deliberate rather than lazy. All three front the same
+	// normalizer, so a rule that differed in either direction would be visible on
+	// the wire: stricter and it refuses an address that was successfully
+	// registered, looser and "that is not an address" becomes a cheaper answer
+	// than "that address has no account", which is the first half of an
+	// enumeration oracle.
+	Email         string `protobuf:"bytes,1,opt,name=email,proto3" json:"email,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RequestPasswordResetRequest) Reset() {
+	*x = RequestPasswordResetRequest{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RequestPasswordResetRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RequestPasswordResetRequest) ProtoMessage() {}
+
+func (x *RequestPasswordResetRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RequestPasswordResetRequest.ProtoReflect.Descriptor instead.
+func (*RequestPasswordResetRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *RequestPasswordResetRequest) GetEmail() string {
+	if x != nil {
+		return x.Email
+	}
+	return ""
+}
+
+// RequestPasswordResetResponse is deliberately empty, and its emptiness is the
+// feature.
+//
+// Five outcomes reach this message and all five produce these zero bytes: no
+// account claims the address, an account claims it and can be reset, an account
+// claims it and has no password to reset, an account claims it and is
+// deactivated, and an account claims it and is suspended. Exactly one of them
+// appends an event and sends mail.
+//
+// A field here — `sent`, `already_reset`, a next-allowed timestamp — would turn
+// an unauthenticated endpoint into a precise account-existence and account-state
+// oracle for any address a prober can type. The client renders one sentence for
+// all five: "if that address has an account with a password, we have sent it a
+// reset link".
+type RequestPasswordResetResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RequestPasswordResetResponse) Reset() {
+	*x = RequestPasswordResetResponse{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RequestPasswordResetResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RequestPasswordResetResponse) ProtoMessage() {}
+
+func (x *RequestPasswordResetResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RequestPasswordResetResponse.ProtoReflect.Descriptor instead.
+func (*RequestPasswordResetResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{7}
+}
+
+// ResetPasswordRequest presents the token from a reset link and the password the
+// account will be signed into with next.
+//
+// The two travel together for VerifyEmailRequest's reason: the token proves
+// control of the mailbox and the password is the credential that control
+// authorises, in one request, so the party choosing the credential and the party
+// proving the mailbox cannot be different people.
+type ResetPasswordRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The plaintext from the link. It is hashed and spent server-side and is never
+	// stored, logged or placed in an event.
+	//
+	// `required` matches the handler, which refuses an empty token. The ceiling is
+	// a DENIAL-OF-SERVICE bound rather than a format rule, and it is deliberately
+	// far above any token this system mints so it cannot become a probe for the
+	// token's real length. A wrong token, a spent one and an expired one remain
+	// one refusal.
+	Token string `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	// The new secret as typed. Normalized under RFC 8265's OpaqueString profile
+	// before it is screened against the breach corpus and hashed.
+	//
+	// The same two numbers VerifyEmailRequest declares, and stated here for the
+	// same reason: this is an ENROLMENT surface, where the password policy is
+	// PUBLIC because it is printed beside the field the user is typing into. They
+	// are deliberately NOT repeated on AuthenticateRequest or
+	// CreateSessionRequest.
+	//
+	// Declaring them here is not an oracle. The rule is evaluated by the
+	// interceptor BEFORE the handler, and the handler screens the password before
+	// it spends the token — so both refusals are functions of the caller's own
+	// input alone, say nothing about whether the token was real, and leave it
+	// unspent. A person who chose a breached password still has their link.
+	//
+	// `min_len` counts CHARACTERS and `max_bytes` counts BYTES, matching
+	// `domain.MinPasswordRunes` (8) and `domain.MaxPasswordBytes` (4096).
+	Password      string `protobuf:"bytes,2,opt,name=password,proto3" json:"password,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResetPasswordRequest) Reset() {
+	*x = ResetPasswordRequest{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResetPasswordRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResetPasswordRequest) ProtoMessage() {}
+
+func (x *ResetPasswordRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResetPasswordRequest.ProtoReflect.Descriptor instead.
+func (*ResetPasswordRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *ResetPasswordRequest) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+func (x *ResetPasswordRequest) GetPassword() string {
+	if x != nil {
+		return x.Password
+	}
+	return ""
+}
+
+// ResetPasswordResponse is empty, and unlike VerifyEmailResponse that is a
+// SECURITY choice rather than an enumeration one.
+//
+// VerifyEmail returns the account's identifiers because presenting a valid
+// single-use token IS proof of control, and the party holding it is about to
+// become the account holder. A reset is different in one decisive respect: it
+// must not advance the caller towards a session (ASVS 5.0 V6.4.3). The caller's
+// next act is an ordinary CreateSession that presents the account's second
+// factor, unchanged by the reset, and there is nothing this message could carry
+// that would help with that.
+//
+// So it carries nothing: no subject id, no user id, no bearer token, no
+// assurance level. A reset that returned a session would convert "the attacker
+// can read the mailbox" into full account takeover in one step, and the surest
+// way not to write that is to have no field to put it in.
+type ResetPasswordResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResetPasswordResponse) Reset() {
+	*x = ResetPasswordResponse{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResetPasswordResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResetPasswordResponse) ProtoMessage() {}
+
+func (x *ResetPasswordResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResetPasswordResponse.ProtoReflect.Descriptor instead.
+func (*ResetPasswordResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{9}
+}
+
 // AuthenticateRequest is one login attempt, presenting whichever factors the
 // caller has (ADR-050).
 type AuthenticateRequest struct {
@@ -751,7 +1002,7 @@ type AuthenticateRequest struct {
 
 func (x *AuthenticateRequest) Reset() {
 	*x = AuthenticateRequest{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[6]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -763,7 +1014,7 @@ func (x *AuthenticateRequest) String() string {
 func (*AuthenticateRequest) ProtoMessage() {}
 
 func (x *AuthenticateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[6]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -776,7 +1027,7 @@ func (x *AuthenticateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuthenticateRequest.ProtoReflect.Descriptor instead.
 func (*AuthenticateRequest) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{6}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *AuthenticateRequest) GetIdentifier() string {
@@ -832,7 +1083,7 @@ type AuthenticateResponse struct {
 
 func (x *AuthenticateResponse) Reset() {
 	*x = AuthenticateResponse{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[7]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -844,7 +1095,7 @@ func (x *AuthenticateResponse) String() string {
 func (*AuthenticateResponse) ProtoMessage() {}
 
 func (x *AuthenticateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[7]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -857,7 +1108,7 @@ func (x *AuthenticateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuthenticateResponse.ProtoReflect.Descriptor instead.
 func (*AuthenticateResponse) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{7}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *AuthenticateResponse) GetSecondFactorRequired() bool {
@@ -908,7 +1159,7 @@ type CreateSessionRequest struct {
 
 func (x *CreateSessionRequest) Reset() {
 	*x = CreateSessionRequest{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[8]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -920,7 +1171,7 @@ func (x *CreateSessionRequest) String() string {
 func (*CreateSessionRequest) ProtoMessage() {}
 
 func (x *CreateSessionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[8]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -933,7 +1184,7 @@ func (x *CreateSessionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateSessionRequest.ProtoReflect.Descriptor instead.
 func (*CreateSessionRequest) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{8}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *CreateSessionRequest) GetIdentifier() string {
@@ -1000,7 +1251,7 @@ type CreateSessionResponse struct {
 
 func (x *CreateSessionResponse) Reset() {
 	*x = CreateSessionResponse{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[9]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1012,7 +1263,7 @@ func (x *CreateSessionResponse) String() string {
 func (*CreateSessionResponse) ProtoMessage() {}
 
 func (x *CreateSessionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[9]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1025,7 +1276,7 @@ func (x *CreateSessionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateSessionResponse.ProtoReflect.Descriptor instead.
 func (*CreateSessionResponse) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{9}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *CreateSessionResponse) GetSessionId() string {
@@ -1090,7 +1341,7 @@ type GetUserRequest struct {
 
 func (x *GetUserRequest) Reset() {
 	*x = GetUserRequest{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[10]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1102,7 +1353,7 @@ func (x *GetUserRequest) String() string {
 func (*GetUserRequest) ProtoMessage() {}
 
 func (x *GetUserRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[10]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1115,7 +1366,7 @@ func (x *GetUserRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetUserRequest.ProtoReflect.Descriptor instead.
 func (*GetUserRequest) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{10}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{14}
 }
 
 // GetUserResponse is the account, its lifecycle position, and whether the
@@ -1152,7 +1403,7 @@ type GetUserResponse struct {
 
 func (x *GetUserResponse) Reset() {
 	*x = GetUserResponse{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[11]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1164,7 +1415,7 @@ func (x *GetUserResponse) String() string {
 func (*GetUserResponse) ProtoMessage() {}
 
 func (x *GetUserResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[11]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1177,7 +1428,7 @@ func (x *GetUserResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetUserResponse.ProtoReflect.Descriptor instead.
 func (*GetUserResponse) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{11}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *GetUserResponse) GetSubjectId() string {
@@ -1266,7 +1517,7 @@ type ListSessionsRequest struct {
 
 func (x *ListSessionsRequest) Reset() {
 	*x = ListSessionsRequest{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[12]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1278,7 +1529,7 @@ func (x *ListSessionsRequest) String() string {
 func (*ListSessionsRequest) ProtoMessage() {}
 
 func (x *ListSessionsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[12]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1291,7 +1542,7 @@ func (x *ListSessionsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSessionsRequest.ProtoReflect.Descriptor instead.
 func (*ListSessionsRequest) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{12}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ListSessionsRequest) GetPageSize() int32 {
@@ -1343,7 +1594,7 @@ type Session struct {
 
 func (x *Session) Reset() {
 	*x = Session{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[13]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1355,7 +1606,7 @@ func (x *Session) String() string {
 func (*Session) ProtoMessage() {}
 
 func (x *Session) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[13]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1368,7 +1619,7 @@ func (x *Session) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Session.ProtoReflect.Descriptor instead.
 func (*Session) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{13}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *Session) GetSessionId() string {
@@ -1435,7 +1686,7 @@ type ListSessionsResponse struct {
 
 func (x *ListSessionsResponse) Reset() {
 	*x = ListSessionsResponse{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[14]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1447,7 +1698,7 @@ func (x *ListSessionsResponse) String() string {
 func (*ListSessionsResponse) ProtoMessage() {}
 
 func (x *ListSessionsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[14]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1460,7 +1711,7 @@ func (x *ListSessionsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSessionsResponse.ProtoReflect.Descriptor instead.
 func (*ListSessionsResponse) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{14}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ListSessionsResponse) GetSessions() []*Session {
@@ -1486,7 +1737,7 @@ type ListMethodsRequest struct {
 
 func (x *ListMethodsRequest) Reset() {
 	*x = ListMethodsRequest{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[15]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1498,7 +1749,7 @@ func (x *ListMethodsRequest) String() string {
 func (*ListMethodsRequest) ProtoMessage() {}
 
 func (x *ListMethodsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[15]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1511,7 +1762,7 @@ func (x *ListMethodsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListMethodsRequest.ProtoReflect.Descriptor instead.
 func (*ListMethodsRequest) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{15}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{19}
 }
 
 // AuthMethod is one enrolled authentication method.
@@ -1550,7 +1801,7 @@ type AuthMethod struct {
 
 func (x *AuthMethod) Reset() {
 	*x = AuthMethod{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[16]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1562,7 +1813,7 @@ func (x *AuthMethod) String() string {
 func (*AuthMethod) ProtoMessage() {}
 
 func (x *AuthMethod) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[16]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1575,7 +1826,7 @@ func (x *AuthMethod) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuthMethod.ProtoReflect.Descriptor instead.
 func (*AuthMethod) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{16}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *AuthMethod) GetCredentialId() string {
@@ -1634,7 +1885,7 @@ type ListMethodsResponse struct {
 
 func (x *ListMethodsResponse) Reset() {
 	*x = ListMethodsResponse{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[17]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1646,7 +1897,7 @@ func (x *ListMethodsResponse) String() string {
 func (*ListMethodsResponse) ProtoMessage() {}
 
 func (x *ListMethodsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[17]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1659,7 +1910,7 @@ func (x *ListMethodsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListMethodsResponse.ProtoReflect.Descriptor instead.
 func (*ListMethodsResponse) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{17}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ListMethodsResponse) GetMethods() []*AuthMethod {
@@ -1685,7 +1936,7 @@ type ListLoginHistoryRequest struct {
 
 func (x *ListLoginHistoryRequest) Reset() {
 	*x = ListLoginHistoryRequest{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[18]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1697,7 +1948,7 @@ func (x *ListLoginHistoryRequest) String() string {
 func (*ListLoginHistoryRequest) ProtoMessage() {}
 
 func (x *ListLoginHistoryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[18]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1710,7 +1961,7 @@ func (x *ListLoginHistoryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListLoginHistoryRequest.ProtoReflect.Descriptor instead.
 func (*ListLoginHistoryRequest) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{18}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *ListLoginHistoryRequest) GetPageSize() int32 {
@@ -1759,7 +2010,7 @@ type LoginAttempt struct {
 
 func (x *LoginAttempt) Reset() {
 	*x = LoginAttempt{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[19]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1771,7 +2022,7 @@ func (x *LoginAttempt) String() string {
 func (*LoginAttempt) ProtoMessage() {}
 
 func (x *LoginAttempt) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[19]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1784,7 +2035,7 @@ func (x *LoginAttempt) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LoginAttempt.ProtoReflect.Descriptor instead.
 func (*LoginAttempt) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{19}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *LoginAttempt) GetSucceeded() bool {
@@ -1842,7 +2093,7 @@ type ListLoginHistoryResponse struct {
 
 func (x *ListLoginHistoryResponse) Reset() {
 	*x = ListLoginHistoryResponse{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[20]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1854,7 +2105,7 @@ func (x *ListLoginHistoryResponse) String() string {
 func (*ListLoginHistoryResponse) ProtoMessage() {}
 
 func (x *ListLoginHistoryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[20]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1867,7 +2118,7 @@ func (x *ListLoginHistoryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListLoginHistoryResponse.ProtoReflect.Descriptor instead.
 func (*ListLoginHistoryResponse) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{20}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *ListLoginHistoryResponse) GetAttempts() []*LoginAttempt {
@@ -1913,7 +2164,7 @@ type EnrollTotpRequest struct {
 
 func (x *EnrollTotpRequest) Reset() {
 	*x = EnrollTotpRequest{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[21]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1925,7 +2176,7 @@ func (x *EnrollTotpRequest) String() string {
 func (*EnrollTotpRequest) ProtoMessage() {}
 
 func (x *EnrollTotpRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[21]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1938,7 +2189,7 @@ func (x *EnrollTotpRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollTotpRequest.ProtoReflect.Descriptor instead.
 func (*EnrollTotpRequest) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{21}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *EnrollTotpRequest) GetAccountName() string {
@@ -1979,7 +2230,7 @@ type EnrollTotpResponse struct {
 
 func (x *EnrollTotpResponse) Reset() {
 	*x = EnrollTotpResponse{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[22]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1991,7 +2242,7 @@ func (x *EnrollTotpResponse) String() string {
 func (*EnrollTotpResponse) ProtoMessage() {}
 
 func (x *EnrollTotpResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[22]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2004,7 +2255,7 @@ func (x *EnrollTotpResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollTotpResponse.ProtoReflect.Descriptor instead.
 func (*EnrollTotpResponse) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{22}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *EnrollTotpResponse) GetCredentialId() string {
@@ -2059,7 +2310,7 @@ type ConfirmTotpRequest struct {
 
 func (x *ConfirmTotpRequest) Reset() {
 	*x = ConfirmTotpRequest{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[23]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2071,7 +2322,7 @@ func (x *ConfirmTotpRequest) String() string {
 func (*ConfirmTotpRequest) ProtoMessage() {}
 
 func (x *ConfirmTotpRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[23]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2084,7 +2335,7 @@ func (x *ConfirmTotpRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfirmTotpRequest.ProtoReflect.Descriptor instead.
 func (*ConfirmTotpRequest) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{23}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *ConfirmTotpRequest) GetCode() string {
@@ -2112,7 +2363,7 @@ type ConfirmTotpResponse struct {
 
 func (x *ConfirmTotpResponse) Reset() {
 	*x = ConfirmTotpResponse{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[24]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2124,7 +2375,7 @@ func (x *ConfirmTotpResponse) String() string {
 func (*ConfirmTotpResponse) ProtoMessage() {}
 
 func (x *ConfirmTotpResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[24]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2137,7 +2388,7 @@ func (x *ConfirmTotpResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfirmTotpResponse.ProtoReflect.Descriptor instead.
 func (*ConfirmTotpResponse) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{24}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *ConfirmTotpResponse) GetCredentialId() string {
@@ -2179,7 +2430,7 @@ type GenerateRecoveryCodesRequest struct {
 
 func (x *GenerateRecoveryCodesRequest) Reset() {
 	*x = GenerateRecoveryCodesRequest{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[25]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2191,7 +2442,7 @@ func (x *GenerateRecoveryCodesRequest) String() string {
 func (*GenerateRecoveryCodesRequest) ProtoMessage() {}
 
 func (x *GenerateRecoveryCodesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[25]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2204,7 +2455,7 @@ func (x *GenerateRecoveryCodesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GenerateRecoveryCodesRequest.ProtoReflect.Descriptor instead.
 func (*GenerateRecoveryCodesRequest) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{25}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *GenerateRecoveryCodesRequest) GetCount() int32 {
@@ -2234,7 +2485,7 @@ type GenerateRecoveryCodesResponse struct {
 
 func (x *GenerateRecoveryCodesResponse) Reset() {
 	*x = GenerateRecoveryCodesResponse{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[26]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2246,7 +2497,7 @@ func (x *GenerateRecoveryCodesResponse) String() string {
 func (*GenerateRecoveryCodesResponse) ProtoMessage() {}
 
 func (x *GenerateRecoveryCodesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[26]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2259,7 +2510,7 @@ func (x *GenerateRecoveryCodesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GenerateRecoveryCodesResponse.ProtoReflect.Descriptor instead.
 func (*GenerateRecoveryCodesResponse) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{26}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *GenerateRecoveryCodesResponse) GetCredentialId() string {
@@ -2306,7 +2557,7 @@ type RevokeSessionRequest struct {
 
 func (x *RevokeSessionRequest) Reset() {
 	*x = RevokeSessionRequest{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[27]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2318,7 +2569,7 @@ func (x *RevokeSessionRequest) String() string {
 func (*RevokeSessionRequest) ProtoMessage() {}
 
 func (x *RevokeSessionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[27]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2331,7 +2582,7 @@ func (x *RevokeSessionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RevokeSessionRequest.ProtoReflect.Descriptor instead.
 func (*RevokeSessionRequest) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{27}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *RevokeSessionRequest) GetSessionId() string {
@@ -2361,7 +2612,7 @@ type RevokeSessionResponse struct {
 
 func (x *RevokeSessionResponse) Reset() {
 	*x = RevokeSessionResponse{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[28]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2373,7 +2624,7 @@ func (x *RevokeSessionResponse) String() string {
 func (*RevokeSessionResponse) ProtoMessage() {}
 
 func (x *RevokeSessionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[28]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2386,7 +2637,7 @@ func (x *RevokeSessionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RevokeSessionResponse.ProtoReflect.Descriptor instead.
 func (*RevokeSessionResponse) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{28}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *RevokeSessionResponse) GetChanged() bool {
@@ -2419,7 +2670,7 @@ type RevokeAllSessionsRequest struct {
 
 func (x *RevokeAllSessionsRequest) Reset() {
 	*x = RevokeAllSessionsRequest{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[29]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2431,7 +2682,7 @@ func (x *RevokeAllSessionsRequest) String() string {
 func (*RevokeAllSessionsRequest) ProtoMessage() {}
 
 func (x *RevokeAllSessionsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[29]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2444,7 +2695,7 @@ func (x *RevokeAllSessionsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RevokeAllSessionsRequest.ProtoReflect.Descriptor instead.
 func (*RevokeAllSessionsRequest) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{29}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *RevokeAllSessionsRequest) GetExceptSessionId() string {
@@ -2481,7 +2732,7 @@ type RevokeAllSessionsResponse struct {
 
 func (x *RevokeAllSessionsResponse) Reset() {
 	*x = RevokeAllSessionsResponse{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[30]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2493,7 +2744,7 @@ func (x *RevokeAllSessionsResponse) String() string {
 func (*RevokeAllSessionsResponse) ProtoMessage() {}
 
 func (x *RevokeAllSessionsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[30]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2506,7 +2757,7 @@ func (x *RevokeAllSessionsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RevokeAllSessionsResponse.ProtoReflect.Descriptor instead.
 func (*RevokeAllSessionsResponse) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{30}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *RevokeAllSessionsResponse) GetRevoked() int32 {
@@ -2547,7 +2798,17 @@ const file_chronos_identity_v1_identity_proto_rawDesc = "" +
 	"\x15identity.email.length\x12)an email address may not exceed 254 bytes\x1a bytes(this.trim()).size() <= 254\xba\x01\x84\x02\n" +
 	"\x14identity.email.shape\x12Gan email address must contain a local part and a fully qualified domain\x1a\xa2\x01this.trim().lastIndexOf('@') > 0 && this.trim().lastIndexOf('@') < this.trim().size() - 1 && this.trim().substring(this.trim().lastIndexOf('@') + 1).contains('.')\xba\x01\xc8\x01\n" +
 	"\x19identity.email.local_part\x12:the local part of an email address may not exceed 64 bytes\x1aothis.trim().lastIndexOf('@') <= 0 || bytes(this.trim().substring(0, this.trim().lastIndexOf('@'))).size() <= 64\xc8\x01\x01R\x05email\"!\n" +
-	"\x1fResendEmailVerificationResponse\"\xdc\x02\n" +
+	"\x1fResendEmailVerificationResponse\"\x8f\x05\n" +
+	"\x1bRequestPasswordResetRequest\x12\xef\x04\n" +
+	"\x05email\x18\x01 \x01(\tB\xd8\x04\xbaG\x13:\x11\x12\x0fada@example.com\xbaH\xbe\x04\xba\x01d\n" +
+	"\x15identity.email.length\x12)an email address may not exceed 254 bytes\x1a bytes(this.trim()).size() <= 254\xba\x01\x84\x02\n" +
+	"\x14identity.email.shape\x12Gan email address must contain a local part and a fully qualified domain\x1a\xa2\x01this.trim().lastIndexOf('@') > 0 && this.trim().lastIndexOf('@') < this.trim().size() - 1 && this.trim().substring(this.trim().lastIndexOf('@') + 1).contains('.')\xba\x01\xc8\x01\n" +
+	"\x19identity.email.local_part\x12:the local part of an email address may not exceed 64 bytes\x1aothis.trim().lastIndexOf('@') <= 0 || bytes(this.trim().substring(0, this.trim().lastIndexOf('@'))).size() <= 64\xc8\x01\x01R\x05email\"\x1e\n" +
+	"\x1cRequestPasswordResetResponse\"\xb0\x01\n" +
+	"\x14ResetPasswordRequest\x12J\n" +
+	"\x05token\x18\x01 \x01(\tB4\xbaG&:$\x12\"PLACEHOLDER-not-a-real-reset-token\xbaH\b\xc8\x01\x01r\x03\x18\x80\x04R\x05token\x12L\n" +
+	"\bpassword\x18\x02 \x01(\tB0\xbaG#:!\x12\x1fPLACEHOLDER-not-a-real-password\xbaH\ar\x05\x10\b(\x80 R\bpassword\"\x17\n" +
+	"\x15ResetPasswordResponse\"\xdc\x02\n" +
 	"\x13AuthenticateRequest\x12\xa3\x01\n" +
 	"\n" +
 	"identifier\x18\x01 \x01(\tB\x82\x01\xbaG\x13:\x11\x12\x0fada@example.com\xbaHi\xba\x01f\n" +
@@ -2692,7 +2953,7 @@ const file_chronos_identity_v1_identity_proto_rawDesc = "" +
 	"$FAILURE_REASON_INCOMPLETE_ENROLLMENT\x10\x06\x12\x1e\n" +
 	"\x1aFAILURE_REASON_DEACTIVATED\x10\a\x12\x1c\n" +
 	"\x18FAILURE_REASON_SUSPENDED\x10\b\x12\x1f\n" +
-	"\x1bFAILURE_REASON_RATE_LIMITED\x10\t2\xdfx\n" +
+	"\x1bFAILURE_REASON_RATE_LIMITED\x10\t2\xa0\x82\x01\n" +
 	"\x0fIdentityService\x12\xa5\x04\n" +
 	"\bRegister\x12$.chronos.identity.v1.RegisterRequest\x1a%.chronos.identity.v1.RegisterResponse\"\xcb\x03\xbaG\xbf\x03B\xba\x03\x12\xb7\x03\n" +
 	"\x03200\x12\xaf\x03\n" +
@@ -2723,7 +2984,34 @@ const file_chronos_identity_v1_identity_proto_rawDesc = "" +
 	"userId: usr_01ARZ3NDEKTSV4RRFFQ69G5FAV\n" +
 	"changed: true\n" +
 	"Z\x00\xd0\xf3\x18\x02\xe8\xf3\x18\x01\x12\x93\x01\n" +
-	"\x17ResendEmailVerification\x123.chronos.identity.v1.ResendEmailVerificationRequest\x1a4.chronos.identity.v1.ResendEmailVerificationResponse\"\r\xbaG\x02Z\x00\xd0\xf3\x18\x02\xe8\xf3\x18\x01\x12\xcb\x06\n" +
+	"\x17ResendEmailVerification\x123.chronos.identity.v1.ResendEmailVerificationRequest\x1a4.chronos.identity.v1.ResendEmailVerificationResponse\"\r\xbaG\x02Z\x00\xd0\xf3\x18\x02\xe8\xf3\x18\x01\x12\xc9\x04\n" +
+	"\x14RequestPasswordReset\x120.chronos.identity.v1.RequestPasswordResetRequest\x1a1.chronos.identity.v1.RequestPasswordResetResponse\"\xcb\x03\xbaG\xbf\x03B\xba\x03\x12\xb7\x03\n" +
+	"\x03200\x12\xaf\x03\n" +
+	"\xac\x03\n" +
+	"\xc0\x02Accepted. The body is empty, and its emptiness is the feature: this\n" +
+	"response is identical for an unknown address, a resettable account, a\n" +
+	"passwordless account, a deactivated account and a suspended one.\n" +
+	"Render one sentence for all five — \"if that address has an account\n" +
+	"with a password, we have sent it a reset link\".\n" +
+	"\x1ag\n" +
+	"e\n" +
+	"\x10application/json\x12Q\n" +
+	"I\x12G\n" +
+	"E#/components/schemas/chronos.identity.v1.RequestPasswordResetResponse\x12\x04\x12\x02{}Z\x00\xd0\xf3\x18\x02\xe8\xf3\x18\x01\x12\xf2\x04\n" +
+	"\rResetPassword\x12).chronos.identity.v1.ResetPasswordRequest\x1a*.chronos.identity.v1.ResetPasswordResponse\"\x89\x04\xbaG\xfd\x03B\xf8\x03\x12\xf5\x03\n" +
+	"\x03200\x12\xed\x03\n" +
+	"\xea\x03\n" +
+	"\x85\x03The link was valid and has been spent. The account's password is the\n" +
+	"one just supplied, every session it had is gone, and every outstanding\n" +
+	"link of every kind is dead. The body is empty on purpose: a reset must\n" +
+	"not advance the caller towards a session, so there is no token, no\n" +
+	"assurance level and no account identifier here. Sign in normally next,\n" +
+	"presenting the account's second factor.\n" +
+	"\x1a`\n" +
+	"^\n" +
+	"\x10application/json\x12J\n" +
+	"B\x12@\n" +
+	">#/components/schemas/chronos.identity.v1.ResetPasswordResponse\x12\x04\x12\x02{}Z\x00\xd0\xf3\x18\x02\xe8\xf3\x18\x01\x12\xcb\x06\n" +
 	"\fAuthenticate\x12(.chronos.identity.v1.AuthenticateRequest\x1a).chronos.identity.v1.AuthenticateResponse\"\xe5\x05\xbaG\xd9\x05B\xd4\x05\x12\xd1\x05\n" +
 	"\x03200\x12\xc9\x05\n" +
 	"\xc6\x05\n" +
@@ -3094,7 +3382,7 @@ func file_chronos_identity_v1_identity_proto_rawDescGZIP() []byte {
 }
 
 var file_chronos_identity_v1_identity_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_chronos_identity_v1_identity_proto_msgTypes = make([]protoimpl.MessageInfo, 31)
+var file_chronos_identity_v1_identity_proto_msgTypes = make([]protoimpl.MessageInfo, 35)
 var file_chronos_identity_v1_identity_proto_goTypes = []any{
 	(MethodKind)(0),                         // 0: chronos.identity.v1.MethodKind
 	(AccountState)(0),                       // 1: chronos.identity.v1.AccountState
@@ -3105,91 +3393,99 @@ var file_chronos_identity_v1_identity_proto_goTypes = []any{
 	(*VerifyEmailResponse)(nil),             // 6: chronos.identity.v1.VerifyEmailResponse
 	(*ResendEmailVerificationRequest)(nil),  // 7: chronos.identity.v1.ResendEmailVerificationRequest
 	(*ResendEmailVerificationResponse)(nil), // 8: chronos.identity.v1.ResendEmailVerificationResponse
-	(*AuthenticateRequest)(nil),             // 9: chronos.identity.v1.AuthenticateRequest
-	(*AuthenticateResponse)(nil),            // 10: chronos.identity.v1.AuthenticateResponse
-	(*CreateSessionRequest)(nil),            // 11: chronos.identity.v1.CreateSessionRequest
-	(*CreateSessionResponse)(nil),           // 12: chronos.identity.v1.CreateSessionResponse
-	(*GetUserRequest)(nil),                  // 13: chronos.identity.v1.GetUserRequest
-	(*GetUserResponse)(nil),                 // 14: chronos.identity.v1.GetUserResponse
-	(*ListSessionsRequest)(nil),             // 15: chronos.identity.v1.ListSessionsRequest
-	(*Session)(nil),                         // 16: chronos.identity.v1.Session
-	(*ListSessionsResponse)(nil),            // 17: chronos.identity.v1.ListSessionsResponse
-	(*ListMethodsRequest)(nil),              // 18: chronos.identity.v1.ListMethodsRequest
-	(*AuthMethod)(nil),                      // 19: chronos.identity.v1.AuthMethod
-	(*ListMethodsResponse)(nil),             // 20: chronos.identity.v1.ListMethodsResponse
-	(*ListLoginHistoryRequest)(nil),         // 21: chronos.identity.v1.ListLoginHistoryRequest
-	(*LoginAttempt)(nil),                    // 22: chronos.identity.v1.LoginAttempt
-	(*ListLoginHistoryResponse)(nil),        // 23: chronos.identity.v1.ListLoginHistoryResponse
-	(*EnrollTotpRequest)(nil),               // 24: chronos.identity.v1.EnrollTotpRequest
-	(*EnrollTotpResponse)(nil),              // 25: chronos.identity.v1.EnrollTotpResponse
-	(*ConfirmTotpRequest)(nil),              // 26: chronos.identity.v1.ConfirmTotpRequest
-	(*ConfirmTotpResponse)(nil),             // 27: chronos.identity.v1.ConfirmTotpResponse
-	(*GenerateRecoveryCodesRequest)(nil),    // 28: chronos.identity.v1.GenerateRecoveryCodesRequest
-	(*GenerateRecoveryCodesResponse)(nil),   // 29: chronos.identity.v1.GenerateRecoveryCodesResponse
-	(*RevokeSessionRequest)(nil),            // 30: chronos.identity.v1.RevokeSessionRequest
-	(*RevokeSessionResponse)(nil),           // 31: chronos.identity.v1.RevokeSessionResponse
-	(*RevokeAllSessionsRequest)(nil),        // 32: chronos.identity.v1.RevokeAllSessionsRequest
-	(*RevokeAllSessionsResponse)(nil),       // 33: chronos.identity.v1.RevokeAllSessionsResponse
-	(v1.AssuranceLevel)(0),                  // 34: chronos.options.v1.AssuranceLevel
-	(*timestamppb.Timestamp)(nil),           // 35: google.protobuf.Timestamp
+	(*RequestPasswordResetRequest)(nil),     // 9: chronos.identity.v1.RequestPasswordResetRequest
+	(*RequestPasswordResetResponse)(nil),    // 10: chronos.identity.v1.RequestPasswordResetResponse
+	(*ResetPasswordRequest)(nil),            // 11: chronos.identity.v1.ResetPasswordRequest
+	(*ResetPasswordResponse)(nil),           // 12: chronos.identity.v1.ResetPasswordResponse
+	(*AuthenticateRequest)(nil),             // 13: chronos.identity.v1.AuthenticateRequest
+	(*AuthenticateResponse)(nil),            // 14: chronos.identity.v1.AuthenticateResponse
+	(*CreateSessionRequest)(nil),            // 15: chronos.identity.v1.CreateSessionRequest
+	(*CreateSessionResponse)(nil),           // 16: chronos.identity.v1.CreateSessionResponse
+	(*GetUserRequest)(nil),                  // 17: chronos.identity.v1.GetUserRequest
+	(*GetUserResponse)(nil),                 // 18: chronos.identity.v1.GetUserResponse
+	(*ListSessionsRequest)(nil),             // 19: chronos.identity.v1.ListSessionsRequest
+	(*Session)(nil),                         // 20: chronos.identity.v1.Session
+	(*ListSessionsResponse)(nil),            // 21: chronos.identity.v1.ListSessionsResponse
+	(*ListMethodsRequest)(nil),              // 22: chronos.identity.v1.ListMethodsRequest
+	(*AuthMethod)(nil),                      // 23: chronos.identity.v1.AuthMethod
+	(*ListMethodsResponse)(nil),             // 24: chronos.identity.v1.ListMethodsResponse
+	(*ListLoginHistoryRequest)(nil),         // 25: chronos.identity.v1.ListLoginHistoryRequest
+	(*LoginAttempt)(nil),                    // 26: chronos.identity.v1.LoginAttempt
+	(*ListLoginHistoryResponse)(nil),        // 27: chronos.identity.v1.ListLoginHistoryResponse
+	(*EnrollTotpRequest)(nil),               // 28: chronos.identity.v1.EnrollTotpRequest
+	(*EnrollTotpResponse)(nil),              // 29: chronos.identity.v1.EnrollTotpResponse
+	(*ConfirmTotpRequest)(nil),              // 30: chronos.identity.v1.ConfirmTotpRequest
+	(*ConfirmTotpResponse)(nil),             // 31: chronos.identity.v1.ConfirmTotpResponse
+	(*GenerateRecoveryCodesRequest)(nil),    // 32: chronos.identity.v1.GenerateRecoveryCodesRequest
+	(*GenerateRecoveryCodesResponse)(nil),   // 33: chronos.identity.v1.GenerateRecoveryCodesResponse
+	(*RevokeSessionRequest)(nil),            // 34: chronos.identity.v1.RevokeSessionRequest
+	(*RevokeSessionResponse)(nil),           // 35: chronos.identity.v1.RevokeSessionResponse
+	(*RevokeAllSessionsRequest)(nil),        // 36: chronos.identity.v1.RevokeAllSessionsRequest
+	(*RevokeAllSessionsResponse)(nil),       // 37: chronos.identity.v1.RevokeAllSessionsResponse
+	(v1.AssuranceLevel)(0),                  // 38: chronos.options.v1.AssuranceLevel
+	(*timestamppb.Timestamp)(nil),           // 39: google.protobuf.Timestamp
 }
 var file_chronos_identity_v1_identity_proto_depIdxs = []int32{
 	0,  // 0: chronos.identity.v1.AuthenticateResponse.offered:type_name -> chronos.identity.v1.MethodKind
-	34, // 1: chronos.identity.v1.CreateSessionResponse.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
-	35, // 2: chronos.identity.v1.CreateSessionResponse.idle_expires_at:type_name -> google.protobuf.Timestamp
-	35, // 3: chronos.identity.v1.CreateSessionResponse.absolute_expires_at:type_name -> google.protobuf.Timestamp
+	38, // 1: chronos.identity.v1.CreateSessionResponse.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
+	39, // 2: chronos.identity.v1.CreateSessionResponse.idle_expires_at:type_name -> google.protobuf.Timestamp
+	39, // 3: chronos.identity.v1.CreateSessionResponse.absolute_expires_at:type_name -> google.protobuf.Timestamp
 	1,  // 4: chronos.identity.v1.GetUserResponse.state:type_name -> chronos.identity.v1.AccountState
-	35, // 5: chronos.identity.v1.GetUserResponse.registered_at:type_name -> google.protobuf.Timestamp
-	35, // 6: chronos.identity.v1.GetUserResponse.activated_at:type_name -> google.protobuf.Timestamp
-	35, // 7: chronos.identity.v1.GetUserResponse.deactivated_at:type_name -> google.protobuf.Timestamp
-	35, // 8: chronos.identity.v1.GetUserResponse.suspended_at:type_name -> google.protobuf.Timestamp
-	34, // 9: chronos.identity.v1.Session.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
-	35, // 10: chronos.identity.v1.Session.idle_expires_at:type_name -> google.protobuf.Timestamp
-	35, // 11: chronos.identity.v1.Session.absolute_expires_at:type_name -> google.protobuf.Timestamp
-	35, // 12: chronos.identity.v1.Session.created_at:type_name -> google.protobuf.Timestamp
-	35, // 13: chronos.identity.v1.Session.last_seen_at:type_name -> google.protobuf.Timestamp
-	16, // 14: chronos.identity.v1.ListSessionsResponse.sessions:type_name -> chronos.identity.v1.Session
+	39, // 5: chronos.identity.v1.GetUserResponse.registered_at:type_name -> google.protobuf.Timestamp
+	39, // 6: chronos.identity.v1.GetUserResponse.activated_at:type_name -> google.protobuf.Timestamp
+	39, // 7: chronos.identity.v1.GetUserResponse.deactivated_at:type_name -> google.protobuf.Timestamp
+	39, // 8: chronos.identity.v1.GetUserResponse.suspended_at:type_name -> google.protobuf.Timestamp
+	38, // 9: chronos.identity.v1.Session.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
+	39, // 10: chronos.identity.v1.Session.idle_expires_at:type_name -> google.protobuf.Timestamp
+	39, // 11: chronos.identity.v1.Session.absolute_expires_at:type_name -> google.protobuf.Timestamp
+	39, // 12: chronos.identity.v1.Session.created_at:type_name -> google.protobuf.Timestamp
+	39, // 13: chronos.identity.v1.Session.last_seen_at:type_name -> google.protobuf.Timestamp
+	20, // 14: chronos.identity.v1.ListSessionsResponse.sessions:type_name -> chronos.identity.v1.Session
 	0,  // 15: chronos.identity.v1.AuthMethod.kind:type_name -> chronos.identity.v1.MethodKind
-	35, // 16: chronos.identity.v1.AuthMethod.added_at:type_name -> google.protobuf.Timestamp
-	35, // 17: chronos.identity.v1.AuthMethod.enabled_at:type_name -> google.protobuf.Timestamp
-	35, // 18: chronos.identity.v1.AuthMethod.last_used_at:type_name -> google.protobuf.Timestamp
-	19, // 19: chronos.identity.v1.ListMethodsResponse.methods:type_name -> chronos.identity.v1.AuthMethod
+	39, // 16: chronos.identity.v1.AuthMethod.added_at:type_name -> google.protobuf.Timestamp
+	39, // 17: chronos.identity.v1.AuthMethod.enabled_at:type_name -> google.protobuf.Timestamp
+	39, // 18: chronos.identity.v1.AuthMethod.last_used_at:type_name -> google.protobuf.Timestamp
+	23, // 19: chronos.identity.v1.ListMethodsResponse.methods:type_name -> chronos.identity.v1.AuthMethod
 	2,  // 20: chronos.identity.v1.LoginAttempt.reason:type_name -> chronos.identity.v1.FailureReason
 	0,  // 21: chronos.identity.v1.LoginAttempt.methods:type_name -> chronos.identity.v1.MethodKind
-	34, // 22: chronos.identity.v1.LoginAttempt.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
-	35, // 23: chronos.identity.v1.LoginAttempt.occurred_at:type_name -> google.protobuf.Timestamp
-	22, // 24: chronos.identity.v1.ListLoginHistoryResponse.attempts:type_name -> chronos.identity.v1.LoginAttempt
-	35, // 25: chronos.identity.v1.EnrollTotpResponse.expires_at:type_name -> google.protobuf.Timestamp
+	38, // 22: chronos.identity.v1.LoginAttempt.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
+	39, // 23: chronos.identity.v1.LoginAttempt.occurred_at:type_name -> google.protobuf.Timestamp
+	26, // 24: chronos.identity.v1.ListLoginHistoryResponse.attempts:type_name -> chronos.identity.v1.LoginAttempt
+	39, // 25: chronos.identity.v1.EnrollTotpResponse.expires_at:type_name -> google.protobuf.Timestamp
 	3,  // 26: chronos.identity.v1.IdentityService.Register:input_type -> chronos.identity.v1.RegisterRequest
 	5,  // 27: chronos.identity.v1.IdentityService.VerifyEmail:input_type -> chronos.identity.v1.VerifyEmailRequest
 	7,  // 28: chronos.identity.v1.IdentityService.ResendEmailVerification:input_type -> chronos.identity.v1.ResendEmailVerificationRequest
-	9,  // 29: chronos.identity.v1.IdentityService.Authenticate:input_type -> chronos.identity.v1.AuthenticateRequest
-	11, // 30: chronos.identity.v1.IdentityService.CreateSession:input_type -> chronos.identity.v1.CreateSessionRequest
-	13, // 31: chronos.identity.v1.IdentityService.GetUser:input_type -> chronos.identity.v1.GetUserRequest
-	15, // 32: chronos.identity.v1.IdentityService.ListSessions:input_type -> chronos.identity.v1.ListSessionsRequest
-	18, // 33: chronos.identity.v1.IdentityService.ListMethods:input_type -> chronos.identity.v1.ListMethodsRequest
-	21, // 34: chronos.identity.v1.IdentityService.ListLoginHistory:input_type -> chronos.identity.v1.ListLoginHistoryRequest
-	24, // 35: chronos.identity.v1.IdentityService.EnrollTotp:input_type -> chronos.identity.v1.EnrollTotpRequest
-	26, // 36: chronos.identity.v1.IdentityService.ConfirmTotp:input_type -> chronos.identity.v1.ConfirmTotpRequest
-	28, // 37: chronos.identity.v1.IdentityService.GenerateRecoveryCodes:input_type -> chronos.identity.v1.GenerateRecoveryCodesRequest
-	30, // 38: chronos.identity.v1.IdentityService.RevokeSession:input_type -> chronos.identity.v1.RevokeSessionRequest
-	32, // 39: chronos.identity.v1.IdentityService.RevokeAllSessions:input_type -> chronos.identity.v1.RevokeAllSessionsRequest
-	4,  // 40: chronos.identity.v1.IdentityService.Register:output_type -> chronos.identity.v1.RegisterResponse
-	6,  // 41: chronos.identity.v1.IdentityService.VerifyEmail:output_type -> chronos.identity.v1.VerifyEmailResponse
-	8,  // 42: chronos.identity.v1.IdentityService.ResendEmailVerification:output_type -> chronos.identity.v1.ResendEmailVerificationResponse
-	10, // 43: chronos.identity.v1.IdentityService.Authenticate:output_type -> chronos.identity.v1.AuthenticateResponse
-	12, // 44: chronos.identity.v1.IdentityService.CreateSession:output_type -> chronos.identity.v1.CreateSessionResponse
-	14, // 45: chronos.identity.v1.IdentityService.GetUser:output_type -> chronos.identity.v1.GetUserResponse
-	17, // 46: chronos.identity.v1.IdentityService.ListSessions:output_type -> chronos.identity.v1.ListSessionsResponse
-	20, // 47: chronos.identity.v1.IdentityService.ListMethods:output_type -> chronos.identity.v1.ListMethodsResponse
-	23, // 48: chronos.identity.v1.IdentityService.ListLoginHistory:output_type -> chronos.identity.v1.ListLoginHistoryResponse
-	25, // 49: chronos.identity.v1.IdentityService.EnrollTotp:output_type -> chronos.identity.v1.EnrollTotpResponse
-	27, // 50: chronos.identity.v1.IdentityService.ConfirmTotp:output_type -> chronos.identity.v1.ConfirmTotpResponse
-	29, // 51: chronos.identity.v1.IdentityService.GenerateRecoveryCodes:output_type -> chronos.identity.v1.GenerateRecoveryCodesResponse
-	31, // 52: chronos.identity.v1.IdentityService.RevokeSession:output_type -> chronos.identity.v1.RevokeSessionResponse
-	33, // 53: chronos.identity.v1.IdentityService.RevokeAllSessions:output_type -> chronos.identity.v1.RevokeAllSessionsResponse
-	40, // [40:54] is the sub-list for method output_type
-	26, // [26:40] is the sub-list for method input_type
+	9,  // 29: chronos.identity.v1.IdentityService.RequestPasswordReset:input_type -> chronos.identity.v1.RequestPasswordResetRequest
+	11, // 30: chronos.identity.v1.IdentityService.ResetPassword:input_type -> chronos.identity.v1.ResetPasswordRequest
+	13, // 31: chronos.identity.v1.IdentityService.Authenticate:input_type -> chronos.identity.v1.AuthenticateRequest
+	15, // 32: chronos.identity.v1.IdentityService.CreateSession:input_type -> chronos.identity.v1.CreateSessionRequest
+	17, // 33: chronos.identity.v1.IdentityService.GetUser:input_type -> chronos.identity.v1.GetUserRequest
+	19, // 34: chronos.identity.v1.IdentityService.ListSessions:input_type -> chronos.identity.v1.ListSessionsRequest
+	22, // 35: chronos.identity.v1.IdentityService.ListMethods:input_type -> chronos.identity.v1.ListMethodsRequest
+	25, // 36: chronos.identity.v1.IdentityService.ListLoginHistory:input_type -> chronos.identity.v1.ListLoginHistoryRequest
+	28, // 37: chronos.identity.v1.IdentityService.EnrollTotp:input_type -> chronos.identity.v1.EnrollTotpRequest
+	30, // 38: chronos.identity.v1.IdentityService.ConfirmTotp:input_type -> chronos.identity.v1.ConfirmTotpRequest
+	32, // 39: chronos.identity.v1.IdentityService.GenerateRecoveryCodes:input_type -> chronos.identity.v1.GenerateRecoveryCodesRequest
+	34, // 40: chronos.identity.v1.IdentityService.RevokeSession:input_type -> chronos.identity.v1.RevokeSessionRequest
+	36, // 41: chronos.identity.v1.IdentityService.RevokeAllSessions:input_type -> chronos.identity.v1.RevokeAllSessionsRequest
+	4,  // 42: chronos.identity.v1.IdentityService.Register:output_type -> chronos.identity.v1.RegisterResponse
+	6,  // 43: chronos.identity.v1.IdentityService.VerifyEmail:output_type -> chronos.identity.v1.VerifyEmailResponse
+	8,  // 44: chronos.identity.v1.IdentityService.ResendEmailVerification:output_type -> chronos.identity.v1.ResendEmailVerificationResponse
+	10, // 45: chronos.identity.v1.IdentityService.RequestPasswordReset:output_type -> chronos.identity.v1.RequestPasswordResetResponse
+	12, // 46: chronos.identity.v1.IdentityService.ResetPassword:output_type -> chronos.identity.v1.ResetPasswordResponse
+	14, // 47: chronos.identity.v1.IdentityService.Authenticate:output_type -> chronos.identity.v1.AuthenticateResponse
+	16, // 48: chronos.identity.v1.IdentityService.CreateSession:output_type -> chronos.identity.v1.CreateSessionResponse
+	18, // 49: chronos.identity.v1.IdentityService.GetUser:output_type -> chronos.identity.v1.GetUserResponse
+	21, // 50: chronos.identity.v1.IdentityService.ListSessions:output_type -> chronos.identity.v1.ListSessionsResponse
+	24, // 51: chronos.identity.v1.IdentityService.ListMethods:output_type -> chronos.identity.v1.ListMethodsResponse
+	27, // 52: chronos.identity.v1.IdentityService.ListLoginHistory:output_type -> chronos.identity.v1.ListLoginHistoryResponse
+	29, // 53: chronos.identity.v1.IdentityService.EnrollTotp:output_type -> chronos.identity.v1.EnrollTotpResponse
+	31, // 54: chronos.identity.v1.IdentityService.ConfirmTotp:output_type -> chronos.identity.v1.ConfirmTotpResponse
+	33, // 55: chronos.identity.v1.IdentityService.GenerateRecoveryCodes:output_type -> chronos.identity.v1.GenerateRecoveryCodesResponse
+	35, // 56: chronos.identity.v1.IdentityService.RevokeSession:output_type -> chronos.identity.v1.RevokeSessionResponse
+	37, // 57: chronos.identity.v1.IdentityService.RevokeAllSessions:output_type -> chronos.identity.v1.RevokeAllSessionsResponse
+	42, // [42:58] is the sub-list for method output_type
+	26, // [26:42] is the sub-list for method input_type
 	26, // [26:26] is the sub-list for extension type_name
 	26, // [26:26] is the sub-list for extension extendee
 	0,  // [0:26] is the sub-list for field type_name
@@ -3206,7 +3502,7 @@ func file_chronos_identity_v1_identity_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chronos_identity_v1_identity_proto_rawDesc), len(file_chronos_identity_v1_identity_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   31,
+			NumMessages:   35,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

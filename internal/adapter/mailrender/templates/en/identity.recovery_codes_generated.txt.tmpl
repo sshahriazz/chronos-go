@@ -1,0 +1,11 @@
+Hello{{if .Name}} {{.Name}}{{end}},
+
+A new set of {{.Count}} recovery codes was generated for your Chronos account on
+{{datetime .OccurredAt}}. Every code you held before this is now dead.
+
+Store the new set somewhere you can reach without your phone.
+
+If you did not do this, someone else can get into your account without your
+second factor. Sign in and regenerate them yourself:
+
+  {{url "/settings/security"}}

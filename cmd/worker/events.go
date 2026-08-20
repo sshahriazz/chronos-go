@@ -2,6 +2,8 @@ package main
 
 import (
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
+	"github.com/chronos/chronos-go/internal/modules/identity"
+	identityevents "github.com/chronos/chronos-go/internal/modules/identity/contract"
 	"github.com/chronos/chronos-go/internal/modules/notification/contract"
 	"github.com/chronos/chronos-go/internal/platform/notify"
 )
@@ -12,20 +14,34 @@ import (
 // Two declarations, side by side on purpose:
 //
 //   - registerEvents says which events this binary can DECODE.
-//   - notifications says, for each of them, whether it notifies and to whom.
+//   - notifications says, for each event the REPOSITORY defines, whether it
+//     notifies and to whom.
 //
-// events_test.go asserts the two agree. An event added to the first without a
-// decision in the second fails the build — which is the point. Nothing about
-// notification delivery is implicit: not the audience, not the class, not the
-// wording, and not the decision to stay silent.
+// The difference between those two scopes is the bug this file was rewritten to
+// fix. Until it was, registerEvents listed five notification-module types and
+// the completeness test verified the catalogue against `codec.Types()` — the
+// same five. It read as "every event has a notification decision" and meant
+// "every event I remembered to register has one". Identity's twenty-nine event
+// types were in neither list, so nine Sec-class alerts the catalogue is
+// supposed to guarantee — password changed, second factor disabled, recovery
+// codes used, account suspended — were absent with no test able to say so.
+//
+// events_test.go now derives the event universe from the SOURCE (see
+// eventUniverse) rather than from this file, so forgetting a registration here
+// fails the build instead of quietly shrinking what the guard checks.
 func registerEvents(codec *eventcodec.JSON) {
-	// Module event types register here as the verticals land, e.g.
-	//   eventcodec.Register[identity.PasswordChanged](codec)
 	eventcodec.Register[contract.NotificationCreated](codec)
 	eventcodec.Register[contract.NotificationRead](codec)
 	eventcodec.Register[contract.PushSubscribed](codec)
 	eventcodec.Register[contract.PushSubscriptionExpired](codec)
 	eventcodec.Register[contract.PushSent](codec)
+
+	// Identity registers its own types from the module's composition surface,
+	// exactly as cmd/projector does. Listing them here instead would be a
+	// second place to forget one — and forgetting one is silent: the reactor
+	// cannot decode the event, so the notification is never sent, no error is
+	// raised and no metric moves.
+	identity.RegisterEvents(codec)
 }
 
 // notifications declares what each event sends, and to whom.
@@ -34,31 +50,338 @@ func registerEvents(codec *eventcodec.JSON) {
 // the type parameter), the wording, the class that decides whether it is
 // delivered at all, and the audience that decides who receives it.
 //
-//	cat.On[identity.PasswordChanged](notify.Spec{
-//	    Template: "identity.password_changed",
-//	    Class:    notify.Security,          // always sent, no unsubscribe
-//	    Audience: notify.AudienceSubject,   // the person whose password it was
-//	}, func(e *identity.PasswordChanged) map[string]any {
-//	    return map[string]any{"Device": e.Device, "Location": e.City}
-//	})
+// An event that should tell nobody is declared too, WITH A REASON. "No entry"
+// is ambiguous between "decided against" and "nobody thought about it", and the
+// second is the one that ships a security event nobody is ever told about.
 //
-// An event that should tell nobody is declared too, with a reason:
+// # Delivery is idempotent by construction, not by anything written here
 //
-//	cat.Silent[identity.TelemetryRecorded]("internal counter")
+// The reactor keys every delivery on `<event id>:<recipient index>`
+// (notify/reactor.go). That key is the Temporal workflow id, so a redelivered
+// event asks to start a run that already exists and is refused — which the
+// reactor treats as success, because the work was already done. Below Temporal,
+// the persistent subscription's own `reactor_processed` row deduplicates the
+// event before React is called at all. Neither depends on the entry, so every
+// entry added here inherits both.
 func notifications() *notify.Catalogue {
 	cat := notify.NewCatalogue()
 
-	// The notification module's OWN events notify nobody. They are operational
-	// records of delivery — that a feed item was created, that a push was sent
-	// — and notifying about them would be a loop: a notification about a
-	// notification, which itself notifies (notification.md §10).
+	identityNotifications(cat)
+	notificationModuleNotifications(cat)
+
+	return cat
+}
+
+// identityNotifications is NOTIFICATIONS.md §5, expressed as code.
+//
+// The doc's tables are the specification; the deviations from them are all in
+// one direction and all for the same reason — a catalogue entry sees ONE
+// decoded event and nothing else. It cannot ask a read model whether a device
+// is new, whether a threshold was crossed, or how many sessions a revocation
+// ended. Where the doc qualifies an alert with a condition of that kind, the
+// entry is attached to the event that already carries the condition as a fact,
+// and the qualified event is declared silent pointing at it.
+func identityNotifications(cat *notify.Catalogue) {
+	// ---------------------------------------------------------------------
+	// Email reservation — internal to identity (ADR-044)
+	// ---------------------------------------------------------------------
+
+	cat.Silent[identityevents.EmailReserved](
+		"the uniqueness mechanism, internal to identity (ADR-044). It records a claim on " +
+			"an address nobody has proven yet; the account-side fact a person can act on " +
+			"is UserRegistered, and NOTIFICATIONS §5 forbids mailing an unverified address")
+	cat.Silent[identityevents.EmailReservationConfirmed](
+		"bookkeeping that makes an address claim permanent. It rides the same proof as " +
+			"EmailVerified, which is the entry that mails the person")
+	cat.Silent[identityevents.EmailReleased](
+		"a fact about an address, not about an account. Its routine cause is an unverified " +
+			"reservation lapsing — mailing that address would be unsolicited mail to " +
+			"someone who never asked (NOTIFICATIONS §5) — and its other two causes, an " +
+			"address change and an erasure, notify from the account-side event")
+
+	// ---------------------------------------------------------------------
+	// Account lifecycle
+	// ---------------------------------------------------------------------
+
+	cat.Silent[identityevents.UserRegistered](
+		"the verification mail is the notification a registration produces, and it is " +
+			"triggered by EmailVerificationRequested, which rides the same append. An " +
+			"entry here would mail the same person twice about one registration — and " +
+			"the second copy could not carry a link, because a catalogue entry cannot " +
+			"mint a token")
+	cat.Silent[identityevents.EmailVerificationRequested](
+		"delivered by the verification-mail reactor (cmd/worker/verification.go), on its " +
+			"own subscription group, because the message's payload is a credential that " +
+			"does not exist yet and cannot be derived from anything the event carries. A " +
+			"catalogue entry would send a second, link-less copy of a mail whose entire " +
+			"purpose is the link")
+
+	// The welcome fires on VERIFICATION, not registration: mailing an
+	// unverified address is unsolicited mail to someone who may not have asked
+	// for it, and confirms to whoever typed the address that it exists
+	// (NOTIFICATIONS §5).
+	cat.On[identityevents.EmailVerified](notify.Spec{
+		Template: "identity.welcome",
+		Class:    notify.Transactional,
+		Audience: notify.AudienceSubject,
+	}, nil)
+
+	cat.Silent[identityevents.UserActivated](
+		"activation is the conjunction of two facts that each notify on their own — the " +
+			"address was proven (EmailVerified) and a second factor was enrolled " +
+			"(TotpEnabled). A third message repeating both is noise, and noise in a " +
+			"security stream is what trains people to ignore the message that matters")
+
+	cat.On[identityevents.UserDeactivated](notify.Spec{
+		Template: "identity.account_deactivated",
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, func(e *identityevents.UserDeactivated) map[string]any {
+		return map[string]any{"ByAnotherParty": actedOnBehalf(e.ActorID, e.SubjectID)}
+	})
+
+	// Not in the doc's table, and deliberately added: deactivation is
+	// reversible by the holder, so an attacker who has an account's credentials
+	// can undo the very step a worried owner took. Telling nobody about the
+	// reversal would make the deactivation alert the more useful half of a pair
+	// whose other half is silent.
+	cat.On[identityevents.UserReactivated](notify.Spec{
+		Template: "identity.account_reactivated",
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, func(e *identityevents.UserReactivated) map[string]any {
+		return map[string]any{"ByAnotherParty": actedOnBehalf(e.ActorID, e.SubjectID)}
+	})
+
+	// Reason is NOT passed to the template. It is an operator-entered string
+	// with no constrained vocabulary, and a mail is the one place a note
+	// written for an internal audit trail must not surface verbatim.
+	cat.On[identityevents.UserSuspended](notify.Spec{
+		Template: "identity.account_suspended",
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, nil)
+
+	// ---------------------------------------------------------------------
+	// Password
+	// ---------------------------------------------------------------------
+
+	// Found by this file's own completeness guard, minutes after it was fixed:
+	// identity added this event while the catalogue was being written, and the
+	// build failed naming it. That is the mechanism working — under the previous
+	// guard, which verified against the five types the worker happened to
+	// register, it would have arrived silently.
+	cat.Silent[identityevents.PasswordResetRequested](
+		"structurally identical to EmailVerificationRequested: the message IS a freshly " +
+			"minted token, and a catalogue Data function sees only the decoded event — " +
+			"which deliberately carries neither the token nor its digest, because a reset " +
+			"token grants account access and a permanent replicated log is the last place " +
+			"it may appear. Delivery therefore belongs to a minting reactor with its own " +
+			"subscription group, as verification mail has (cmd/worker/verification.go); an " +
+			"entry here could only send a reset mail with no link in it")
+
+	cat.Silent[identityevents.PasswordSet](
+		"identity emits this only from Registration.VerifyEmail — the sole caller of " +
+			"domain.User.SetPassword, which the aggregate refuses on an unproven address " +
+			"(IDENTITY-REVIEW C8). It therefore lands in the SAME append as EmailVerified, " +
+			"every time, so the escalation NOTIFICATIONS §5 describes — a password " +
+			"appearing on an established passwordless account — cannot happen yet. A " +
+			"message saying 'a password was added' would arrive beside the welcome mail, " +
+			"about the password the reader had just chosen. This entry must become an " +
+			"On the day a federated account can add one")
+
+	cat.On[identityevents.PasswordChanged](notify.Spec{
+		Template: "identity.password_changed",
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, func(e *identityevents.PasswordChanged) map[string]any {
+		// ViaReset changes the wording, not the decision to send: a change made
+		// by someone who knew the old password and a change made through a
+		// reset link read very differently to a person who did neither.
+		return map[string]any{"ViaReset": e.ViaReset}
+	})
+
+	cat.Silent[identityevents.PasswordRehashed](
+		"a transparent upgrade of the stored verifier on a successful login. Nothing the " +
+			"account holder did, nothing about their credentials changed, and nothing " +
+			"they could act on. It exists as evidence the rehash job runs, which is an " +
+			"operator question answered by a metric rather than by mail")
+
+	cat.On[identityevents.CredentialCompromiseDetected](notify.Spec{
+		Template: "identity.credential_compromised",
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, func(e *identityevents.CredentialCompromiseDetected) map[string]any {
+		// The corpus name, never the password and never the match. Source is a
+		// provider identifier, which is why it is safe to render.
+		return map[string]any{"Source": e.Source}
+	})
+
+	// ---------------------------------------------------------------------
+	// Second factors
+	// ---------------------------------------------------------------------
+
+	cat.Silent[identityevents.TotpEnrollmentStarted](
+		"a secret provisioned but not yet proven — the user is looking at the QR code as " +
+			"this is written. An abandoned enrollment expires without ever having changed " +
+			"the account, so the fact worth mailing is TotpEnabled")
+
+	cat.On[identityevents.TotpEnabled](notify.Spec{
+		Template: "identity.totp_enabled",
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, nil)
+
+	// The highest-value alert in the catalogue (NOTIFICATIONS §5): disabling a
+	// second factor is the step an attacker takes immediately after taking over
+	// an account, and this mail is what tells the victim it happened.
+	cat.On[identityevents.TotpDisabled](notify.Spec{
+		Template: "identity.totp_disabled",
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, func(e *identityevents.TotpDisabled) map[string]any {
+		return map[string]any{"ByAnotherParty": actedOnBehalf(e.ActorID, e.SubjectID)}
+	})
+
+	cat.On[identityevents.RecoveryCodesGenerated](notify.Spec{
+		Template: "identity.recovery_codes_generated",
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, func(e *identityevents.RecoveryCodesGenerated) map[string]any {
+		// The count, never a code. Regeneration replaces the whole set, so a
+		// person who did not do this has lost every code they held.
+		return map[string]any{"Count": e.Count}
+	})
+
+	// NOTIFICATIONS §5 lists "running low on recovery codes" as a separate
+	// Activity message with no trigger event of its own. It is folded in here
+	// instead of invented as a second mail: Remaining is on the event, so the
+	// same message that reports the use can report how many are left — and one
+	// message about one fact beats two.
+	cat.On[identityevents.RecoveryCodeConsumed](notify.Spec{
+		Template: "identity.recovery_code_used",
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, func(e *identityevents.RecoveryCodeConsumed) map[string]any {
+		return map[string]any{"Remaining": e.Remaining, "Low": e.Remaining <= lowRecoveryCodes}
+	})
+
+	cat.On[identityevents.RecoveryCodesExhausted](notify.Spec{
+		Template: "identity.recovery_codes_exhausted",
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, nil)
+
+	// ---------------------------------------------------------------------
+	// Authentication outcomes
+	// ---------------------------------------------------------------------
+
+	cat.Silent[identityevents.AuthenticationSucceeded](
+		"NOTIFICATIONS §5 restricts the sign-in alert to a NEW device or country, and says " +
+			"why: alerting on every login trains people to ignore the alert, which " +
+			"destroys the value of the one that matters. This event is emitted on every " +
+			"successful login and carries a DeviceID but no way to tell whether it is new " +
+			"— that is a read-model question, and a catalogue entry sees one decoded event. " +
+			"The new-device half of the condition is already a first-class fact: " +
+			"DeviceRegistered, which identity emits the first time a client is seen under " +
+			"an account, and which is where the alert is attached. The country half needs " +
+			"a location the event does not carry")
+
+	cat.Silent[identityevents.AuthenticationFailed](
+		"NOTIFICATIONS §5 asks for an AGGREGATED alert when a threshold is crossed. One " +
+			"refusal is not a threshold and a catalogue entry cannot count, so an entry " +
+			"here would mail on every mistyped password — the exact noise the aggregation " +
+			"exists to avoid. The crossing is already an event: AuthenticatorDisabled, " +
+			"emitted when an authenticator locks out, carrying the failure count, and that " +
+			"is where the alert is attached. This event also has an EMPTY SubjectID when " +
+			"the identifier matched no account, so there is frequently nobody to notify")
+
+	cat.Silent[identityevents.SecondFactorChallenged](
+		"the person is mid-login, looking at the prompt this records. It exists so that an " +
+			"abandoned login — first factor correct, second never supplied — is visible as " +
+			"the credential-stuffing signal it is, which is a detection concern rather " +
+			"than a message to the account holder")
+
+	// This is NOTIFICATIONS §5's "repeated failed sign-in attempts", attached to
+	// the event that means the threshold was actually crossed. Per
+	// authenticator, never per account — locking the account on failed attempts
+	// would hand any attacker a denial of service against any address.
+	cat.On[identityevents.AuthenticatorDisabled](notify.Spec{
+		Template: "identity.authenticator_disabled",
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, func(e *identityevents.AuthenticatorDisabled) map[string]any {
+		return map[string]any{"Failures": e.Failures}
+	})
+
+	// ---------------------------------------------------------------------
+	// Sessions and devices
+	// ---------------------------------------------------------------------
+
+	cat.Silent[identityevents.SessionCreated](
+		"one per login, so an entry here is the every-login alert §5 forbids. The " +
+			"new-device signal it would be a proxy for is DeviceRegistered")
+	cat.Silent[identityevents.SessionElevated](
+		"a step-up ceremony the person completed themselves, seconds earlier, in the flow " +
+			"that demanded it. The operation the elevation was granted FOR is what " +
+			"notifies — disabling a second factor requires step-up, and TotpDisabled is " +
+			"the mail that matters")
+	cat.Silent[identityevents.SessionRevoked](
+		"emitted once per session, and §5 asks for one message saying 'signed out of n " +
+			"devices'. n is not derivable from a single event, so an entry here would send " +
+			"one mail per device to someone who pressed 'sign out everywhere' once. The " +
+			"causes that carry real risk already notify from their own event: a reset " +
+			"through PasswordChanged, a compromise through CredentialCompromiseDetected. " +
+			"Closing this properly needs an aggregate event identity does not yet emit")
+	cat.Silent[identityevents.SessionExpired](
+		"a deadline being reached. The contract's own comment says it: expiry is not a " +
+			"security signal and revocation usually is, and collapsing the two would bury " +
+			"every real revocation in routine noise")
+
+	// NOTIFICATIONS §5's "new sign-in from device, city", attached to the event
+	// that means the device is actually new.
+	//
+	// The mail names no device and no city. DeviceID is a pseudonym; the name,
+	// platform, user agent and address are personal data held in the vault under
+	// it (ADR-002), and the vault port resolves a SUBJECT, not a device. The
+	// message therefore says that an unrecognised client signed in and sends the
+	// reader to their own sessions page, which is the honest version of a
+	// message that cannot see the detail.
+	cat.On[identityevents.DeviceRegistered](notify.Spec{
+		Template: "identity.new_device",
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, nil)
+}
+
+// notificationModuleNotifications covers the notification module's OWN events.
+//
+// They notify nobody. They are operational records of delivery — that a feed
+// item was created, that a push was sent — and notifying about them would be a
+// loop: a notification about a notification, which itself notifies
+// (notification.md §10).
+func notificationModuleNotifications(cat *notify.Catalogue) {
 	cat.Silent[contract.NotificationCreated]("operational record of in-app delivery; notifying about it would recurse")
 	cat.Silent[contract.NotificationRead]("the recipient read it; telling them so is circular")
 	cat.Silent[contract.PushSubscribed]("the person just granted permission in the browser; they know")
 	cat.Silent[contract.PushSubscriptionExpired]("a dead endpoint is an operational fact, surfaced in-app if it matters")
 	cat.Silent[contract.PushSent]("operational record of push delivery")
+}
 
-	return cat
+// lowRecoveryCodes is when "you are running low" starts appearing in the mail
+// that reports a code being used (NOTIFICATIONS §5).
+const lowRecoveryCodes = 2
+
+// actedOnBehalf reports whether somebody OTHER than the account holder did this.
+//
+// It returns a bool rather than the actor, and that is the point: ActorID is a
+// pseudonym and would be meaningless in a mail, but "an administrator did this,
+// not you" is the single most important thing the message can say. An empty
+// actor reads as the holder — identity sets ActorID to the subject for
+// self-service, and treating "unknown" as "someone else" would tell people an
+// administrator touched their account whenever metadata was incomplete.
+func actedOnBehalf(actorID, subjectID string) bool {
+	return actorID != "" && actorID != subjectID
 }
 
 // audiences maps each role to the thing that can answer it.

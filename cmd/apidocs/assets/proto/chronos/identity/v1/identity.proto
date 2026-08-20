@@ -359,6 +359,142 @@ message ResendEmailVerificationRequest {
 // it a new link".
 message ResendEmailVerificationResponse {}
 
+// RequestPasswordResetRequest asks for a password-reset link.
+//
+// It names an ADDRESS rather than an account, and it has to: the population that
+// needs this call is exactly the population that cannot sign in, so there is no
+// principal to read from the context and no identifier available to the caller
+// other than the address they typed into the login form.
+//
+// The address is used to FIND an account and never to address the mail. The link
+// goes to the address the vault holds for the account that was found — never to
+// the one this request supplied (identity.md §4.5) — which is what stops this
+// message from being a way to have somebody else's reset link delivered to you.
+message RequestPasswordResetRequest {
+  // The address as typed. Reduced to a blind index server-side; neither the raw
+  // nor the normalized form reaches an event, a log line or an error message.
+  //
+  // The rules are RegisterRequest.email's and
+  // ResendEmailVerificationRequest.email's, character for character, and the
+  // duplication is deliberate rather than lazy. All three front the same
+  // normalizer, so a rule that differed in either direction would be visible on
+  // the wire: stricter and it refuses an address that was successfully
+  // registered, looser and "that is not an address" becomes a cheaper answer
+  // than "that address has no account", which is the first half of an
+  // enumeration oracle.
+  string email = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "ada@example.com"}},
+    (buf.validate.field) = {
+      required: true
+    cel: [
+      {
+        id: "identity.email.length"
+        message: "an email address may not exceed 254 bytes"
+        expression: "bytes(this.trim()).size() <= 254"
+      },
+      {
+        id: "identity.email.shape"
+        message: "an email address must contain a local part and a fully qualified domain"
+        expression:
+          "this.trim().lastIndexOf('@') > 0"
+          " && this.trim().lastIndexOf('@') < this.trim().size() - 1"
+          " && this.trim().substring(this.trim().lastIndexOf('@') + 1).contains('.')"
+      },
+      {
+        id: "identity.email.local_part"
+        message: "the local part of an email address may not exceed 64 bytes"
+        expression:
+          "this.trim().lastIndexOf('@') <= 0"
+          " || bytes(this.trim().substring(0, this.trim().lastIndexOf('@'))).size() <= 64"
+      }
+    ]
+  }
+  ];
+}
+
+// RequestPasswordResetResponse is deliberately empty, and its emptiness is the
+// feature.
+//
+// Five outcomes reach this message and all five produce these zero bytes: no
+// account claims the address, an account claims it and can be reset, an account
+// claims it and has no password to reset, an account claims it and is
+// deactivated, and an account claims it and is suspended. Exactly one of them
+// appends an event and sends mail.
+//
+// A field here — `sent`, `already_reset`, a next-allowed timestamp — would turn
+// an unauthenticated endpoint into a precise account-existence and account-state
+// oracle for any address a prober can type. The client renders one sentence for
+// all five: "if that address has an account with a password, we have sent it a
+// reset link".
+message RequestPasswordResetResponse {}
+
+// ResetPasswordRequest presents the token from a reset link and the password the
+// account will be signed into with next.
+//
+// The two travel together for VerifyEmailRequest's reason: the token proves
+// control of the mailbox and the password is the credential that control
+// authorises, in one request, so the party choosing the credential and the party
+// proving the mailbox cannot be different people.
+message ResetPasswordRequest {
+  // The plaintext from the link. It is hashed and spent server-side and is never
+  // stored, logged or placed in an event.
+  //
+  // `required` matches the handler, which refuses an empty token. The ceiling is
+  // a DENIAL-OF-SERVICE bound rather than a format rule, and it is deliberately
+  // far above any token this system mints so it cannot become a probe for the
+  // token's real length. A wrong token, a spent one and an expired one remain
+  // one refusal.
+  string token = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-not-a-real-reset-token"}},
+    (buf.validate.field) = {
+      required: true
+      string: {max_len: 512}
+    }
+  ];
+
+  // The new secret as typed. Normalized under RFC 8265's OpaqueString profile
+  // before it is screened against the breach corpus and hashed.
+  //
+  // The same two numbers VerifyEmailRequest declares, and stated here for the
+  // same reason: this is an ENROLMENT surface, where the password policy is
+  // PUBLIC because it is printed beside the field the user is typing into. They
+  // are deliberately NOT repeated on AuthenticateRequest or
+  // CreateSessionRequest.
+  //
+  // Declaring them here is not an oracle. The rule is evaluated by the
+  // interceptor BEFORE the handler, and the handler screens the password before
+  // it spends the token — so both refusals are functions of the caller's own
+  // input alone, say nothing about whether the token was real, and leave it
+  // unspent. A person who chose a breached password still has their link.
+  //
+  // `min_len` counts CHARACTERS and `max_bytes` counts BYTES, matching
+  // `domain.MinPasswordRunes` (8) and `domain.MaxPasswordBytes` (4096).
+  string password = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-not-a-real-password"}},
+    (buf.validate.field).string = {
+      min_len: 8
+      max_bytes: 4096
+    }
+  ];
+}
+
+// ResetPasswordResponse is empty, and unlike VerifyEmailResponse that is a
+// SECURITY choice rather than an enumeration one.
+//
+// VerifyEmail returns the account's identifiers because presenting a valid
+// single-use token IS proof of control, and the party holding it is about to
+// become the account holder. A reset is different in one decisive respect: it
+// must not advance the caller towards a session (ASVS 5.0 V6.4.3). The caller's
+// next act is an ordinary CreateSession that presents the account's second
+// factor, unchanged by the reset, and there is nothing this message could carry
+// that would help with that.
+//
+// So it carries nothing: no subject id, no user id, no bearer token, no
+// assurance level. A reset that returned a session would convert "the attacker
+// can read the mailbox" into full account takeover in one step, and the surest
+// way not to write that is to have no field to put it in.
+message ResetPasswordResponse {}
+
 // AuthenticateRequest is one login attempt, presenting whichever factors the
 // caller has (ADR-050).
 message AuthenticateRequest {
@@ -1145,6 +1281,113 @@ service IdentityService {
     option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
 
     option (gnostic.openapi.v3.operation) = {security: [{}]};
+  }
+
+  // RequestPasswordReset sends a reset link to the address a registered account
+  // holds.
+  //
+  // Public, and the choice is forced rather than preferred: the population that
+  // needs this call is exactly the population that cannot sign in.
+  //
+  // The cost of being public is that it is an unauthenticated mail trigger
+  // pointed at a third party's mailbox, so it is rate limited on TWO axes before
+  // anything is looked up — per address, which bounds mail-bombing one victim,
+  // and per caller, which bounds an enumeration sweep. Both counters are
+  // consumed whether or not an account exists, so the ceiling itself is not an
+  // oracle. The per-address counter is the SAME one verification mail spends
+  // (NOTIFICATIONS.md §4: "an hourly ceiling per address across all classes"), so
+  // an attacker cannot double a victim's mail by alternating between the two
+  // endpoints.
+  //
+  // A WRITE: the successful path appends PasswordResetRequested to the account's
+  // stream, and the reset-mail issuer does the rest.
+  rpc RequestPasswordReset(RequestPasswordResetRequest) returns (RequestPasswordResetResponse) {
+    option (chronos.options.v1.public) = true;
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    option (gnostic.openapi.v3.operation) = {
+      security: [{}]
+      responses: {
+        response_or_reference: [
+          {
+            name: "200"
+            value: {
+              response: {
+                description:
+                  "Accepted. The body is empty, and its emptiness is the feature: this\n"
+                  "response is identical for an unknown address, a resettable account, a\n"
+                  "passwordless account, a deactivated account and a suspended one.\n"
+                  "Render one sentence for all five — \"if that address has an account\n"
+                  "with a password, we have sent it a reset link\".\n"
+                content: {
+                  additional_properties: [
+                    {
+                      name: "application/json"
+                      value: {
+                        schema: {reference: {_ref: "#/components/schemas/chronos.identity.v1.RequestPasswordResetResponse"}}
+                        example: {yaml: "{}"}
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    };
+  }
+
+  // ResetPassword redeems a reset link and replaces the account's password.
+  //
+  // Public: it is reached from a link in a mailbox, by a browser that has never
+  // authenticated. The token IS the authentication, and it is single-use.
+  //
+  // It grants NOTHING beyond the credential change. No session is created, no
+  // bearer token is returned, the second factor is untouched, and a Pending
+  // account is not activated — so a reset cannot be used to bypass the second
+  // factor (ASVS 5.0 V6.4.3). The caller's next act is an ordinary
+  // CreateSession.
+  //
+  // In the same request it voids every session for the account including any
+  // held by whoever is resetting, every outstanding token of every purpose, and
+  // any pending identifier change (identity.md §4.4, §4.5).
+  rpc ResetPassword(ResetPasswordRequest) returns (ResetPasswordResponse) {
+    option (chronos.options.v1.public) = true;
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    option (gnostic.openapi.v3.operation) = {
+      security: [{}]
+      responses: {
+        response_or_reference: [
+          {
+            name: "200"
+            value: {
+              response: {
+                description:
+                  "The link was valid and has been spent. The account's password is the\n"
+                  "one just supplied, every session it had is gone, and every outstanding\n"
+                  "link of every kind is dead. The body is empty on purpose: a reset must\n"
+                  "not advance the caller towards a session, so there is no token, no\n"
+                  "assurance level and no account identifier here. Sign in normally next,\n"
+                  "presenting the account's second factor.\n"
+                content: {
+                  additional_properties: [
+                    {
+                      name: "application/json"
+                      value: {
+                        schema: {reference: {_ref: "#/components/schemas/chronos.identity.v1.ResetPasswordResponse"}}
+                        example: {yaml: "{}"}
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    };
   }
 
   // Authenticate verifies the factors presented and reports what remains

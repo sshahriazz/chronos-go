@@ -96,6 +96,22 @@ type Resender interface {
 	) (app.ResendVerificationResult, error)
 }
 
+// PasswordResets is the reset half: asking for a link, and redeeming one.
+//
+// A port of its own rather than two more methods on Registration, and the split
+// is not cosmetic. Registration's two methods bring an account into existence;
+// these two act on an account that already exists, on behalf of an
+// unauthenticated stranger who typed an address or followed a link. Keeping them
+// separate is what lets the handler for them hold nothing that could create an
+// account, and lets the handler for registration hold nothing that could replace
+// a credential.
+type PasswordResets interface {
+	Request(
+		ctx context.Context, cmd app.RequestPasswordResetCommand,
+	) (app.RequestPasswordResetResult, error)
+	Complete(ctx context.Context, cmd app.ResetPasswordCommand) (app.ResetPasswordResult, error)
+}
+
 // Authentication is the login and session half.
 type Authentication interface {
 	Authenticate(ctx context.Context, cmd app.AuthenticateCommand) (app.AuthenticateResult, error)
@@ -133,8 +149,11 @@ type Queries interface {
 // pointers to types whose names differ only by their role, and the compiler
 // cannot tell a swapped pair apart.
 type Deps struct {
-	Registration   Registration
-	Resender       Resender
+	Registration Registration
+	Resender     Resender
+
+	// Resets is the password-reset pair. Required; see New.
+	Resets         PasswordResets
 	Authentication Authentication
 	SecondFactor   SecondFactor
 	Queries        Queries
@@ -161,6 +180,7 @@ type Deps struct {
 type Service struct {
 	registration Registration
 	resender     Resender
+	resets       PasswordResets
 	authn        Authentication
 	secondFactor SecondFactor
 	queries      Queries
@@ -188,6 +208,12 @@ func New(deps Deps) (*Service, error) {
 		// ResendEmailVerification with a panic, and the people who reach that RPC
 		// are by definition the ones already locked out of their own account.
 		return nil, missing("a verification resender")
+	case deps.Resets == nil:
+		// Refused rather than tolerated as "reset is optional". A nil here serves
+		// both reset RPCs with a panic, and the people who reach them are by
+		// definition the ones already locked out of their own account — the same
+		// argument the resender is refused under, with a worse population.
+		return nil, missing("a password-reset service")
 	case deps.Authentication == nil:
 		return nil, missing("an authentication service")
 	case deps.SecondFactor == nil:
@@ -200,6 +226,7 @@ func New(deps Deps) (*Service, error) {
 	return &Service{
 		registration: deps.Registration,
 		resender:     deps.Resender,
+		resets:       deps.Resets,
 		authn:        deps.Authentication,
 		secondFactor: deps.SecondFactor,
 		queries:      deps.Queries,
@@ -339,6 +366,7 @@ var _ identityv1connect.IdentityServiceHandler = (*Service)(nil)
 // tested and wired into nothing by.
 var (
 	_ Registration   = (*app.Registration)(nil)
+	_ PasswordResets = (*app.PasswordReset)(nil)
 	_ Authentication = (*app.Authentication)(nil)
 	_ SecondFactor   = (*app.SecondFactor)(nil)
 	_ Queries        = (*app.Queries)(nil)

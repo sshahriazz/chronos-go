@@ -95,3 +95,19 @@ DELETE FROM recovery_code WHERE subject_id = $1;
 -- name: CountUnusedRecoveryCodes :one
 SELECT count(*) FROM recovery_code
 WHERE subject_id = $1 AND consumed_at IS NULL;
+
+-- name: RevokeAllTokensForSubject :execrows
+-- Drop every outstanding token for a subject, of EVERY purpose.
+--
+-- Deliberately not RevokeTokens with a loop over purposes in Go, and the
+-- difference is not tidiness. A loop is several statements: a purpose added to
+-- app.TokenPurpose without being added to the loop is a live token that survives
+-- a reset, silently, and nothing in any test would notice because the loop
+-- passes. Filtering on the subject alone cannot acquire that gap — a new purpose
+-- is covered the day it is invented.
+--
+-- Required by identity.md §4.5: a password reset voids every outstanding token
+-- of every purpose for that subject, not only reset tokens. The variant it
+-- closes is the attacker who triggered a VERIFICATION mail (or a second reset)
+-- before the victim recovered, and holds a live link that outlives the recovery.
+DELETE FROM identity_token WHERE subject_id = $1;

@@ -1,0 +1,12 @@
+Hello{{if .Name}} {{.Name}}{{end}},
+
+Your Chronos account was signed in to from a device we have not seen before, on
+{{datetime .OccurredAt}}.
+
+If that was you — a new phone, a new browser, a reinstall — nothing further is
+needed. This message is sent only the first time a device is used, not on every
+sign-in.
+
+If it wasn't, sign out of that device and change your password:
+
+  {{url "/settings/sessions"}}

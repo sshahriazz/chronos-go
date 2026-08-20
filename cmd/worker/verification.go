@@ -82,12 +82,16 @@ func (a issuerAdapter) IssueVerification(
 // newVerificationMail builds the verification-mail reactor.
 //
 // It decodes with identity's OWN codec rather than this binary's notification
-// codec. The two answer different questions: newCodec is the catalogue-driven
-// reactor's, and every type in it must have a notification decision recorded
-// against it or events_test.go fails the build. This reactor is not
-// catalogue-driven — it mints a credential, which no catalogue Data function
-// could do — so registering identity's whole event set there would demand a
-// notification decision for thirty events that have nothing to do with this one.
+// codec, and the reason is the upcaster registry rather than the type set: both
+// now carry identity's whole event set, but newIdentityCodec is the one built
+// alongside identity.RegisterSchemas, so a stored event read back through a
+// version chain resolves. The notification codec is handed a bare registry, as
+// cmd/projector's is.
+//
+// The two reactors stay separate for the reason the registration in reactors()
+// gives: this one MINTS a credential, which no catalogue Data function can do,
+// and a verification that keeps failing must park on its own queue rather than
+// share retries with every other notification in the system.
 func newVerificationMail(d *dependencies) (*identityreactor.VerificationMail, error) {
 	if d.verification == nil {
 		return nil, errors.New("no verification issuer was constructed")

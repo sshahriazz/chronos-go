@@ -158,6 +158,10 @@ func (f *fakeCredentials) Rehash(context.Context, ids.CredentialID, string, stri
 	return errors.New("not used by registration")
 }
 
+func (f *fakeCredentials) Replace(context.Context, ids.CredentialID, string, string, int32) error {
+	return errors.New("not used by registration")
+}
+
 func (f *fakeCredentials) RecordSuccess(context.Context, ids.CredentialID) error {
 	return errors.New("not used by registration")
 }
@@ -288,6 +292,13 @@ func (f *fakeTokens) Consume(
 	return f.subjectID, f.err
 }
 
+// RevokeAllPurposes belongs to the reset flow. Registration never sweeps across
+// purposes — a verification voids only verification tokens — so this fails
+// loudly rather than returning zero.
+func (f *fakeTokens) RevokeAllPurposes(context.Context, string) (int, error) {
+	return 0, errors.New("not used by registration")
+}
+
 func (f *fakeTokens) RevokeAll(_ context.Context, purpose TokenPurpose, subjectID string) error {
 	f.journal = append(f.journal, "revoke")
 	if f.revokeErr != nil {
@@ -340,6 +351,14 @@ func (s *liveTokens) Consume(
 	}
 	delete(s.rows, k)
 	return row.subjectID, nil
+}
+
+// RevokeAllPurposes is the reset's sweep. It is not reachable from registration
+// or verification, so it fails loudly here rather than returning zero: a handler
+// that started calling it would otherwise be voiding tokens with nothing to say
+// so.
+func (s *liveTokens) RevokeAllPurposes(context.Context, string) (int, error) {
+	return 0, errors.New("not used by registration")
 }
 
 func (s *liveTokens) RevokeAll(_ context.Context, purpose TokenPurpose, subjectID string) error {

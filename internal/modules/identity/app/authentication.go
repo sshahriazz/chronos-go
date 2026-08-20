@@ -1820,6 +1820,22 @@ func (a *Authentication) RevokeSession(
 // find every one of them.
 const RevokeReasonEmailVerified = "email_verified"
 
+// RevokeReasonPasswordReset is the reason a completed password reset voids
+// sessions.
+//
+// It lands in SessionRevoked, which is permanent, so it is a fixed string rather
+// than prose assembled at the call site — and it is a DIFFERENT string from
+// RevokeReasonEmailVerified because the two mean different things to the person
+// receiving the notification. "Your address was verified, so we signed you out"
+// is routine; "your password was reset, so we signed you out everywhere" is the
+// line that tells somebody their account was taken, and collapsing the two would
+// bury it.
+//
+// Unlike the verification's, this one is NOT a no-op: a reset is performed by an
+// account that has a password and therefore can have sessions, and every one of
+// them dies (identity.md §4.5). See app.PasswordReset.Complete.
+const RevokeReasonPasswordReset = "password_reset"
+
 // RevokeAllSessionsCommand ends every live session for a subject.
 type RevokeAllSessionsCommand struct {
 	SubjectID string

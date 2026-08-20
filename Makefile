@@ -158,6 +158,16 @@ run: ## Run the tenant API against the local stack
 	@echo "  readyz     http://localhost:$${API_PORT:-8090}/readyz"
 	@go run ./cmd/api -addr :$${API_PORT:-8090}
 
+.PHONY: dev-api dev-worker dev-projector
+dev-api: ## Hot-reload cmd/api (air)
+	@air -c .air/api.toml
+
+dev-worker: ## Hot-reload cmd/worker (air)
+	@air -c .air/worker.toml
+
+dev-projector: ## Hot-reload cmd/projector (air)
+	@air -c .air/projector.toml
+
 .PHONY: projector
 projector: ## Run the projector against the local stack
 	@echo "  healthz    http://localhost:$${PROJECTOR_PORT:-8093}/healthz"

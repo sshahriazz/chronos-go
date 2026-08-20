@@ -1,0 +1,9 @@
+{{define "title"}}Your recovery codes were replaced{{end}}
+{{define "content"}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 14px;">A new set of <strong>{{.Count}}</strong> recovery codes was generated for your
+  Chronos account on <strong>{{datetime .OccurredAt}}</strong>. Every code you held before this is now dead.</p>
+<p style="margin:0 0 14px;">Store the new set somewhere you can reach without your phone.</p>
+<p style="margin:0 0 20px;">If you did not do this, someone else can get into your account without your
+  second factor — <a href="{{url "/settings/security"}}" style="color:#b42318;">regenerate them yourself</a>.</p>
+{{end}}

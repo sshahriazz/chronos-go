@@ -8,5 +8,19 @@
   <a href="{{.VerifyURL}}" style="display:inline-block;background:#1a1d21;color:#ffffff;text-decoration:none;padding:11px 20px;border-radius:6px;font-size:14px;font-weight:500;">Confirm email address</a>
 </p>
 <p style="margin:0 0 6px;color:#6b7280;font-size:13px;">This link expires in {{.ExpiresIn}}.</p>
+{{else}}
+<p style="margin:0 0 14px;">Your address is confirmed and you can sign in. Two things worth doing now,
+  in this order:</p>
+<p style="margin:0 0 10px;"><strong>1. Turn on two-factor authentication</strong> — and save the recovery
+  codes it gives you somewhere you can reach without your phone.</p>
+<p style="margin:0 0 18px;">
+  <a href="{{url "/settings/security"}}" style="display:inline-block;background:#1a1d21;color:#ffffff;text-decoration:none;padding:11px 20px;border-radius:6px;font-size:14px;font-weight:500;">Security settings</a>
+</p>
+<p style="margin:0 0 10px;"><strong>2. Check your notification settings.</strong> Security messages — a
+  password change, a second factor being turned off, a sign-in from a device we have not seen before —
+  are always sent and cannot be switched off. Everything else is yours to choose.</p>
+<p style="margin:0 0 20px;">
+  <a href="{{url "/settings/notifications"}}" style="color:#1a1d21;">Notification settings</a>
+</p>
 {{end}}
 {{end}}

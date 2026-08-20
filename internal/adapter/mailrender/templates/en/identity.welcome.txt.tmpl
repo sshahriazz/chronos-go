@@ -7,4 +7,20 @@ Confirm your email address to finish setting up:
   {{.VerifyURL}}
 
 This link expires in {{.ExpiresIn}}.
+{{else}}
+Your address is confirmed and you can sign in.
+
+Two things worth doing now, in this order:
+
+  1. Turn on two-factor authentication, and save the recovery codes it gives
+     you somewhere you can reach without your phone.
+
+       {{url "/settings/security"}}
+
+  2. Check your notification settings. Security messages — a password change, a
+     second factor being turned off, a sign-in from a device we have not seen
+     before — are always sent and cannot be switched off. Everything else is
+     yours to choose.
+
+       {{url "/settings/notifications"}}
 {{end}}

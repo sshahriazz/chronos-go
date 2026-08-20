@@ -3297,3 +3297,141 @@ Demonstrated rather than argued: with the append precondition deliberately
 removed so that all eight racers win, the run reports `accounts=1` from
 `user_view` — the old assertion passing — while the log assertion reports eight
 `UserRegistered` events for one address.
+
+---
+
+## ADR-053 — A password reset changes one credential and grants nothing else
+
+**Date:** 2026-08-20 · **Status:** Accepted · **Implements** identity.md §4.4 and §4.5
+
+### Context
+
+`identity.md` §4.5 specified the password reset before anything was built, as a
+list of things the flow MUST do rather than a feature description. Building it
+forced three decisions the specification implies but does not settle: what a
+reset returns, what serializes two simultaneous resets, and which of the two
+unavoidable crash windows the flow chooses.
+
+### Decision 1 — the reset returns NOTHING, so it cannot bypass the second factor
+
+`ResetPasswordResponse` is an empty message. No subject id, no user id, no
+bearer token, no assurance level. The caller's next act is an ordinary
+`CreateSession` presenting whatever factors the account has, unchanged.
+
+ASVS 5.0 V6.4.3 forbids a reset from bypassing the second factor, and the usual
+way it is broken is a reset that helpfully signs the user in. That converts "the
+attacker can read the mailbox" into full account takeover in one step, because a
+mailbox proves control of an ADDRESS and the second factor exists precisely
+because control of an address is not control of a person.
+
+The property is therefore carried by SHAPE rather than by a check: there is no
+branch anywhere that could decide to skip a factor, because there is no field to
+put a session in. `VerifyEmail` deliberately does the opposite — it returns the
+account's identifiers on the same kind of proof — and the difference is the
+point. Its caller is about to BECOME the account holder; this one must not be
+advanced towards a session at all.
+
+Three things the reset consequently does not do, all of which would be
+convenient:
+
+- it does not disable, remove or weaken TOTP, and consumes no recovery code;
+- it does not activate a Pending account, and does not touch `everSecondFactor`,
+  so it cannot widen the bootstrap carve-out that admits a password alone;
+- it does not re-enable a locked-out authenticator (`disabled_at IS NULL` is in
+  the statement). Somebody who has lost both their password and their
+  authenticator is a last-resort recovery case (identity.md §7.5), not a reset.
+
+### Decision 2 — the credential compare-and-set is the flow's serialization point
+
+Two reset links for one account can be redeemed simultaneously — an attacker
+triggered one, a victim triggered another — and BOTH consume their own token
+successfully, because they are different digests in different rows. The token
+store cannot serialize them; it is not being asked to.
+
+`ResetCredentialPassword` is a compare-and-set on the verifier the reset was
+decided against, so exactly one of the two lands and the loser writes nothing and
+appends nothing. Without it the surviving password is whichever transaction
+committed last — a password the user may never have typed, with no error raised
+anywhere.
+
+The observable behaviour under contention is one success and one refusal, and
+the refusal is one of two: `CONFLICT` when the compare-and-set lost, or the
+ordinary "this link is no longer valid" when the winner's token sweep reached the
+loser's link first. Both are safe, and which one arrives depends on the
+interleaving — so the test asserts the disjunction rather than picking one.
+
+### Decision 3 — the verifier moves BEFORE the event, and the append then retries
+
+Everything destructive is ordered so that a failure falls towards LESS access:
+
+1. void every outstanding token of every purpose,
+2. void any pending identifier change,
+3. void every session, sparing none,
+4. replace the verifier (compare-and-set),
+5. append `PasswordChanged{ViaReset: true}`.
+
+Revocations before the write, because the opposite order can fail between them
+and leave a NEW password live while the attacker's session is still live and
+their outstanding verification link still redeemable — the exact state §4.5
+forbids, reached through an error path where nothing notices.
+
+Steps 4 and 5 are the one window this flow cannot close, and the choice is
+deliberate. Appending first means a failure leaves the log saying the password
+was reset, the sessions gone, the user told to sign in — and the OLD password
+still the one that works. A reset exists because control may have been lost;
+leaving the old credential live after announcing it dead is the failure direction
+a reset must never take. Writing the verifier first means a failure leaves the
+person's new password working with no event to explain it, which is visible and
+is caught: the credential-tamper reconciliation (identity.md §4.2) reports a
+verifier the log does not account for.
+
+Because the event is therefore not optional, the append RETRIES on
+`ErrWrongExpectedRevision`, reloading the aggregate each time. This is not
+theoretical: `Authentication` appends to the same account stream when it locks
+out an authenticator or rehashes a verifier, so a reset racing a login can lose
+the precondition through no fault of its own. Three attempts, and a failure after
+them is an `INTERNAL` that states plainly that the credential store and the log
+now disagree.
+
+### Decision 4 — the cross-purpose token sweep is one statement, not a loop
+
+§4.5 requires a reset to void every outstanding token of EVERY purpose. That is
+`DELETE FROM identity_token WHERE subject_id = $1`, not a loop over the known
+purposes in Go. A loop is correct exactly until somebody adds a purpose and
+forgets it, and the symptom is a live token that survives a reset with nothing
+anywhere to say so — while every test still passes, because the loop is still
+enforcing its own half.
+
+The same statement is what actually voids a "pending identifier change" today: a
+change cannot be COMPLETED without the live verification token that was mailed
+for it. `domain.User.VoidPendingIdentifierChange` is written and called anyway
+and provably records nothing, exactly as `VerifyEmail`'s `RevokeAllSessions` was
+written before any session could exist — the rule is free while it is a no-op and
+expensive to retrofit once it is not.
+
+### Decision 5 — reset mail spends the verification-mail budget
+
+`RequestPasswordReset` holds the same two `ratelimit.Limiter` instances
+`ResendEmailVerification` does, over the same Valkey keys. NOTIFICATIONS.md §4
+asks for "an hourly ceiling per address across ALL classes", and that is only
+true if both endpoints increment one key — otherwise an attacker with two
+endpoints alternates between them and doubles the mail one victim receives, while
+every unit test passes because each limiter correctly enforces its own half.
+`mailAddressLimitPrefix` was deliberately not verification-specific for exactly
+this moment.
+
+Both ceilings are spent BEFORE the account lookup, which is what keeps the
+limiter from becoming the enumeration oracle the empty response exists to
+prevent: three requests to a refusal would otherwise mean "registered" and
+unlimited would mean "nobody".
+
+### Consequences
+
+- Five outcomes — no account, resettable, passwordless, deactivated, suspended —
+  produce byte-identical responses, asserted on marshalled bytes over real HTTP.
+- The residual leak is timing: the appending path performs one store round trip
+  the others do not. It is bounded by the per-address ceiling of three an hour
+  and stated rather than padded, for the reason `ResendVerification` states it.
+- `PasswordResetRequested` is appended and, today, consumed by nothing. The
+  reset-mail issuer is the missing component the verification reactor was before
+  `cmd/worker` grew one, and until it exists a reset link is never delivered.

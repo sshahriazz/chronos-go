@@ -1,0 +1,9 @@
+{{define "title"}}Your Chronos account was deactivated{{end}}
+{{define "content"}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 14px;">Your Chronos account was deactivated on <strong>{{datetime .OccurredAt}}</strong>{{if .ByAnotherParty}},
+  by an administrator rather than by you{{end}}.</p>
+<p style="margin:0 0 14px;">You will not be able to sign in while it stays that way. Nothing has been deleted.</p>
+<p style="margin:0 0 20px;">If you did not ask for this, contact support — a deactivation you did not
+  make means somebody else reached your account.</p>
+{{end}}

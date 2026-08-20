@@ -127,6 +127,50 @@ type PasswordCredentials interface {
 	// transit key is destroyed (identity.md §4).
 	Rehash(ctx context.Context, cred ids.CredentialID, expected, replacement string, pepperVersion int32) error
 
+	// Replace swaps the verifier of an EXISTING password credential, but only if
+	// the row still holds the one the caller decided against.
+	//
+	// This is the password-reset write, and the compare-and-set is the whole
+	// reason it is a distinct method rather than a call to Store.
+	//
+	// # It is the reset flow's only serialization point
+	//
+	// Two reset links for one account can be redeemed simultaneously, and both
+	// succeed at the token store, because they are different digests in different
+	// rows — that concurrency is not exotic, it is what an attacker who triggered
+	// a reset and a victim who triggered another produce between them. Both
+	// callers then hold a verifier computed from the same expected value. An
+	// unconditional write would let both land, and the account would end up with
+	// whichever password committed last: one the user may never have typed, with
+	// no error raised anywhere. Requiring the row to still hold `expected` makes
+	// exactly one of them win, and the loser stops before it appends anything.
+	//
+	// # The failure count is cleared, and Rehash's is not
+	//
+	// A consecutive-failure count describes attempts against a password that no
+	// longer exists once this returns. Carrying it forward would let a run of
+	// guesses against the OLD password lock out the new one, locking out the
+	// person who has just proven control of the mailbox. Rehash must not do the
+	// same: it runs after a login that already cleared the count, so zeroing it
+	// there would erase a run still accumulating against a credential nobody has
+	// used successfully.
+	//
+	// # The contract on the caller
+	//
+	// `cred` MUST be the credential the ACCOUNT'S OWN EVENT STREAM names as its
+	// usable password (domain.User.UsablePasswordCredential), never one read from
+	// this table. The log is the authority on which credentials an account has
+	// (identity.md §4.2): a row the log cannot account for was written outside
+	// the application, and a reset driven from the table would rewrite it as if
+	// it were legitimate.
+	//
+	// Returns ErrCredentialMoved when the row no longer matches — changed,
+	// disabled, or gone. That is an ordinary outcome under contention and the
+	// caller must ABORT rather than retry: retrying would recompute `expected`
+	// from a verifier somebody else just chose, which is a second reset nobody
+	// asked for.
+	Replace(ctx context.Context, cred ids.CredentialID, expected, replacement string, pepperVersion int32) error
+
 	// RecordSuccess stamps the credential as used and clears its failure count.
 	//
 	// Clearing on success is what makes the count consecutive rather than

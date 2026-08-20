@@ -1,0 +1,12 @@
+{{define "title"}}You have used your last recovery code{{end}}
+{{define "content"}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 14px;">Your last recovery code was used on <strong>{{datetime .OccurredAt}}</strong>.
+  You have none left.</p>
+<p style="margin:0 0 20px;">If you lose your authenticator now, there is no second way back into this
+  account. Generate a new set, and consider adding another authenticator.</p>
+<p style="margin:0 0 20px;">
+  <a href="{{url "/settings/security"}}" style="display:inline-block;background:#b42318;color:#ffffff;text-decoration:none;padding:11px 20px;border-radius:6px;font-size:14px;font-weight:500;">Generate new recovery codes</a>
+</p>
+<p style="margin:0;color:#6b7280;font-size:13px;">If you did not use these codes yourself, somebody else has been using them.</p>
+{{end}}

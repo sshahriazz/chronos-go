@@ -10,9 +10,9 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// The four RPCs in this file are PUBLIC: they run before any session exists, so
-// there is no principal to read and nothing in them is scoped to a caller. They
-// are also the four the gate pipeline skips entirely, which is why each of them
+// The RPCs in this file are PUBLIC: they run before any session exists, so there
+// is no principal to read and nothing in them is scoped to a caller. They are
+// also the ones the gate pipeline skips entirely, which is why each of them
 // reads the idempotency key from the header itself.
 
 // Register claims an address and creates the account that claims it.
@@ -123,6 +123,84 @@ func (s *Service) ResendEmailVerification(
 		return nil, fail(err)
 	}
 	return connect.NewResponse(&identityv1.ResendEmailVerificationResponse{}), nil
+}
+
+// RequestPasswordReset sends a reset link to the address a registered account
+// holds.
+//
+// # The result is dropped, and that is the whole design
+//
+// `app.RequestPasswordResetResult.Outcome` distinguishes five things — no
+// account, a request appended, an account with no password, a deactivated
+// account, a suspended one — and NONE of them reaches the wire. Mapping any of
+// them onto a field, a code or a message would turn an unauthenticated endpoint
+// into a precise account-state oracle for any address a prober can type.
+// Registration and ResendEmailVerification solve the same problem the same way.
+//
+// # The address in the request is a LOOKUP key, never a destination
+//
+// This handler passes it to the app layer and nothing else. The link is issued
+// against the account that was found and mailed to the address the vault holds
+// for it, so a request cannot redirect somebody else's reset link
+// (identity.md §4.5). The property is carried by the app layer holding no way to
+// address mail at all, not by a check here.
+//
+// The caller scope comes from the transport exactly as ResendEmailVerification's
+// does; see that handler for the whole argument about X-Forwarded-For and
+// API_TRUSTED_PROXY_HOPS.
+func (s *Service) RequestPasswordReset(
+	ctx context.Context, req *connect.Request[identityv1.RequestPasswordResetRequest],
+) (*connect.Response[identityv1.RequestPasswordResetResponse], error) {
+	key, err := idempotencyKey(req.Header())
+	if err != nil {
+		return nil, fail(err)
+	}
+	if _, err := s.resets.Request(ctx, app.RequestPasswordResetCommand{
+		Email:          req.Msg.GetEmail(),
+		CallerScope:    callerScope(s.callerScope, req),
+		IdempotencyKey: key,
+	}); err != nil {
+		return nil, fail(err)
+	}
+	return connect.NewResponse(&identityv1.RequestPasswordResetResponse{}), nil
+}
+
+// ResetPassword redeems a reset link and replaces the account's password.
+//
+// # Nothing comes back, and that is a security decision
+//
+// `app.ResetPasswordResult` carries the subject, the user id, how many sessions
+// were voided and how many tokens were swept. All of it is dropped here, and the
+// wire message has no field for any of it.
+//
+// VerifyEmail, one function above, DOES return the account's identifiers on the
+// same kind of proof — a valid single-use token — and the difference is worth
+// stating because the two look like they should agree. VerifyEmail's caller is
+// about to become the account holder; this one must not be advanced towards a
+// session at all (ASVS 5.0 V6.4.3). A reset that handed back a session, or
+// anything a client could treat as one, converts "the attacker can read the
+// mailbox" into full account takeover in one step. The surest way not to write
+// that is to have nothing to write it into.
+//
+// Every unusable link — unknown, spent, expired, or naming an account with no
+// password — is one undifferentiated refusal produced by the app layer. There is
+// no switch here, deliberately: a switch is how one answer becomes several
+// distinguishable Connect codes (ADR-036).
+func (s *Service) ResetPassword(
+	ctx context.Context, req *connect.Request[identityv1.ResetPasswordRequest],
+) (*connect.Response[identityv1.ResetPasswordResponse], error) {
+	key, err := idempotencyKey(req.Header())
+	if err != nil {
+		return nil, fail(err)
+	}
+	if _, err := s.resets.Complete(ctx, app.ResetPasswordCommand{
+		Token:          req.Msg.GetToken(),
+		Password:       req.Msg.GetPassword(),
+		IdempotencyKey: key,
+	}); err != nil {
+		return nil, fail(err)
+	}
+	return connect.NewResponse(&identityv1.ResetPasswordResponse{}), nil
 }
 
 // callerScope names whoever is calling, for the per-caller ceiling.

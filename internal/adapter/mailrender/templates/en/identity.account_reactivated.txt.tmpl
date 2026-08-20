@@ -1,0 +1,9 @@
+Hello{{if .Name}} {{.Name}}{{end}},
+
+Your Chronos account was reactivated on {{datetime .OccurredAt}}{{if .ByAnotherParty}}, by an
+administrator rather than by you{{end}}. You can sign in again.
+
+If you deactivated this account deliberately and did not turn it back on,
+somebody else has your credentials. Change your password immediately:
+
+  {{url "/settings/security"}}

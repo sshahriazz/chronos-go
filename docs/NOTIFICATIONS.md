@@ -233,6 +233,79 @@ revert link stays valid for the full revert window.
 | `UserSuspended` | Account suspended | user | Sec ★ | immediate |
 | `UserDeletionRequested` | Deletion scheduled for *date* — cancel | user | Sec ★ | immediate + reminders |
 
+### 5.1 As implemented — every identity event, with its decision
+
+The tables above are the specification. This one is the code, and the two are
+kept honest by a test rather than by review: `TestEveryEventHasANotificationDecision`
+(`cmd/worker/events_test.go`) derives the event universe by parsing every
+non-test file under `internal/` for `EventType() string`, and fails the build
+if any type it finds has neither a `notify.On` nor a `notify.Silent` entry in
+`cmd/worker/events.go`.
+
+That derivation is the fix for a guard that could not fail. It previously
+verified the catalogue against `codec.Types()` — the list the worker itself had
+just built — so it read as "every event has a notification decision" and meant
+"every event I remembered to register has one". Identity's events were in
+neither list, and every one of the Sec ★ alerts below reached nobody while the
+test stayed green.
+
+`Silent` is a decision and carries a reason. Where an entry departs from the
+tables above, it is always for the same structural cause: **a catalogue entry
+sees one decoded event and nothing else.** It cannot ask a read model whether a
+device is new, cannot count failures towards a threshold, and cannot mint a
+token. Where a row above is qualified by a condition of that kind, the alert is
+attached to the event that already carries the condition as a fact.
+
+| Event | Decision | Template / reason |
+| --- | --- | --- |
+| `EmailReserved` | Silent | internal uniqueness mechanism (ADR-044); the address is unproven and §5 forbids mailing it |
+| `EmailReservationConfirmed` | Silent | bookkeeping on the claim; `EmailVerified` is what mails the person |
+| `EmailReleased` | Silent | a fact about an address; the routine cause is an unverified lapse |
+| `UserRegistered` | Silent | the registration's mail is the verification link, triggered by `EmailVerificationRequested` in the same append |
+| `EmailVerificationRequested` | **Reactor**, not catalogue | `cmd/worker/verification.go` — the message IS a freshly minted token, which no catalogue `Data` function can produce |
+| `EmailVerified` | **Notify** Txn ★ | `identity.welcome` |
+| `UserActivated` | Silent | the conjunction of two facts that each already notify |
+| `UserDeactivated` | **Notify** Sec ★ | `identity.account_deactivated` |
+| `UserReactivated` | **Notify** Sec ★ | `identity.account_reactivated` — added; deactivation is holder-reversible, so the reversal is the attacker's move |
+| `UserSuspended` | **Notify** Sec ★ | `identity.account_suspended`. `Reason` is NOT rendered: it is an operator-entered free string |
+| `PasswordResetRequested` | **Reactor**, not catalogue | same shape as verification: the mail is a minted token the event deliberately does not carry |
+| `PasswordSet` | Silent | emitted only from `Registration.VerifyEmail`, always in the same append as `EmailVerified` (IDENTITY-REVIEW C8). Becomes an `On` the day a federated account can add a password |
+| `PasswordChanged` | **Notify** Sec ★ | `identity.password_changed`, wording varies on `ViaReset` |
+| `PasswordRehashed` | Silent | a transparent verifier upgrade; nothing the holder did or can act on |
+| `CredentialCompromiseDetected` | **Notify** Sec ★ | `identity.credential_compromised` (the doc's `BreachedCredentialDetected`) |
+| `TotpEnrollmentStarted` | Silent | a secret provisioned but unproven; an abandoned enrollment changes nothing |
+| `TotpEnabled` | **Notify** Sec ★ | `identity.totp_enabled` |
+| `TotpDisabled` | **Notify** Sec ★ | `identity.totp_disabled` — the highest-value alert in the catalogue |
+| `RecoveryCodesGenerated` | **Notify** Sec ★ | `identity.recovery_codes_generated`, carries `Count` |
+| `RecoveryCodeConsumed` | **Notify** Sec ★ | `identity.recovery_code_used`. The separate "running low" Act message is folded in: `Remaining` is on the event, so one message reports both |
+| `RecoveryCodesExhausted` | **Notify** Sec ★ | `identity.recovery_codes_exhausted` |
+| `AuthenticationSucceeded` | Silent | §5 restricts the alert to a NEW device or country, which one event cannot answer. The new-device half is `DeviceRegistered`, below |
+| `AuthenticationFailed` | Silent | §5 asks for an aggregated threshold alert; one refusal is not a threshold, and `SubjectID` is empty when the identifier matched no account. The crossing is `AuthenticatorDisabled` |
+| `SecondFactorChallenged` | Silent | the person is looking at the prompt; a stuffing-detection signal, not a message |
+| `AuthenticatorDisabled` | **Notify** Sec ★ | `identity.authenticator_disabled` — §5's "repeated failed sign-in attempts", carries `Failures` |
+| `SessionCreated` | Silent | one per login; an entry here is the every-login alert §5 forbids |
+| `SessionElevated` | Silent | a step-up the person completed seconds earlier; the operation it was granted for is what notifies |
+| `SessionRevoked` | Silent | **known gap.** Emitted per session, so §5's single "signed out of *n* devices" is not derivable. Closing it needs an aggregate event identity does not emit |
+| `SessionExpired` | Silent | a deadline passing is not a security signal |
+| `DeviceRegistered` | **Notify** Sec ★ | `identity.new_device` — §5's new-device sign-in alert, attached to the event that means the device is actually new |
+
+**Two limitations, stated rather than hidden.**
+
+1. **No "this wasn't me" link yet.** §4 requires every security message to carry
+   a signed, single-use, expiring link that revokes sessions without
+   authenticating the clicker. Minting one is the same problem verification mail
+   has, and the same answer applies: it needs a reactor that mints, not a
+   catalogue entry. `identity.password_changed` and `identity.totp_disabled` —
+   the two highest-value alerts — already render `{{if .RevokeURL}}` and fall
+   back to the security settings page, so a minting reactor fills them with no
+   template change. The other nine security templates link to the settings page
+   only, and gain the block when that reactor lands.
+2. **The new-device mail names no device and no city.** `DeviceID` is a
+   pseudonym; the device name, platform, user agent and address live in the
+   vault under it (ADR-002), and the vault port resolves a *subject*, not a
+   device. The message says an unrecognised client signed in and links to the
+   sessions page.
+
 ---
 
 ## 6. Billing and entitlement — notification catalogue

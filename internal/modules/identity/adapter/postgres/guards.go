@@ -160,6 +160,36 @@ func (g *Guards) RevokeAll(ctx context.Context, purpose app.TokenPurpose, subjec
 	})
 }
 
+// RevokeAllPurposes drops every outstanding token for a subject, whatever it was
+// issued for.
+//
+// ONE statement scoped by the subject, never a loop over the known purposes: a
+// purpose added to app.TokenPurpose without being added to a loop would be a
+// live token that survives a password reset, and nothing at runtime or in any
+// test would notice, because the loop still passes. See identity.md §4.5.
+func (g *Guards) RevokeAllPurposes(ctx context.Context, subjectID string) (int, error) {
+	if subjectID == "" {
+		// Refused rather than executed. An empty subject matches no row here, but
+		// the same mistake against a store that treated it as a wildcard would
+		// delete every outstanding token in the system — so the refusal belongs at
+		// the boundary rather than in the WHERE clause's luck.
+		return 0, errors.New("identity/postgres: revoking every token needs a subject")
+	}
+	var n int64
+	err := g.tx.InSystemTx(ctx, func(ctx context.Context, q db.Querier) error {
+		rows, err := q.Exec(ctx, identitydb.RevokeAllTokensForSubject, subjectID)
+		if err != nil {
+			return fmt.Errorf("identity/postgres: revoking every outstanding token: %w", err)
+		}
+		n = rows
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
+}
+
 // SweepTOTPReplay drops spent steps whose codes can no longer be presented.
 //
 // Retention, not correctness: a step past its expiry cannot be replayed anyway,

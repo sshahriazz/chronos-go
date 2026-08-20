@@ -3,29 +3,46 @@ package main
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
 	"github.com/chronos/chronos-go/internal/adapter/mailrender"
+	identityevents "github.com/chronos/chronos-go/internal/modules/identity/contract"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/platform/mail"
 	"github.com/chronos/chronos-go/internal/platform/notify"
+	"github.com/chronos/chronos-go/internal/platform/workflow"
 )
 
-// THE test. Every event this binary can decode must have a notification
+// THE test. Every event the REPOSITORY defines must have a notification
 // decision recorded against it — either it notifies someone, or it is declared
 // silent with a reason.
 //
-// Without this, adding an event type is enough to create a notification nobody
-// ever receives and nothing ever reports. That failure is invisible in
-// production: no error, no metric, no log line — just a user asking why they
-// were never told their password changed.
+// It verifies against eventUniverse, not against codec.Types(), and the
+// difference is the whole reason this file was rewritten. Verifying against the
+// codec made the guard's scope equal to whatever registerEvents happened to
+// list: it read as "every event has a notification decision" and meant "every
+// event I remembered to register has one". Under that wording identity's
+// twenty-nine event types — including every Sec-class alert in NOTIFICATIONS §5
+// — were absent from both lists at once, and the test passed.
+//
+// A guard whose scope is set by the thing it guards cannot fail. This one takes
+// its scope from the source tree instead, so an event added anywhere under
+// internal/ fails the build until somebody decides what it tells people.
 func TestEveryEventHasANotificationDecision(t *testing.T) {
-	codec := newCodec()
 	cat := notifications()
 
-	if err := cat.Verify(codec.Types()); err != nil {
+	if err := cat.Verify(eventUniverse(t)); err != nil {
 		t.Fatalf(`%v
 
 Fix by adding ONE of these to cmd/worker/events.go:
@@ -40,19 +57,191 @@ Fix by adding ONE of these to cmd/worker/events.go:
 	}
 }
 
+// The catalogue may only decide about events this binary can actually DECODE.
+//
+// A decision on an event the codec has never heard of is not coverage. The
+// reactor's subscription filter is built from the catalogue, so the event is
+// delivered, `codec.Unmarshal` fails, and React returns ErrPoison — the
+// notification parks instead of being sent. Declaring it silent is worse still:
+// it looks settled while the reactor could not have acted on it either way.
+//
+// This is the check that makes registerEvents non-optional. Removing
+// identity.RegisterEvents fails HERE, loudly, naming every event that would
+// have gone undelivered.
+func TestTheCodecDecodesEveryEventInTheRepository(t *testing.T) {
+	registered := newCodec().Types()
+
+	var missing []string
+	for _, event := range eventUniverse(t) {
+		if !slices.Contains(registered, event) {
+			missing = append(missing, event)
+		}
+	}
+	if len(missing) > 0 {
+		t.Fatalf("the codec cannot decode %d event type(s) this repository defines: %v\n\n"+
+			"The notification reactor skips what it cannot decode — no error, no metric, "+
+			"no log line, just a security alert nobody receives. Register them in "+
+			"registerEvents (cmd/worker/events.go), through the owning module's "+
+			"RegisterEvents where it has one.", len(missing), missing)
+	}
+}
+
 // A renamed or retired event leaves its notification behind, pointing at
 // something that can no longer arrive. The entry then looks like coverage while
 // covering nothing.
 func TestNoOrphanedCatalogueEntries(t *testing.T) {
-	codec := newCodec()
 	cat := notifications()
 
-	if orphans := cat.Orphans(codec.Types()); len(orphans) > 0 {
-		t.Fatalf("the catalogue notifies on %v, which the codec cannot decode. "+
+	if orphans := cat.Orphans(eventUniverse(t)); len(orphans) > 0 {
+		t.Fatalf("the catalogue decides about %v, which this repository does not define. "+
 			"Either the event was renamed and the entry was not, or it was retired "+
 			"and the entry outlived it", orphans)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The event universe
+// ---------------------------------------------------------------------------
+
+// eventUniverse is every stored event type this repository defines, read from
+// the SOURCE.
+//
+// # Why the source and not a registry
+//
+// Three enumerations were possible and two of them are circular:
+//
+//   - codec.Types() is what registerEvents put there. Using it to check
+//     registerEvents is the defect this file exists to fix.
+//   - A hand-maintained list is a third place to forget the same event, and it
+//     is the one place where forgetting produces no symptom at all.
+//   - Go has no package-level reflection, so there is no runtime way to ask
+//     "which types implement eventsourcing.Event".
+//
+// So the list is derived by parsing every non-test file under internal/ for
+// `EventType() string` method declarations. That set cannot be shortened by
+// forgetting anything — an event type exists precisely when somebody writes
+// that method, and writing it is what puts it in scope here.
+//
+// It is also why the module registration in registerEvents is a real
+// dependency rather than a gesture: cmd/worker must import identity to satisfy
+// the check this produces, and the import is the point.
+//
+// The scan is deliberately strict. An `EventType` method whose body is not a
+// single string literal FAILS rather than being skipped, because a skipped
+// event is exactly the invisible gap this whole mechanism exists to prevent.
+func eventUniverse(t *testing.T) []string {
+	t.Helper()
+
+	root := filepath.Join(repoRoot(t), "internal")
+	fset := token.NewFileSet()
+
+	var types []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == "testdata" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+
+		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			return err
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv == nil || fn.Name.Name != "EventType" {
+				continue
+			}
+			name, ok := returnedStringLiteral(fn)
+			if !ok {
+				t.Fatalf("%s: EventType is not a single string literal.\n"+
+					"The notification completeness guard reads event type names out of "+
+					"the source, and a name it cannot read is a name it cannot check. "+
+					"Return the literal directly, or this event silently leaves the "+
+					"universe every other guard is measured against.",
+					fset.Position(fn.Pos()))
+			}
+			types = append(types, name)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("scanning %s for event types: %v", root, err)
+	}
+
+	slices.Sort(types)
+	types = slices.Compact(types)
+
+	// A guard on the guard. If this scan ever returns nothing — a moved
+	// directory, a changed layout, a build tag — every test above would pass
+	// vacuously, which is the precise failure mode that made the previous
+	// version of this file worthless. Two known-present names are asserted so
+	// an empty or truncated scan is a failure rather than a green run.
+	for _, want := range []string{"identity.TotpDisabled.v1", "notification.Created.v1"} {
+		if !slices.Contains(types, want) {
+			t.Fatalf("the event scan found %d type(s) and none of them is %q; "+
+				"it is not reading the repository, so every completeness check "+
+				"above it is passing over an empty set", len(types), want)
+		}
+	}
+	return types
+}
+
+// returnedStringLiteral reduces `func (*T) EventType() string { return "x" }` to
+// `x`. Anything else reports false and is treated as a hard failure by the
+// caller.
+func returnedStringLiteral(fn *ast.FuncDecl) (string, bool) {
+	if fn.Body == nil || len(fn.Body.List) != 1 {
+		return "", false
+	}
+	ret, ok := fn.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		return "", false
+	}
+	lit, ok := ret.Results[0].(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", false
+	}
+	value, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return "", false
+	}
+	return value, true
+}
+
+// repoRoot walks up from the test's working directory to the module root.
+// Tests run in their package directory, so this is what turns "internal/" into
+// an absolute path that does not depend on where `go test` was invoked.
+func repoRoot(t *testing.T) string {
+	t.Helper()
+
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("working directory: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("no go.mod above the test's working directory; the event scan " +
+				"cannot locate the repository")
+		}
+		dir = parent
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The catalogue's own consistency
+// ---------------------------------------------------------------------------
 
 // Every template the catalogue names must exist. A missing one fails at
 // DELIVERY time — the moment somebody needs the message — and by then the event
@@ -61,7 +250,9 @@ func TestEveryCatalogueTemplateExists(t *testing.T) {
 	cat := notifications()
 	templates := cat.Templates()
 	if len(templates) == 0 {
-		t.Skip("no notifications declared yet")
+		t.Fatal("the catalogue names no templates at all. With identity registered " +
+			"that cannot be right, and an empty set would make this test pass " +
+			"without checking anything")
 	}
 
 	renderer := mailrender.New(mailrender.Embedded{}, mailrender.Config{
@@ -82,6 +273,64 @@ func TestEveryCatalogueTemplateExists(t *testing.T) {
 				"internal/adapter/mailrender/templates", want)
 		}
 	}
+}
+
+// Security and Transactional mail cannot be switched off, and that is a
+// security property rather than a product one: if switching off email could
+// stop a security alert, an attacker who gains access to an account would
+// simply switch it off and silence the message that reveals them
+// (NOTIFICATIONS §3).
+//
+// So the class of an account-safety alert is asserted, not merely declared.
+// Downgrading one of these to Activity is a one-word edit that compiles, passes
+// every other test in this file, and makes the alert suppressible.
+func TestAccountSafetyAlertsCannotBeSwitchedOff(t *testing.T) {
+	cat := notifications()
+
+	// NOTIFICATIONS §5, the rows marked Sec ★, restricted to the events
+	// identity actually emits today.
+	mustBeUnsuppressible := []string{
+		"identity.PasswordChanged.v1",
+		"identity.CredentialCompromiseDetected.v1",
+		"identity.TotpEnabled.v1",
+		"identity.TotpDisabled.v1",
+		"identity.RecoveryCodesGenerated.v1",
+		"identity.RecoveryCodeConsumed.v1",
+		"identity.RecoveryCodesExhausted.v1",
+		"identity.AuthenticatorDisabled.v1",
+		"identity.DeviceRegistered.v1",
+		"identity.UserDeactivated.v1",
+		"identity.UserReactivated.v1",
+		"identity.UserSuspended.v1",
+	}
+
+	for _, event := range mustBeUnsuppressible {
+		spec, ok := cat.For(event)
+		if !ok {
+			reason, silent := cat.IsSilent(event)
+			t.Errorf("%s notifies nobody (%q), but NOTIFICATIONS §5 marks it Sec ★ — "+
+				"the alert that tells a person their account was taken over",
+				event, silenceNote(reason, silent))
+			continue
+		}
+		if spec.Class != notify.Security {
+			t.Errorf("%s is class %s; NOTIFICATIONS §3 requires Security, which ignores "+
+				"preferences and carries no unsubscribe. As %s an attacker who reached "+
+				"the account could switch this off and silence the alert that reveals them",
+				event, spec.Class, spec.Class)
+		}
+		if spec.Audience != notify.AudienceSubject {
+			t.Errorf("%s notifies the %s audience; a security alert about an account "+
+				"goes to the person whose account it is", event, spec.Audience)
+		}
+	}
+}
+
+func silenceNote(reason string, silent bool) string {
+	if !silent {
+		return "no decision at all"
+	}
+	return reason
 }
 
 // The guard above is only worth having if it actually fires. This proves the
@@ -121,6 +370,32 @@ func TestOperatorRecipients(t *testing.T) {
 	}
 }
 
+// "An administrator did this, not you" is the most important sentence a
+// security mail can carry, and it is decided by comparing two pseudonyms. The
+// unknown-actor case is the one worth pinning: identity sets ActorID to the
+// subject for self-service, so an EMPTY actor means metadata was incomplete —
+// and reporting that as "somebody else" would tell people an administrator
+// touched their account whenever it was.
+func TestActedOnBehalf(t *testing.T) {
+	tests := []struct {
+		name             string
+		actor, subject   string
+		wantOnBehalfFlag bool
+	}{
+		{name: "self-service", actor: "sub_a", subject: "sub_a", wantOnBehalfFlag: false},
+		{name: "an operator acted", actor: "sub_ops", subject: "sub_a", wantOnBehalfFlag: true},
+		{name: "no actor recorded", actor: "", subject: "sub_a", wantOnBehalfFlag: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := actedOnBehalf(tt.actor, tt.subject); got != tt.wantOnBehalfFlag {
+				t.Errorf("actedOnBehalf(%q, %q) = %v, want %v",
+					tt.actor, tt.subject, got, tt.wantOnBehalfFlag)
+			}
+		})
+	}
+}
+
 // The subscription filter must never be empty-meaning-everything: a
 // notification reactor with nothing registered would otherwise wake on every
 // event in the system.
@@ -132,6 +407,105 @@ func TestEmptyCatalogueDoesNotSubscribeToEverything(t *testing.T) {
 	if len(f.EventTypePrefixes) == 0 && len(f.StreamPrefixes) == 0 {
 		t.Fatal("an empty catalogue produced a filter with no prefixes, which means " +
 			"'no filter' — the reactor would be handed every event in the system")
+	}
+}
+
+// The real filter must name the identity events, or the reactor never sees
+// them. The catalogue can be complete and the subscription still miss.
+func TestTheSubscriptionFilterCoversTheSecurityAlerts(t *testing.T) {
+	f := notify.NewEventReactor(notificationReactorName, notifications(), newCodec(),
+		notify.SubjectAudiences{}, nil).Filter()
+
+	for _, want := range []string{
+		"identity.TotpDisabled.v1",
+		"identity.PasswordChanged.v1",
+		"identity.RecoveryCodeConsumed.v1",
+	} {
+		if !slices.Contains(f.EventTypePrefixes, want) {
+			t.Errorf("the reactor's subscription does not match %s, so the event is "+
+				"never delivered to it however complete the catalogue is", want)
+		}
+	}
+}
+
+// Delivery is keyed on the event, so a redelivery asks to start the run that
+// already exists — and Temporal refuses it, which the reactor treats as success
+// because the work was already done.
+//
+// The keying belongs to the reactor rather than to any entry, so this asserts it
+// through a real catalogue entry: if a future entry could opt out of it, one
+// redelivered event would become two "your second factor was disabled" emails,
+// which reads to the person as two separate incidents.
+func TestARedeliveredEventAsksToStartTheSameWorkflow(t *testing.T) {
+	spy := &recordingStarter{}
+	r := notify.NewEventReactor(notificationReactorName, notifications(), newCodec(),
+		notify.SubjectAudiences{}, nil, notify.WithWorkflows(spy))
+
+	env := decidedEnvelope(t)
+	for i := range 2 {
+		if err := r.React(context.Background(), env); err != nil {
+			t.Fatalf("delivery %d: %v", i+1, err)
+		}
+	}
+
+	if len(spy.ids) != 2 {
+		t.Fatalf("two deliveries produced %d workflow starts, want 2", len(spy.ids))
+	}
+	if spy.ids[0] != spy.ids[1] {
+		t.Fatalf("the redelivery asked for workflow %q where the first asked for %q; "+
+			"two different ids means Temporal starts two runs and the person is "+
+			"told twice", spy.ids[1], spy.ids[0])
+	}
+	if want := env.ID.String() + ":0"; spy.ids[0] != want {
+		t.Errorf("workflow id %q is not derived from the event id (%q); a random id "+
+			"cannot deduplicate anything", spy.ids[0], want)
+	}
+	if spy.names[0] != notify.SendNotificationWorkflow {
+		t.Errorf("started %q, want %q", spy.names[0], notify.SendNotificationWorkflow)
+	}
+	// Workflow input is durable, replicated history. A resolved address there is
+	// personal data crypto-shredding cannot reach (ADR-002).
+	if spy.inputs[0].SubjectID == "" {
+		t.Error("the workflow carries no subject pseudonym, so the activity has nobody to resolve")
+	}
+}
+
+type recordingStarter struct {
+	ids    []string
+	names  []string
+	inputs []notify.SendNotificationInput
+}
+
+func (s *recordingStarter) Start(_ context.Context, w workflow.Start) (workflow.Run, error) {
+	s.ids = append(s.ids, w.ID)
+	s.names = append(s.names, w.Name)
+	in, _ := w.Input.(notify.SendNotificationInput)
+	s.inputs = append(s.inputs, in)
+	return workflow.Run{ID: w.ID, RunID: "run_1"}, nil
+}
+
+// decidedEnvelope is one real, catalogued identity event, encoded by the real
+// codec — so this test fails if TotpDisabled ever stops being decodable or
+// stops notifying.
+func decidedEnvelope(t *testing.T) eventsourcing.Envelope {
+	t.Helper()
+
+	event := &identityevents.TotpDisabled{
+		SubjectID: "sub_probe", CredentialID: "cred_probe", DisabledAt: time.Now().UTC(),
+	}
+	payload, err := newCodec().Marshal(event)
+	if err != nil {
+		t.Fatalf("the worker's codec cannot encode %s: %v", event.EventType(), err)
+	}
+	return eventsourcing.Envelope{
+		ID:      eventsourcing.DeriveEventID("cmd-probe", 0),
+		Type:    event.EventType(),
+		Payload: payload,
+		Meta: eventsourcing.Metadata{
+			OccurredAt: time.Now().UTC(),
+			SubjectIDs: []string{"sub_probe"},
+			ActorID:    "sub_probe",
+		},
 	}
 }
 

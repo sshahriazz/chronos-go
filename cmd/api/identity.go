@@ -582,6 +582,53 @@ func (d *dependencies) buildIdentity(
 		return nil, fmt.Errorf("verification resend: %w", err)
 	}
 
+	// The password-reset pair. It holds the SAME two mail ceilings the resend
+	// holds, over the same counter and therefore the same keys — that sharing is
+	// required rather than convenient. NOTIFICATIONS.md §4 asks for "an hourly
+	// ceiling per address across ALL classes", and mailAddressLimitPrefix is
+	// deliberately not verification-specific for exactly this moment: giving reset
+	// mail its own budget would let an attacker alternate between
+	// ResendEmailVerification and RequestPasswordReset and double the mail one
+	// victim receives.
+	//
+	// TokenTTL is the adapter's own constant — one hour, far shorter than a
+	// verification link's day, because a reset token grants account access rather
+	// than confirming an address. It only sets the deadline the EVENT advertises;
+	// the token the issuer mints carries its own and the store enforces that one.
+	//
+	// Directory and Subjects are the two lookups in opposite directions, and both
+	// are the readers the rest of the module already uses: `sessions` answers
+	// "which account claims this address" for authentication, `readModel` answers
+	// "which account is this pseudonym" for verification. A third reader here
+	// would be a third answer to a question that must have one.
+	passwordResets, err := app.NewPasswordReset(app.PasswordResetDeps{
+		Clock:          clk,
+		Index:          index,
+		Directory:      sessions,
+		Subjects:       readModel,
+		Users:          users,
+		Appender:       d.store,
+		Schemas:        d.upcasters,
+		AddressLimiter: mailAddressLimiter,
+		CallerLimiter:  mailCallerLimiter,
+		TokenTTL:       token.ResetTTL,
+		Breach:         hibp.New(),
+		Hasher:         hasher,
+		Credentials:    credentials,
+		Tokens:         guards,
+		Digest:         token.Digest,
+		// The SAME handlers RevokeAllSessions is served from, so a reset and a
+		// "sign out everywhere" void sessions through one code path with one epoch
+		// bump. A second implementation here would be a second answer to "what does
+		// revoking everything mean", and the two would diverge exactly when one of
+		// them was changed.
+		Revocations: authentication,
+		Log:         log,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("password reset: %w", err)
+	}
+
 	secondFactor, err := app.NewSecondFactor(app.SecondFactorDeps{
 		Clock:    clk,
 		Entropy:  rand.Reader,
@@ -619,6 +666,7 @@ func (d *dependencies) buildIdentity(
 	return identityapi.New(identityapi.Deps{
 		Registration:   registration,
 		Resender:       resend,
+		Resets:         passwordResets,
 		Authentication: authentication,
 		SecondFactor:   secondFactor,
 		Queries:        queries,

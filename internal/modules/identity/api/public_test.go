@@ -693,3 +693,263 @@ func TestResendEmailVerification(t *testing.T) {
 		}
 	})
 }
+
+func TestRequestPasswordReset(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the request is mapped onto the command, key and caller scope included",
+		func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+
+			_, err := h.client.RequestPasswordReset(t.Context(),
+				withKey(&identityv1.RequestPasswordResetRequest{Email: "ada@example.com"},
+					"idem-reset-1"))
+			if err != nil {
+				t.Fatalf("RequestPasswordReset: %v", err)
+			}
+
+			cmds := h.resets.requests()
+			if len(cmds) != 1 {
+				t.Fatalf("app.Request called %d times, want 1", len(cmds))
+			}
+			if cmds[0].Email != "ada@example.com" {
+				t.Errorf("Email = %q, want %q", cmds[0].Email, "ada@example.com")
+			}
+			if cmds[0].IdempotencyKey != "idem-reset-1" {
+				t.Errorf("IdempotencyKey = %q, want %q", cmds[0].IdempotencyKey, "idem-reset-1")
+			}
+			// Without a scope the per-caller ceiling has nothing to count against,
+			// and the app layer refuses an empty one — so an unset scope is a 500 on
+			// every reset request rather than a silently disabled axis. Asserted here
+			// because the value comes from the TRANSPORT, which only a real server
+			// produces.
+			if cmds[0].CallerScope == "" {
+				t.Error("the handler passed no caller scope; the per-caller ceiling would " +
+					"have nothing to count against")
+			}
+		})
+
+	// The trust boundary, asserted at the WIRE. A reset request is a mail trigger
+	// aimed at somebody else's mailbox, so a caller able to choose their own
+	// rate-limit bucket by writing a header defeats the only control on it.
+	t.Run("the default trusts no proxy, so X-Forwarded-For cannot choose a bucket",
+		func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+
+			req := withKey(&identityv1.RequestPasswordResetRequest{Email: "ada@example.com"},
+				"idem-reset-xff")
+			req.Header().Set("X-Forwarded-For", "192.0.2.111, 198.51.100.222")
+
+			if _, err := h.client.RequestPasswordReset(t.Context(), req); err != nil {
+				t.Fatalf("RequestPasswordReset: %v", err)
+			}
+			cmds := h.resets.requests()
+			if len(cmds) != 1 {
+				t.Fatalf("app.Request called %d times, want 1", len(cmds))
+			}
+			for _, spoofed := range []string{"192.0.2.111", "198.51.100.222"} {
+				if strings.Contains(cmds[0].CallerScope, spoofed) {
+					t.Errorf("caller scope %q was taken from X-Forwarded-For with the "+
+						"default trust boundary of zero hops", cmds[0].CallerScope)
+				}
+			}
+		})
+
+	// The five outcomes an unauthenticated caller must not be able to tell apart.
+	// Compared as BYTES, so a field added later that carried the difference — a
+	// `sent` flag, a retry hint — is caught here and nowhere else.
+	t.Run("every outcome produces an identical response", func(t *testing.T) {
+		t.Parallel()
+
+		outcomes := []app.ResetOutcome{
+			app.ResetNoAccount,
+			app.ResetRequested,
+			app.ResetNoPassword,
+			app.ResetNotEligible,
+			app.ResetRaced,
+		}
+		responses := make([][]byte, 0, len(outcomes))
+		for _, outcome := range outcomes {
+			h := newHarness(t)
+			h.resets.requestFn = func(app.RequestPasswordResetCommand) (
+				app.RequestPasswordResetResult, error,
+			) {
+				return app.RequestPasswordResetResult{Outcome: outcome}, nil
+			}
+			resp, err := h.client.RequestPasswordReset(t.Context(),
+				withKey(&identityv1.RequestPasswordResetRequest{Email: "ada@example.com"},
+					"idem-reset-2"))
+			if err != nil {
+				t.Fatalf("RequestPasswordReset(outcome=%v): %v", outcome, err)
+			}
+			raw, merr := proto.Marshal(resp.Msg)
+			if merr != nil {
+				t.Fatalf("marshalling the response: %v", merr)
+			}
+			responses = append(responses, raw)
+		}
+		for i, raw := range responses {
+			if string(raw) != string(responses[0]) {
+				t.Fatalf("outcome %v produced %x while %v produced %x; the difference IS "+
+					"the account-existence oracle this endpoint exists to avoid being",
+					outcomes[i], raw, outcomes[0], responses[0])
+			}
+		}
+		if len(responses[0]) != 0 {
+			t.Fatalf("RequestPasswordResetResponse carries %d bytes; it must stay empty",
+				len(responses[0]))
+		}
+	})
+
+	t.Run("a rate-limited request is refused with RESOURCE_EXHAUSTED", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.resets.requestFn = func(app.RequestPasswordResetCommand) (
+			app.RequestPasswordResetResult, error,
+		) {
+			return app.RequestPasswordResetResult{}, errs.RateLimitedf("too many")
+		}
+
+		_, err := h.client.RequestPasswordReset(t.Context(),
+			withKey(&identityv1.RequestPasswordResetRequest{Email: "ada@example.com"},
+				"idem-reset-3"))
+		requireCode(t, err, connect.CodeResourceExhausted)
+	})
+
+	// Public methods skip gate 5, so this refusal is the handler's own.
+	t.Run("a missing idempotency key is refused before the app is called", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+
+		_, err := h.client.RequestPasswordReset(t.Context(),
+			connect.NewRequest(&identityv1.RequestPasswordResetRequest{
+				Email: "ada@example.com",
+			}))
+		requireCode(t, err, connect.CodeInvalidArgument)
+		if got := len(h.resets.requests()); got != 0 {
+			t.Errorf("the app was called %d times without an idempotency key", got)
+		}
+	})
+
+	// Public: reachable with no session at all. The population that needs this
+	// call is exactly the population that cannot obtain one.
+	t.Run("it is reachable without a session", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, options{authnErr: errs.Unauthenticatedf("no session")})
+
+		if _, err := h.client.RequestPasswordReset(t.Context(),
+			withKey(&identityv1.RequestPasswordResetRequest{Email: "ada@example.com"},
+				"idem-reset-4")); err != nil {
+			t.Fatalf("an unauthenticated reset request was refused with %v", err)
+		}
+	})
+}
+
+func TestResetPassword(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the token and the password reach the app unchanged", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+
+		_, err := h.client.ResetPassword(t.Context(),
+			withKey(&identityv1.ResetPasswordRequest{
+				Token:    "a-reset-token",
+				Password: "a-brand-new-passphrase",
+			}, "idem-complete-1"))
+		if err != nil {
+			t.Fatalf("ResetPassword: %v", err)
+		}
+
+		cmds := h.resets.completions()
+		if len(cmds) != 1 {
+			t.Fatalf("app.Complete called %d times, want 1", len(cmds))
+		}
+		if cmds[0].Token != "a-reset-token" {
+			t.Errorf("Token = %q, want %q", cmds[0].Token, "a-reset-token")
+		}
+		if cmds[0].Password != "a-brand-new-passphrase" {
+			t.Errorf("Password = %q, want the password as typed", cmds[0].Password)
+		}
+		if cmds[0].IdempotencyKey != "idem-complete-1" {
+			t.Errorf("IdempotencyKey = %q, want %q", cmds[0].IdempotencyKey, "idem-complete-1")
+		}
+	})
+
+	// The response must stay empty however much the app layer knows.
+	//
+	// This is the ASVS 5.0 V6.4.3 assertion at the transport: a reset must not
+	// advance the caller towards a session, and the cheapest way to be sure is
+	// that a fully populated result still marshals to zero bytes. A field added
+	// later — a subject id, "you may now sign in", a token — fails here.
+	t.Run("a fully populated result still marshals to nothing", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.resets.completeFn = func(app.ResetPasswordCommand) (app.ResetPasswordResult, error) {
+			return app.ResetPasswordResult{
+				SubjectID:       "subj_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+				UserID:          ids.MustParse[ids.User]("usr_01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+				SessionsRevoked: 3,
+				TokensRevoked:   2,
+			}, nil
+		}
+
+		resp, err := h.client.ResetPassword(t.Context(),
+			withKey(&identityv1.ResetPasswordRequest{
+				Token:    "a-reset-token",
+				Password: "a-brand-new-passphrase",
+			}, "idem-complete-2"))
+		if err != nil {
+			t.Fatalf("ResetPassword: %v", err)
+		}
+		raw, merr := proto.Marshal(resp.Msg)
+		if merr != nil {
+			t.Fatalf("marshalling the response: %v", merr)
+		}
+		if len(raw) != 0 {
+			t.Fatalf("ResetPasswordResponse carries %d bytes (%x); a reset must return "+
+				"nothing a client could mistake for a session", len(raw), raw)
+		}
+	})
+
+	// A spent, expired or unknown link is one refusal, rendered by the shared
+	// mapping and nothing else.
+	t.Run("an unusable link is INVALID_ARGUMENT", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.resets.completeFn = func(app.ResetPasswordCommand) (app.ResetPasswordResult, error) {
+			return app.ResetPasswordResult{}, errs.ValidationFailedf(
+				"this password-reset link is no longer valid; request a new one")
+		}
+
+		_, err := h.client.ResetPassword(t.Context(),
+			withKey(&identityv1.ResetPasswordRequest{
+				Token:    "spent",
+				Password: "a-brand-new-passphrase",
+			}, "idem-complete-3"))
+		requireCode(t, err, connect.CodeInvalidArgument)
+	})
+
+	// The schema-level refusals — an empty token, a password below the floor —
+	// are protovalidate's, and protovalidate is an interceptor this harness does
+	// not run. They are asserted against the REAL server instead, in
+	// internal/adapter/identityit, where the production interceptor chain is the
+	// one under test. Restating them here with a hand-rolled check would assert
+	// that this test file can validate a message, which nothing depends on.
+
+	t.Run("it is reachable without a session", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, options{authnErr: errs.Unauthenticatedf("no session")})
+
+		if _, err := h.client.ResetPassword(t.Context(),
+			withKey(&identityv1.ResetPasswordRequest{
+				Token:    "a-reset-token",
+				Password: "a-brand-new-passphrase",
+			}, "idem-complete-6")); err != nil {
+			t.Fatalf("an unauthenticated reset was refused with %v; it is reached from a "+
+				"mailbox by a browser that has never authenticated", err)
+		}
+	})
+}

@@ -5,6 +5,7 @@ package reactor
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -320,6 +321,14 @@ func (stubCredentials) StoreFirst(context.Context, app.NewPasswordCredential) er
 	return nil
 }
 
+// Replace is the password reset's write. Nothing in a verification performs one,
+// so it fails loudly rather than returning nil.
+func (stubCredentials) Replace(
+	context.Context, ids.CredentialID, string, string, int32,
+) error {
+	return errors.New("a verification must not replace a password verifier")
+}
+
 func (stubCredentials) Find(context.Context, string) (app.PasswordCredential, error) {
 	panic("VerifyEmail reads no credential")
 }
@@ -378,6 +387,13 @@ func (s *memoryTokens) Consume(
 	}
 	delete(s.rows, k)
 	return row.subjectID, nil
+}
+
+// RevokeAllPurposes belongs to the password reset. A verification issuer voids
+// one purpose, never every purpose, so this fails loudly rather than quietly
+// widening the sweep.
+func (s *memoryTokens) RevokeAllPurposes(context.Context, string) (int, error) {
+	return 0, errors.New("not used by the verification issuer")
 }
 
 func (s *memoryTokens) RevokeAll(_ context.Context, purpose app.TokenPurpose, subjectID string) error {

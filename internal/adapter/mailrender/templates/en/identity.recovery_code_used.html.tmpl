@@ -1,0 +1,15 @@
+{{define "title"}}A recovery code was used on your account{{end}}
+{{define "content"}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 14px;">One of your recovery codes was used to sign in to Chronos on
+  <strong>{{datetime .OccurredAt}}</strong>. That code is now spent; you have <strong>{{.Remaining}}</strong> left.</p>
+{{if .Low}}
+<p style="margin:0 0 14px;color:#b42318;">You are running low. Generate a new set before you run out — an
+  account with no codes and no authenticator is an account you cannot get back into.</p>
+{{end}}
+<p style="margin:0 0 20px;">A recovery code is normally used because a device was lost. If you still
+  have your authenticator and did not do this, somebody else has your codes.</p>
+<p style="margin:0 0 20px;">
+  <a href="{{url "/settings/security"}}" style="display:inline-block;background:#1a1d21;color:#ffffff;text-decoration:none;padding:11px 20px;border-radius:6px;font-size:14px;font-weight:500;">Review security settings</a>
+</p>
+{{end}}

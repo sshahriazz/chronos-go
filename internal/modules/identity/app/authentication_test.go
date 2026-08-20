@@ -298,6 +298,15 @@ func (c *authCredentials) Rehash(
 	return ErrCredentialMoved
 }
 
+// Replace is the password reset's write. A login never performs one, so it
+// fails loudly rather than returning nil: an authentication that replaced a
+// verifier would be changing a credential nobody asked it to.
+func (c *authCredentials) Replace(
+	context.Context, ids.CredentialID, string, string, int32,
+) error {
+	return errors.New("a login must not replace a password verifier")
+}
+
 func (c *authCredentials) RecordSuccess(_ context.Context, cred ids.CredentialID) error {
 	c.successes = append(c.successes, cred)
 	delete(c.counts, cred)

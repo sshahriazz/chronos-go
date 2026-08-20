@@ -440,12 +440,60 @@ type Querier interface {
 	// the verifier wins) could be rewritten at the same version on every pass — new
 	// ciphertext, unchanged version, a done check that never falls, forever.
 	ResealCredential(ctx context.Context, arg ResealCredentialParams) (int64, error)
+	// Replace a password verifier from a reset, but only if the row still holds the
+	// one the reset was decided against.
+	//
+	// A COMPARE-AND-SET, like RehashCredential, and here the comparison is the ONLY
+	// serialization point the whole reset flow has. Two reset links can be redeemed
+	// at the same instant — an attacker who triggered one and a victim who triggered
+	// another, which is precisely the situation a reset exists for — and both
+	// consume their own token successfully, because the tokens are different rows.
+	// Without the guard both would write, and the surviving verifier would be
+	// whichever transaction committed last: a password the user did not choose,
+	// with no error anywhere. With it, exactly one wins, the loser writes nothing
+	// and appends nothing, and the account is never left in a state between the two.
+	//
+	// Separate from RehashCredential rather than a reuse of it, for two reasons.
+	//
+	// `failures = 0` is the first. The consecutive-failure count refers to a
+	// password that no longer exists after this statement, so carrying it forward
+	// would let a run of guesses against the OLD password lock out the new one — and
+	// the person it locks out is the one who just proved control of the mailbox.
+	// RehashCredential must NOT do this: it runs after a login that already cleared
+	// the count, and zeroing it there would hide a failure run that is still
+	// accumulating against a credential nobody has successfully used.
+	//
+	// `kind = 'password'` is the second. RehashCredential is driven by a login that
+	// has just verified a password and therefore cannot name anything else; this is
+	// driven by a credential id read from the account's event stream, and pinning
+	// the kind in the statement means a bug that handed it a TOTP credential id
+	// writes nothing rather than sealing a password verifier into the second-factor
+	// row.
+	//
+	// `disabled_at IS NULL` for RehashCredential's reason: a fresh verifier on a
+	// locked-out authenticator leaves the lockout intact and the row looking
+	// maintained.
+	ResetCredentialPassword(ctx context.Context, arg ResetCredentialPasswordParams) (int64, error)
 	// Revoke every live session for a subject, optionally sparing one.
 	//
 	// The exception is "sign out everywhere else", which must not sign the caller
 	// out of the device they are asking from. Passing the empty string spares
 	// nothing, which is what a password reset needs.
 	RevokeAllSessions(ctx context.Context, arg RevokeAllSessionsParams) (int64, error)
+	// Drop every outstanding token for a subject, of EVERY purpose.
+	//
+	// Deliberately not RevokeTokens with a loop over purposes in Go, and the
+	// difference is not tidiness. A loop is several statements: a purpose added to
+	// app.TokenPurpose without being added to the loop is a live token that survives
+	// a reset, silently, and nothing in any test would notice because the loop
+	// passes. Filtering on the subject alone cannot acquire that gap — a new purpose
+	// is covered the day it is invented.
+	//
+	// Required by identity.md §4.5: a password reset voids every outstanding token
+	// of every purpose for that subject, not only reset tokens. The variant it
+	// closes is the attacker who triggered a VERIFICATION mail (or a second reset)
+	// before the victim recovered, and holds a live link that outlives the recovery.
+	RevokeAllTokensForSubject(ctx context.Context, subjectID string) (int64, error)
 	RevokeSession(ctx context.Context, sessionID string) (int64, error)
 	// Drop every outstanding token of a purpose for a subject.
 	//

@@ -411,6 +411,92 @@ func (u *User) ChangePassword(credentialID ids.CredentialID, viaReset bool, at t
 	return nil
 }
 
+// UsablePasswordCredential names the password this account can authenticate
+// with, if it has one.
+//
+// USABLE, not merely enrolled, and the distinction is what makes this safe to
+// drive a password reset from. A credential that was never enabled belongs to a
+// half-finished enrolment, and one that was disabled belongs to an authenticator
+// this account has locked out; writing a fresh verifier onto either produces a
+// row that looks maintained and that nothing will ever accept, with the reset
+// reported to the user as done.
+//
+// It exists as a method on the aggregate rather than as a lookup in the
+// credential table because the LOG is the authority on which methods an account
+// has (identity.md §4.2): a row the log does not account for was written outside
+// the application, and a reset that took its target from the table would happily
+// rewrite it.
+func (u *User) UsablePasswordCredential() (ids.CredentialID, bool) {
+	for id, m := range u.methods {
+		if m.Kind == contract.MethodPassword && m.Usable() {
+			return id, true
+		}
+	}
+	return ids.CredentialID{}, false
+}
+
+// HasUsablePassword reports whether a password reset could do anything for this
+// account.
+//
+// A passwordless account is a first-class state here (identity.md §4, §5, §7),
+// and the way into one is the verification link, never a reset: VerifyEmail is
+// the only call that can give an account its first password, and
+// domain.User.SetPassword refuses one on an unproven address. So a reset link
+// mailed to a passwordless account would lead to a page that cannot succeed.
+func (u *User) HasUsablePassword() bool {
+	_, ok := u.UsablePasswordCredential()
+	return ok
+}
+
+// VoidPendingIdentifierChange cancels an identifier change this account has
+// started but not completed.
+//
+// # What it does today, stated plainly: nothing
+//
+// There is no email-change flow in this module — no RPC, no use case, no event —
+// so no account can be holding a pending change and there is nothing here to
+// record. The method is written anyway, and it is called by the password reset
+// on every run, for exactly the reason Registration.VerifyEmail calls
+// RevokeAllSessions on a subject that provably has none:
+//
+//	the rule is free while it is a no-op and expensive to retrofit once it is not.
+//
+// # The rule it carries
+//
+// identity.md §4.4 and §4.5, from Sudhodanan & Paverd (USENIX Security 2022).
+// The "unexpired email change" variant is an attacker queueing a change to an
+// address they control and letting the victim's own recovery survive it: the
+// victim resets their password, believes they have taken the account back, and
+// the pending change completes minutes later and hands it straight back. Voiding
+// the change is what closes it, and it has to happen in the same command as the
+// reset — a reactor on PasswordChanged would leave a window, and the window is
+// the attack.
+//
+// # Where the enforcement actually lives today
+//
+// Not here, and saying so is the point of this comment. A pending change cannot
+// be COMPLETED without the live email-verification token that was mailed for it,
+// and the reset voids every outstanding token of every purpose for the subject
+// (app.TokenStore.RevokeAllPurposes). That is the half of the rule that is real
+// today. This method is the half that will matter the moment a pending change
+// becomes a fact the AGGREGATE holds rather than only a token in a table — and
+// when it does, the recording goes here and every existing caller inherits it
+// without being changed.
+//
+// It returns an error rather than nothing so that the day it can refuse — an
+// account suspended mid-flight, a change already completed — the callers already
+// handle the refusal instead of acquiring a new error path.
+func (u *User) VoidPendingIdentifierChange(at time.Time) error {
+	if err := u.mutable(); err != nil {
+		return err
+	}
+	// No branch, and no `if u.pendingIndex != ""`: the aggregate has no such
+	// field, because no event can set one. Adding a field for a state nothing
+	// produces would be a state nothing can test.
+	_ = at
+	return nil
+}
+
 // StartTotpEnrollment provisions a secret that is not yet proven.
 func (u *User) StartTotpEnrollment(
 	credentialID ids.CredentialID, expiresAt, at time.Time,

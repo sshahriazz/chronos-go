@@ -134,6 +134,61 @@ func (f *fakeResender) resends() []app.ResendVerificationCommand {
 	return append([]app.ResendVerificationCommand(nil), f.cmds...)
 }
 
+// fakeResets records what the two password-reset RPCs asked the app layer for.
+//
+// The COMMANDS are kept rather than a call count, because every assertion worth
+// making about these two handlers is about a field of one: which address was
+// looked up, which caller scope was derived, and that the token and the password
+// arrived unchanged. A counter would pass on a handler that reset the wrong
+// account.
+type fakeResets struct {
+	mu sync.Mutex
+
+	requestFn  func(app.RequestPasswordResetCommand) (app.RequestPasswordResetResult, error)
+	completeFn func(app.ResetPasswordCommand) (app.ResetPasswordResult, error)
+
+	requested []app.RequestPasswordResetCommand
+	completed []app.ResetPasswordCommand
+}
+
+func (f *fakeResets) Request(
+	_ context.Context, cmd app.RequestPasswordResetCommand,
+) (app.RequestPasswordResetResult, error) {
+	f.mu.Lock()
+	f.requested = append(f.requested, cmd)
+	fn := f.requestFn
+	f.mu.Unlock()
+	if fn == nil {
+		return app.RequestPasswordResetResult{}, nil
+	}
+	return fn(cmd)
+}
+
+func (f *fakeResets) Complete(
+	_ context.Context, cmd app.ResetPasswordCommand,
+) (app.ResetPasswordResult, error) {
+	f.mu.Lock()
+	f.completed = append(f.completed, cmd)
+	fn := f.completeFn
+	f.mu.Unlock()
+	if fn == nil {
+		return app.ResetPasswordResult{}, nil
+	}
+	return fn(cmd)
+}
+
+func (f *fakeResets) requests() []app.RequestPasswordResetCommand {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]app.RequestPasswordResetCommand(nil), f.requested...)
+}
+
+func (f *fakeResets) completions() []app.ResetPasswordCommand {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]app.ResetPasswordCommand(nil), f.completed...)
+}
+
 type fakeAuthentication struct {
 	mu sync.Mutex
 
@@ -472,6 +527,7 @@ type harness struct {
 	client       identityv1connect.IdentityServiceClient
 	registration *fakeRegistration
 	resender     *fakeResender
+	resets       *fakeResets
 	authn        *fakeAuthentication
 	secondFactor *fakeSecondFactor
 	queries      *fakeQueries
@@ -512,6 +568,7 @@ func newHarness(t *testing.T, opts ...options) *harness {
 	h := &harness{
 		registration: &fakeRegistration{},
 		resender:     &fakeResender{},
+		resets:       &fakeResets{},
 		authn:        &fakeAuthentication{},
 		secondFactor: &fakeSecondFactor{},
 		queries:      &fakeQueries{},
@@ -529,6 +586,7 @@ func newHarness(t *testing.T, opts ...options) *harness {
 	svc, err := api.New(api.Deps{
 		Registration:   h.registration,
 		Resender:       h.resender,
+		Resets:         h.resets,
 		Authentication: h.authn,
 		SecondFactor:   h.secondFactor,
 		Queries:        h.queries,
@@ -619,6 +677,7 @@ func TestNewRefusesAPartiallyWiredHandler(t *testing.T) {
 		return api.Deps{
 			Registration:   &fakeRegistration{},
 			Resender:       &fakeResender{},
+			Resets:         &fakeResets{},
 			Authentication: &fakeAuthentication{},
 			SecondFactor:   &fakeSecondFactor{},
 			Queries:        &fakeQueries{},
@@ -629,6 +688,7 @@ func TestNewRefusesAPartiallyWiredHandler(t *testing.T) {
 	tests := map[string]func(*api.Deps){
 		"no registration service":   func(d *api.Deps) { d.Registration = nil },
 		"no verification resender":  func(d *api.Deps) { d.Resender = nil },
+		"no password-reset service": func(d *api.Deps) { d.Resets = nil },
 		"no authentication service": func(d *api.Deps) { d.Authentication = nil },
 		"no second-factor service":  func(d *api.Deps) { d.SecondFactor = nil },
 		"no read side":              func(d *api.Deps) { d.Queries = nil },

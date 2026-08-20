@@ -209,6 +209,52 @@ func (*UserSuspended) EventType() string { return "identity.UserSuspended.v1" }
 // Password
 // ---------------------------------------------------------------------------
 
+// PasswordResetRequested records that a password-reset link was asked for.
+//
+// The token is NOT here, and neither is its digest — the same rule
+// EmailVerificationRequested is written under, and it bites harder here: a reset
+// token grants account access rather than confirming an address, so a digest in
+// a permanent, replicated log would be an offline attack surface against the
+// credential itself. The log records that a reset was ASKED FOR; the digest
+// lives in identity_token, is deleted on use, and expires in an hour.
+//
+// It is recorded on the ACCOUNT's stream rather than on a stream of its own,
+// because that is where the outcome lands too — PasswordChanged with ViaReset —
+// so a reader can see a request and its result in order without joining two
+// streams.
+//
+// # Why this event exists at all, rather than the handler mailing directly
+//
+// Three reasons, all of them ResendVerification's (identity/app,
+// ResendVerification's package comment) applied unchanged: the mail system's
+// availability must not decide whether a reset can be REQUESTED, there must be
+// exactly one place a reset link is minted, and a reset that left no trace in the
+// account's own log would make "somebody asked to reset my password" invisible to
+// the person it happened to.
+type PasswordResetRequested struct {
+	SubjectID string
+
+	// Index is the address the link will be sent to, as a blind index. Present
+	// for the same reason EmailVerificationRequested carries one: it says WHICH
+	// claim the request was made against, and it is the only form of the address
+	// that may appear in an event (ADR-002).
+	//
+	// It is advisory to delivery. The mail goes to the address the VAULT holds
+	// for the subject — never to one a request supplied — which is what makes
+	// this event unable to redirect a reset link (identity.md §4.5).
+	Index EmailIndex
+
+	// ExpiresAt is the deadline the link will carry. Advisory: the token the
+	// issuer mints carries its own, and the store enforces that one.
+	ExpiresAt time.Time
+
+	RequestedAt time.Time
+}
+
+func (*PasswordResetRequested) EventType() string {
+	return "identity.PasswordResetRequested.v1"
+}
+
 // PasswordSet records the FIRST password on an account.
 //
 // No hash, no salt, no parameters, no pepper version. The verifier lives in the
