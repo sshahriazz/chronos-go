@@ -3193,3 +3193,107 @@ Systems that permit both (GitHub, most social products) pay for it with
 substantial secondary defence. That is a reasonable trade for a product whose
 users expect it; it is not a trade to make by accident because the field happened
 to exist.
+
+## ADR-052 — `user_view.email_index` is unique among CURRENT holders, not among all rows
+
+**Date:** 2026-08-20 · **Status:** Accepted
+
+Migration 00008 gave `user_view.email_index` a bare `UNIQUE` constraint and
+described it as "a backstop rather than the mechanism", on the reasoning that
+uniqueness is enforced at write time by the reservation stream (ADR-044). The
+reasoning is right. The constraint was still wrong, because it asserted a
+property the domain has never guaranteed.
+
+**What the domain guarantees is that at most one account HOLDS an address at any
+instant. It does not guarantee that at most one account was ever registered with
+it.** An unverified claim lapses after `app.DefaultReservationLease` — that lapse
+is the entire bound on the squatting attack IDENTITY-REVIEW C8 leaves open — and
+`EmailReservation.Reserve` then takes the lapsed claim over, recording
+`EmailReleased` followed by `EmailReserved`. The previous holder's `Pending`
+account is not deleted by a release and is not supposed to be: nothing in the log
+says it ever went away.
+
+So the designed squat-recovery path produces two `UserRegistered` events sharing
+one email index, and the old constraint made that state unrepresentable. The
+consequence was not a rejected write in a request handler:
+
+```
+projection: apply failed: ... UpsertUser: duplicate key value violates
+unique constraint "user_view_email_index_key" (SQLSTATE 23505)
+```
+
+The `identity_user` projector stopped, and `projector -rebuild identity_user`
+failed at the same event — so the table was no longer reconstructable by
+replaying from position zero, which is the property every projection in this
+codebase is required to have. **A constraint that turns a bounded 48h denial of
+service into a permanently stalled projection is not a backstop.**
+
+### The shape of the fix
+
+`user_view` gains `email_released_at`, written from `EmailReleased` by the
+account projection, and the constraint becomes partial:
+
+```sql
+CREATE UNIQUE INDEX user_view_email_index_held_key
+    ON user_view (email_index) WHERE email_released_at IS NULL;
+```
+
+This keeps a real uniqueness guarantee and narrows it to the claim the domain
+actually makes. It still fails closed on the case worth failing on: two
+SIMULTANEOUS holders means the reservation stream admitted two winners, and the
+projector stopping is the correct direction for that failure.
+
+The superseded row keeps its `email_index` rather than having it blanked:
+
+- It is not personal data — a keyed HMAC whose key is not in this database
+  (ADR-048), so ADR-002 is satisfied by keeping it exactly as it is satisfied by
+  keeping it on the live row.
+- Blanking would need the column to become nullable, collapsing every abandoned
+  registration into one indistinguishable class — replacing "this account used to
+  hold that address" with "this account has no address", which is false.
+- `''` is not available as a sentinel: `SetUserState` inserts a placeholder row
+  with `email_index = ''`, so a blanked row would collide with that rather than
+  with nothing.
+
+### The read side moves with it, and that half is a security fix
+
+`GetUserByEmailIndex` — the login lookup, and a `:one` query — gains
+`AND email_released_at IS NULL`. Without it, two rows match after a
+lapse-and-reclaim and `QueryRow` returns whichever the planner reached first: an
+authentication attempt for the address could resolve to the SQUATTER's abandoned
+account. That is a worse failure than the stalled projector, and unlike the
+stalled projector it is silent.
+
+### What this was NOT
+
+The symptom — two `UserRegistered` events carrying one email index, minted
+milliseconds apart during a run of `TestConcurrentRegistrationsForOneAddress` —
+reads exactly like the reservation stream admitting two winners, and that was the
+first diagnosis. It was wrong. The events belonged to
+`TestALapsedReservationIsReleasedAndTheAddressIsRegisterableAgain`, which
+registers an address, runs the sweep at an instant past the lease, and registers
+it again on purpose. The `EmailReleased` between the two carried
+`$causationId: identity.reservation.sweep:<index>:<expiry>` and a `ReleasedAt` 49
+hours in the future — the sweep's own clock offset. Reading the stream's payloads
+is what settled it; the ULID prefixes did not, because eight shared characters of
+a ULID cover a 1024 ms window rather than one millisecond.
+
+`MultiAppender.AppendToMany` was re-verified under real concurrency at the same
+time — eight goroutines contending on one `NoStream` reservation stream, 320
+trials — and it is atomic: exactly one winner every time, and no loser's
+aggregate stream exists afterwards. See
+`TestAtomicAppendUnderConcurrencyHasExactlyOneWinner`.
+
+### Why the test that was supposed to catch this could not
+
+`TestConcurrentRegistrationsForOneAddress` asserted
+`SELECT count(*) FROM user_view WHERE email_index = $1` equals 1. Under the bare
+`UNIQUE`, a second account for one address was not a second row — it was a
+rejected INSERT that stopped the projector, after which the count still read 1.
+**The assertion measured the projection, and the projection was the thing
+concealing the duplicate.** It now asserts against `$all`, which cannot filter.
+
+Demonstrated rather than argued: with the append precondition deliberately
+removed so that all eight racers win, the run reports `accounts=1` from
+`user_view` — the old assertion passing — while the log assertion reports eight
+`UserRegistered` events for one address.

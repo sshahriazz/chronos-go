@@ -1,6 +1,9 @@
 package db
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // Writer collects statements to be sent together.
 //
@@ -15,6 +18,50 @@ import "context"
 type Writer interface {
 	Exec(sql string, args ...any)
 }
+
+// StatementCounter reports how many statements a Writer has queued so far.
+//
+// OPTIONAL, and probed with a type assertion. It exists so that a caller which
+// queues statements on behalf of several units of work — a projector applying a
+// batch of events — can record which statements belong to which unit, and
+// therefore say which unit a failure belongs to.
+//
+// It has to be a separate interface rather than a method on Writer because the
+// number is meaningless to almost every caller: one unit of work per batch has
+// nothing to attribute.
+type StatementCounter interface {
+	// Queued is the number of statements queued so far, counting everything the
+	// batch itself queued before the caller got the Writer.
+	Queued() int
+}
+
+// BatchStatementError names the statement that failed inside a batch.
+//
+// TYPED rather than only a message, because the index is what lets a caller
+// attribute the failure. A projector queues several statements per event and
+// sends fifty events in one batch; without the index the only honest thing it
+// can say is "something in this batch failed", and the only convenient thing it
+// can say — the batch's last event — is WRONG. That misattribution cost an hour
+// of debugging: the message named EmailVerificationRequested, the event that
+// happened to close the batch, while the statement that failed was the
+// UpsertUser of a different event several positions earlier.
+type BatchStatementError struct {
+	// Index is the ZERO-BASED position of the failing statement in the batch,
+	// on the same scale StatementCounter.Queued reports.
+	Index int
+	// Count is how many statements the batch held.
+	Count int
+	// SQL is the failing statement, summarised for a log line.
+	SQL string
+	// Err is the error PostgreSQL returned.
+	Err error
+}
+
+func (e *BatchStatementError) Error() string {
+	return fmt.Sprintf("batch statement %d of %d (%s): %v", e.Index+1, e.Count, e.SQL, e.Err)
+}
+
+func (e *BatchStatementError) Unwrap() error { return e.Err }
 
 // Durability states whether a batch must survive a crash.
 //

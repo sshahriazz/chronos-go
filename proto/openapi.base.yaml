@@ -147,7 +147,7 @@ info:
 
     The list above is not maintained here: each of those methods declares
     `(chronos.options.v1.public) = true` in the `.proto`, which is what the
-    authentication interceptor reads, and `scripts/check_openapi.py` fails the
+    authentication interceptor reads, and `internal/tools/checkopenapi` fails the
     build if the published document and that option disagree.
 
     A session carries an **assurance level**. Every session this system mints is

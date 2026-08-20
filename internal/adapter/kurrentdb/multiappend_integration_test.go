@@ -6,14 +6,19 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"io"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
 	kdb "github.com/chronos/chronos-go/internal/adapter/kurrentdb"
 	es "github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/platform/ids"
 	"github.com/google/uuid"
-	"time"
+	"github.com/kurrent-io/KurrentDB-Client-Go/kurrentdb"
 )
 
 // claimed stands in for a uniqueness reservation.
@@ -186,5 +191,211 @@ func TestAtomicAppendWithNothingToWrite(t *testing.T) {
 	results, err := store.AppendToMany(context.Background(), nil)
 	if err != nil || results != nil {
 		t.Fatalf("an empty append must be a no-op, got %v / %v", results, err)
+	}
+}
+
+// TestAtomicAppendUnderConcurrencyHasExactlyOneWinner is the property ADR-044
+// rests on, and until now nothing demonstrated it.
+//
+// The two tests above contend SEQUENTIALLY: the first claim is already durable
+// before the second is attempted, so they show that the server rejects a
+// precondition it can already see is violated. That is not the interesting
+// case. The interesting case is N callers whose preconditions are all
+// satisfiable at the moment each request is formed, arriving together — because
+// that is what a registration race actually is, and because a server that
+// evaluated multi-stream preconditions outside the per-stream write lock would
+// pass both sequential tests and admit two winners here.
+//
+// The losers' OWN aggregate streams are checked too, and that is the half a
+// "count the claims" assertion misses: a loser that lost the claim but still
+// created its aggregate is exactly the state that produces two accounts holding
+// one address.
+func TestAtomicAppendUnderConcurrencyHasExactlyOneWinner(t *testing.T) {
+	const racers = 8
+	store := multiStore(t)
+	ctx := context.Background()
+	sfx := uniqueSuffix(t)
+
+	reservation := es.StreamID("multiresv" + sfx + "-contended")
+	aggregates := make([]es.StreamID, racers)
+	for i := range aggregates {
+		aggregates[i] = es.StreamID(fmt.Sprintf("multitest%s-racer%d", sfx, i))
+	}
+
+	// Indexed rather than collected through a channel: each goroutine owns one
+	// slot, so there is no shared mutable state and no ordering to reason about.
+	errsOf := make([]error, racers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range racers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, err := store.AppendToMany(ctx, []es.StreamAppend{
+				{Stream: reservation, Expected: es.NoStream(),
+					Events: []es.PendingEvent{pending(&claimed{Value: "contended"})}},
+				{Stream: aggregates[i], Expected: es.NoStream(),
+					Events: []es.PendingEvent{pending(&created{Name: fmt.Sprintf("racer %d", i)})}},
+			})
+			errsOf[i] = err
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	winners := make([]int, 0, racers)
+	for i, err := range errsOf {
+		switch {
+		case err == nil:
+			winners = append(winners, i)
+		case errors.Is(err, es.ErrWrongExpectedRevision):
+		default:
+			t.Errorf("racer %d failed with %v, want either success or ErrWrongExpectedRevision: "+
+				"an infrastructure error here would make ordinary contention look like an outage",
+				i, err)
+		}
+	}
+	if len(winners) != 1 {
+		t.Errorf("%d of %d racers won the claim, want exactly 1 (winners=%v)",
+			len(winners), racers, winners)
+	}
+
+	events, err := store.ReadStream(ctx, reservation, 0)
+	if err != nil {
+		t.Fatalf("reading %s: %v", reservation, err)
+	}
+	if len(events) != 1 {
+		t.Errorf("the contended stream holds %d claims, want 1", len(events))
+	}
+
+	// The decisive assertion. A loser must have written NOTHING, including to
+	// the stream whose own precondition was perfectly satisfiable.
+	for i, s := range aggregates {
+		_, err := store.ReadStream(ctx, s, 0)
+		won := len(winners) == 1 && winners[0] == i
+		switch {
+		case won && err != nil:
+			t.Errorf("the winner's aggregate %s is missing: %v", s, err)
+		case !won && !errors.Is(err, es.ErrStreamNotFound):
+			t.Errorf("loser %d's aggregate %s exists after losing the claim (err=%v): the "+
+				"append was partial, so a caller relying on atomicity ends up with an "+
+				"aggregate that holds a claim it never won", i, s, err)
+		}
+	}
+}
+
+// TestAtomicAppendPreservesRequestOrderInAll pins the ordering a takeover
+// depends on.
+//
+// When a lapsed claim is taken over, ONE multi-append carries the release and
+// the new claim on the reservation stream and the new aggregate on its own —
+// reservation entry first, as app.Registration.appendBoth builds it. Consumers
+// read $all, and a projection that must retire the previous holder before the
+// new one is written needs the release to arrive first.
+//
+// The append is atomic, so nothing guarantees an interleaving a priori: the
+// server could order one commit's events any way it liked. This asserts that it
+// follows the order of the request, which is what makes "reservation entry
+// first" a decision the caller gets to make rather than a coincidence.
+func TestAtomicAppendPreservesRequestOrderInAll(t *testing.T) {
+	client, store := multiStore2(t)
+	ctx := context.Background()
+	sfx := uniqueSuffix(t)
+
+	reservation := es.StreamID("multiresv" + sfx + "-ordered")
+	aggregate := es.StreamID("multitest" + sfx + "-ordered")
+
+	// The tail BEFORE the append, so the read below is bounded by the append
+	// itself rather than by a window of N recent events. A fixed window is a
+	// flake waiting to happen: creating streams also writes system events, so
+	// "the last 512" is not a stable amount of history.
+	from := tailOfAll(t, client)
+
+	if _, err := store.AppendToMany(ctx, []es.StreamAppend{
+		{Stream: reservation, Expected: es.NoStream(), Events: []es.PendingEvent{
+			pending(&claimed{Value: "first"}),
+			pending(&claimed{Value: "second"}),
+		}},
+		{Stream: aggregate, Expected: es.NoStream(), Events: []es.PendingEvent{
+			pending(&created{Name: "third"}),
+			pending(&created{Name: "fourth"}),
+		}},
+	}); err != nil {
+		t.Fatalf("atomic append: %v", err)
+	}
+
+	rs, err := client.ReadAll(ctx, kurrentdb.ReadAllOptions{
+		Direction: kurrentdb.Forwards, From: from,
+	}, ^uint64(0))
+	if err != nil {
+		t.Fatalf("reading $all: %v", err)
+	}
+	defer rs.Close()
+
+	var got []es.StreamID
+	for {
+		ev, err := rs.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("reading $all: %v", err)
+		}
+		// System streams carry the suffix too: KurrentDB indexes a new stream
+		// by writing to $$$category-<category>, and it does so AFTER the events
+		// that created it. Those are the server's bookkeeping, not this
+		// append's events, and counting them made this test flake.
+		if ev.Event == nil || strings.HasPrefix(ev.Event.StreamID, "$") ||
+			!strings.Contains(ev.Event.StreamID, sfx) {
+			continue
+		}
+		got = append(got, es.StreamID(ev.Event.StreamID))
+	}
+
+	want := []es.StreamID{reservation, reservation, aggregate, aggregate}
+	if len(got) != len(want) {
+		t.Fatalf("$all holds %d events for this append, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("$all order is %v, want %v: the commit does not follow the order of the "+
+				"request, so a consumer cannot rely on the reservation entry being applied "+
+				"before the aggregate it belongs to", got, want)
+		}
+	}
+}
+
+// multiStore2 is multiStore plus the raw client, for the one test that has to
+// read $all rather than a stream.
+func multiStore2(t *testing.T) (*kurrentdb.Client, *kdb.Store) {
+	t.Helper()
+	c, _ := typeStore(t)
+	codec := eventcodec.NewJSON(es.NewUpcasterRegistry())
+	codec.Register("multitest.Claimed.v1", func() es.Event { return &claimed{} })
+	codec.Register("multitest.Created.v1", func() es.Event { return &created{} })
+	return c, kdb.NewStore(c, codec)
+}
+
+// tailOfAll reports the position just past the end of $all.
+func tailOfAll(t *testing.T, client *kurrentdb.Client) kurrentdb.AllPosition {
+	t.Helper()
+	rs, err := client.ReadAll(context.Background(), kurrentdb.ReadAllOptions{
+		Direction: kurrentdb.Backwards, From: kurrentdb.End{},
+	}, 1)
+	if err != nil {
+		t.Fatalf("reading the tail of $all: %v", err)
+	}
+	defer rs.Close()
+	ev, err := rs.Recv()
+	if errors.Is(err, io.EOF) {
+		return kurrentdb.Start{}
+	}
+	if err != nil {
+		t.Fatalf("reading the tail of $all: %v", err)
+	}
+	return kurrentdb.Position{
+		Commit:  ev.Event.Position.Commit,
+		Prepare: ev.Event.Position.Prepare,
 	}
 }

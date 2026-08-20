@@ -61,8 +61,16 @@ func (d *DB) InTenantBatch(
 		first = err
 	}
 	if first != nil {
-		return fmt.Errorf("postgres: batch statement %d of %d (%s): %w",
-			failed+1, len(w.sql), summarise(w.sql[failed]), first)
+		// Typed, so a caller that queued several statements per unit of work can
+		// map the index back to the unit that queued it. See
+		// db.BatchStatementError: a projector that cannot do that names the
+		// batch's last event, which is almost never the one that failed.
+		return fmt.Errorf("postgres: %w", &db.BatchStatementError{
+			Index: failed,
+			Count: len(w.sql),
+			SQL:   summarise(w.sql[failed]),
+			Err:   first,
+		})
 	}
 	return nil
 }
@@ -98,6 +106,15 @@ func (w *batchWriter) Exec(sql string, args ...any) {
 	w.batch.Queue(sql, args...)
 	w.sql = append(w.sql, sql)
 }
+
+// Queued reports the position the next statement will take, which is what a
+// caller needs in order to record the range of statements one unit of work
+// queued. It counts the scope statement this batch queued before the caller was
+// handed the Writer, so the number is on the same scale as the index a
+// db.BatchStatementError reports.
+func (w *batchWriter) Queued() int { return len(w.sql) }
+
+var _ db.StatementCounter = (*batchWriter)(nil)
 
 // summarise reduces a statement to something readable in an error message.
 func summarise(sql string) string {

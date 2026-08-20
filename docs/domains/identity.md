@@ -961,13 +961,27 @@ does not permit rewriting.
 
 | Projection | Serves | Key indexes |
 | --- | --- | --- |
-| `user_view` | profile, status | `(normalized_email_blind_index)` unique |
+| `user_view` | profile, status | `(email_index) WHERE email_released_at IS NULL` unique |
 | `auth_method_view` | the security settings screen | `(user_id, method_type)` |
 | `session_view` | device list | `(user_id, status, last_seen_at DESC)` |
 | `linked_account_view` | connected providers | `(issuer, subject)` unique |
 | `api_key_view` | key management | `(key_id)` unique, `(owner_id, status)` |
 | `login_history_view` | "recent activity" | `(user_id, occurred_at DESC)` |
 | `auth_attempt_counter` | rate limiting (Valkey, TTL) | — |
+
+`user_view.email_index` is unique among **current holders only**, and the
+qualifier is load-bearing rather than a detail of the index. An unverified claim
+lapses (§4.3), `EmailReservation.Reserve` takes it over, and the previous
+holder's `Pending` account survives its own lapsed claim — so two accounts
+legitimately carry one email index, at different times. `email_released_at`
+records which of them stopped holding it, written by the account projection from
+`EmailReleased`; a bare `UNIQUE` here asserted a property the domain never
+promised and stopped the projector the first time the designed squat-recovery
+path ran. See ADR-052.
+
+The same column is why `GetUserByEmailIndex` filters on
+`email_released_at IS NULL`: without it the login lookup can resolve an address
+to the abandoned account instead of the one that holds it.
 
 ---
 

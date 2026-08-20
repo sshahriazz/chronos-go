@@ -38,6 +38,10 @@ func TestConcurrentRegistrationsForOneAddress(t *testing.T) {
 	ctx := context.Background()
 	email := h.freshEmail("race")
 
+	// The position the log is at before anything races. Every assertion below
+	// that matters is made against the events committed after it.
+	from := h.logTail(t)
+
 	// A distinct idempotency key per goroutine, deliberately. A shared key would
 	// let gate 5 collapse seven of the eight requests before any of them reached
 	// the event store, and the test would pass while proving only that the
@@ -76,11 +80,35 @@ func TestConcurrentRegistrationsForOneAddress(t *testing.T) {
 	t.Logf("racers=%d refused=%d", racers, failed)
 
 	index := h.emailIndex(t, email)
+
+	// THE assertion, and it is made against the LOG.
+	//
+	// It used to be `SELECT count(*) FROM user_view WHERE email_index = $1`, and
+	// that assertion could not fail. user_view.email_index was UNIQUE, so a
+	// second account for one address was not a second row — it was a rejected
+	// INSERT that stopped the identity projector, after which the count still
+	// read 1 and this test still passed while the log held two registrations.
+	// The assertion measured the projection, and the projection was the thing
+	// concealing the duplicate.
+	//
+	// The log cannot filter. Every registration that got as far as an append is
+	// here, whatever any projector later did or failed to do with it.
+	subjects := h.accountsRegisteredFor(t, index, from)
+	if len(subjects) != 1 {
+		t.Errorf("%d concurrent registrations put %d UserRegistered events in the log for "+
+			"one address, want exactly 1: %v. The append that claims the address and the "+
+			"append that creates the account are the same atomic multi-append, so a second "+
+			"account here means the reservation stream admitted two winners (ADR-044).",
+			racers, len(subjects), subjects)
+	}
+
 	account := h.awaitAccount(t, index)
 
-	// The assertions that matter. All three are absolute rather than delta-based
-	// and that is safe: the blind-index key is unique to this run, so no other
-	// test and no earlier run can have written a row under this index.
+	// The projection is checked SECOND and separately, because it answers a
+	// different question: not "did uniqueness hold" but "did the projector
+	// survive what uniqueness produced". Both counts are absolute rather than
+	// delta-based, which is safe because the blind-index key is unique to this
+	// run.
 	var accounts, reservations int
 	h.systemQuery(t, func(ctx context.Context, q db.Querier) error {
 		if err := q.QueryRow(ctx,
@@ -92,7 +120,7 @@ func TestConcurrentRegistrationsForOneAddress(t *testing.T) {
 			index).Scan(&reservations)
 	})
 	if accounts != 1 {
-		t.Errorf("%d concurrent registrations produced %d accounts, want exactly 1", racers, accounts)
+		t.Errorf("%d concurrent registrations produced %d account rows, want exactly 1", racers, accounts)
 	}
 	if reservations != 1 {
 		t.Errorf("%d concurrent registrations produced %d reservations, want exactly 1",
@@ -184,6 +212,7 @@ func TestConcurrentRegistrationsForOneAddress(t *testing.T) {
 func TestASecondRegistrationIsIndistinguishable(t *testing.T) {
 	ctx := context.Background()
 	email := h.freshEmail("dup")
+	from := h.logTail(t)
 
 	if _, err := h.client.Register(ctx, write(&identityv1.RegisterRequest{
 		Email: email,
@@ -202,14 +231,24 @@ func TestASecondRegistrationIsIndistinguishable(t *testing.T) {
 			"address has an account by trying to register it.", err)
 	}
 
-	// And exactly one account still holds the address, whichever answer came back.
+	// And exactly one account was ever registered with the address — asserted
+	// against the LOG, for the reason spelled out in
+	// TestConcurrentRegistrationsForOneAddress: user_view could not have shown a
+	// second one even when a second one existed.
+	index := h.emailIndex(t, email)
+	if subjects := h.accountsRegisteredFor(t, index, from); len(subjects) != 1 {
+		t.Errorf("a duplicate registration put %d UserRegistered events in the log, want 1: %v. "+
+			"The second Register answered identically, which is the point — but it must "+
+			"also have written nothing.", len(subjects), subjects)
+	}
+
 	var accounts int
 	h.systemQuery(t, func(ctx context.Context, q db.Querier) error {
 		return q.QueryRow(ctx, `SELECT count(*) FROM user_view WHERE email_index = $1`,
-			h.emailIndex(t, email)).Scan(&accounts)
+			index).Scan(&accounts)
 	})
 	if accounts != 1 {
-		t.Errorf("after a duplicate registration %d accounts hold the address, want 1", accounts)
+		t.Errorf("after a duplicate registration %d account rows hold the address, want 1", accounts)
 	}
 }
 

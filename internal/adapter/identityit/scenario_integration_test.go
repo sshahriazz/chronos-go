@@ -459,9 +459,15 @@ func (hh *harness) awaitAccount(t *testing.T, index string) accountRow {
 		var row accountRow
 		found := false
 		hh.systemQuery(t, func(ctx context.Context, q db.Querier) error {
+			// `email_released_at IS NULL` mirrors GetUserByEmailIndex, the
+			// production lookup. An address can have been held by one account
+			// and then be held by another (migration 00014), and a QueryRow
+			// without this clause would return whichever row the planner
+			// reached first — so a test could silently follow the SUPERSEDED
+			// account through every step after this one.
 			err := q.QueryRow(ctx, `
 				SELECT subject_id, user_id, state, email_verified
-				FROM user_view WHERE email_index = $1`, index).
+				FROM user_view WHERE email_index = $1 AND email_released_at IS NULL`, index).
 				Scan(&row.subjectID, &row.userID, &row.state, &row.verified)
 			if err != nil && strings.Contains(err.Error(), "no rows") {
 				return nil

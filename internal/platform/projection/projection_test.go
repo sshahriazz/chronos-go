@@ -664,6 +664,10 @@ type fakeTX struct {
 	rolledBack int
 	discarded  []int
 	batches    []*fakeBatch
+
+	// sendFailsAt makes the batch fail when it is SENT, at this zero-based
+	// statement index. nil means it never fails. See InTenantBatch.
+	sendFailsAt *int
 }
 
 func (f *fakeTX) InSystemTx(ctx context.Context, fn func(context.Context, db.Querier) error) error {
@@ -699,6 +703,11 @@ type fakeBatch struct {
 
 func (b *fakeBatch) Exec(sql string, _ ...any) { b.queued = append(b.queued, sql) }
 
+// Queued makes the fake behave like the real batch writer, which reports its
+// position so a failure can be attributed to the event that queued the failing
+// statement (db.StatementCounter).
+func (b *fakeBatch) Queued() int { return len(b.queued) }
+
 // InTenantBatch is guarded because a SHARDED rebuild calls it from several
 // goroutines at once. The real implementation acquires its own pooled connection
 // per call and is safe by construction; this one would race on the bookkeeping
@@ -722,6 +731,19 @@ func (f *fakeTX) InTenantBatch(
 		return err
 	}
 
+	// A failure at SEND time, which is the only kind a real batch has: Exec
+	// queues and returns nothing, so PostgreSQL's rejection arrives here, after
+	// every handler has already returned nil.
+	if f.sendFailsAt != nil {
+		f.mu.Lock()
+		f.rolledBack++
+		f.mu.Unlock()
+		return fmt.Errorf("postgres: %w", &db.BatchStatementError{
+			Index: *f.sendFailsAt, Count: len(b.queued),
+			SQL: "INSERT INTO spy …", Err: errSendFailed,
+		})
+	}
+
 	f.mu.Lock()
 	b.sent = true
 	effects := b.onSend
@@ -732,6 +754,8 @@ func (f *fakeTX) InTenantBatch(
 	}
 	return nil
 }
+
+var errSendFailed = errors.New("duplicate key value violates unique constraint")
 
 func (q *fakeQuerier) Exec(context.Context, string, ...any) (int64, error) { return 0, nil }
 func (q *fakeQuerier) Query(context.Context, string, ...any) (db.Rows, error) {
@@ -1559,4 +1583,56 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("condition not met within 10s")
+}
+
+// A batch failure must name the event whose statement failed, not the event that
+// happened to close the batch.
+//
+// This drives the real Runner rather than the mapping in isolation, because the
+// mapping is only half of it: the buffer that holds the envelopes is CLEARED IN
+// PLACE on the failure path, so reading the culprit after the reset yields a
+// zeroed envelope and an error that names nothing at all. That happened — the
+// message read "apply failed:  at #0" against a live rebuild — and only a test
+// that exercises flush's ordering can catch it.
+func TestBatchFailureAtSendNamesTheEventThatQueuedTheStatement(t *testing.T) {
+	// spyProjection queues exactly one statement per event and this fake queues
+	// no scope statement of its own, so statement index 3 belongs to the event
+	// at revision 3. (The real batch queues its tenant scope first; that offset
+	// is covered by TestBatchFailureNamesTheEventThatQueuedTheStatement.)
+	const failAt = 3
+	at := failAt
+
+	proj := &spyProjection{name: "test_view"}
+	tx := &fakeTX{sendFailsAt: &at}
+	sub := &fakeSubscriber{drained: make(chan struct{})}
+	for i := range 8 {
+		sub.events = append(sub.events, recorded("test-1", int64(i), uint64(i+1)*10, "org_A"))
+	}
+
+	r := projection.NewRunner(proj, projection.Deps{
+		Subscriber: sub, Codec: fakeCodec{}, Batch: tx, TX: tx,
+		Checkpoints: &fakeCheckpoints{}, Lease: grantingLease{}, Log: quiet(),
+		CatchUpBatch: 8,
+	})
+	err := r.Run(context.Background())
+	if err == nil {
+		t.Fatal("a batch that failed at send did not stop the projector")
+	}
+	if !errors.Is(err, errSendFailed) {
+		t.Fatalf("got %v, want the send failure", err)
+	}
+
+	// The batch's LAST event is revision 7, and that is the name the old code
+	// reported for every failure in the batch. A zeroed envelope — the reset
+	// bug — produces "at #0", which this also rejects.
+	const want = "test-1#3"
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("the failure names the wrong event.\n got: %v\nwant it to contain %q — "+
+			"statement %d was queued by that event, and naming any other one sends a reader "+
+			"to an event that did nothing wrong", err, want, failAt)
+	}
+	if strings.Contains(err.Error(), "could not be attributed") {
+		t.Errorf("the attribution was reported as uncertain although the Writer counts "+
+			"statements: %v", err)
+	}
 }

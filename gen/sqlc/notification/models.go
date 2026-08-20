@@ -203,4 +203,6 @@ type UserView struct {
 	ActivatedAt   pgtype.Timestamptz
 	DeactivatedAt pgtype.Timestamptz
 	SuspendedAt   pgtype.Timestamptz
+	// When this account stopped holding email_index. NULL means it still holds it.
+	EmailReleasedAt pgtype.Timestamptz
 }

@@ -212,8 +212,18 @@ type Querier interface {
 	//
 	// By INDEX, never by address: the address is not in this database. The caller
 	// derives the index with the blind-index key and asks for it.
-	GetUserByEmailIndex(ctx context.Context, emailIndex string) (UserView, error)
-	GetUserBySubject(ctx context.Context, subjectID string) (UserView, error)
+	//
+	// `email_released_at IS NULL` is what makes this a :one query rather than a
+	// query that HAPPENS to return one row. An address can be held by one account
+	// after having been held by another — an unverified claim lapses and the next
+	// registrant takes it over (identity.md §4.3) — and the earlier account keeps
+	// its row and its index. Without this clause two rows match, QueryRow returns
+	// whichever the planner reached first, and an authentication attempt for the
+	// address can resolve to the SUPERSEDED account. Matching the partial unique
+	// index of migration 00014 is what makes "exactly one" true by construction
+	// instead of by the absence of a lapse in the test data.
+	GetUserByEmailIndex(ctx context.Context, emailIndex string) (GetUserByEmailIndexRow, error)
+	GetUserBySubject(ctx context.Context, subjectID string) (GetUserBySubjectRow, error)
 	InsertRecoveryCode(ctx context.Context, arg InsertRecoveryCodeParams) error
 	// The AUTHORITATIVE half, written by the login handler.
 	//
@@ -372,6 +382,30 @@ type Querier interface {
 	// freed, and the sweep needs to be able to tell "never claimed" from "claimed and
 	// released" when it is deciding whether its own release already landed.
 	ReleaseEmailReservation(ctx context.Context, arg ReleaseEmailReservationParams) error
+	// Applied from EmailReleased: this account no longer holds this address.
+	//
+	// The row is MARKED, never deleted and never blanked. A release does not delete
+	// the account — the squatter's Pending account survives its own lapsed claim by
+	// design (identity.md §4.3) — so the account projection must be able to say
+	// "this account USED to hold this address, another holds it now". That sentence
+	// is what the partial unique index in migration 00014 makes representable, and
+	// without it the next registration for the address stops the projector on a
+	// duplicate key and the table stops being rebuildable from position zero.
+	//
+	// Guarded on BOTH subject_id and email_index. On subject_id because a release
+	// names the holder whose claim ended, and applying it to whoever holds the
+	// address now would retire the live row and hand the index to nobody. On
+	// email_index because an account that has since moved to another address must
+	// not be marked as having released the one it currently holds — the guard is
+	// redundant today (there is no email-change flow) and is what keeps it correct
+	// on the day there is one.
+	//
+	// `email_released_at IS NULL` makes it idempotent: replayed, the second
+	// application matches no row and the first timestamp stands. Re-applying with
+	// the same timestamp would also be harmless; keeping the first one means the
+	// column answers "when did this account lose the address" rather than "when was
+	// this event last replayed".
+	ReleaseUserEmailIndex(ctx context.Context, arg ReleaseUserEmailIndexParams) error
 	// Move one credential's sealed value to a newer key version.
 	//
 	// A COMPARE-AND-SET, like RehashCredential and for the same race: the re-sealing

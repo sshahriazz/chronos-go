@@ -57,6 +57,47 @@ func NewUser(codec eventsourcing.Codec) *User {
 		return nil
 	})
 
+	// EmailReleased is the ONLY event that says an account has stopped holding
+	// its address, and it lives on the reservation stream rather than the
+	// account's own. Handling it here is therefore not a convenience: without it
+	// user_view cannot represent the state the domain legitimately produces —
+	// one account that held an address and another that holds it now — and the
+	// next registration for a lapsed address stops this projector on a duplicate
+	// key. That happened, and it took the rebuild with it: the table was no
+	// longer reconstructable from position zero.
+	//
+	// Ordering is what makes this correct, and it is guaranteed rather than
+	// assumed. The release is committed before the taking-over UserRegistered:
+	// when Reserve takes over a lapsed claim it emits both in ONE multi-stream
+	// append with the reservation stream first (app.Registration.appendBoth), and
+	// when the sweep releases first it is a separate, earlier append. Live
+	// consumption reads $all, so it sees them in commit order. A REBUILD sees the
+	// same order because this projection's filter names an event-type PREFIX,
+	// which resolves to neither exactly one type nor exactly one category — so
+	// Runner.rebuildFromLinkStreams falls through to $all and never takes the
+	// sharded link-stream path that gives up cross-aggregate ordering (ADR-044).
+	// That is a property of the handler set, not a setting: this projection
+	// handles six event types across two stream categories and cannot collapse
+	// to one of either.
+	//
+	// There is deliberately no EmailReserved handler to clear the column again.
+	// Every route back to an address mints a FRESH SubjectID — registration
+	// always creates a new account, and identifier reuse after erasure is
+	// explicitly a new subject (identity.md §7.5) — so no live path re-claims an
+	// index for a subject that released it. A handler for a transition nothing
+	// can perform is a handler nothing can test.
+	d.On[contract.EmailReleased](func(
+		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.EmailReleased,
+	) error {
+		// The reason is not projected, for the same reason the reservation
+		// projection does not project it: a lapse, an address changed away from
+		// and an erasure differ in what they mean and not in what this row must
+		// say afterwards, which is "no longer held" in all three cases.
+		w.Exec(identitydb.ReleaseUserEmailIndex,
+			e.SubjectID, string(e.Index), e.ReleasedAt)
+		return nil
+	})
+
 	// The four state transitions share one shape. Written as a loop over a table
 	// rather than four near-identical closures, so a state added to the domain
 	// without a projector handler is a visibly missing table entry rather than a

@@ -166,23 +166,33 @@ func (w *shardWorker) flush(ctx context.Context) error {
 	}
 	r := w.replay.runner
 	last := w.pending.last()
-	culprit := last
+
+	// The same attribution the live path uses, and needed here for the same
+	// reason: Apply queues statements and returns nil, so the error arrives from
+	// the send with no indication of which event produced it.
+	blame := attribution{events: w.pending.events}
 
 	started := r.deps.Clock.Now()
 	err := r.deps.Batch.InTenantBatch(ctx, w.pending.scope, db.Replayable, func(bw db.Writer) error {
-		for _, env := range w.pending.events {
+		blame.begin(bw)
+		for i, env := range w.pending.events {
 			if err := r.proj.Apply(ctx, bw, env); err != nil {
-				culprit = env
+				blame.applyFailed(i)
 				return err
 			}
+			blame.applied(i)
 		}
 		return nil
 	})
 	if err != nil {
+		// BEFORE reset, for the reason spelled out on the live path: reset()
+		// clears the array attribution is reading.
+		culprit, known := blame.culprit(err)
 		w.pending.reset()
 		r.deps.Metrics.Failed(r.name)
-		return fmt.Errorf("%w: %s at %s#%d (in a batch of %d): %w",
-			errApply, culprit.Type, culprit.Stream, culprit.Revision, n, err)
+		return fmt.Errorf("%w: %s at %s#%d%s (in a batch of %d): %w",
+			errApply, culprit.Type, culprit.Stream, culprit.Revision,
+			uncertain(known), n, err)
 	}
 
 	// One transaction's duration split across its events, so the histogram stays

@@ -3,6 +3,21 @@
 version: "2"
 
 linters:
+  # Test files are exempt from three linters, and this block MUST live under
+  # `linters:` — at the top level golangci-lint v2 rejects the whole config
+  # (`additional properties 'exclusions' not allowed`), which means the rule had
+  # never applied since the v2 migration: gosec, errcheck and noctx were running
+  # on every _test.go in the repo. `golangci-lint config verify` is what catches
+  # this; a plain `run` does not complain.
+  #
+  # Why these three and only in tests: gosec flags file reads and weak randomness
+  # a fixture is entitled to; errcheck flags the deliberate discard of a Close
+  # whose failure a test does not care about; noctx flags requests a test makes
+  # against its own httptest server.
+  exclusions:
+    rules:
+      - path: _test\.go$
+        linters: [gosec, errcheck, noctx]
   enable:
     - depguard
     - errcheck
@@ -125,8 +140,3 @@ formatters:
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
-
-exclusions:
-  rules:
-    - path: _test\.go$
-      linters: [gosec, errcheck, noctx]

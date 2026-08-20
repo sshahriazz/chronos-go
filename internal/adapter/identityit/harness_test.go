@@ -70,6 +70,7 @@ import (
 	"github.com/chronos/chronos-go/internal/modules/identity/adapter/totp"
 	"github.com/chronos/chronos-go/internal/modules/identity/adapter/totpseal"
 	"github.com/chronos/chronos-go/internal/modules/identity/app"
+	"github.com/chronos/chronos-go/internal/modules/identity/contract"
 	"github.com/chronos/chronos-go/internal/modules/identity/domain"
 	identityprojection "github.com/chronos/chronos-go/internal/modules/identity/projection"
 	"github.com/chronos/chronos-go/internal/platform/clock"
@@ -77,6 +78,7 @@ import (
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/platform/projection"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/kurrent-io/KurrentDB-Client-Go/kurrentdb"
 )
 
 // ---------------------------------------------------------------------------
@@ -106,6 +108,12 @@ type harness struct {
 	pg    *pgadapter.DB
 	store *kurrentadapter.Store
 	codec *eventcodec.JSON
+
+	// kurrent is the raw client behind store, kept for the one thing the port
+	// does not expose: reading $all between two positions. A property about how
+	// many accounts exist for an address cannot be asked of one stream, and it
+	// must not be asked of a projection — see accountsRegisteredFor.
+	kurrent *kurrentdb.Client
 
 	index  *blindindex.Index
 	guards *identitypg.Guards
@@ -250,6 +258,7 @@ func (hh *harness) dialInfra(env map[string]string, indexKeyHex, sealKeyHex, pep
 		return fmt.Errorf("kurrentdb: %w", err)
 	}
 	hh.store = kurrentadapter.NewStore(client, codec)
+	hh.kurrent = client
 
 	indexKey, err := hex.DecodeString(indexKeyHex)
 	if err != nil {
@@ -543,4 +552,90 @@ func (hh *harness) systemQuery(t *testing.T, scan func(context.Context, db.Queri
 	if err := hh.pg.InSystemTx(ctx, scan); err != nil {
 		t.Fatalf("system query: %v", err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// reading the log, which is the only place uniqueness is decided
+// ---------------------------------------------------------------------------
+
+// logTail reports the position just past the end of $all.
+//
+// Taken BEFORE the work under test so accountsRegisteredFor reads exactly that
+// work and nothing else: a window of "the last N events" is not a stable amount
+// of history, because creating a stream also writes the server's own index
+// entries.
+func (hh *harness) logTail(t *testing.T) kurrentdb.AllPosition {
+	t.Helper()
+	rs, err := hh.kurrent.ReadAll(context.Background(), kurrentdb.ReadAllOptions{
+		Direction: kurrentdb.Backwards, From: kurrentdb.End{},
+	}, 1)
+	if err != nil {
+		t.Fatalf("reading the tail of $all: %v", err)
+	}
+	defer rs.Close()
+	ev, err := rs.Recv()
+	if errors.Is(err, io.EOF) {
+		return kurrentdb.Start{}
+	}
+	if err != nil {
+		t.Fatalf("reading the tail of $all: %v", err)
+	}
+	return kurrentdb.Position{Commit: ev.Event.Position.Commit, Prepare: ev.Event.Position.Prepare}
+}
+
+// accountsRegisteredFor returns the subject of every account the LOG says was
+// registered with this email index, in commit order.
+//
+// This exists because the obvious question — "how many accounts hold this
+// address?" — has been asked of user_view, and user_view is the one place that
+// cannot answer it. Its email_index carried a bare UNIQUE constraint, so a
+// second account for one address did not appear as a second row: the INSERT was
+// refused, the identity projector stopped, and `SELECT count(*)` kept returning
+// 1. An assertion on that count measured the projection's ability to hide the
+// duplicate. The constraint is now partial (migration 00014) and the count would
+// be honest — but a projection is still derived, still behind, and still able to
+// filter, so the assertion belongs here regardless.
+//
+// $all rather than $et-identity.UserRegistered.v1, and the difference matters
+// for a test that runs immediately after the write: $all is the log itself and
+// is consistent the moment the append returns, while a $et- link stream is
+// produced by a system projection that can lag.
+func (hh *harness) accountsRegisteredFor(
+	t *testing.T, index string, from kurrentdb.AllPosition,
+) []string {
+	t.Helper()
+	rs, err := hh.kurrent.ReadAll(context.Background(), kurrentdb.ReadAllOptions{
+		Direction: kurrentdb.Forwards, From: from,
+	}, ^uint64(0))
+	if err != nil {
+		t.Fatalf("reading $all: %v", err)
+	}
+	defer rs.Close()
+
+	registered := new(contract.UserRegistered)
+	var subjects []string
+	for {
+		ev, err := rs.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("reading $all: %v", err)
+		}
+		if ev.Event == nil || ev.Event.EventType != registered.EventType() {
+			continue
+		}
+		decoded, err := hh.codec.Unmarshal(ev.Event.EventType, ev.Event.Data)
+		if err != nil {
+			t.Fatalf("decoding %s at %s: %v", ev.Event.EventType, ev.Event.StreamID, err)
+		}
+		e, ok := decoded.(*contract.UserRegistered)
+		if !ok {
+			t.Fatalf("%s decoded as %T", ev.Event.EventType, decoded)
+		}
+		if string(e.EmailIndex) == index {
+			subjects = append(subjects, e.SubjectID)
+		}
+	}
+	return subjects
 }

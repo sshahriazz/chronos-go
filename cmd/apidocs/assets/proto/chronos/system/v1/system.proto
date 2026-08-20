@@ -114,13 +114,13 @@ service SystemService {
     // annotations and knows nothing of this repo's own options. The empty
     // requirement overrides the document-level `bearerAuth`, so
     // "unauthenticated" is a statement in the document rather than the absence
-    // of one. scripts/check_openapi.py asserts the two agree, so this cannot
+    // of one. internal/tools/checkopenapi asserts the two agree, so this cannot
     // drift away from the option the interceptor actually reads.
     //
     // The `200` response is restated in full because the generator REPLACES a
     // status code it is given rather than merging into it; the `schema`
     // reference below is the one it would have emitted, and a wrong one is
-    // caught by the dangling-$ref check in scripts/check_openapi.py.
+    // caught by the dangling-$ref check in internal/tools/checkopenapi.
     option (gnostic.openapi.v3.operation) = {
       security: [{}]
       responses: {
