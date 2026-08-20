@@ -35,7 +35,7 @@ var _ projection.Projection = (*User)(nil)
 func NewUser(codec eventsourcing.Codec) *User {
 	d := projection.NewDispatch(codec)
 
-	projection.On[contract.UserRegistered](d, func(
+	d.On[contract.UserRegistered](func(
 		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.UserRegistered,
 	) error {
 		// Upsert, not insert. A projector is replayed on restart and on rebuild,
@@ -47,7 +47,7 @@ func NewUser(codec eventsourcing.Codec) *User {
 		return nil
 	})
 
-	projection.On[contract.EmailVerified](d, func(
+	d.On[contract.EmailVerified](func(
 		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.EmailVerified,
 	) error {
 		// The index is written again because verification can be for a NEW
@@ -65,7 +65,7 @@ func NewUser(codec eventsourcing.Codec) *User {
 		apply func(*projection.Dispatch)
 	}{
 		{func(d *projection.Dispatch) {
-			projection.On[contract.UserActivated](d, func(
+			d.On[contract.UserActivated](func(
 				_ context.Context, w db.Writer, _ projection.Envelope, e *contract.UserActivated,
 			) error {
 				w.Exec(identitydb.SetUserState, e.SubjectID, domain.StateActive.String())
@@ -73,7 +73,7 @@ func NewUser(codec eventsourcing.Codec) *User {
 			})
 		}},
 		{func(d *projection.Dispatch) {
-			projection.On[contract.UserDeactivated](d, func(
+			d.On[contract.UserDeactivated](func(
 				_ context.Context, w db.Writer, _ projection.Envelope, e *contract.UserDeactivated,
 			) error {
 				w.Exec(identitydb.SetUserState, e.SubjectID, domain.StateDeactivated.String())
@@ -81,7 +81,7 @@ func NewUser(codec eventsourcing.Codec) *User {
 			})
 		}},
 		{func(d *projection.Dispatch) {
-			projection.On[contract.UserReactivated](d, func(
+			d.On[contract.UserReactivated](func(
 				_ context.Context, w db.Writer, _ projection.Envelope, e *contract.UserReactivated,
 			) error {
 				w.Exec(identitydb.SetUserState, e.SubjectID, domain.StateActive.String())
@@ -89,7 +89,7 @@ func NewUser(codec eventsourcing.Codec) *User {
 			})
 		}},
 		{func(d *projection.Dispatch) {
-			projection.On[contract.UserSuspended](d, func(
+			d.On[contract.UserSuspended](func(
 				_ context.Context, w db.Writer, _ projection.Envelope, e *contract.UserSuspended,
 			) error {
 				w.Exec(identitydb.SetUserState, e.SubjectID, domain.StateSuspended.String())

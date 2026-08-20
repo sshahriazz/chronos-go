@@ -34,7 +34,7 @@ func registerEvents(codec *eventcodec.JSON) {
 // the type parameter), the wording, the class that decides whether it is
 // delivered at all, and the audience that decides who receives it.
 //
-//	notify.On[identity.PasswordChanged](cat, notify.Spec{
+//	cat.On[identity.PasswordChanged](notify.Spec{
 //	    Template: "identity.password_changed",
 //	    Class:    notify.Security,          // always sent, no unsubscribe
 //	    Audience: notify.AudienceSubject,   // the person whose password it was
@@ -44,7 +44,7 @@ func registerEvents(codec *eventcodec.JSON) {
 //
 // An event that should tell nobody is declared too, with a reason:
 //
-//	notify.Silent[identity.TelemetryRecorded](cat, "internal counter")
+//	cat.Silent[identity.TelemetryRecorded]("internal counter")
 func notifications() *notify.Catalogue {
 	cat := notify.NewCatalogue()
 
@@ -52,16 +52,11 @@ func notifications() *notify.Catalogue {
 	// records of delivery — that a feed item was created, that a push was sent
 	// — and notifying about them would be a loop: a notification about a
 	// notification, which itself notifies (notification.md §10).
-	notify.Silent[contract.NotificationCreated](cat,
-		"operational record of in-app delivery; notifying about it would recurse")
-	notify.Silent[contract.NotificationRead](cat,
-		"the recipient read it; telling them so is circular")
-	notify.Silent[contract.PushSubscribed](cat,
-		"the person just granted permission in the browser; they know")
-	notify.Silent[contract.PushSubscriptionExpired](cat,
-		"a dead endpoint is an operational fact, surfaced in-app if it matters")
-	notify.Silent[contract.PushSent](cat,
-		"operational record of push delivery")
+	cat.Silent[contract.NotificationCreated]("operational record of in-app delivery; notifying about it would recurse")
+	cat.Silent[contract.NotificationRead]("the recipient read it; telling them so is circular")
+	cat.Silent[contract.PushSubscribed]("the person just granted permission in the browser; they know")
+	cat.Silent[contract.PushSubscriptionExpired]("a dead endpoint is an operational fact, surfaced in-app if it matters")
+	cat.Silent[contract.PushSent]("operational record of push delivery")
 
 	return cat
 }

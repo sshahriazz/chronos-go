@@ -41,6 +41,19 @@ type dependencies struct {
 	closes  []func()
 	metrics *obs.Metrics
 
+	// profiling is the /debug/pprof listener (Go 1.27's goroutineleak profile
+	// among them). Never nil: disabled is a working object whose Addr is "".
+	//
+	// It is built HERE rather than in main for the reason every other field on
+	// this struct is: a composition-root test can then assert it, and this
+	// particular seam has the worst possible failure signature. A profiler that
+	// was never started is invisible — no error, no log line, and the only
+	// symptom is a `go tool pprof` that cannot connect on the day somebody is
+	// trying to explain a memory leak. A profiler started with the TOKEN
+	// dropped from the mapping is worse than invisible: it works, and it serves
+	// heap dumps to anyone who reaches the port.
+	profiling *obs.Profiler
+
 	// authz is the ONLY authorization surface handlers get. It is never nil: if
 	// OpenFGA is unreachable it is a Guard over DenyAll, so an outage denies
 	// rather than panicking or — far worse — being skipped.
@@ -390,6 +403,34 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 				openbao.NewKeyRing(bc, cfg.OpenBao.KEKName)))
 		}
 	}
+
+	// ---- profiling: a SEPARATE listener, off unless asked for --------------
+	//
+	// Never the API port. See obs.StartProfiling for why an "authenticated"
+	// pprof route on the tenant mux would in fact be an unauthenticated one.
+	//
+	// A bind failure is logged and survived, exactly like every other
+	// unreachable dependency (ADR-010): an optional debug surface that cannot
+	// take its port must not turn into a crash loop on the server that serves
+	// customers.
+	profiler, err := obs.StartProfiling(context.Background(), obs.ProfilingConfig{
+		Enabled: cfg.Profiling.Enabled,
+		Addr:    cfg.Profiling.Addr,
+		Token:   cfg.Profiling.Token.Expose(),
+	}, log)
+	if err != nil {
+		log.Error("profiling listener not started; /debug/pprof is unreachable and no "+
+			"heap, CPU or goroutine-leak profile can be collected from this process",
+			"addr", cfg.Profiling.Addr, "error", err)
+	}
+	d.profiling = profiler
+	d.closes = append(d.closes, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := profiler.Shutdown(ctx); err != nil {
+			log.Warn("profiling listener did not drain", "error", err)
+		}
+	})
 
 	// Identity LAST: it needs the pool, the store, the vault and the counter, and
 	// a thing constructed before what it depends on is how a composition root

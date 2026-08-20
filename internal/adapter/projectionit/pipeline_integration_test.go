@@ -51,7 +51,7 @@ type probeView struct {
 
 func newProbeView(name string, category eventsourcing.Category, codec eventsourcing.Codec) *probeView {
 	d := projection.NewDispatch(codec)
-	projection.On[ThingRecorded](d, func(
+	d.On[ThingRecorded](func(
 		ctx context.Context, w db.Writer, env projection.Envelope, e *ThingRecorded,
 	) error {
 		// Upsert, not insert. A projector is replayed on restart and on

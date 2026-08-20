@@ -50,7 +50,7 @@ category, so a service, RPC, message or field without a doc comment **fails the
 build**. `buf breaking` runs in `make check`. The OpenAPI spec and the error
 catalogue are generated from the same sources the server uses, and a test fails
 if an `errs.Reason` is declared without a catalogue entry.
-| Go | 1.26.x (installed: 1.26.5) | |
+| Go | 1.27.x (installed: 1.27.0) | |
 | Key custody | OpenBao transit (ADR-028) | cloud KMS, app-held KEK |
 | Event evolution | upcast on read (ADR-029) | rewriting stored events |
 | Subscriptions | projector=catch-up, reactor=persistent | rebuilding a reactor |
@@ -96,6 +96,14 @@ if an `errs.Reason` is declared without a catalogue entry.
   one. `make migrate-check` enforces it (ADR-011).
 - **All times UTC.** `APP_TIMEZONE` affects presentation and operator
   convenience only — never storage.
+- **The build is pure Go.** Every generator and every gate is a program under
+  `internal/tools/`, run with `go run`. No Python, no `jq`, no scripting runtime
+  of any kind — a build step that needs an interpreter the CI image happens to
+  ship is a build step that silently changes behaviour when the image does. The
+  OpenAPI gate spent its entire life exiting 0 because PyYAML was absent
+  everywhere it ran, which is exactly the failure this rule prevents.
+  `docs/evidence/*.py` are one-off records of past experiments; nothing in the
+  build runs them.
 
 ## Commands
 
@@ -118,10 +126,21 @@ make valkey-cli  # Valkey shell
 make config      # render the fully-resolved compose file
 make check-centrifugo  # validate infra/centrifugo/config.json before restarting
 
-make dashboards        # regenerate Grafana dashboards from scripts/gen_dashboards.py
+make dashboards        # regenerate Grafana dashboards from internal/tools/gendashboards
 make dashboards-check  # run every dashboard query against live Prometheus
 make targets           # Prometheus scrape target health
 make traces            # services currently reporting traces to Tempo
+```
+
+Every one of those is a Go program under `internal/tools/`, and each can be run
+directly when a flag is wanted:
+
+```bash
+go run ./internal/tools/gendocs                 # docs/api/errors.md + the OpenAPI error fragment
+go run ./internal/tools/gendashboards           # -out <dir>
+go run ./internal/tools/checkopenapi            # -spec <file> -proto <dir>
+go run ./internal/tools/checkdashboards         # -dashboards <dir> -prometheus <url>
+go run ./internal/tools/obsprobe targets|traces|status
 ```
 
 Temporal's CLI is behind a compose profile, so it does not run by default:
@@ -208,7 +227,7 @@ PostgreSQL hosts four isolated databases on one server: `chronos` (read model),
   scrubbing belong in `infra/otel-collector/config.yaml`, not in service code.
   Emitting traces is enough to get latency dashboards — Tempo's
   metrics-generator turns spans into `traces_spanmetrics_*` automatically.
-- **Dashboards are code.** Edit `scripts/gen_dashboards.py` and run
+- **Dashboards are code.** Edit `internal/tools/gendashboards` and run
   `make dashboards`; Grafana has `allowUiUpdates: false`, so UI edits are
   overwritten. Always run `make dashboards-check` after — a panel with a wrong
   metric name renders as "0", which reads as healthy when it isn't.

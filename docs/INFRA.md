@@ -690,6 +690,9 @@ Deliberately **not** published:
 - **OpenFGA playground** (`:3000`) — it cannot run alongside authentication
   (§2, correction 4), so the port mapping was removed rather than left dangling.
   Port 3000 is therefore free for a frontend dev server; Grafana sits on 3001.
+- **`cmd/api` pprof** (`:6060`, `PPROF_ADDR`) — off by default and, when on,
+  bound to loopback. Publishing it would put live heap contents and every
+  goroutine's stack on the network; access is a port-forward (§12.4).
 
 ---
 
@@ -790,7 +793,7 @@ is the Grafana home page.
 | **Realtime & Cache** | Connections/subscriptions, **dropped PUB/SUB messages**, Valkey evictions and TTL coverage. |
 | **Storage & Data** | Per-database connections and cache hit ratio, S3 object counts, filer latency, SMTP accept/reject. |
 
-Dashboards are **code**: `scripts/gen_dashboards.py` is the source of truth and
+Dashboards are **code**: `internal/tools/gendashboards` is the source of truth and
 `allowUiUpdates` is off, so UI edits are overwritten on the next reload.
 
 ```bash
@@ -798,12 +801,128 @@ make dashboards        # regenerate JSON from the generator
 make dashboards-check  # run all 103 queries against live Prometheus
 ```
 
+The generator is deterministic: the seven files under `infra/grafana/dashboards/`
+are both committed and generated, and a test in `internal/tools/gendashboards`
+fails if a fresh generation differs from the committed copy by a single byte.
+That is stricter than it sounds, and it is what makes a regeneration reviewable —
+a generator free to reorder object keys would rewrite four thousand lines every
+run, and the one changed metric name would be invisible in the diff.
+
 `make dashboards-check` exists because a panel that renders nothing looks like
 "zero" when it actually means "wrong metric name". Every expression in every
 dashboard was validated against a running stack — **103/103 return data**. Metric
 names were read out of the live registry, not guessed from documentation.
 
-### 12.4 What is not here
+### 12.4 Profiling — `/debug/pprof` on its own listener
+
+The fourth signal. Prometheus answers "how much", Tempo answers "where did the
+time go", the logs answer "what happened", and none of them answers "which
+allocation is growing" or "which goroutine is stuck". Until Go 1.27 there was no
+profiling endpoint in this repository at all — `grep -r net/http/pprof` returned
+nothing — so neither did CPU, heap, nor the new leak profile.
+
+**Go 1.27 promoted `goroutineleak` to general availability.** It reports
+goroutines blocked on a concurrency primitive that no live goroutine can ever
+reach again: a worker whose owner returned without closing its channel, a
+subscription loop whose consumer went away. In Go 1.26 it sat behind
+`GOEXPERIMENT=goroutineleakprofile`; that experiment is deleted, and
+`GOEXPERIMENT=goroutineleakprofile go env` now fails with "unknown GOEXPERIMENT",
+which is the cheapest way to tell the two toolchains apart.
+
+It is **reachability**-based, so it has a blind spot that must be stated rather
+than discovered: a goroutine parked on a channel held by a package-level
+variable, or on one living in a runnable goroutine's locals, is reported as
+healthy forever. Both are verified in `internal/platform/obs/leak_test.go`
+rather than quoted from a release note. A clean profile means "nothing is
+provably stranded", never "nothing is stuck" — the goroutine count in Prometheus
+is still the detector for the rest.
+
+#### Exposure
+
+| Decision | Value | Why |
+| --- | --- | --- |
+| Default | **off** (`PPROF_ENABLED=false`) | `/debug/pprof/heap` returns live heap contents and `/debug/pprof/goroutine?debug=2` returns every goroutine's stack with its arguments — session tokens, email addresses and unwrapped data keys among them (ADR-002). |
+| Listener | **its own**, `PPROF_ADDR=127.0.0.1:6060` | Never the API port. The ADR-021 gates are Connect interceptors; `/debug/pprof` is not a Connect handler, so an "authenticated" pprof route on the API mux would in fact be unauthenticated, and nothing in the pipeline would report it. |
+| Published port | **no** | Not in `docker-compose.yml`, no ingress rule. Access is a port-forward, so the app toggle and the network are two independent locks. |
+| Credential | `PPROF_TOKEN`, constant-time compared | Mandatory for any non-loopback bind in **every** environment, and mandatory outside local even on loopback — a container's loopback is shared by every process in the pod, and `kubectl exec` into any container in it lands inside. Floor of 32 characters; there is no lockout on a debug listener. |
+| `?seconds=` | capped at 300 | The stdlib imposes no ceiling. Each in-flight profile pins a goroutine, a buffer and — for CPU — a process-global no second request can take. |
+
+`cmd/api` **refuses to boot** on a non-loopback bind with no token, on
+`PPROF_ENABLED=true` outside local with no token, and on a token below the
+floor. None of those combinations has a runtime symptom: all three work, and the
+only report is somebody else's heap dump.
+
+Two stdlib paths are deliberately not served: `/debug/pprof/cmdline` (argv is a
+routine place for a credential passed as a flag) and `/debug/pprof/symbol` (Go's
+profiles arrive symbolised).
+
+`internal/platform/obs` does **not** import `net/http/pprof`, and that is load
+bearing rather than stylistic. That package has an `init()` calling
+`http.HandleFunc` for all five of its paths, so importing it at all — blank or
+named — publishes the profiler on `http.DefaultServeMux`, a process-global that
+every `http.Server` with a nil `Handler` serves. `obs` is linked into `cmd/api`,
+`cmd/worker` and `cmd/projector`, so one import would have armed a pprof surface
+in three binaries. The handlers are built over `runtime/pprof` and
+`runtime/trace` directly instead, and `go tool pprof http://…/debug/pprof/heap`
+and `…/goroutineleak` were both run against the result.
+
+```bash
+# local, with PPROF_ENABLED=true
+go tool pprof -top http://localhost:6060/debug/pprof/heap
+go tool pprof -top http://localhost:6060/debug/pprof/goroutineleak
+curl -s 'http://localhost:6060/debug/pprof/goroutineleak?debug=1' | head -1
+#   goroutineleak profile: total 0
+
+# in a cluster
+kubectl port-forward deploy/chronos-api 6060:6060
+curl -H "Authorization: Bearer $PPROF_TOKEN" \
+  http://localhost:6060/debug/pprof/goroutineleak?debug=1
+```
+
+`make leaks` is the test-time half of the same facility: it runs the packages
+that carry a leak-checking `TestMain` and fails when the profile is non-empty.
+It replaces a target that ran `-gcflags=all=-d=checkptr` under the name
+"goroutine-leak detection" — unsafe.Pointer arithmetic checking, which has never
+detected a goroutine leak and could not. That check kept its value and lost its
+misleading name: it is now `make checkptr`.
+
+### 12.5 Request head limits
+
+`internal/server/connect.DefaultConfig` bounds the request head:
+`MaxHeaderBytes` 32 KiB, `MaxHeaderValueCount` 128 (Go 1.27's new field, default
+500), `ReadHeaderTimeout` 5s. All three were unset, which meant Go's defaults of
+1 MiB, 500 and "fall back to `ReadTimeout`" — the last of which let a slowloris
+connection hold a socket for thirty seconds.
+
+The numbers are measured rather than chosen. `TestTheHeaderLimitsAreDerivedFromWhatTheProtocolsActuallySend`
+drives a real Connect service over all five transports this one port carries and
+binary-searches the smallest limit each still works at:
+
+| Header set | values | bytes (HTTP/2) |
+| --- | --- | --- |
+| bare protocol floor | 10 | 282 |
+| \+ everything this codebase reads | 22 | 1 570 |
+| \+ Chrome, split cookies, a CDN and a mesh | 61 | 4 774 |
+
+The middle row is `Authorization`, `Idempotency-Key`, `traceparent`, a
+maximum-length W3C `tracestate` and eight separate `X-Forwarded-For` field lines
+— one per hop `config.MaxTrustedProxyHops` permits, each counted separately
+because `clientip.Scope` reads `Header.Values`. The bottom row is the one to
+design against, because it is the only one that describes a request we must not
+refuse. 128 is 2.1× it; 32 KiB is 6.9× it and is also exactly nginx's default
+header budget (`large_client_header_buffers 4 8k`), so a request that survived
+the reverse proxy in front of us is not then refused by us.
+
+Two accounting quirks were measured, not assumed. HTTP/1 grants a further 4 KiB
+of slack above `MaxHeaderBytes` before enforcing it, so its effective ceiling is
+36 KiB while HTTP/2 enforces 32 KiB exactly. HTTP/2's value count includes the
+four pseudo-headers, which never appear in `http.Request.Header` — which is why
+the limits were found by search rather than by counting.
+
+`ReadHeaderTimeout` is HTTP/1.1 only; Go's h2 server does not consult it, and
+there `MaxHeaderBytes` is enforced as `MAX_HEADER_LIST_SIZE` instead.
+
+### 12.6 What is not here
 
 - **No log aggregation (Loki/Elasticsearch).** Container logs are still
   `docker compose logs`, capped at 10MB × 3 files per service. This is the

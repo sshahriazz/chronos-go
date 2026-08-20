@@ -34,15 +34,14 @@ func NewDispatch(codec eventsourcing.Codec) *Dispatch {
 // T is the event struct; PT — inferred — is the pointer type that carries the
 // method set and that deserialization needs:
 //
-//	projection.On[identity.UserRegistered](d, func(
+//	d.On[identity.UserRegistered](func(
 //	    ctx context.Context, w db.Writer, env projection.Envelope, e *identity.UserRegistered,
 //	) error { ... })
 //
 // It panics on a duplicate registration. That is a wiring bug, it is
 // deterministic, and it happens at startup — the alternative is a projection
 // that silently drops half its events.
-func On[T any, PT eventsourcing.EventPtr[T]](
-	d *Dispatch,
+func (d *Dispatch) On[T any, PT eventsourcing.EventPtr[T]](
 	fn func(context.Context, db.Writer, Envelope, PT) error,
 ) {
 	eventType := eventsourcing.TypeOf[T, PT]()

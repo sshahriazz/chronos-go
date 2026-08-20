@@ -37,7 +37,6 @@ func TestConcurrentRegistrationsForOneAddress(t *testing.T) {
 	const racers = 8
 	ctx := context.Background()
 	email := h.freshEmail("race")
-	const password = "correct-horse-battery-staple-50"
 
 	// A distinct idempotency key per goroutine, deliberately. A shared key would
 	// let gate 5 collapse seven of the eight requests before any of them reached
@@ -185,7 +184,6 @@ func TestConcurrentRegistrationsForOneAddress(t *testing.T) {
 func TestASecondRegistrationIsIndistinguishable(t *testing.T) {
 	ctx := context.Background()
 	email := h.freshEmail("dup")
-	const password = "correct-horse-battery-staple-55"
 
 	if _, err := h.client.Register(ctx, write(&identityv1.RegisterRequest{
 		Email: email,
@@ -232,7 +230,7 @@ func TestASecondRegistrationIsIndistinguishable(t *testing.T) {
 func TestRebuildPreservesCredentials(t *testing.T) {
 	ctx := context.Background()
 	email := h.freshEmail("rebuild")
-	const password = "correct-horse-battery-staple-51"
+	const password = "correct-horse-battery-staple-58"
 
 	if _, err := h.client.Register(ctx, write(&identityv1.RegisterRequest{
 		Email: email,

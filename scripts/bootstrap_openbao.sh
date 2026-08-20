@@ -52,6 +52,28 @@ case "$code" in
   *)       echo -e "  ${R}FAIL${X}  creating KEK: HTTP $code"; exit 1 ;;
 esac
 
-verdict=$(curl -s -H "X-Vault-Token: $TOKEN" "$ADDR/v1/transit/keys/$KEK" \
-  | python3 -c "import json,sys; d=json.load(sys.stdin)['data']; print(d['type'], d['exportable'])" 2>/dev/null)
-echo -e "  ${G}OK${X}    verified: $verdict (type, exportable)"
+# Read the key back and ASSERT the two properties erasure depends on, rather
+# than printing whatever the server said.
+#
+# This used to pipe the response through a scripting-runtime one-liner and echo
+# the result beside a hardcoded "OK". Where that runtime was absent the pipeline
+# produced an empty string and the line still said OK — so the one check standing
+# between "erasure destroys the key" and "erasure destroys a copy of the key"
+# reported success without ever looking. It now fails.
+#
+# Matched as whole literals rather than extracted: `"mount_type":"transit"` also
+# ends in `type`, so pulling a value out with sed would read the wrong field,
+# while asking whether the exact expected pair is present cannot.
+detail=$(curl -s -H "X-Vault-Token: $TOKEN" "$ADDR/v1/transit/keys/$KEK")
+if [ -z "$detail" ]; then
+  echo -e "  ${R}FAIL${X}  could not read '$KEK' back from $ADDR"; exit 1
+fi
+case "$detail" in
+  *'"exportable":false'*) ;;
+  *) echo -e "  ${R}FAIL${X}  '$KEK' is EXPORTABLE — a key that can be copied means destroying the original erases nothing (ADR-002)"; exit 1 ;;
+esac
+case "$detail" in
+  *'"type":"aes256-gcm96"'*) ;;
+  *) echo -e "  ${R}FAIL${X}  '$KEK' is not aes256-gcm96"; exit 1 ;;
+esac
+echo -e "  ${G}OK${X}    verified: aes256-gcm96, exportable=false"

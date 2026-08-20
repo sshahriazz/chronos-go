@@ -23,8 +23,8 @@ func Error(err error) error {
 	if err == nil {
 		return nil
 	}
-	var e *errs.Error
-	if !errors.As(err, &e) {
+	e, ok := errors.AsType[*errs.Error](err)
+	if !ok {
 		// An error that never passed through errs has not been through the
 		// disclosure ladder, so nothing is known about what it is safe to say.
 		// Internal, with no message — and the cause pinned to it, because this

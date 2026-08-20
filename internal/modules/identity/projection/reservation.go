@@ -41,7 +41,7 @@ var _ projection.Projection = (*Reservation)(nil)
 func NewReservation(codec eventsourcing.Codec) *Reservation {
 	d := projection.NewDispatch(codec)
 
-	projection.On[contract.EmailReserved](d, func(
+	d.On[contract.EmailReserved](func(
 		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.EmailReserved,
 	) error {
 		w.Exec(identitydb.UpsertEmailReservation,
@@ -49,14 +49,14 @@ func NewReservation(codec eventsourcing.Codec) *Reservation {
 		return nil
 	})
 
-	projection.On[contract.EmailReservationConfirmed](d, func(
+	d.On[contract.EmailReservationConfirmed](func(
 		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.EmailReservationConfirmed,
 	) error {
 		w.Exec(identitydb.ConfirmEmailReservation, string(e.Index), e.SubjectID)
 		return nil
 	})
 
-	projection.On[contract.EmailReleased](d, func(
+	d.On[contract.EmailReleased](func(
 		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.EmailReleased,
 	) error {
 		// The reason is deliberately not projected. Three causes reach here — a

@@ -69,6 +69,7 @@ type Config struct {
 	Reactor   ReactorConfig
 	Temporal  TemporalConfig
 	Tracing   TracingConfig
+	Profiling ProfilingConfig
 	API       APIConfig
 	Identity  IdentityConfig
 
@@ -482,6 +483,80 @@ type TracingConfig struct {
 	Enabled bool `env:"OTEL_ENABLED" envDefault:"false"`
 }
 
+// ProfilingConfig is the Go runtime profiler served over HTTP (net/http/pprof).
+//
+// It is the fourth observability signal. Prometheus answers "how much", Tempo
+// answers "where did the time go", the logs answer "what happened" — and none of
+// them answers "which allocation is growing" or "which goroutine is stuck".
+// Go 1.27 adds a fifth profile that matters here specifically: `goroutineleak`
+// reports goroutines blocked on concurrency primitives nothing can reach again,
+// which is the failure mode a projector, a reactor or a subscription loop
+// actually dies of.
+//
+// # Everything in this struct is a security control
+//
+// A pprof surface is not a metrics endpoint with more detail. `heap` returns
+// live heap contents. `goroutine?debug=2` returns every goroutine's stack WITH
+// ARGUMENTS — which is where a bearer token, an email address and a decrypted
+// data key are, in a system whose whole compliance story is that those three
+// never leave the vault (ADR-002). `cmdline` returns argv. `symbol` and the
+// binary's own function names disclose the source tree layout.
+//
+// So the exposure decision is made here rather than left to whoever writes the
+// deployment manifest, and it is made in three independent layers:
+//
+//  1. OFF by default. A deployment that says nothing gets no profiler, and the
+//     listener is never created. This is the only default that is safe without
+//     knowing the network topology.
+//  2. A SEPARATE listener, never the tenant API port. Anything mounted on the
+//     API mux is reachable by every client that can reach the API, and no
+//     interceptor protects it — the Connect gates run inside a Connect handler,
+//     and /debug/pprof is not one. A second listener also means the port can be
+//     left unpublished, so the app-level toggle and the network are two locks
+//     rather than one.
+//  3. A BEARER TOKEN, mandatory whenever the bind address is not loopback and
+//     mandatory outside local regardless of address. A container's loopback is
+//     shared by every process in the pod, so "127.0.0.1" is a weaker boundary in
+//     production than it looks on a laptop.
+//
+// validate() refuses combinations that are unsafe rather than trusting an
+// operator to notice, because none of them has a runtime symptom: a profiler
+// bound to 0.0.0.0 with no token works perfectly, and the only report you get is
+// somebody else's heap dump.
+type ProfilingConfig struct {
+	// Enabled creates the listener. Off means net.Listen is never called and
+	// /debug/pprof exists nowhere in this process.
+	//
+	// Off is also the state `make check` runs in, which is deliberate: the test
+	// that proves the endpoints ANSWER and the test that proves they are ABSENT
+	// are both wiring assertions, and only one of them can be true at a time.
+	Enabled bool `env:"PPROF_ENABLED" envDefault:"false"`
+
+	// Addr is the debug listener's own host:port. It must never be the API's.
+	//
+	// The default binds loopback, so on a developer machine the profiler is
+	// reachable by `go tool pprof http://localhost:6060/...` and by nothing on
+	// the network. In a cluster the intended access path is the same one used for
+	// any other debug surface — a port-forward into the pod — which needs no
+	// published port and no ingress rule.
+	Addr string `env:"PPROF_ADDR" envDefault:"127.0.0.1:6060"`
+
+	// Token is the bearer credential every /debug/pprof request must present.
+	//
+	// Empty is permitted ONLY for a loopback bind inside local. Compared in
+	// constant time, so the check cannot be turned into an oracle by timing it.
+	Token Secret `env:"PPROF_TOKEN"`
+}
+
+// MinProfilingTokenLength is the floor for PPROF_TOKEN.
+//
+// Thirty-two characters is 128 bits at four bits per hex character, which is the
+// same floor the rest of this system uses for key material. A short token here
+// is not a weak password on a low-value account: it is one guess away from a
+// heap dump of a process that holds session tokens and decrypted addresses, and
+// there is no lockout on a debug listener.
+const MinProfilingTokenLength = 32
+
 // TemporalConfig points at the durable-work service (ADR-017).
 //
 // Work that spans several effects, needs timers, or must survive the process
@@ -728,6 +803,43 @@ func (c *Config) validate() error {
 
 	if c.Tracing.Enabled && strings.TrimSpace(c.Tracing.Endpoint) == "" {
 		add("OTEL_EXPORTER_OTLP_ENDPOINT is required when OTEL_ENABLED is true")
+	}
+
+	// The pprof surface. Every rule below refuses a combination that WORKS —
+	// which is the point: a profiler bound to a routable address with no token
+	// serves heap dumps and goroutine stacks to anyone who can reach the port,
+	// and it does so with no error, no log line and no metric. The only moment
+	// this is detectable is at startup, so this is where it is detected.
+	if c.Profiling.Enabled {
+		host, port, err := net.SplitHostPort(c.Profiling.Addr)
+		switch {
+		case err != nil:
+			add("PPROF_ADDR %q is not a host:port: %v", c.Profiling.Addr, err)
+		case port == "":
+			add("PPROF_ADDR %q names no port", c.Profiling.Addr)
+		default:
+			// A wildcard or routable bind is a network-reachable heap dump. It is
+			// allowed — a port-forward is not always available — but only behind a
+			// credential, in every environment including local.
+			if !isLoopbackHost(host) && c.Profiling.Token.IsZero() {
+				add("PPROF_ADDR %q is not loopback and PPROF_TOKEN is empty: the profiler "+
+					"would serve live heap contents and every goroutine's stack — bearer "+
+					"tokens and email addresses among them — to anyone who can reach the "+
+					"port (ADR-002)", c.Profiling.Addr)
+			}
+		}
+		// Outside local, loopback is not a boundary. Every process in the pod
+		// shares it, and `kubectl exec` into any container in it lands inside.
+		if !c.Env.IsLocal() && c.Profiling.Token.IsZero() {
+			add("PPROF_TOKEN must be set when PPROF_ENABLED is true and APP_ENV=%s: a "+
+				"container's loopback is shared by every process in the pod, so binding "+
+				"it is not an access control", c.Env)
+		}
+		if n := len(c.Profiling.Token.Expose()); n > 0 && n < MinProfilingTokenLength {
+			add("PPROF_TOKEN is %d characters; the floor is %d. There is no lockout on a "+
+				"debug listener, and what it guards is a heap dump",
+				n, MinProfilingTokenLength)
+		}
 	}
 
 	// A task queue nobody agrees on is the failure mode Temporal makes hardest to
@@ -986,6 +1098,22 @@ func identityKeySet(
 // invisible to the re-sealing job's `pepper_version < n` work list: it is skipped
 // silently, the operator's done check reports zero rows outstanding, and the
 // account loses its credential when the old key is destroyed.
+// isLoopbackHost reports whether a bind host reaches only this machine.
+//
+// The empty host is the WILDCARD — ":6060" binds every interface — so it is
+// deliberately not loopback. Getting that backwards is the single mistake this
+// helper exists to prevent.
+func isLoopbackHost(host string) bool {
+	switch host {
+	case "":
+		return false
+	case "localhost":
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func validVersionNumber(name string, v int) error {
 	if v < 1 {
 		return fmt.Errorf("%s is %d; a key version must be at least 1, because 0 is "+

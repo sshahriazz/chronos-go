@@ -25,6 +25,3 @@ bin/
 # or run with `go run`; a 50 MB executable at the repo root is always an
 # accident, and it shows up in the gate as an untracked file.
 /api
-
-# Local Python venv, bootstrapped by `make api-validate` for the OpenAPI checker.
-.venv/

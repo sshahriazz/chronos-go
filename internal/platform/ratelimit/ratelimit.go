@@ -22,10 +22,11 @@
 package ratelimit
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 )
@@ -130,9 +131,8 @@ func New(counter Counter, prefix string, rules ...Rule) (*Limiter, error) {
 		}
 		seen[r.Name] = true
 	}
-	ordered := make([]Rule, len(rules))
-	copy(ordered, rules)
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Window < ordered[j].Window })
+	ordered := slices.Clone(rules)
+	slices.SortFunc(ordered, func(a, b Rule) int { return cmp.Compare(a.Window, b.Window) })
 
 	return &Limiter{counter: counter, rules: ordered, prefix: prefix}, nil
 }

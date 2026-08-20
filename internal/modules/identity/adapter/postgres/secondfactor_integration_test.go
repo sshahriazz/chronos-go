@@ -356,9 +356,7 @@ func TestConcurrentRedemptionsOfOneCodeProduceExactlyOneWinner(t *testing.T) {
 	)
 	start := make(chan struct{})
 	for range racers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			_, err := store.Consume(ctx, subject, digest)
 			mu.Lock()
@@ -370,7 +368,7 @@ func TestConcurrentRedemptionsOfOneCodeProduceExactlyOneWinner(t *testing.T) {
 			default:
 				other = err
 			}
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()

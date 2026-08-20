@@ -30,7 +30,7 @@ func reactWith(t *testing.T, opts ...notify.ReactorOption) (*spyTransport, error
 	t.Helper()
 
 	cat := notify.NewCatalogue()
-	notify.On[passwordChanged](cat, notify.Spec{
+	cat.On[passwordChanged](notify.Spec{
 		Template: "identity.password_changed",
 		Class:    notify.Security,
 		Audience: notify.AudienceSubject,

@@ -448,9 +448,9 @@ func TestPushEndpointIsPerOrganization(t *testing.T) {
 		return m
 	}
 
-	h.apply(t, p, ptr(subscribe(orgA, "psb_a_"+h.sfx)), metaFor(orgA))
+	h.apply(t, p, new(subscribe(orgA, "psb_a_"+h.sfx)), metaFor(orgA))
 	// Before the fix this call failed with an RLS USING violation.
-	h.apply(t, p, ptr(subscribe(orgB, "psb_b_"+h.sfx)), metaFor(orgB))
+	h.apply(t, p, new(subscribe(orgB, "psb_b_"+h.sfx)), metaFor(orgB))
 
 	// Both organizations must see their own live endpoint, and only their own.
 	for org, want := range map[string]string{orgA: "psb_a_" + h.sfx, orgB: "psb_b_" + h.sfx} {
@@ -481,7 +481,7 @@ func TestPushEndpointIsPerOrganization(t *testing.T) {
 	// Re-subscribing in one organization must still collapse onto the same row
 	// rather than accumulating one per permission prompt — the property the
 	// original global index was reaching for, now correctly scoped.
-	h.apply(t, p, ptr(subscribe(orgA, "psb_a2_"+h.sfx)), metaFor(orgA))
+	h.apply(t, p, new(subscribe(orgA, "psb_a2_"+h.sfx)), metaFor(orgA))
 	var count int
 	h.tenant(t, orgA, func(ctx context.Context, q db.Querier) error {
 		return q.QueryRow(ctx,
@@ -499,5 +499,3 @@ func TestPushEndpointIsPerOrganization(t *testing.T) {
 		})
 	})
 }
-
-func ptr[T any](v T) *T { return &v }

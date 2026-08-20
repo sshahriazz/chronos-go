@@ -1,12 +1,13 @@
 package seaweedfs
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
+	"slices"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -126,9 +127,8 @@ func (s *Store) CompleteResumable(
 	if len(parts) == 0 {
 		return blob.Object{}, fmt.Errorf("%w: no parts to complete", blob.ErrPolicyRefused)
 	}
-	sorted := make([]blob.UploadedPart, len(parts))
-	copy(sorted, parts)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].PartNumber < sorted[j].PartNumber })
+	sorted := slices.Clone(parts)
+	slices.SortFunc(sorted, func(a, b blob.UploadedPart) int { return cmp.Compare(a.PartNumber, b.PartNumber) })
 
 	completed := make([]s3types.CompletedPart, 0, len(sorted))
 	for i, p := range sorted {

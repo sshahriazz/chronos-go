@@ -35,7 +35,7 @@ var _ projection.Projection = (*Session)(nil)
 func NewSession(codec eventsourcing.Codec) *Session {
 	d := projection.NewDispatch(codec)
 
-	projection.On[contract.SessionCreated](d, func(
+	d.On[contract.SessionCreated](func(
 		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.SessionCreated,
 	) error {
 		// DO NOTHING on conflict, not DO UPDATE. A replay must not resurrect a
@@ -52,7 +52,7 @@ func NewSession(codec eventsourcing.Codec) *Session {
 		return nil
 	})
 
-	projection.On[contract.SessionElevated](d, func(
+	d.On[contract.SessionElevated](func(
 		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.SessionElevated,
 	) error {
 		aal, err := aalColumn(e.AAL)
@@ -64,14 +64,14 @@ func NewSession(codec eventsourcing.Codec) *Session {
 		return nil
 	})
 
-	projection.On[contract.SessionRevoked](d, func(
+	d.On[contract.SessionRevoked](func(
 		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.SessionRevoked,
 	) error {
 		w.Exec(identitydb.RevokeSession, e.SessionID)
 		return nil
 	})
 
-	projection.On[contract.SessionExpired](d, func(
+	d.On[contract.SessionExpired](func(
 		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.SessionExpired,
 	) error {
 		// Expiry marks the row revoked too. The two are different FACTS — one is
@@ -82,7 +82,7 @@ func NewSession(codec eventsourcing.Codec) *Session {
 		return nil
 	})
 
-	projection.On[contract.AuthenticationSucceeded](d, func(
+	d.On[contract.AuthenticationSucceeded](func(
 		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.AuthenticationSucceeded,
 	) error {
 		methods := make([]string, len(e.Methods))
@@ -99,7 +99,7 @@ func NewSession(codec eventsourcing.Codec) *Session {
 		return nil
 	})
 
-	projection.On[contract.AuthenticationFailed](d, func(
+	d.On[contract.AuthenticationFailed](func(
 		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.AuthenticationFailed,
 	) error {
 		// SubjectID is empty when the identifier matched no account, and is

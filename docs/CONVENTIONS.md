@@ -535,12 +535,78 @@ suite must therefore be parallel-safe by construction.
 adapter run the *same* suite; without that, fakes drift and green tests stop
 meaning anything.
 
-`testing/synctest` (Go 1.26) for concurrent logic — virtual time, deterministic,
-no sleeps. `goroutineleak` profiling in CI, given how many long-lived
-subscriptions this design implies.
+`testing/synctest` (Go 1.27) for concurrent logic — virtual time, deterministic,
+no sleeps. Prefer `synctest.Sleep`, added in 1.27, over `time.Sleep` followed by
+`synctest.Wait`: it is the same two steps with no window between them to forget.
+`httptest.NewTestServer` (also 1.27) gives a synctest-compatible in-memory server,
+so an HTTP test no longer has to leave the virtual clock to talk to a real port.
+
+`goroutineleak` profiling, given how many long-lived subscriptions this design
+implies. **It went generally available in Go 1.27** (`runtime/pprof`, and the
+`/debug/pprof/goroutineleak` endpoint); the `goroutineleakprofile` GOEXPERIMENT
+that gated it in 1.26 is deleted. Its documented limitation is worth knowing
+before trusting it: it may miss a leak reachable through a global variable, or
+through a runnable goroutine's locals.
 
 **TDD order**: failing domain test → domain → failing use-case test → use case →
 adapter → API.
+
+---
+
+## 9.1 The Go version, and what it changes
+
+**Go 1.27.x.** `go.mod` declares `go 1.27.0`, and that declaration is load-bearing
+rather than cosmetic — it is what makes `encoding/json/v2` usable at all.
+
+**`encoding/json/v2` is stdlib now.** It graduated from `GOEXPERIMENT=jsonv2` in
+1.27 and is gated on the module's language version instead. `internal/platform/codec`
+needs no build flag; a comment or document still telling someone to set
+`GOEXPERIMENT` is stale, and the opt-out went the other way (`GOEXPERIMENT=nojsonv2`,
+expected to be removed). ADR-047 is unchanged in substance: all JSON goes through
+the one kernel package.
+
+**Run the modernizers.** `go fix ./...` applies every registered analyzer by
+default — `waitgroupgo` (`wg.Add(1)`/`go`/`wg.Done()` → `wg.Go`), `newexpr`
+(`new(expr)`, so a local `ptr[T]` helper is now dead weight), `slicesbackward`,
+`atomictypes`, `unsafefuncs`, `stringscut`, `rangeint` and the rest. It does NOT
+see files behind a build tag, so integration-tagged code needs
+`go fix -tags=integration` explicitly — the same blind spot that let
+integration tests break invisibly before `make check` gained `vet-integration`.
+
+**One exception, and the reason for it: `-embedlit=false`.** Go 1.27 allows a
+struct literal key to be any field selector, and the `embedlit` modernizer
+rewrites nested literals into that form. `staticcheck` (honnef.co/go/tools
+v0.7.0, vendored inside golangci-lint) cannot parse it and does not degrade
+gracefully — it panics:
+
+```
+buildir: package "reactor_test": unexpected expr: *ast.KeyValueExpr
+```
+
+which takes the whole lint run down. Keep `embedlit` disabled until staticcheck
+supports the syntax. This is a tooling lag, not a style judgement; the rewrite
+itself is correct.
+
+**Build the linter from source, never from a release binary.** golangci-lint's
+published binaries are compiled with whatever Go that release used, and a linter
+built with an older Go cannot typecheck a module declaring a newer one — again by
+panicking, not by reporting:
+
+```
+panic: file requires newer Go version go1.27 (application built with go1.26)
+```
+
+`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.0`
+compiles it with this module's toolchain. CI does the same.
+
+**v2.13.0 is a floor, not a preference.** v2.12.2 cannot typecheck a **generic
+method** (Go 1.27): a package calling one on a type from another package — loaded
+from export data — reports `d.On undefined (type *projection.Dispatch has no
+field or method On)` while `go build` accepts it, and gosec's SSA pass panics on
+the type parameter outright. Anything below v2.13.0 therefore rejects code the
+compiler accepts. A related landmine survives even on v2.13.0: taking a generic
+method VALUE (`f := d.On[T]`) still panics staticcheck's IR builder. Plain calls
+are fine; no code here takes one.
 
 ---
 

@@ -193,8 +193,7 @@ worker-replay: ## Return a reactor's parked events to the live queue: make worke
 
 .PHONY: status
 status-api: ## Call GetStatus over HTTP/JSON
-	@curl -s -X POST http://localhost:$${API_PORT:-8090}/chronos.system.v1.SystemService/GetStatus \
-		-H 'Content-Type: application/json' -d '{}' | python3 -m json.tool
+	@go run ./internal/tools/obsprobe status
 
 .PHONY: docs-serve
 docs-serve: ## Run the API documentation server (foreground)
@@ -287,7 +286,51 @@ bench-integration: ## Benchmarks that need the live stack (make up first)
 	go test -tags=integration ./... -run=XXX -bench=. -benchmem -benchtime=2000x
 
 .PHONY: leaks
-leaks: ## Run tests with goroutine-leak detection (Go 1.26)
+leaks: ## Goroutine-leak detection: Go 1.27's `goroutineleak` profile
+	@# WHAT THIS USED TO RUN, AND WHY IT WAS A LIE
+	@#
+	@# Until Go 1.27 this target ran `-gcflags=all=-d=checkptr`. That is
+	@# unsafe.Pointer arithmetic checking. It has never detected a goroutine
+	@# leak, could not detect one in principle, and would have passed with every
+	@# goroutine in the process stranded — while its name told anyone reading the
+	@# Makefile that the codebase was checked for leaks. It now lives under
+	@# `make checkptr`, where its name matches what it does; that check has real
+	@# value, it is simply a different check.
+	@#
+	@# WHAT IT RUNS NOW
+	@#
+	@# Go 1.27 promoted the `goroutineleak` profile to general availability: it is
+	@# in runtime/pprof, and the GOEXPERIMENT that gated it in 1.26 is deleted
+	@# (`GOEXPERIMENT=goroutineleakprofile go env` now fails with "unknown
+	@# GOEXPERIMENT", which is how to tell the two toolchains apart). It reports
+	@# goroutines blocked on a concurrency primitive no live goroutine can reach
+	@# again. internal/platform/obs.GoroutineLeaks collects it, and a TestMain in
+	@# each package below fails the package when the count is non-zero.
+	@#
+	@# TWO LIMITS, STATED RATHER THAN HIDDEN
+	@#
+	@# 1. The profile is REACHABILITY-based, so it misses a goroutine parked on a
+	@#    channel held by a package-level variable, or on one living in a runnable
+	@#    goroutine's locals. Both are verified in obs/leak_test.go rather than
+	@#    quoted from a release note. A clean run means "nothing is provably
+	@#    stranded", never "nothing is stuck".
+	@# 2. There is no `go test` flag for it, and the profile is process-global
+	@#    while `go test ./...` gives every package its own process. So detection
+	@#    is per-package opt-in via TestMain, and THE PACKAGES LISTED BELOW ARE
+	@#    THE ONLY ONES CHECKED. Adding a package here without adding its TestMain
+	@#    checks nothing and says nothing — which is the failure mode this target
+	@#    is being repaired from, so do both or neither.
+	CHRONOS_LEAKCHECK=1 go test -race -count=1 \
+		./internal/server/connect/... \
+		./cmd/api/...
+
+.PHONY: checkptr
+checkptr: ## unsafe.Pointer arithmetic checking (what `leaks` ran under the wrong name)
+	@# Rebuilds every package with the checkptr instrumentation, so it is slow and
+	@# deliberately not part of `make check`. It catches pointer arithmetic that
+	@# produces an address outside the original allocation, and conversions
+	@# through unsafe.Pointer that violate the unsafe.Pointer rules — real
+	@# defects, none of them a goroutine leak.
 	go test ./... -race -count=1 -gcflags=all=-d=checkptr
 
 .PHONY: test-integration
@@ -353,42 +396,31 @@ vet-integration: ## Type-check the integration-tagged tests without running them
 
 .PHONY: api-validate
 api-validate: ## Validate the generated OpenAPI spec is complete and non-empty
-	@# Bootstraps a venv when PyYAML is missing rather than skipping the check.
-	@# The checker used to exit 0 without PyYAML, so this gate passed without ever
-	@# parsing the spec — on every developer machine AND in CI, which installs no
-	@# Python dependencies. It now fails instead, and this target makes that
-	@# failure fixable without a manual step: PEP 668 blocks `pip install` into
-	@# the system interpreter on macOS, so a local venv is the only path that
-	@# works out of the box.
-	@if python3 -c "import yaml" >/dev/null 2>&1; then \
-		python3 scripts/check_openapi.py; \
-	else \
-		if [ ! -x .venv/bin/python ]; then \
-			echo "  bootstrapping .venv for PyYAML (the OpenAPI check needs it)"; \
-			python3 -m venv .venv >/dev/null 2>&1 && .venv/bin/pip install --quiet pyyaml; \
-		fi; \
-		.venv/bin/python scripts/check_openapi.py; \
-	fi
+	@# A Go program: the YAML parser and the protobuf descriptors are compiled in,
+	@# so there is no runtime to bootstrap and nothing that can skip. Its Python
+	@# predecessor exited 0 whenever PyYAML was absent — which was everywhere it
+	@# ran, CI included — so this gate passed for its entire life without once
+	@# parsing the spec. That is how 20 operations shipped with no operationId.
+	@go run ./internal/tools/checkopenapi
 
 ## ---------------------------------------------------------------------------
 ## Telemetry
 ## ---------------------------------------------------------------------------
 
 .PHONY: dashboards
-dashboards: ## Regenerate Grafana dashboards from scripts/gen_dashboards.py
-	@python3 scripts/gen_dashboards.py
+dashboards: ## Regenerate Grafana dashboards from internal/tools/gendashboards
+	@go run ./internal/tools/gendashboards
 	@echo "  (Grafana reloads provisioned dashboards within 30s)"
 
 .PHONY: dashboards-check
 dashboards-check: ## Run every dashboard query against live Prometheus
-	@python3 scripts/check_dashboards.py
+	@# Built rather than `go run`: the tool exits with the NUMBER of dead
+	@# expressions, and `go run` collapses any non-zero child status to 1.
+	@go build -o bin/checkdashboards ./internal/tools/checkdashboards && ./bin/checkdashboards
 
 .PHONY: traces
 traces: ## Show services currently reporting traces to Tempo
-	@curl -s "http://localhost:$${TEMPO_PORT:-3200}/api/v2/search/tag/.service.name/values" \
-		| python3 -c "import sys,json; v=json.load(sys.stdin).get('tagValues',[]); \
-print('\n'.join('  '+x['value'] for x in v) if v else '  (no traces received yet)')" \
-		2>/dev/null || echo "  (Tempo unreachable on $${TEMPO_PORT:-3200})"
+	@go run ./internal/tools/obsprobe traces
 
 .PHONY: urls
 urls: ## Print every local endpoint
@@ -433,5 +465,4 @@ urls: ## Print every local endpoint
 
 .PHONY: targets
 targets: ## Show Prometheus scrape target health
-	@curl -s http://localhost:$${PROMETHEUS_PORT:-9090}/api/v1/targets \
-		| python3 -c "import sys,json;[print(f\"  {t['health']:8s} {t['labels']['job']:20s} {t['scrapeUrl']}\") for t in sorted(json.load(sys.stdin)['data']['activeTargets'], key=lambda x: x['labels']['job'])]"
+	@go run ./internal/tools/obsprobe targets

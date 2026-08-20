@@ -109,7 +109,6 @@ func TestResendCeilingStopsTheFourthRequest(t *testing.T) {
 	clearCallerCeiling(t)
 	ctx := context.Background()
 	email := h.freshEmail("resend-ceiling")
-	const password = "correct-horse-battery-staple-48"
 
 	if _, err := h.client.Register(ctx, write(&identityv1.RegisterRequest{
 		Email: email,
@@ -216,7 +215,6 @@ func TestResendIsIndistinguishableForAnUnknownAddress(t *testing.T) {
 	ctx := context.Background()
 	known := h.freshEmail("resend-known")
 	unknown := h.freshEmail("resend-nobody")
-	const password = "correct-horse-battery-staple-48"
 
 	if _, err := h.client.Register(ctx, write(&identityv1.RegisterRequest{
 		Email: known,

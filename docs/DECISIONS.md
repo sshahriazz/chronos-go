@@ -2658,7 +2658,7 @@ takeover is ever loosened.
 **Date:** 2026-08-10 · **Status:** Accepted
 
 Every encode and decode in this codebase goes through `internal/platform/codec`,
-which wraps `encoding/json/v2` (Go 1.26, `GOEXPERIMENT=jsonv2`, already on by
+which wraps `encoding/json/v2` (stdlib since Go 1.27 — no build flag; it was `GOEXPERIMENT=jsonv2` on 1.26, already on by
 default in this toolchain). No other package imports a JSON library.
 
 Three reasons, none of them speed. The strictness decision is **forced to be made
@@ -2794,7 +2794,7 @@ need.
 ### The accepted risk
 
 `encoding/json/v2` is EXPERIMENTAL and explicitly outside the Go 1 compatibility
-promise. It exists only under `GOEXPERIMENT=jsonv2`. `gopls` reports every v2
+promise. On Go 1.26 it existed only under `GOEXPERIMENT=jsonv2`; since 1.27 it is ordinary stdlib gated on go.mod's language version. `gopls` reports every v2
 symbol as "requires go1.27", although `go build`, `go vet` and `golangci-lint`
 all pass — so the editor is noisy in a way that is easy to mistake for a real
 error.

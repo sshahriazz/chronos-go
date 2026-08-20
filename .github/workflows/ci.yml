@@ -61,13 +61,18 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # The pinned binary, invoked through the same make target developers run.
-      # Going through the action instead would couple us to its own release
-      # cadence and to whether it understands golangci-lint v2 config yet.
+      # The pinned version, BUILT FROM SOURCE with this job's Go rather than
+      # downloaded as a prebuilt binary. The release binaries are compiled with
+      # whatever Go the golangci-lint release used, and a linter built with an
+      # older Go cannot typecheck a module that declares a newer one — it does
+      # not degrade, it panics:
+      #   panic: file requires newer Go version go1.27 (application built with go1.26)
+      # That happened here on the 1.26 -> 1.27 move. `go install` compiles it
+      # against go.mod's toolchain, so the linter can always read what it lints.
+      # Invoked through the same make target developers run.
       - name: Install golangci-lint
         run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
-            | sh -s -- -b "$(go env GOPATH)/bin" v2.12.2
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.0
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: golangci-lint, including the depguard import contract
@@ -83,6 +88,14 @@ jobs:
       - uses: bufbuild/buf-setup-action@v1
         with:
           version: 1.71.0
+      # The OpenAPI checker is a Go program in this repository. It reads the
+      # `(chronos.options.v1.public)` option off the COMPILED descriptors —
+      # the same ones the authentication interceptor enforces at runtime — so
+      # it needs the toolchain, not a scripting runtime.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
 
       # The COMMENTS category is on, so an undocumented service, RPC, message
       # or field fails the build (CONVENTIONS §7.1).
@@ -97,12 +110,12 @@ jobs:
           buf breaking --against '.git#ref=origin/main,subdir=.'
 
       - name: OpenAPI spec is complete
-        # PyYAML is installed explicitly because the checker now FAILS rather than
-        # skips without it. It used to exit 0, so this step passed on every run
-        # here without ever parsing the spec.
-        run: |
-          python3 -m pip install --quiet pyyaml
-          python3 scripts/check_openapi.py
+        # No runtime to install and nothing to skip: the YAML parser and the
+        # protobuf descriptors are compiled into the checker. Its predecessor
+        # was a script that exited 0 when its YAML library was missing, which
+        # is what this step did on every run here for its entire life — passing
+        # without ever parsing the spec.
+        run: go run ./internal/tools/checkopenapi
 
   migrations:
     name: migrations are append-only

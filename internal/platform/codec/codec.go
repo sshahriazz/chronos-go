@@ -1,6 +1,6 @@
 // Package codec is the only place this codebase encodes or decodes JSON.
 //
-// It wraps encoding/json/v2 (Go 1.26, GOEXPERIMENT=jsonv2) behind generic
+// It wraps encoding/json/v2 (stdlib since Go 1.27; no build flag) behind generic
 // primitives, for three reasons that are not about performance:
 //
 //  1. **The strictness decision is forced.** v2 can reject unknown members, and

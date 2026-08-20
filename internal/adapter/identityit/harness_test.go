@@ -487,7 +487,7 @@ func loadDotEnv(path string) (map[string]string, error) {
 		return nil, fmt.Errorf("reading %s: %w", path, err)
 	}
 	env := map[string]string{}
-	for _, line := range strings.Split(string(raw), "\n") {
+	for line := range strings.SplitSeq(string(raw), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue

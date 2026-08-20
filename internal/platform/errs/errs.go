@@ -77,8 +77,8 @@ func (e *Error) Unwrap() error { return e.internal }
 
 // Is compares by Reason so errors.Is(err, errs.NotFoundError()) works.
 func (e *Error) Is(target error) bool {
-	var t *Error
-	return errors.As(target, &t) && t.Reason == e.Reason
+	t, ok := errors.AsType[*Error](target)
+	return ok && t.Reason == e.Reason
 }
 
 // New builds an error. Prefer the named constructors below.
@@ -215,18 +215,16 @@ func hide(err *Error) *Error {
 
 // As extracts a *Error from any error, reporting whether one was present.
 //
-// The type assertion is a fast path: errors.As walks the chain reflectively,
+// The type assertion is a fast path: errors.AsType walks the chain reflectively,
 // and the common case is an error we constructed ourselves one frame earlier.
 func As(err error) (*Error, bool) {
-	// nolint:errorlint // Deliberate fast path, not a substitute for errors.As:
+	// nolint:errorlint // Deliberate fast path, not a substitute for errors.AsType:
 	// the reflective walk below still runs for wrapped errors. Worth 54ns -> 2.7ns
 	// on the hottest classification call in the system (ADR-038).
 	if e, ok := err.(*Error); ok { //nolint:errorlint
 		return e, true
 	}
-	var e *Error
-	ok := errors.As(err, &e)
-	return e, ok
+	return errors.AsType[*Error](err)
 }
 
 // ReasonOf returns the Reason of err, or INTERNAL if it is not a domain error.
@@ -352,8 +350,7 @@ func validationSummary(v []Violation) string {
 
 // Violations extracts field-level detail from err, if it carries any.
 func Violations(err error) ([]Violation, bool) {
-	var v *ValidationError
-	if errors.As(err, &v) && len(v.Violations) > 0 {
+	if v, ok := errors.AsType[*ValidationError](err); ok && len(v.Violations) > 0 {
 		return v.Violations, true
 	}
 	return nil, false

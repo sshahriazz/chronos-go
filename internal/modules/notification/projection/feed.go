@@ -39,7 +39,7 @@ var (
 func NewFeed(codec eventsourcing.Codec) *Feed {
 	d := projection.NewDispatch(codec)
 
-	projection.On[contract.NotificationCreated](d, func(
+	d.On[contract.NotificationCreated](func(
 		ctx context.Context, w db.Writer, env projection.Envelope, e *contract.NotificationCreated,
 	) error {
 		// No NullEmpty, deliberately. A notification with no template data has
@@ -71,7 +71,7 @@ func NewFeed(codec eventsourcing.Codec) *Feed {
 		return nil
 	})
 
-	projection.On[contract.NotificationRead](d, func(
+	d.On[contract.NotificationRead](func(
 		ctx context.Context, w db.Writer, env projection.Envelope, e *contract.NotificationRead,
 	) error {
 		// COALESCE keeps the FIRST read time. Reading something twice does not

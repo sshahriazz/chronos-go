@@ -18,7 +18,7 @@ import (
 // about a tenant they have nothing to do with.
 func TestRecipientFromAnotherOrgIsRefused(t *testing.T) {
 	cat := notify.NewCatalogue()
-	notify.On[passwordChanged](cat, notify.Spec{
+	cat.On[passwordChanged](notify.Spec{
 		Template: "identity.password_changed",
 		Class:    notify.Security,
 		Audience: notify.AudienceOrgAdmins,
@@ -78,7 +78,7 @@ func TestOrgOwnerMustResolveToExactlyOne(t *testing.T) {
 // operational detail about one customer is going to another.
 func TestOperatorRecipientCannotCarryATenantSubject(t *testing.T) {
 	cat := notify.NewCatalogue()
-	notify.On[projectionStopped](cat, notify.Spec{
+	cat.On[projectionStopped](notify.Spec{
 		Template: "operator.alert",
 		Class:    notify.Operator,
 		Audience: notify.AudienceOperator,
@@ -119,7 +119,7 @@ func TestTenantRecipientCannotArriveWithAnAddress(t *testing.T) {
 // Someone who is both the owner and an admin must not be told twice.
 func TestDuplicateRecipientIsRefused(t *testing.T) {
 	cat := notify.NewCatalogue()
-	notify.On[passwordChanged](cat, notify.Spec{
+	cat.On[passwordChanged](notify.Spec{
 		Template: "identity.password_changed",
 		Class:    notify.Security,
 		Audience: notify.AudienceOrgAdmins,
@@ -149,7 +149,7 @@ func TestDuplicateRecipientIsRefused(t *testing.T) {
 // approximated. Notifying the wrong person is worse than notifying nobody.
 func TestUnwiredAudienceIsRefusedNotGuessed(t *testing.T) {
 	cat := notify.NewCatalogue()
-	notify.On[passwordChanged](cat, notify.Spec{
+	cat.On[passwordChanged](notify.Spec{
 		Template: "identity.password_changed",
 		Class:    notify.Security,
 		Audience: notify.AudienceOrgAdmins,
@@ -186,7 +186,7 @@ func TestRegisteringAnAudienceTwicePanics(t *testing.T) {
 func reactWithOwner(t *testing.T, recipients []notify.Recipient) error {
 	t.Helper()
 	cat := notify.NewCatalogue()
-	notify.On[passwordChanged](cat, notify.Spec{
+	cat.On[passwordChanged](notify.Spec{
 		Template: "identity.password_changed",
 		Class:    notify.Security,
 		Audience: notify.AudienceOrgOwner,

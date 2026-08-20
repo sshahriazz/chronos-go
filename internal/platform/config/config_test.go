@@ -448,3 +448,115 @@ func keysOf(m map[int][]byte) []int {
 	sort.Ints(out)
 	return out
 }
+
+// ---- profiling (PPROF_*) -------------------------------------------------
+
+// The default must be OFF, everywhere.
+//
+// This is the only default that is safe without knowing the network topology.
+// A profiler on by default serves live heap contents and every goroutine's
+// stack — bearer tokens and email addresses among them — from whatever address
+// the default happens to name, and the first report anyone gets is somebody
+// else's heap dump.
+func TestProfilingIsOffByDefaultAndBindsLoopback(t *testing.T) {
+	withEnv(t, base())
+	c, err := config.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.Profiling.Enabled {
+		t.Error("PPROF_ENABLED defaults to true")
+	}
+	if c.Profiling.Addr != "127.0.0.1:6060" {
+		t.Errorf("PPROF_ADDR defaults to %q; it must bind loopback", c.Profiling.Addr)
+	}
+	if !c.Profiling.Token.IsZero() {
+		t.Error("PPROF_TOKEN has a default value; a shipped default credential is no credential")
+	}
+}
+
+// Every refused combination below WORKS if it is allowed through. That is the
+// whole reason the refusal has to be here: a profiler bound to a routable
+// address with no token serves, and serves to anyone, with no error, no log
+// line and no metric to distinguish it from the safe configuration.
+func TestValidate_RefusesAnUnguardedProfiler(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		env     map[string]string
+		wantErr string
+	}{
+		{
+			name:    "wildcard bind with no token",
+			env:     map[string]string{"PPROF_ENABLED": "true", "PPROF_ADDR": ":6060"},
+			wantErr: "not loopback",
+		},
+		{
+			name:    "routable bind with no token",
+			env:     map[string]string{"PPROF_ENABLED": "true", "PPROF_ADDR": "10.0.0.5:6060"},
+			wantErr: "not loopback",
+		},
+		{
+			name: "loopback outside local with no token",
+			env: map[string]string{
+				"PPROF_ENABLED": "true", "PPROF_ADDR": "127.0.0.1:6060",
+				"APP_ENV": "production", "OPENBAO_DEV_TOKEN": "prod-token",
+				"SMTP_STARTTLS": "true", "CENTRIFUGO_TOKEN_HMAC_SECRET": "s",
+				"KURRENTDB_CONNECTION_STRING": "kurrentdb://es:2113?tls=true",
+			},
+			wantErr: "PPROF_TOKEN must be set",
+		},
+		{
+			name: "short token",
+			env: map[string]string{
+				"PPROF_ENABLED": "true", "PPROF_ADDR": "0.0.0.0:6060",
+				"PPROF_TOKEN": "tooshort",
+			},
+			wantErr: "the floor is 32",
+		},
+		{
+			name:    "malformed address",
+			env:     map[string]string{"PPROF_ENABLED": "true", "PPROF_ADDR": "6060"},
+			wantErr: "is not a host:port",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withEnv(t, base())
+			withEnv(t, tc.env)
+			_, err := config.Load()
+			if err == nil {
+				t.Fatalf("%s was accepted; it produces a working, reachable heap dump", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error does not name the problem (%q): %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// And the configurations that must be ACCEPTED, so the rules above cannot be
+// satisfied by refusing everything.
+func TestValidate_AcceptsAGuardedProfiler(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+	}{
+		{"disabled with a nonsense address", map[string]string{"PPROF_ADDR": "nonsense"}},
+		{"loopback in local, no token", map[string]string{
+			"PPROF_ENABLED": "true", "PPROF_ADDR": "127.0.0.1:6060"}},
+		{"localhost in local, no token", map[string]string{
+			"PPROF_ENABLED": "true", "PPROF_ADDR": "localhost:6060"}},
+		{"ipv6 loopback in local, no token", map[string]string{
+			"PPROF_ENABLED": "true", "PPROF_ADDR": "[::1]:6060"}},
+		{"wildcard with a token", map[string]string{
+			"PPROF_ENABLED": "true", "PPROF_ADDR": ":6060", "PPROF_TOKEN": token}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withEnv(t, base())
+			withEnv(t, tc.env)
+			if _, err := config.Load(); err != nil {
+				t.Fatalf("a legitimate profiling configuration was refused: %v", err)
+			}
+		})
+	}
+}

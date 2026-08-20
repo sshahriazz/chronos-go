@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -666,12 +667,7 @@ func secretFromURI(t *testing.T, uri string) string {
 }
 
 func hasKind(kinds []identityv1.MethodKind, want identityv1.MethodKind) bool {
-	for _, k := range kinds {
-		if k == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(kinds, want)
 }
 
 // assertTokenStoredHashedOnly proves the bearer token is not recoverable from

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -39,7 +40,7 @@ func TestDispatchRoutesByType(t *testing.T) {
 	d := projection.NewDispatch(fakeCodec{})
 
 	var got string
-	projection.On[thingHappened](d, func(_ context.Context, _ db.Writer, _ projection.Envelope, e *thingHappened) error {
+	d.On[thingHappened](func(_ context.Context, _ db.Writer, _ projection.Envelope, e *thingHappened) error {
 		got = e.Name
 		return nil
 	})
@@ -59,7 +60,7 @@ func TestDispatchRoutesByType(t *testing.T) {
 func TestDispatchSkipsUnregisteredTypes(t *testing.T) {
 	codec := &countingCodec{}
 	d := projection.NewDispatch(codec)
-	projection.On[thingHappened](d, func(context.Context, db.Writer, projection.Envelope, *thingHappened) error {
+	d.On[thingHappened](func(context.Context, db.Writer, projection.Envelope, *thingHappened) error {
 		t.Fatal("the wrong handler ran")
 		return nil
 	})
@@ -78,19 +79,48 @@ func TestDispatchSkipsUnregisteredTypes(t *testing.T) {
 
 func TestDispatchRejectsDuplicateRegistration(t *testing.T) {
 	d := projection.NewDispatch(fakeCodec{})
-	projection.On[thingHappened](d, func(context.Context, db.Writer, projection.Envelope, *thingHappened) error { return nil })
+	d.On[thingHappened](func(context.Context, db.Writer, projection.Envelope, *thingHappened) error { return nil })
 
 	defer func() {
 		if recover() == nil {
 			t.Fatal("registering the same event type twice must panic at wiring time")
 		}
 	}()
-	projection.On[thingHappened](d, func(context.Context, db.Writer, projection.Envelope, *thingHappened) error { return nil })
+	d.On[thingHappened](func(context.Context, db.Writer, projection.Envelope, *thingHappened) error { return nil })
+}
+
+// A handler is registered by Go TYPE; the codec answers by event-type NAME. If
+// the two disagree the handler would be called with a value it was never
+// written for, so Apply refuses the event instead.
+//
+// This is a registry mismatch, not bad data: the fix is a wiring change, and
+// surfacing it as an error stops the projector rather than letting it build a
+// read model that is wrong with nothing recording why.
+func TestDispatchRefusesAnEventDecodedAsTheWrongType(t *testing.T) {
+	d := projection.NewDispatch(mismatchedCodec{})
+	d.On[thingHappened](func(context.Context, db.Writer, projection.Envelope, *thingHappened) error {
+		t.Fatal("a handler must not run for an event decoded as a different type")
+		return nil
+	})
+
+	env := projection.Envelope{
+		Type:    eventsourcing.TypeOf[thingHappened](),
+		Stream:  "test-1",
+		Payload: []byte(`{}`),
+	}
+	err := d.Apply(context.Background(), nil, env)
+	if err == nil {
+		t.Fatal("a codec returning a different Go type than the handler was registered " +
+			"for must be an error, not a silent skip")
+	}
+	if !strings.Contains(err.Error(), eventsourcing.TypeOf[thingHappened]()) {
+		t.Errorf("the error must name the event type that mismatched, got: %v", err)
+	}
 }
 
 func TestDispatchSurfacesDecodeErrors(t *testing.T) {
 	d := projection.NewDispatch(fakeCodec{})
-	projection.On[thingHappened](d, func(context.Context, db.Writer, projection.Envelope, *thingHappened) error { return nil })
+	d.On[thingHappened](func(context.Context, db.Writer, projection.Envelope, *thingHappened) error { return nil })
 
 	env := projection.Envelope{Type: "test.ThingHappened.v1", Stream: "test-1", Payload: []byte(`{not json`)}
 	err := d.Apply(context.Background(), nil, env)
@@ -603,6 +633,14 @@ func (fakeCodec) UnmarshalMetadata(b []byte) (eventsourcing.Metadata, error) {
 		}
 	}
 	return eventsourcing.Metadata{OrgID: w.OrgID, Residency: w.Residency}, nil
+}
+
+// mismatchedCodec decodes every payload as *otherHappened whatever the
+// envelope's type name says — a registry that disagrees with the dispatcher.
+type mismatchedCodec struct{ fakeCodec }
+
+func (mismatchedCodec) Unmarshal(string, []byte) (eventsourcing.Event, error) {
+	return &otherHappened{}, nil
 }
 
 type countingCodec struct {

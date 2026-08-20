@@ -69,25 +69,33 @@ check "tempo              (3200)"   http "http://localhost:${TEMPO_PORT:-3200}/r
 check "otel collector otlp(4317)"   grpc "${OTLP_GRPC_PORT:-4317}"
 check "otel collector http(4318)"   grpc "${OTLP_HTTP_PORT:-4318}"
 check "otel collector mtrx(8889)"   http "http://localhost:${OTEL_COLLECTOR_METRICS_PORT:-8889}/metrics"
-if command -v python3 >/dev/null 2>&1; then
-  down=$(curl -fsS --max-time 5 "http://localhost:${PROMETHEUS_PORT:-9090}/api/v1/targets" 2>/dev/null \
-    | python3 -c "import sys,json;print(','.join(sorted(t['labels']['job'] for t in json.load(sys.stdin)['data']['activeTargets'] if t['health']!='up')))" 2>/dev/null)
-  if [ -z "${down:-}" ]; then
-    printf '  \033[32mOK\033[0m    all prometheus targets up\n'
-  else
-    printf '  \033[31mFAIL\033[0m  prometheus targets down: %s\n' "$down"
-    fails=$((fails + 1))
-  fi
+# These two checks used to sit behind a `command -v` guard on a scripting
+# runtime, which meant they did not run at all where it was absent — silently,
+# reporting neither pass nor fail. They now always run: the Go toolchain is not
+# optional in this repository, and a check that can vanish is a check nobody can
+# rely on.
+#
+# Pairing a scrape target's health with its job label needs a JSON parser, so it
+# is a Go program; counting provisioned dashboards does not, so it is grep.
+down=$(go run ./internal/tools/obsprobe -down targets 2>/dev/null)
+if [ -z "${down:-}" ]; then
+  printf '  \033[32mOK\033[0m    all prometheus targets up\n'
+else
+  printf '  \033[31mFAIL\033[0m  prometheus targets down: %s\n' "$down"
+  fails=$((fails + 1))
+fi
 
-  dash=$(curl -fsS --max-time 5 -u "${GRAFANA_ADMIN_USER:-admin}:${GRAFANA_ADMIN_PASSWORD:-chronos_dev_grafana}" \
-    "http://localhost:${GRAFANA_PORT:-3001}/api/search?type=dash-db" 2>/dev/null \
-    | python3 -c "import sys,json;print(len(json.load(sys.stdin)))" 2>/dev/null)
-  if [ "${dash:-0}" -ge 6 ]; then
-    printf '  \033[32mOK\033[0m    %s grafana dashboards provisioned\n' "$dash"
-  else
-    printf '  \033[31mFAIL\033[0m  only %s grafana dashboards provisioned (expected 6)\n' "${dash:-0}"
-    fails=$((fails + 1))
-  fi
+# One "uid" per dashboard in Grafana's search response, and the query is already
+# filtered to dash-db, so a count of the key is a count of the dashboards.
+expected=$(find infra/grafana/dashboards -name '*.json' | wc -l | tr -d ' ')
+dash=$(curl -fsS --max-time 5 -u "${GRAFANA_ADMIN_USER:-admin}:${GRAFANA_ADMIN_PASSWORD:-chronos_dev_grafana}" \
+  "http://localhost:${GRAFANA_PORT:-3001}/api/search?type=dash-db" 2>/dev/null \
+  | grep -o '"uid"' | wc -l | tr -d ' ')
+if [ "${dash:-0}" -ge "${expected:-1}" ]; then
+  printf '  \033[32mOK\033[0m    %s grafana dashboards provisioned\n' "$dash"
+else
+  printf '  \033[31mFAIL\033[0m  only %s grafana dashboards provisioned (expected %s)\n' "${dash:-0}" "$expected"
+  fails=$((fails + 1))
 fi
 
 echo

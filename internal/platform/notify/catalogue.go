@@ -104,15 +104,15 @@ func NewCatalogue() *Catalogue {
 // The event type comes from T, so it cannot drift from the codec registration
 // or be mistyped:
 //
-//	notify.On[identity.PasswordChanged](cat, notify.Spec{
+//	cat.On[identity.PasswordChanged](notify.Spec{
 //	    Template: "identity.password_changed",
 //	    Class:    notify.Security,
 //	    Audience: notify.AudienceSubject,
 //	}, func(e *identity.PasswordChanged) map[string]any {
 //	    return map[string]any{"Device": e.Device, "Location": e.City}
 //	})
-func On[T any, PT eventsourcing.EventPtr[T]](
-	c *Catalogue, spec Spec, data func(PT) map[string]any,
+func (c *Catalogue) On[T any, PT eventsourcing.EventPtr[T]](
+	spec Spec, data func(PT) map[string]any,
 ) {
 	eventType := eventsourcing.TypeOf[T, PT]()
 	c.mustBeUndecided(eventType)
@@ -146,7 +146,7 @@ func On[T any, PT eventsourcing.EventPtr[T]](
 // against" and "nobody thought about it", and the second is the one that ships
 // a security event nobody is ever told about. The reason is stored so a reader
 // gets the decision, not just its absence.
-func Silent[T any, PT eventsourcing.EventPtr[T]](c *Catalogue, reason string) {
+func (c *Catalogue) Silent[T any, PT eventsourcing.EventPtr[T]](reason string) {
 	eventType := eventsourcing.TypeOf[T, PT]()
 	c.mustBeUndecided(eventType)
 	if reason == "" {

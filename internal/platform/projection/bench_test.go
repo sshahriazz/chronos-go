@@ -23,7 +23,7 @@ var (
 func benchDispatch(b *testing.B) (*projection.Dispatch, db.Writer) {
 	b.Helper()
 	d := projection.NewDispatch(fakeCodec{})
-	projection.On[thingHappened](d, func(context.Context, db.Writer, projection.Envelope, *thingHappened) error {
+	d.On[thingHappened](func(context.Context, db.Writer, projection.Envelope, *thingHappened) error {
 		return nil
 	})
 	return d, &fakeBatch{}

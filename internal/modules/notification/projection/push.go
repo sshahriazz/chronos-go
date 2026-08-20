@@ -26,7 +26,7 @@ var _ projection.Projection = (*PushSubscriptions)(nil)
 func NewPushSubscriptions(codec eventsourcing.Codec) *PushSubscriptions {
 	d := projection.NewDispatch(codec)
 
-	projection.On[contract.PushSubscribed](d, func(
+	d.On[contract.PushSubscribed](func(
 		ctx context.Context, w db.Writer, env projection.Envelope, e *contract.PushSubscribed,
 	) error {
 		// Conflict on (org_id, endpoint), not the id: the same browser
@@ -47,7 +47,7 @@ func NewPushSubscriptions(codec eventsourcing.Codec) *PushSubscriptions {
 		return nil
 	})
 
-	projection.On[contract.PushSubscriptionExpired](d, func(
+	d.On[contract.PushSubscriptionExpired](func(
 		ctx context.Context, w db.Writer, env projection.Envelope, e *contract.PushSubscriptionExpired,
 	) error {
 		// Marked expired, not deleted. "Why did I stop getting push?" is a real

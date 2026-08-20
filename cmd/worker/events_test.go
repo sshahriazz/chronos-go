@@ -30,13 +30,13 @@ func TestEveryEventHasANotificationDecision(t *testing.T) {
 
 Fix by adding ONE of these to cmd/worker/events.go:
 
-    notify.On[modulepkg.TheEvent](cat, notify.Spec{
+    cat.On[modulepkg.TheEvent](notify.Spec{
         Template: "module.the_event",
         Class:    notify.Security,        // or Transactional / Activity / Product / Operator
         Audience: notify.AudienceSubject, // who receives it
     }, func(e *modulepkg.TheEvent) map[string]any { ... })
 
-    notify.Silent[modulepkg.TheEvent](cat, "why nobody needs to hear about this")`, err)
+    cat.Silent[modulepkg.TheEvent]("why nobody needs to hear about this")`, err)
 	}
 }
 

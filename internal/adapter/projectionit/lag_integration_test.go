@@ -4,7 +4,7 @@ package projectionit_test
 
 import (
 	"context"
-	"sort"
+	"slices"
 	"testing"
 	"time"
 
@@ -50,7 +50,7 @@ func TestEndToEndLag(t *testing.T) {
 	cancel()
 	<-done
 
-	sort.Slice(lags, func(i, j int) bool { return lags[i] < lags[j] })
+	slices.Sort(lags)
 	p50 := lags[len(lags)/2]
 	p95 := lags[len(lags)*95/100]
 	worst := lags[len(lags)-1]

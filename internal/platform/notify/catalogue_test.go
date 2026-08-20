@@ -34,7 +34,7 @@ func (*projectionStopped) EventType() string { return "system.ProjectionStopped.
 // "nobody is told, and nothing says so".
 func TestUndecidedEventTypeIsAFailure(t *testing.T) {
 	cat := notify.NewCatalogue()
-	notify.On[passwordChanged](cat, notify.Spec{
+	cat.On[passwordChanged](notify.Spec{
 		Template: "identity.password_changed",
 		Class:    notify.Security,
 		Audience: notify.AudienceSubject,
@@ -61,12 +61,12 @@ func TestUndecidedEventTypeIsAFailure(t *testing.T) {
 // Deciding NOT to notify is a valid decision, and must be recorded as one.
 func TestSilentIsAValidDecision(t *testing.T) {
 	cat := notify.NewCatalogue()
-	notify.On[passwordChanged](cat, notify.Spec{
+	cat.On[passwordChanged](notify.Spec{
 		Template: "identity.password_changed",
 		Class:    notify.Security,
 		Audience: notify.AudienceSubject,
 	}, nil)
-	notify.Silent[telemetryRecorded](cat, "internal counter; of no interest to anyone")
+	cat.Silent[telemetryRecorded]("internal counter; of no interest to anyone")
 
 	known := []string{"identity.PasswordChanged.v1", "identity.TelemetryRecorded.v1"}
 	if err := cat.Verify(known); err != nil {
@@ -86,14 +86,14 @@ func TestSilentRequiresAReason(t *testing.T) {
 			t.Fatal("declaring an event silent without a reason must panic at wiring time")
 		}
 	}()
-	notify.Silent[telemetryRecorded](cat, "")
+	cat.Silent[telemetryRecorded]("")
 }
 
 // A renamed or retired event leaves its notification behind, pointing at
 // something that can no longer arrive.
 func TestOrphanedEntriesAreReported(t *testing.T) {
 	cat := notify.NewCatalogue()
-	notify.On[passwordChanged](cat, notify.Spec{
+	cat.On[passwordChanged](notify.Spec{
 		Template: "identity.password_changed",
 		Class:    notify.Security,
 		Audience: notify.AudienceSubject,
@@ -112,28 +112,91 @@ func TestDuplicateRegistrationPanics(t *testing.T) {
 		Class:    notify.Security,
 		Audience: notify.AudienceSubject,
 	}
-	notify.On[passwordChanged](cat, spec, nil)
+	cat.On[passwordChanged](spec, nil)
 
 	defer func() {
 		if recover() == nil {
 			t.Fatal("registering one event twice must panic: it would notify twice")
 		}
 	}()
-	notify.On[passwordChanged](cat, spec, nil)
+	cat.On[passwordChanged](spec, nil)
 }
 
 func TestSilentAndNotifyingAreMutuallyExclusive(t *testing.T) {
 	cat := notify.NewCatalogue()
-	notify.Silent[passwordChanged](cat, "decided against")
+	cat.Silent[passwordChanged]("decided against")
 
 	defer func() {
 		if recover() == nil {
 			t.Fatal("an event declared silent must not then be given a notification")
 		}
 	}()
-	notify.On[passwordChanged](cat, notify.Spec{
+	cat.On[passwordChanged](notify.Spec{
 		Template: "x", Class: notify.Security, Audience: notify.AudienceSubject,
 	}, nil)
+}
+
+// Silent records a DECISION, so a second one for the same event means two
+// people each believed they were the one who decided. Overwriting would keep
+// whichever ran last, and the reason a reader sees would not be the reason that
+// applies. Both orders panic at wiring time.
+func TestASecondDecisionAfterSilentPanics(t *testing.T) {
+	t.Run("declared silent twice", func(t *testing.T) {
+		cat := notify.NewCatalogue()
+		cat.Silent[passwordChanged]("decided against")
+
+		defer func() {
+			if recover() == nil {
+				t.Fatal("declaring one event silent twice must panic: the second reason " +
+					"would silently replace the first")
+			}
+		}()
+		cat.Silent[passwordChanged]("decided against, again")
+	})
+
+	t.Run("notifying, then declared silent", func(t *testing.T) {
+		cat := notify.NewCatalogue()
+		cat.On[passwordChanged](notify.Spec{
+			Template: "identity.password_changed",
+			Class:    notify.Security,
+			Audience: notify.AudienceSubject,
+		}, nil)
+
+		defer func() {
+			if recover() == nil {
+				t.Fatal("an event that already notifies must not then be declared silent")
+			}
+		}()
+		cat.Silent[passwordChanged]("decided against")
+	})
+}
+
+// The catalogue binds Data by Go TYPE; the reactor calls it with whatever the
+// codec produced for that event NAME. If those disagree, returning no data
+// would send a real notification with empty placeholders where the device and
+// location belong — wrong, but plausible enough to ship. It panics instead.
+func TestCatalogueDataPanicsWhenTheCodecDisagrees(t *testing.T) {
+	cat := notify.NewCatalogue()
+	cat.On[passwordChanged](notify.Spec{
+		Template: "identity.password_changed",
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, func(e *passwordChanged) map[string]any {
+		return map[string]any{"Device": e.Device}
+	})
+
+	spec, ok := cat.For(eventsourcing.TypeOf[passwordChanged]())
+	if !ok {
+		t.Fatal("the entry just registered must be present")
+	}
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("data extracted from an event of the wrong Go type must panic, not " +
+				"quietly render a notification with the fields left empty")
+		}
+	}()
+	spec.Data(&sessionCreated{Device: "laptop"})
 }
 
 // ---------------------------------------------------------------------------
@@ -148,7 +211,7 @@ func TestOperatorClassAndAudienceMustMatch(t *testing.T) {
 				t.Fatal("operator wording addressed to a tenant must be rejected")
 			}
 		}()
-		notify.On[projectionStopped](cat, notify.Spec{
+		cat.On[projectionStopped](notify.Spec{
 			Template: "operator.alert", Class: notify.Operator, Audience: notify.AudienceSubject,
 		}, nil)
 	})
@@ -160,7 +223,7 @@ func TestOperatorClassAndAudienceMustMatch(t *testing.T) {
 				t.Fatal("tenant wording sent to operators must be rejected")
 			}
 		}()
-		notify.On[projectionStopped](cat, notify.Spec{
+		cat.On[projectionStopped](notify.Spec{
 			Template: "identity.welcome", Class: notify.Security, Audience: notify.AudienceOperator,
 		}, nil)
 	})
@@ -173,7 +236,7 @@ func TestAudienceIsRequired(t *testing.T) {
 			t.Fatal("a notification with no audience must be rejected: who receives it cannot be implicit")
 		}
 	}()
-	notify.On[passwordChanged](cat, notify.Spec{
+	cat.On[passwordChanged](notify.Spec{
 		Template: "identity.password_changed", Class: notify.Security,
 	}, nil)
 }
@@ -184,7 +247,7 @@ func TestAudienceIsRequired(t *testing.T) {
 
 func TestReactorDispatchesFromTheCatalogue(t *testing.T) {
 	cat := notify.NewCatalogue()
-	notify.On[passwordChanged](cat, notify.Spec{
+	cat.On[passwordChanged](notify.Spec{
 		Template: "identity.password_changed",
 		Class:    notify.Security,
 		Audience: notify.AudienceSubject,
@@ -235,7 +298,7 @@ func TestReactorIgnoresUndecidedEvents(t *testing.T) {
 // silent hole this design exists to remove.
 func TestUnresolvableAudienceIsParked(t *testing.T) {
 	cat := notify.NewCatalogue()
-	notify.On[projectionStopped](cat, notify.Spec{
+	cat.On[projectionStopped](notify.Spec{
 		Template: "operator.alert",
 		Class:    notify.Operator,
 		Audience: notify.AudienceOperator,
@@ -254,7 +317,7 @@ func TestUnresolvableAudienceIsParked(t *testing.T) {
 // Two people notified by one event must not deduplicate against each other.
 func TestEachRecipientGetsADistinctIdempotencyKey(t *testing.T) {
 	cat := notify.NewCatalogue()
-	notify.On[passwordChanged](cat, notify.Spec{
+	cat.On[passwordChanged](notify.Spec{
 		Template: "identity.password_changed",
 		Class:    notify.Security,
 		Audience: notify.AudienceSubject,
@@ -282,10 +345,10 @@ func TestEachRecipientGetsADistinctIdempotencyKey(t *testing.T) {
 // The subscription filter must cover exactly the catalogue's events.
 func TestFilterCoversTheCatalogue(t *testing.T) {
 	cat := notify.NewCatalogue()
-	notify.On[passwordChanged](cat, notify.Spec{
+	cat.On[passwordChanged](notify.Spec{
 		Template: "identity.password_changed", Class: notify.Security, Audience: notify.AudienceSubject,
 	}, nil)
-	notify.Silent[telemetryRecorded](cat, "internal counter")
+	cat.Silent[telemetryRecorded]("internal counter")
 
 	r := notify.NewEventReactor("notifications", cat, catCodec{}, notify.SubjectAudiences{}, nil)
 	prefixes := r.Filter().EventTypePrefixes
