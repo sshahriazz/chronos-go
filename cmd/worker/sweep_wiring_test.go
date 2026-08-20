@@ -91,7 +91,7 @@ func TestTheSweepIsConstructedEvenWithDurableWorkDisabled(t *testing.T) {
 // reservation stream. A codec missing one of the three types loads the aggregate
 // into a wrong state — or fails — on exactly the streams that need releasing.
 func TestTheReservationCodecDecodesTheWholeStream(t *testing.T) {
-	codec, upcasters := newReservationCodec()
+	codec, upcasters := newIdentityCodec()
 	if upcasters == nil {
 		t.Fatal("no upcaster registry: a stored event at any schema version but the " +
 			"current one would fail to load")

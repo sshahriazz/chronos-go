@@ -97,7 +97,12 @@ jobs:
           buf breaking --against '.git#ref=origin/main,subdir=.'
 
       - name: OpenAPI spec is complete
-        run: python3 scripts/check_openapi.py
+        # PyYAML is installed explicitly because the checker now FAILS rather than
+        # skips without it. It used to exit 0, so this step passed on every run
+        # here without ever parsing the spec.
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 scripts/check_openapi.py
 
   migrations:
     name: migrations are append-only

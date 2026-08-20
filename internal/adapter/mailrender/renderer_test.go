@@ -2,6 +2,7 @@ package mailrender_test
 
 import (
 	"context"
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -305,9 +306,7 @@ type mapSource map[string][]byte
 
 func (m mapSource) Templates(context.Context) (map[string][]byte, error) {
 	out := map[string][]byte{}
-	for k, v := range m {
-		out[k] = v
-	}
+	maps.Copy(out, m)
 	return out, nil
 }
 

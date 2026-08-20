@@ -291,7 +291,17 @@ func (*CredentialCompromiseDetected) EventType() string {
 // enrollment as complete at provisioning time is how accounts end up with a
 // second factor nobody can satisfy.
 //
-// The secret is not here. It is sealed in the vault under the subject's key.
+// The secret is not here, and it is not in the PII vault either — an earlier
+// version of this comment said it was. It is sealed with AES-256-GCM under a key
+// wrapped by the OpenBao KEK (ADR-028) and stored in `credential.verifier` with
+// `kind = 'totp'`, beside the password verifier that shares the column
+// (migration 00008), bound by AAD to `subject:credential` so a row moved between
+// accounts fails to open.
+//
+// The vault is for PERSONAL DATA, under a per-subject key that erasure destroys.
+// A TOTP secret is key material: filing it there would make crypto-shredding a
+// subject silently take their second factor with it. What the two share is only
+// the rule that neither may enter an event.
 type TotpEnrollmentStarted struct {
 	SubjectID    string
 	CredentialID string

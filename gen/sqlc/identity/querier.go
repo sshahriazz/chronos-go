@@ -62,11 +62,41 @@ type Querier interface {
 	// token was valid but has expired" would confirm that the address it was sent to
 	// has an account.
 	ConsumeToken(ctx context.Context, arg ConsumeTokenParams) (string, error)
+	// The rotation job's DONE check, and the one an operator runs before destroying a
+	// key.
+	//
+	// Separate from the work list because the question is different: the list is
+	// bounded by LIMIT and answers "what do I re-seal next", while this answers "is
+	// anything left at all". Reading a zero-length page as "finished" is the mistake
+	// this exists to remove — a page can be empty because the limit was reached on a
+	// previous pass and the caller forgot to loop.
+	CountCredentialsAtKeyVersion(ctx context.Context, arg CountCredentialsAtKeyVersionParams) (int64, error)
 	// Consecutive-failure detection across accounts for one identifier: the
 	// credential-stuffing signal.
 	CountRecentFailures(ctx context.Context, arg CountRecentFailuresParams) (int64, error)
 	CountUnusedRecoveryCodes(ctx context.Context, subjectID string) (int64, error)
 	DeleteCredential(ctx context.Context, credentialID string) error
+	// Remove a password row that the event log does not account for.
+	//
+	// Used by ONE caller — setting an account's first password, in the same
+	// transaction as the insert that replaces it — and it exists because the write
+	// order has to be verifier-then-event. An attempt that stores the verifier and
+	// then fails to append leaves a row with no PasswordSet behind it: unusable,
+	// because the aggregate rebuilt from the log has no password method, and fatal,
+	// because the retry mints a fresh credential id and collides with
+	// credential_one_usable_per_kind_idx. Without this statement that collision is
+	// permanent and the account can never obtain a password at all.
+	//
+	// `disabled_at IS NULL` matches the partial unique index exactly, so this
+	// removes precisely the rows that could collide and leaves the lockout history
+	// alone. Nothing cascades: recovery_code and totp_replay hang from credentials
+	// of other kinds.
+	//
+	// The safety of deleting anything here rests on the CALLER, not on this
+	// statement: it is issued only after domain.User.SetPassword has succeeded,
+	// which it does only when the account's own stream records no usable password.
+	// See app.PasswordCredentials.StoreFirst.
+	DeleteOrphanedPasswordCredential(ctx context.Context, subjectID string) (int64, error)
 	// Replace the whole set. Whole-set replacement, never incremental top-up: a mix
 	// of old and new codes makes "how many do I have left" unanswerable and leaves
 	// codes the user believes were replaced still live.
@@ -89,6 +119,33 @@ type Querier interface {
 	// hands any attacker a denial of service against any address they can guess.
 	DisableCredential(ctx context.Context, credentialID string) error
 	ElevateSession(ctx context.Context, arg ElevateSessionParams) error
+	// Make a provisioned credential usable.
+	//
+	// This is the write that completes a two-step enrollment, and it is separate from
+	// UpsertCredential on purpose: the upsert also SETS the verifier, so confirming an
+	// enrollment through it would require the caller to hand back the sealed secret it
+	// has just read, and a caller holding a secret it does not need is a secret with
+	// one more place to leak from.
+	//
+	// `coalesce(enabled_at, now())` rather than a plain assignment, so a retried
+	// confirmation neither moves the timestamp nor reports zero rows. The affected-row
+	// count then answers exactly one question — does this credential still exist and
+	// is it still usable — which is what the caller needs to know.
+	EnableCredential(ctx context.Context, credentialID string) (int64, error)
+	// The credential of a kind for an account, ENABLED OR NOT.
+	//
+	// Deliberately not GetUsableCredential, and the difference is the whole reason
+	// this statement exists. A TOTP enrollment is provisioned before it is proven:
+	// the row is written with enabled_at NULL and stays that way until a live code
+	// confirms it. GetUsableCredential filters that row out — correctly, because a
+	// login must never verify against an unproven factor — so the confirmation step
+	// could not find the secret it has to open.
+	//
+	// `disabled_at IS NULL` is still applied. A locked-out authenticator must not be
+	// resurrected by a confirmation, and the partial unique index that keeps one
+	// usable credential per kind is defined on the same predicate, so this returns at
+	// most one row by construction rather than by hope.
+	GetCredentialOfKind(ctx context.Context, arg GetCredentialOfKindParams) (GetCredentialOfKindRow, error)
 	GetEmailReservation(ctx context.Context, emailIndex string) (EmailReservationView, error)
 	// Resolve a bearer token to a session. This is the authenticator's query, and it
 	// runs on EVERY authenticated request.
@@ -107,6 +164,43 @@ type Querier interface {
 	// so there is no window in which a handler holds a session row it then has to
 	// remember to validate. A revoked or expired session simply does not exist to
 	// this query.
+	//
+	// The last column, `enrolment`, is what a bootstrap assurance floor is relaxed
+	// against (policy.Enrolment). It answers "has this ACCOUNT ever held a proven
+	// second factor", and the whole value of the mechanism rests on it being read
+	// server-side, from the session's own account, rather than claimed by a caller.
+	//
+	// # Why "ever", and how each half of the OR earns its place
+	//
+	// `activated_at IS NOT NULL` is the durable half. An account reaches `active`
+	// only through UserActivated, which the domain records only once a REAL second
+	// factor is proven (domain.User.maybeActivate — a recovery-code sheet is
+	// explicitly not enough), and SetUserState's CASE stamps activated_at on that
+	// transition and never clears it afterwards. So it survives every way a factor
+	// can go away: TotpDisabled, a lockout, a deactivation, a suspension, and a
+	// projection rebuild — which replays UserActivated and stamps it again.
+	//
+	// The EXISTS half covers the window the first one cannot see: an account that
+	// has proven a factor but has not activated, because some other precondition
+	// (a verified address, a primary method) is still missing. `enabled_at IS NOT
+	// NULL` is exactly "proven" — an enrolment in progress is written with it NULL
+	// and only EnableCredential sets it — which matters here, because starting an
+	// enrolment must NOT flip the answer to established: a re-enrolment upserts the
+	// same row with enabled_at cleared, and an account whose answer moved on
+	// EnrollTotp could never reach ConfirmTotp. The kind list is an exclusion of the
+	// primaries and of recovery codes rather than an inclusion of 'totp', mirroring
+	// domain.RoleOf's default: a second-factor kind added later counts without this
+	// statement being edited, which is the direction that fails safe.
+	//
+	// The credential half is also the half that is IMMEDIATE. It is written by the
+	// command handler in the same request that proves the factor, so an account does
+	// not spend the projector's lag reporting bootstrap with a factor already in
+	// hand.
+	//
+	// LEFT JOIN, and the CASE reports 'unknown' rather than 'bootstrap' when the
+	// account row is absent. A plain `IS NOT NULL` over an outer join collapses "no
+	// such account row" into "no factor", which is the one direction that must never
+	// be taken silently: unknown denies the exemption, bootstrap grants it.
 	GetSessionByToken(ctx context.Context, arg GetSessionByTokenParams) (GetSessionByTokenRow, error)
 	// The usable credential of a kind for an account.
 	//
@@ -134,13 +228,66 @@ type Querier interface {
 	IssueToken(ctx context.Context, arg IssueTokenParams) error
 	// Every credential on an account, for the security-settings screen.
 	ListCredentials(ctx context.Context, subjectID string) ([]ListCredentialsRow, error)
-	// The rotation job's work list: password verifiers still sealed under an old
-	// pepper key.
+	// The rotation job's work list: credentials still sealed under an old key
+	// version, for one kind.
 	//
 	// The job is not done until this returns zero rows, and the old transit key must
 	// not be destroyed before then (identity.md §4). Nothing in code can enforce
 	// that ordering, which is why the query exists as the check.
-	ListCredentialsAtPepperVersion(ctx context.Context, arg ListCredentialsAtPepperVersionParams) ([]ListCredentialsAtPepperVersionRow, error)
+	//
+	// KIND IS A PARAMETER, and that is a correction rather than a generalisation for
+	// its own sake. This query previously hardcoded `kind = 'password'`, which was
+	// right when a password verifier was the only sealed value in the table. TOTP
+	// secrets are now sealed here too (migration 00013), under their own key set with
+	// its own versions — and they were INVISIBLE to this query. The consequence was
+	// the worst shape a rotation bug can take: the job would report zero rows while
+	// every TOTP secret still depended on the old key, an operator would read that as
+	// "safe to destroy", and every second factor in the system would stop opening at
+	// once, with no way back.
+	//
+	// Each kind has its OWN key set and its own version numbers, so a caller must ask
+	// per kind. Rotating the password pepper says nothing about the TOTP sealing key,
+	// and a single query returning both would compare two unrelated version
+	// sequences.
+	//
+	// Kinds with no sealed value (recovery_code, passkey) simply never match, because
+	// their verifier is NULL.
+	ListCredentialsAtKeyVersion(ctx context.Context, arg ListCredentialsAtKeyVersionParams) ([]ListCredentialsAtKeyVersionRow, error)
+	// The re-sealing job's work list, resumable past rows it could not re-seal.
+	//
+	// This is ListCredentialsAtKeyVersion with two additions, and both exist because
+	// that query answers "what is left" while a JOB needs "what do I do next".
+	//
+	// 1. A CURSOR. ListCredentialsAtKeyVersion is ordered and LIMITed with no
+	//    resume point, which is correct for an operator running it by hand and wrong
+	//    for a loop: a row that cannot be re-sealed keeps its old pepper_version, so
+	//    it matches the predicate again and comes back at the head of every
+	//    subsequent page. One unopenable secret would pin the job to the first page
+	//    forever and the pass would report progress while making none. Paging on
+	//    `credential_id > $after` steps over it. credential_id is the primary key
+	//    and the sort column, so the cursor is unique and total — the property
+	//    page.Keyset exists to enforce elsewhere.
+	//
+	// 2. The USER ID, by LEFT JOIN. A password verifier is sealed with the user id
+	//    and the credential id as AES-GCM additional data (argon2id.aad), so it
+	//    cannot be opened without the user id — and `credential` does not carry one.
+	//    A TOTP secret binds to subject_id instead and does not need it; it is
+	//    fetched for both kinds anyway so that one work list serves both, and the
+	//    caller refuses a password row with no user id rather than inventing one.
+	//
+	//    LEFT, not INNER, and the difference is load-bearing. Migration 00009
+	//    dropped credential's foreign key to user_view precisely so that rebuilding
+	//    the projection cannot cascade into authoritative credential rows — which
+	//    means a credential can legitimately exist with no user_view row while a
+	//    rebuild is in flight. Under an INNER JOIN those rows would silently vanish
+	//    from the work list while still counting in CountCredentialsAtKeyVersion,
+	//    and the job would loop on an empty page forever with no explanation. Under
+	//    a LEFT JOIN they arrive with a NULL user id and are reported as failures,
+	//    which is what they are.
+	//
+	// disabled_at is deliberately NOT filtered, so this matches
+	// CountCredentialsAtKeyVersion row for row. See ResealCredential.
+	ListCredentialsToReseal(ctx context.Context, arg ListCredentialsToResealParams) ([]ListCredentialsToResealRow, error)
 	// The sweep's work list: unverified claims whose lease has run out.
 	//
 	// Returns the index and the holder, which is everything needed to load the
@@ -160,6 +307,21 @@ type Querier interface {
 	// point — freeing a verified address is the worst outcome this table can cause,
 	// so it should take two independent mistakes rather than one.
 	ListLapsedReservations(ctx context.Context, arg ListLapsedReservationsParams) ([]ListLapsedReservationsRow, error)
+	// Every session a subject can still use, for "sign out everywhere".
+	//
+	// Deliberately NOT ListSessions with a wide cursor. That statement joins
+	// session_token to render a device list, so a session whose token row has been
+	// swept — revoked or expired, then cleaned up — disappears from it. Revocation
+	// must not depend on the secret still existing: the session_view row is what a
+	// rebuild replays, and a session missing from this list is one that never gets
+	// its SessionRevoked event.
+	//
+	// Unbounded on purpose. A LIMIT here would make "sign out everywhere" silently
+	// partial, which is the one outcome that flow may not have — the caller believes
+	// every device is signed out and one is not. The count is bounded in practice by
+	// the number of devices a person signs in from, and by the absolute deadline
+	// that removes the rest.
+	ListLiveSessionIDs(ctx context.Context, arg ListLiveSessionIDsParams) ([]string, error)
 	ListLoginHistory(ctx context.Context, arg ListLoginHistoryParams) ([]ListLoginHistoryRow, error)
 	// The device list, newest first.
 	//
@@ -210,6 +372,40 @@ type Querier interface {
 	// freed, and the sweep needs to be able to tell "never claimed" from "claimed and
 	// released" when it is deciding whether its own release already landed.
 	ReleaseEmailReservation(ctx context.Context, arg ReleaseEmailReservationParams) error
+	// Move one credential's sealed value to a newer key version.
+	//
+	// A COMPARE-AND-SET, like RehashCredential and for the same race: the re-sealing
+	// job reads a verifier, re-seals it outside the transaction, and writes it back.
+	// Between those two moments the login-time rehash may have replaced it, or the
+	// user may have changed their password, or a second-factor re-enrollment may
+	// have replaced the TOTP secret. Requiring the row to still hold the value that
+	// was opened makes overwriting any of those impossible rather than unlikely.
+	// Zero affected rows is the NORMAL outcome of losing that race, never an error:
+	// whoever won wrote a value sealed under the CURRENT key, which is exactly what
+	// this statement was trying to achieve.
+	//
+	// It is a separate statement from RehashCredential rather than a reuse of it,
+	// for two reasons that both bite.
+	//
+	// `disabled_at IS NULL` is ABSENT here, and that is the important one.
+	// RehashCredential is right to require it — writing a fresh verifier onto a
+	// locked-out authenticator leaves it looking maintained — but the rotation's
+	// done check, CountCredentialsAtKeyVersion, counts disabled rows. Re-sealing
+	// through a statement that skips them would leave the count permanently above
+	// zero, and the operator would be told forever that it is not yet safe to
+	// destroy the old key. One disabled credential would pin a retired key for the
+	// life of the deployment. A disabled row is still sealed under that key, so
+	// carrying it forward is also the truthful thing to do.
+	//
+	// `pepper_version < $new` is PRESENT here, and RehashCredential has no
+	// equivalent because it does not need one — it is driven by a login that has
+	// just verified the plaintext. This one is driven by a batch, and the guard is
+	// what makes "re-sealed under the version it already had" impossible at the
+	// statement level rather than by the caller remembering. Without it a row whose
+	// pepper_version column disagrees with its verifier (the migration allows this;
+	// the verifier wins) could be rewritten at the same version on every pass — new
+	// ciphertext, unchanged version, a done check that never falls, forever.
+	ResealCredential(ctx context.Context, arg ResealCredentialParams) (int64, error)
 	// Revoke every live session for a subject, optionally sparing one.
 	//
 	// The exception is "sign out everywhere else", which must not sign the caller

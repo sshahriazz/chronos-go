@@ -300,10 +300,7 @@ func pruneDedup(ctx context.Context, d *dependencies, log *slog.Logger) {
 }
 
 func serveHealth(ctx context.Context, addr string, d *dependencies, log *slog.Logger) {
-	registry := health.New(clock.System{}, 2*time.Second)
-	for _, p := range d.probes {
-		registry.Register(p)
-	}
+	registry := newHealthRegistry(d)
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", d.metrics.Handler())
@@ -362,7 +359,7 @@ func reactors(codec *eventcodec.JSON, d *dependencies) []reactor.Reactor {
 		// same dispatcher.
 		opts = append(opts, notify.WithWorkflows(d.temporal))
 	}
-	return []reactor.Reactor{
+	rs := []reactor.Reactor{
 		notify.NewEventReactor(
 			notificationReactorName,
 			notifications(),
@@ -372,6 +369,29 @@ func reactors(codec *eventcodec.JSON, d *dependencies) []reactor.Reactor {
 			opts...,
 		),
 	}
+
+	// The verification mail is a SECOND reactor rather than a catalogue entry,
+	// and the reason is structural rather than a matter of taste: the catalogue
+	// maps an event onto wording and an audience, and its Data function sees only
+	// the decoded event. This notification's payload is a credential that does not
+	// exist yet and cannot be derived from anything the event carries (ADR-002),
+	// so it has to be minted — which no catalogue entry can do.
+	//
+	// Its own subscription group as well, so that a verification that keeps
+	// failing parks on its own queue instead of sharing retries with every other
+	// notification in the system.
+	if r, err := newVerificationMail(d); err != nil {
+		// Loud, and not fatal, like every other wiring failure in this binary
+		// (ADR-010) — but this is the one whose absence is completely silent at
+		// runtime: no error, no parked event, no metric. Just registrations that
+		// mail nobody.
+		slog.Default().Error("the verification-mail reactor is NOT registered; "+
+			"EmailVerificationRequested will be consumed by nothing and no "+
+			"verification link will ever be sent", "error", err)
+	} else {
+		rs = append(rs, r)
+	}
+	return rs
 }
 
 func envOr(key, def string) string {
@@ -379,4 +399,22 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// newHealthRegistry builds the probe registry, WITH the observer that publishes
+// results to Prometheus.
+//
+// Extracted from serveHealth so a composition-root test can assert the observer
+// is attached. A registry without one answers /readyz and GetStatus exactly as
+// this does and exports nothing, which is indistinguishable at runtime from a
+// healthy system: the dashboards fall back to `up{job=...}`, which reports
+// whether Prometheus can scrape this process rather than whether its
+// dependencies work.
+func newHealthRegistry(d *dependencies) *health.Registry {
+	registry := health.New(clock.System{}, 2*time.Second,
+		health.WithObserver(d.metrics.Health()))
+	for _, p := range d.probes {
+		registry.Register(p)
+	}
+	return registry
 }

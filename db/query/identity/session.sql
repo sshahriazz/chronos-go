@@ -75,11 +75,60 @@ VALUES ($1, $2, $3);
 -- so there is no window in which a handler holds a session row it then has to
 -- remember to validate. A revoked or expired session simply does not exist to
 -- this query.
+--
+-- The last column, `enrolment`, is what a bootstrap assurance floor is relaxed
+-- against (policy.Enrolment). It answers "has this ACCOUNT ever held a proven
+-- second factor", and the whole value of the mechanism rests on it being read
+-- server-side, from the session's own account, rather than claimed by a caller.
+--
+-- # Why "ever", and how each half of the OR earns its place
+--
+-- `activated_at IS NOT NULL` is the durable half. An account reaches `active`
+-- only through UserActivated, which the domain records only once a REAL second
+-- factor is proven (domain.User.maybeActivate — a recovery-code sheet is
+-- explicitly not enough), and SetUserState's CASE stamps activated_at on that
+-- transition and never clears it afterwards. So it survives every way a factor
+-- can go away: TotpDisabled, a lockout, a deactivation, a suspension, and a
+-- projection rebuild — which replays UserActivated and stamps it again.
+--
+-- The EXISTS half covers the window the first one cannot see: an account that
+-- has proven a factor but has not activated, because some other precondition
+-- (a verified address, a primary method) is still missing. `enabled_at IS NOT
+-- NULL` is exactly "proven" — an enrolment in progress is written with it NULL
+-- and only EnableCredential sets it — which matters here, because starting an
+-- enrolment must NOT flip the answer to established: a re-enrolment upserts the
+-- same row with enabled_at cleared, and an account whose answer moved on
+-- EnrollTotp could never reach ConfirmTotp. The kind list is an exclusion of the
+-- primaries and of recovery codes rather than an inclusion of 'totp', mirroring
+-- domain.RoleOf's default: a second-factor kind added later counts without this
+-- statement being edited, which is the direction that fails safe.
+--
+-- The credential half is also the half that is IMMEDIATE. It is written by the
+-- command handler in the same request that proves the factor, so an account does
+-- not spend the projector's lag reporting bootstrap with a factor already in
+-- hand.
+--
+-- LEFT JOIN, and the CASE reports 'unknown' rather than 'bootstrap' when the
+-- account row is absent. A plain `IS NOT NULL` over an outer join collapses "no
+-- such account row" into "no factor", which is the one direction that must never
+-- be taken silently: unknown denies the exemption, bootstrap grants it.
 SELECT v.session_id, v.subject_id, v.device_id, v.aal,
        t.idle_expires_at, v.absolute_expires_at, v.requires_credential_rotation,
-       v.elevated_scope, v.elevated_until, v.created_at, t.last_seen_at
+       v.elevated_scope, v.elevated_until, v.created_at, t.last_seen_at,
+       (CASE
+            WHEN u.subject_id IS NULL THEN 'unknown'
+            WHEN u.activated_at IS NOT NULL THEN 'established'
+            WHEN EXISTS (
+                SELECT 1 FROM credential c
+                WHERE c.subject_id = v.subject_id
+                  AND c.enabled_at IS NOT NULL
+                  AND c.kind NOT IN ('password', 'passkey', 'federated', 'recovery_code')
+            ) THEN 'established'
+            ELSE 'bootstrap'
+        END)::text AS enrolment
 FROM session_token t
 JOIN session_view v ON v.session_id = t.session_id
+LEFT JOIN user_view u ON u.subject_id = v.subject_id
 WHERE t.token_digest = $1
   AND v.revoked_at IS NULL
   AND v.absolute_expires_at > $2
@@ -137,6 +186,28 @@ WHERE v.subject_id = $1
   AND (v.created_at, v.session_id) < ($2::timestamptz, $3::text)
 ORDER BY v.created_at DESC, v.session_id DESC
 LIMIT $4;
+
+-- name: ListLiveSessionIDs :many
+-- Every session a subject can still use, for "sign out everywhere".
+--
+-- Deliberately NOT ListSessions with a wide cursor. That statement joins
+-- session_token to render a device list, so a session whose token row has been
+-- swept — revoked or expired, then cleaned up — disappears from it. Revocation
+-- must not depend on the secret still existing: the session_view row is what a
+-- rebuild replays, and a session missing from this list is one that never gets
+-- its SessionRevoked event.
+--
+-- Unbounded on purpose. A LIMIT here would make "sign out everywhere" silently
+-- partial, which is the one outcome that flow may not have — the caller believes
+-- every device is signed out and one is not. The count is bounded in practice by
+-- the number of devices a person signs in from, and by the absolute deadline
+-- that removes the rest.
+SELECT session_id
+FROM session_view
+WHERE subject_id = $1
+  AND revoked_at IS NULL
+  AND absolute_expires_at > $2
+ORDER BY created_at DESC, session_id DESC;
 
 -- name: SweepSessionTokens :execrows
 -- Drop the SECRET half of sessions that can no longer be used.

@@ -11,6 +11,32 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const CountCredentialsAtKeyVersion = `-- name: CountCredentialsAtKeyVersion :one
+SELECT count(*)
+FROM credential
+WHERE kind = $1 AND verifier IS NOT NULL AND pepper_version < $2
+`
+
+type CountCredentialsAtKeyVersionParams struct {
+	Kind          string
+	PepperVersion pgtype.Int4
+}
+
+// The rotation job's DONE check, and the one an operator runs before destroying a
+// key.
+//
+// Separate from the work list because the question is different: the list is
+// bounded by LIMIT and answers "what do I re-seal next", while this answers "is
+// anything left at all". Reading a zero-length page as "finished" is the mistake
+// this exists to remove — a page can be empty because the limit was reached on a
+// previous pass and the caller forgot to loop.
+func (q *Queries) CountCredentialsAtKeyVersion(ctx context.Context, arg CountCredentialsAtKeyVersionParams) (int64, error) {
+	row := q.db.QueryRow(ctx, CountCredentialsAtKeyVersion, arg.Kind, arg.PepperVersion)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const DeleteCredential = `-- name: DeleteCredential :exec
 DELETE FROM credential WHERE credential_id = $1
 `
@@ -18,6 +44,39 @@ DELETE FROM credential WHERE credential_id = $1
 func (q *Queries) DeleteCredential(ctx context.Context, credentialID string) error {
 	_, err := q.db.Exec(ctx, DeleteCredential, credentialID)
 	return err
+}
+
+const DeleteOrphanedPasswordCredential = `-- name: DeleteOrphanedPasswordCredential :execrows
+DELETE FROM credential
+WHERE subject_id = $1 AND kind = 'password' AND disabled_at IS NULL
+`
+
+// Remove a password row that the event log does not account for.
+//
+// Used by ONE caller — setting an account's first password, in the same
+// transaction as the insert that replaces it — and it exists because the write
+// order has to be verifier-then-event. An attempt that stores the verifier and
+// then fails to append leaves a row with no PasswordSet behind it: unusable,
+// because the aggregate rebuilt from the log has no password method, and fatal,
+// because the retry mints a fresh credential id and collides with
+// credential_one_usable_per_kind_idx. Without this statement that collision is
+// permanent and the account can never obtain a password at all.
+//
+// `disabled_at IS NULL` matches the partial unique index exactly, so this
+// removes precisely the rows that could collide and leaves the lockout history
+// alone. Nothing cascades: recovery_code and totp_replay hang from credentials
+// of other kinds.
+//
+// The safety of deleting anything here rests on the CALLER, not on this
+// statement: it is issued only after domain.User.SetPassword has succeeded,
+// which it does only when the account's own stream records no usable password.
+// See app.PasswordCredentials.StoreFirst.
+func (q *Queries) DeleteOrphanedPasswordCredential(ctx context.Context, subjectID string) (int64, error) {
+	result, err := q.db.Exec(ctx, DeleteOrphanedPasswordCredential, subjectID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const DisableCredential = `-- name: DisableCredential :exec
@@ -33,6 +92,79 @@ WHERE credential_id = $1 AND disabled_at IS NULL
 func (q *Queries) DisableCredential(ctx context.Context, credentialID string) error {
 	_, err := q.db.Exec(ctx, DisableCredential, credentialID)
 	return err
+}
+
+const EnableCredential = `-- name: EnableCredential :execrows
+UPDATE credential
+SET enabled_at = coalesce(enabled_at, now())
+WHERE credential_id = $1 AND disabled_at IS NULL
+`
+
+// Make a provisioned credential usable.
+//
+// This is the write that completes a two-step enrollment, and it is separate from
+// UpsertCredential on purpose: the upsert also SETS the verifier, so confirming an
+// enrollment through it would require the caller to hand back the sealed secret it
+// has just read, and a caller holding a secret it does not need is a secret with
+// one more place to leak from.
+//
+// `coalesce(enabled_at, now())` rather than a plain assignment, so a retried
+// confirmation neither moves the timestamp nor reports zero rows. The affected-row
+// count then answers exactly one question — does this credential still exist and
+// is it still usable — which is what the caller needs to know.
+func (q *Queries) EnableCredential(ctx context.Context, credentialID string) (int64, error) {
+	result, err := q.db.Exec(ctx, EnableCredential, credentialID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const GetCredentialOfKind = `-- name: GetCredentialOfKind :one
+SELECT credential_id, subject_id, kind, verifier, pepper_version, enabled_at
+FROM credential
+WHERE subject_id = $1 AND kind = $2 AND disabled_at IS NULL
+`
+
+type GetCredentialOfKindParams struct {
+	SubjectID string
+	Kind      string
+}
+
+type GetCredentialOfKindRow struct {
+	CredentialID  string
+	SubjectID     string
+	Kind          string
+	Verifier      pgtype.Text
+	PepperVersion pgtype.Int4
+	EnabledAt     pgtype.Timestamptz
+}
+
+// The credential of a kind for an account, ENABLED OR NOT.
+//
+// Deliberately not GetUsableCredential, and the difference is the whole reason
+// this statement exists. A TOTP enrollment is provisioned before it is proven:
+// the row is written with enabled_at NULL and stays that way until a live code
+// confirms it. GetUsableCredential filters that row out — correctly, because a
+// login must never verify against an unproven factor — so the confirmation step
+// could not find the secret it has to open.
+//
+// `disabled_at IS NULL` is still applied. A locked-out authenticator must not be
+// resurrected by a confirmation, and the partial unique index that keeps one
+// usable credential per kind is defined on the same predicate, so this returns at
+// most one row by construction rather than by hope.
+func (q *Queries) GetCredentialOfKind(ctx context.Context, arg GetCredentialOfKindParams) (GetCredentialOfKindRow, error) {
+	row := q.db.QueryRow(ctx, GetCredentialOfKind, arg.SubjectID, arg.Kind)
+	var i GetCredentialOfKindRow
+	err := row.Scan(
+		&i.CredentialID,
+		&i.SubjectID,
+		&i.Kind,
+		&i.Verifier,
+		&i.PepperVersion,
+		&i.EnabledAt,
+	)
+	return i, err
 }
 
 const GetUsableCredential = `-- name: GetUsableCredential :one
@@ -120,41 +252,150 @@ func (q *Queries) ListCredentials(ctx context.Context, subjectID string) ([]List
 	return items, nil
 }
 
-const ListCredentialsAtPepperVersion = `-- name: ListCredentialsAtPepperVersion :many
+const ListCredentialsAtKeyVersion = `-- name: ListCredentialsAtKeyVersion :many
 SELECT credential_id, subject_id, verifier
 FROM credential
-WHERE kind = 'password' AND verifier IS NOT NULL AND pepper_version < $1
+WHERE kind = $1 AND verifier IS NOT NULL AND pepper_version < $2
 ORDER BY credential_id
-LIMIT $2
+LIMIT $3
 `
 
-type ListCredentialsAtPepperVersionParams struct {
+type ListCredentialsAtKeyVersionParams struct {
+	Kind          string
 	PepperVersion pgtype.Int4
 	Limit         int32
 }
 
-type ListCredentialsAtPepperVersionRow struct {
+type ListCredentialsAtKeyVersionRow struct {
 	CredentialID string
 	SubjectID    string
 	Verifier     pgtype.Text
 }
 
-// The rotation job's work list: password verifiers still sealed under an old
-// pepper key.
+// The rotation job's work list: credentials still sealed under an old key
+// version, for one kind.
 //
 // The job is not done until this returns zero rows, and the old transit key must
 // not be destroyed before then (identity.md §4). Nothing in code can enforce
 // that ordering, which is why the query exists as the check.
-func (q *Queries) ListCredentialsAtPepperVersion(ctx context.Context, arg ListCredentialsAtPepperVersionParams) ([]ListCredentialsAtPepperVersionRow, error) {
-	rows, err := q.db.Query(ctx, ListCredentialsAtPepperVersion, arg.PepperVersion, arg.Limit)
+//
+// KIND IS A PARAMETER, and that is a correction rather than a generalisation for
+// its own sake. This query previously hardcoded `kind = 'password'`, which was
+// right when a password verifier was the only sealed value in the table. TOTP
+// secrets are now sealed here too (migration 00013), under their own key set with
+// its own versions — and they were INVISIBLE to this query. The consequence was
+// the worst shape a rotation bug can take: the job would report zero rows while
+// every TOTP secret still depended on the old key, an operator would read that as
+// "safe to destroy", and every second factor in the system would stop opening at
+// once, with no way back.
+//
+// Each kind has its OWN key set and its own version numbers, so a caller must ask
+// per kind. Rotating the password pepper says nothing about the TOTP sealing key,
+// and a single query returning both would compare two unrelated version
+// sequences.
+//
+// Kinds with no sealed value (recovery_code, passkey) simply never match, because
+// their verifier is NULL.
+func (q *Queries) ListCredentialsAtKeyVersion(ctx context.Context, arg ListCredentialsAtKeyVersionParams) ([]ListCredentialsAtKeyVersionRow, error) {
+	rows, err := q.db.Query(ctx, ListCredentialsAtKeyVersion, arg.Kind, arg.PepperVersion, arg.Limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []ListCredentialsAtPepperVersionRow{}
+	items := []ListCredentialsAtKeyVersionRow{}
 	for rows.Next() {
-		var i ListCredentialsAtPepperVersionRow
+		var i ListCredentialsAtKeyVersionRow
 		if err := rows.Scan(&i.CredentialID, &i.SubjectID, &i.Verifier); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const ListCredentialsToReseal = `-- name: ListCredentialsToReseal :many
+SELECT c.credential_id, c.subject_id, u.user_id, c.verifier
+FROM credential c
+LEFT JOIN user_view u ON u.subject_id = c.subject_id
+WHERE c.kind = $1
+  AND c.verifier IS NOT NULL
+  AND c.pepper_version < $2
+  AND c.credential_id > $3
+ORDER BY c.credential_id
+LIMIT $4
+`
+
+type ListCredentialsToResealParams struct {
+	Kind              string
+	BelowVersion      pgtype.Int4
+	AfterCredentialID string
+	PageSize          int32
+}
+
+type ListCredentialsToResealRow struct {
+	CredentialID string
+	SubjectID    string
+	UserID       pgtype.Text
+	Verifier     pgtype.Text
+}
+
+// The re-sealing job's work list, resumable past rows it could not re-seal.
+//
+// This is ListCredentialsAtKeyVersion with two additions, and both exist because
+// that query answers "what is left" while a JOB needs "what do I do next".
+//
+//  1. A CURSOR. ListCredentialsAtKeyVersion is ordered and LIMITed with no
+//     resume point, which is correct for an operator running it by hand and wrong
+//     for a loop: a row that cannot be re-sealed keeps its old pepper_version, so
+//     it matches the predicate again and comes back at the head of every
+//     subsequent page. One unopenable secret would pin the job to the first page
+//     forever and the pass would report progress while making none. Paging on
+//     `credential_id > $after` steps over it. credential_id is the primary key
+//     and the sort column, so the cursor is unique and total — the property
+//     page.Keyset exists to enforce elsewhere.
+//
+//  2. The USER ID, by LEFT JOIN. A password verifier is sealed with the user id
+//     and the credential id as AES-GCM additional data (argon2id.aad), so it
+//     cannot be opened without the user id — and `credential` does not carry one.
+//     A TOTP secret binds to subject_id instead and does not need it; it is
+//     fetched for both kinds anyway so that one work list serves both, and the
+//     caller refuses a password row with no user id rather than inventing one.
+//
+//     LEFT, not INNER, and the difference is load-bearing. Migration 00009
+//     dropped credential's foreign key to user_view precisely so that rebuilding
+//     the projection cannot cascade into authoritative credential rows — which
+//     means a credential can legitimately exist with no user_view row while a
+//     rebuild is in flight. Under an INNER JOIN those rows would silently vanish
+//     from the work list while still counting in CountCredentialsAtKeyVersion,
+//     and the job would loop on an empty page forever with no explanation. Under
+//     a LEFT JOIN they arrive with a NULL user id and are reported as failures,
+//     which is what they are.
+//
+// disabled_at is deliberately NOT filtered, so this matches
+// CountCredentialsAtKeyVersion row for row. See ResealCredential.
+func (q *Queries) ListCredentialsToReseal(ctx context.Context, arg ListCredentialsToResealParams) ([]ListCredentialsToResealRow, error) {
+	rows, err := q.db.Query(ctx, ListCredentialsToReseal,
+		arg.Kind,
+		arg.BelowVersion,
+		arg.AfterCredentialID,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListCredentialsToResealRow{}
+	for rows.Next() {
+		var i ListCredentialsToResealRow
+		if err := rows.Scan(
+			&i.CredentialID,
+			&i.SubjectID,
+			&i.UserID,
+			&i.Verifier,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -223,6 +464,68 @@ type RehashCredentialParams struct {
 // read it — and anyone able to time this query already holds the row.
 func (q *Queries) RehashCredential(ctx context.Context, arg RehashCredentialParams) (int64, error) {
 	result, err := q.db.Exec(ctx, RehashCredential,
+		arg.NewVerifier,
+		arg.PepperVersion,
+		arg.CredentialID,
+		arg.ExpectedVerifier,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const ResealCredential = `-- name: ResealCredential :execrows
+UPDATE credential
+SET verifier       = $1,
+    pepper_version = $2
+WHERE credential_id = $3
+  AND verifier      = $4
+  AND pepper_version < $2
+`
+
+type ResealCredentialParams struct {
+	NewVerifier      pgtype.Text
+	PepperVersion    pgtype.Int4
+	CredentialID     string
+	ExpectedVerifier pgtype.Text
+}
+
+// Move one credential's sealed value to a newer key version.
+//
+// A COMPARE-AND-SET, like RehashCredential and for the same race: the re-sealing
+// job reads a verifier, re-seals it outside the transaction, and writes it back.
+// Between those two moments the login-time rehash may have replaced it, or the
+// user may have changed their password, or a second-factor re-enrollment may
+// have replaced the TOTP secret. Requiring the row to still hold the value that
+// was opened makes overwriting any of those impossible rather than unlikely.
+// Zero affected rows is the NORMAL outcome of losing that race, never an error:
+// whoever won wrote a value sealed under the CURRENT key, which is exactly what
+// this statement was trying to achieve.
+//
+// It is a separate statement from RehashCredential rather than a reuse of it,
+// for two reasons that both bite.
+//
+// `disabled_at IS NULL` is ABSENT here, and that is the important one.
+// RehashCredential is right to require it — writing a fresh verifier onto a
+// locked-out authenticator leaves it looking maintained — but the rotation's
+// done check, CountCredentialsAtKeyVersion, counts disabled rows. Re-sealing
+// through a statement that skips them would leave the count permanently above
+// zero, and the operator would be told forever that it is not yet safe to
+// destroy the old key. One disabled credential would pin a retired key for the
+// life of the deployment. A disabled row is still sealed under that key, so
+// carrying it forward is also the truthful thing to do.
+//
+// `pepper_version < $new` is PRESENT here, and RehashCredential has no
+// equivalent because it does not need one — it is driven by a login that has
+// just verified the plaintext. This one is driven by a batch, and the guard is
+// what makes "re-sealed under the version it already had" impossible at the
+// statement level rather than by the caller remembering. Without it a row whose
+// pepper_version column disagrees with its verifier (the migration allows this;
+// the verifier wins) could be rewritten at the same version on every pass — new
+// ciphertext, unchanged version, a done check that never falls, forever.
+func (q *Queries) ResealCredential(ctx context.Context, arg ResealCredentialParams) (int64, error) {
+	result, err := q.db.Exec(ctx, ResealCredential,
 		arg.NewVerifier,
 		arg.PepperVersion,
 		arg.CredentialID,

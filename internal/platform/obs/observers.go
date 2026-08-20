@@ -164,3 +164,93 @@ func (o AuthzObserver) Denied(relation, resourceType, reason string) {
 func (o AuthzObserver) Failed(relation, resourceType string) {
 	o.m.AuthzFailed.WithLabelValues(relation, resourceType).Inc()
 }
+
+// RPC returns the observer the transport's error gate accepts.
+//
+// It counts only the failures a caller cannot act on, which is what makes it
+// alertable without a threshold: a classified refusal never reaches it, so the
+// series is zero on a healthy system no matter how badly clients behave.
+func (m *Metrics) RPC() RPCObserver { return RPCObserver{m} }
+
+type RPCObserver struct{ m *Metrics }
+
+// Internal records one request answered with a code that disclosed nothing.
+func (o RPCObserver) Internal(procedure, code string) {
+	o.m.RPCInternal.WithLabelValues(procedure, code).Inc()
+}
+
+// There is deliberately no InitProcedure counterpart to InitProjection. A
+// projection that has applied nothing is a fault worth alerting on, so its
+// series has to exist at zero; a procedure that has never faulted is the normal
+// state of a healthy server, and pre-publishing a zero series for every
+// registered method would fill the registry with the metric's own absence.
+// `absent(chronos_rpc_internal_total)` is the correct reading of "nothing has
+// broken yet".
+
+// Health returns the observer health.Registry accepts.
+//
+// It turns the probe results that were previously visible only to whoever
+// opened the status endpoint by hand into series Prometheus can alert on. That
+// matters most for the probes nothing else covers: the two Temporal SCHEDULE
+// probes report whether a recurring job exists at all, and a schedule that was
+// never created emits no error and no failed workflow — the absence of work
+// looks exactly like the absence of work to do.
+func (m *Metrics) Health() HealthObserver { return HealthObserver{m} }
+
+type HealthObserver struct{ m *Metrics }
+
+// dependencyStates is the closed set of states the gauge publishes. Held here
+// rather than derived from what has been observed, because the point of a state
+// set is that the states NOT in effect are explicitly zero: a dependency that
+// was down and recovered must stop reporting down, and a series left at 1
+// forever would page someone about an incident that ended.
+var dependencyStates = [...]string{"up", "degraded", "down", "unknown"}
+
+// Registered publishes a dependency's series before it has ever been checked.
+//
+// Deliberately not "up until proven otherwise": every state starts at 0, which
+// reads as "not yet known" and matches the truth. Claiming up would make a
+// process that never manages to run a probe look healthy indefinitely.
+func (o HealthObserver) Registered(dependency, criticality string) {
+	for _, s := range dependencyStates {
+		o.m.DependencyHealth.WithLabelValues(dependency, criticality, s).Set(0)
+	}
+	o.m.DependencyCheckSeconds.WithLabelValues(dependency)
+	for _, s := range dependencyStates {
+		o.m.DependencyChecks.WithLabelValues(dependency, s)
+	}
+}
+
+func (o HealthObserver) Observed(dependency, criticality, state string, seconds float64) {
+	for _, s := range dependencyStates {
+		v := 0.0
+		if s == state {
+			v = 1
+		}
+		o.m.DependencyHealth.WithLabelValues(dependency, criticality, s).Set(v)
+	}
+	o.m.DependencyCheckSeconds.WithLabelValues(dependency).Observe(seconds)
+	o.m.DependencyChecks.WithLabelValues(dependency, state).Inc()
+}
+
+// Authn returns the observer identity's login path reports through.
+//
+// The two outcomes it carries are the ones that leave no event behind — an
+// attempt refused above the ceiling, and an attempt allowed because the ceiling
+// could not be evaluated. See app.AuthObserver for why neither can be recovered
+// from the log, and the metric declarations for what to alert on.
+func (m *Metrics) Authn() AuthnObserver { return AuthnObserver{m} }
+
+type AuthnObserver struct{ m *Metrics }
+
+func (o AuthnObserver) Throttled(rule string) {
+	if rule == "" {
+		// A refusal always names the rule that produced it (ratelimit.Decision).
+		// An empty label would silently merge every window into one series, so the
+		// gap is labelled rather than hidden.
+		rule = "unnamed"
+	}
+	o.m.AuthThrottled.WithLabelValues(rule).Inc()
+}
+
+func (o AuthnObserver) CeilingUnavailable() { o.m.AuthCeilingUnavailable.Inc() }

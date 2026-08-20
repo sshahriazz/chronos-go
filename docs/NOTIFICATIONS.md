@@ -91,6 +91,28 @@ an erased user has no address, and that is a correct outcome, not an error.
 apply per address, per account, and per source IP, with an hourly ceiling per
 address across *all* classes.
 
+*As implemented, for verification mail (`cmd/api/identity.go`).* Per address and
+per account are ONE counter: the address is unique across accounts by the
+reservation stream (ADR-044), so for this class they are the same scope. A third
+scope has to appear the day a class of mail can be aimed at an account by some
+identifier other than its address.
+
+| Axis | Scope | Limits |
+| --- | --- | --- |
+| Per address | blind index, prefix `mail_address` | 3/hour, 10/day |
+| Per caller | connection peer address, prefix `mail_caller` | 20/hour, 100/day |
+
+The per-address prefix is deliberately NOT verification-specific: "across all
+classes" is only true if the password-reset mail that lands next increments the
+same key, or an attacker alternates between two endpoints and doubles the mail
+one victim receives. Windows are fixed, so the honest worst case is 2x each
+number across a boundary. Both counters are consumed **before** the account is
+looked up, so a known and an unknown address cost identical budget — the ceiling
+must not become the oracle §4's enumeration rule closes. The ceiling **fails
+open** and logs `ceiling_unavailable`: failing closed would make a Valkey blip
+permanent account loss for everyone who registered during it, since a Pending
+account can neither sign in nor re-register.
+
 **Enumeration resistance.** API responses are identical whether or not an account
 exists. Mail may differ, because only the mailbox owner sees it — so a reset
 request for an unknown address sends *"someone requested a reset; no account

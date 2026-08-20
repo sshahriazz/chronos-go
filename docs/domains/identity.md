@@ -110,11 +110,34 @@ The single most important state machine in the system.
 | `Anonymous` | primary factor verified | `Active` | no MFA required, or passkey UV satisfied AAL2 |
 | `PendingSecondFactor` | second factor verified | `Active` | within 5 min, attempts < 5 |
 | `PendingSecondFactor` | timeout / attempts exhausted | `Expired` | |
-| `Active` | step-up satisfied | `Elevated` | AAL requirement met |
-| `Elevated` | 5 min elapsed | `Active` | automatic downgrade |
+| `Active` | step-up satisfied | `Active`, elevated (see below) | AAL requirement met |
+| `Active` | `elevated_until` passes | `Active`, no longer elevated | automatic, by clock |
 | `Active` | idle > 14d, or absolute > 30d | `Expired` | |
 | `Active` | user revokes / password changed | `Revoked` | |
-| any | retired refresh token replayed | `Compromised` | ADR-018 |
+| any | retired refresh token replayed | `Compromised` | ADR-018, from ANY state |
+
+**Elevation is ATTRIBUTES on an active session, not a state.** The diagram above
+draws `Elevated` as a peer of `Active`; that is the older design and the
+implementation does not follow it. A session carries `(aal, elevated_scope,
+elevated_until)`, and elevation sets all three.
+
+The reason is that a single state cannot answer the question the gate actually
+asks. "Elevated" alone cannot express *elevated to AAL2 while this action needs
+AAL3*, and it cannot express *elevated in order to change an email, which does
+not authorize deleting the account* — elevation must be scoped to the ceremony
+that produced it, or one step-up becomes a skeleton key for every sensitive
+operation in the session's remaining life.
+
+`elevated_until` is clamped to the session's own absolute deadline
+(`LEAST($4::timestamptz, absolute_expires_at)`), so an elevation cannot outlive
+the session it elevates. It is deliberately **not** carried in any access token:
+a 10-minute token holding a 5-minute elevation would outlive its own window, and
+the window is the entire control.
+
+The `Compromised` transition is reachable from **every** state, not only from an
+elevated one — the diagram's single arrow is a drawing artifact, and reading it
+as the rule would leave replay undetected for ordinary sessions, which are the
+overwhelming majority.
 
 **`PendingSecondFactor` holds no API authority.** It can call exactly one RPC —
 the second-factor verification — and nothing else. This is where half-built
@@ -153,7 +176,10 @@ one. Compromise revokes everything including the current one.
   the stored verified address, never to the address the request supplied.**
   Response and timing identical whether or not the account exists.
 - Optional by design — a passwordless account is a first-class state, not a
-  degraded one (§5, §7).
+  degraded one (§5, §7). **Every account passes through it.** Registration takes
+  an address and nothing else; the first password is supplied to `VerifyEmail`,
+  by whoever follows the link that was mailed to that address. See §4.3.
+
 - **Peppered by encrypting the digest, not by concatenating a secret into it:**
 
   ```
@@ -187,6 +213,101 @@ one. Compromise revokes everything including the current one.
   missed. **The old transit key must not be destroyed until that job reports zero
   rows at the old version** — destroying it early permanently locks out every
   un-migrated user, and unlike an erasure that is not a feature.
+
+### 4.3 The first password is set by whoever proves the mailbox
+
+**`Register` creates no credential.** It claims the address, creates a Pending
+account and asks for the address to be proven. `VerifyEmail` takes the token AND
+the password, and creates the credential in the same request as the proof.
+
+This is the fix for **IDENTITY-REVIEW C8** (pre-hijacking, Sudhodanan & Paverd,
+USENIX Security 2022), which was executed end to end against the running system
+before it landed. The attack:
+
+1. The attacker registers the VICTIM's address with a password of their own.
+2. The victim receives a verification mail they never asked for — an ordinary
+   mail from a real service — and follows it, believing they are finishing their
+   own signup.
+3. Verification proves control of the MAILBOX. It does not prove that whoever
+   set the password controls that mailbox.
+4. The attacker signs in with the password only they know. The bootstrap
+   carve-out (§2) admits them at AAL1 and that session enrols their own
+   authenticator.
+
+The paper's own rule — on verification, void every session and every credential
+not proven by the verifying party — **cannot be applied here**: there is no
+password-reset flow, so voiding the password locks out every legitimate
+registrant. Removing the premise costs nothing by comparison, because the
+credential that would be voided never exists.
+
+Three independent layers carry it:
+
+| Layer | Rule |
+| --- | --- |
+| Wire | `RegisterRequest` has no password field; field 2 is reserved so one cannot reappear at the same number |
+| Aggregate | `domain.User.SetPassword` refuses a password while `email_verified` is false, so any other route inherits the rule |
+| Authentication | A passwordless account has no usable credential, so the bootstrap carve-out has nothing to admit |
+
+**Screening runs before the token is spent.** Length and the breach corpus are
+checked on the submitted password before `Consume`, so a person who picks a weak
+password keeps their link. That is not a guessing surface: both refusals are
+functions of the caller's own bytes and consult neither the token nor the
+account, and a wrong token still fails at `Consume` identically. Everything
+after `Consume` — the hash, the credential write, the append — does spend the
+token, and the recovery is `ResendEmailVerification`, which still admits the
+account because nothing was appended.
+
+**What this does not fix.** An attacker can still CLAIM an address they do not
+own and deny it to its real owner until the reservation lapses
+(`DefaultReservationLease`, 48h). Registration's indistinguishability means the
+real owner is told nothing actionable. That is a denial of service on one
+identifier, bounded and self-clearing — strictly less than takeover, and not
+zero. Closing it needs a control registration does not have today: proof of
+intent before the claim, or a shorter unverified lease.
+
+### 4.4 The revocation rule every future credential flow inherits
+
+**When an identifier becomes verified — and on any password reset or recovery —
+void every session, every pending identifier change, and every identifier not
+proven by the acting party.**
+
+This is the remaining rule from Sudhodanan & Paverd, and it covers the three
+variants §4.3 did not: **unexpired session** (the attacker keeps a live session
+across the victim's recovery), **trojan identifier** (the attacker pre-attaches
+an identifier or federated link that survives it), and **unexpired email change**
+(a pending change survives it).
+
+`VerifyEmail` already enforces it: it calls `RevokeAllSessions` for the subject,
+with no `Except`, before it appends. **Today that call revokes nothing** — a
+pre-verification account has no credential, so no session can exist — and that is
+precisely why it was written now. The rule is free while it is a no-op and
+expensive to retrofit once it is not.
+
+The three variants are currently **unreachable, and only because the flows they
+attack do not exist**: there is no password reset, no email change and no
+federated linking in this module — no RPC, no use case, no event. That is not a
+mitigation, it is an absence, and it expires the day any of them is built. Each
+one carries the requirement in its own section (§4.5, §7, §12) rather than only
+here, because a rule recorded far from the code that must obey it is a rule that
+gets missed.
+
+### 4.5 Password reset — NOT BUILT, and what it must do on arrival
+
+There is no reset flow. When one is written it MUST, in the same transaction as
+the credential change:
+
+- **Void every session for the subject**, including the one performing the reset
+  if it predates the proof. A reset exists because control may have been lost;
+  keeping any prior session is assuming the opposite.
+- **Void every pending identifier change**, or an attacker's queued email change
+  survives the recovery and re-takes the account afterwards.
+- **Void every outstanding token of every purpose** for that subject, not only
+  reset tokens.
+- **Never bypass the second factor** (ASVS 5.0 V6.4.3). This is the most commonly
+  broken requirement in the set, and breaking it converts "attacker controls the
+  mailbox" into full account takeover.
+- **Send the link to the STORED verified address**, never to an address the
+  request supplied.
 
 ### 4.1 Compromised-credential detection — a lifecycle, not a signup check
 
@@ -306,12 +427,36 @@ Conflating them is a data-leak vector.
 
 The browser holds N independent sessions plus a pointer to the active one.
 
-- **One cookie per account** — `__Host-sid.<opaque-ref>` — so revoking one
-  cannot affect another, and no single cookie contains a joinable set of
-  identities.
-- A separate `active-account` selector cookie names which ref is current.
-- Adding an account runs a full authentication flow **without disturbing
-  existing sessions**.
+- **One cookie per account** — `__Host-sid.<opaque-ref>` — so revoking one cannot
+  affect another, and overwriting one cannot clobber another.
+
+  This used to add "and no single cookie contains a joinable set of identities",
+  which **does not follow and must not be relied on**. The browser sends every
+  matching cookie on every request, so the server receives the joinable set
+  regardless of how it is split; splitting hides nothing from anyone who can see
+  one request. The real justification is the one above — independent revocation
+  and independent overwrite — and it is sufficient on its own. The wrong reason
+  is called out rather than quietly deleted because someone who later refutes it
+  might "optimise" back to a single cookie, having disproved an argument that was
+  never load-bearing.
+
+- A separate `active-account` selector cookie names which ref is current, and it
+  is a **UI hint with no authority**. The request MUST name the account it acts
+  on; the server resolves that name against the cookies actually presented.
+  Trusting the selector as the sole authority makes **cookie tossing** an account
+  switch: any subdomain — including one served by a third party, or taken over —
+  can set a cookie the parent domain will send, and the victim then acts on an
+  attacker-chosen account. The selector therefore also carries `__Host-` (which
+  forbids `Domain=`, so a subdomain cannot write it), and the CSRF token is
+  validated against the account the REQUEST names, not the one the cookie points
+  at.
+
+- The ring is **capped**. An uncapped ring is an unbounded `Cookie` header on
+  every single request, which is a self-inflicted request-size problem that grows
+  with how much someone uses the product.
+
+- Adding an account runs a full authentication flow **without disturbing existing
+  sessions**.
 - Removing one revokes only that session.
 
 ### Isolation invariants — each is a test
@@ -328,6 +473,18 @@ The browser holds N independent sessions plus a pointer to the active one.
 ---
 
 ## 7. Federated identity
+
+> **NOT BUILT.** There is no federated linking in this module today — no RPC, no
+> use case, no event. That absence is the only reason C8's **trojan identifier**
+> variant is currently unreachable, and it expires the moment linking is written.
+>
+> **On arrival, linking MUST obey §4.4.** Specifically: a federated link attached
+> to an account the linking party has not proven control of is a trojan
+> identifier — the attacker attaches their own provider identity to the victim's
+> account and it survives every later recovery, because a reset changes the
+> password and leaves the link alone. So a link may only be created by a session
+> that has proven the account (never by an unauthenticated callback alone), and
+> any password reset or recovery MUST void links not proven by the acting party.
 
 **Providers:** Google, Microsoft, Apple (OIDC) · GitHub (OAuth2 + user API).
 
@@ -597,10 +754,15 @@ thought was tenant-scoped.
 - Mandatory expiry with a policy-capped maximum; rotation with an overlap window
   so rotation needs no downtime.
 - Optional IP allowlist; per-key rate limits; `last_used_at` and last-used IP.
+  **`last_used_at` is a coalesced projection write, at most once per key per
+  minute, and is NOT an event** — see §13. It is deliberately approximate: the
+  screen answers "is this key still in use?", which a minute's resolution
+  settles.
 - Secret shown exactly once at creation.
 - Revocation is immediate — API keys have no cached-token equivalent.
 - Leak response: revoke, then produce the audit trail of everything that key
-  touched.
+  touched. **That trail is `compliance`'s, not this module's** — it is sized and
+  retained for request volume, which the event log is not (§13).
 
 ---
 
@@ -628,8 +790,117 @@ thought was tenant-scoped.
 - **Email change** verifies the *new* address before switching, notifies the
   *old* address, and allows a revert window — otherwise an attacker with a
   hijacked session silently takes ownership.
-- Verification tokens: single-use, expiring, constant-time lookup, invalidated on
-  email change.
+
+  **NOT BUILT** — no RPC, no use case, no event — and that absence is the only
+  reason C8's **unexpired email change** variant is unreachable today. On
+  arrival it MUST obey §4.4, in both directions:
+
+  - Re-verifying the new address runs through `VerifyEmail`, which already voids
+    every session for the subject. That is what defeats the *unexpired session*
+    variant here, and it is already enforced rather than pending.
+  - A password reset or recovery MUST void any PENDING change. Otherwise an
+    attacker queues a change to their own address, the victim recovers the
+    account believing they have secured it, and the queued change completes
+    afterwards and hands it back.
+- Verification tokens: **looked up by `SHA-256(token)`, never stored in the
+  clear**; single-use, expiring, invalidated on email change.
+
+  This previously said "constant-time lookup", which is not implementable and
+  hid the rule that matters. You cannot do a constant-time lookup through a
+  B-tree index and you do not need to: the token is 256 bits of uniform
+  randomness, so there is nothing to guess and no candidate list to search.
+  A **fast** hash is therefore correct here, and is not something to "harden"
+  into a KDF later — ASVS 5.0 V6.5.2 settles it ("a standard hash function can
+  be used if the secret has 112 bits of entropy or more"), and a slow KDF on a
+  token lookup is pure denial-of-service surface for no security gain.
+
+  Single-use is enforced by a single `DELETE … WHERE digest = $1 AND purpose =
+  $2 AND expires_at > $3 RETURNING subject_id` (`ConsumeToken`), not by
+  read-then-write: two simultaneous clicks of one link would otherwise both find
+  it valid. The expiry is checked in that same statement so an expired token is
+  indistinguishable from an unknown one — reporting "valid but expired" would
+  confirm that the address it was sent to has an account.
+
+### 12.1 Resending a verification link
+
+A verification link lives 24 hours, is single-use, and every issuance revokes
+every earlier one. Without a resend path a person who lost the mail, waited a
+day, or clicked a link a later issuance had already voided is locked out of an
+account they cannot re-register — the address is claimed by the account they
+cannot reach. `ResendEmailVerification` closes that.
+
+**It is public.** A Pending account holds no session (§1), so requiring one would
+make the call unavailable to every account that needs it. The cost of being
+public is paid by the two controls below rather than by an authentication.
+
+**It appends an event, it does not send mail.** `ResendEmailVerification` writes
+`EmailVerificationRequested` to the account's own stream and returns. The
+verification reactor mints the token, revokes every outstanding one and sends the
+link, exactly as it does after a registration — so there is one code path for "a
+link was sent", one place the revoke-first ordering is written down, and no
+request handler ever holds a plaintext token.
+
+**Five outcomes, one response.** No account claims the address; the account is
+Pending and a request was appended; the account has already verified; the account
+is deactivated or suspended; a concurrent write won the stream. Only the second
+appends anything, and all five return the same zero bytes. The residual
+distinction is **timing** — the appending path performs one store round trip the
+others do not — and it is bounded by the per-address ceiling rather than closed:
+separating a few milliseconds from network jitter needs many samples of the same
+address, and the ceiling permits three an hour.
+
+**Revoking somebody else's live link is a bounded nuisance, not a takeover.**
+Anyone who knows a Pending address can trigger an issuance, and that issuance
+voids the link already in the victim's mailbox. The replacement is mailed to the
+same mailbox, so no attacker gains anything redeemable; what they gain is the
+ability to invalidate a link the victim was about to click, at most three times
+an hour. The alternative — not revoking — leaves two live links for one address,
+which is the property `identity.md §7 rule 7` forbids and is strictly worse.
+
+**Rate limited on two axes, both spent before the account is looked up.** Per
+address, keyed by the blind index (never the address itself — a cache is a
+projection with a shorter life, and ADR-002 applies to it unchanged). Per caller,
+keyed by the caller's network address (below). Both counters are consumed whether
+or not an account exists, so the ceiling itself is not an oracle, and the caller's
+budget is spent first so a sweep cannot exhaust a thousand victims' budgets on its
+way to being refused. The numbers live in `cmd/api/identity.go`; the ceiling
+**fails open** and says so, because failing closed would turn a Valkey blip into
+permanent account loss for everyone who registered during it.
+
+#### Which address the per-caller ceiling counts against
+
+The connection's peer address, plus as much of `X-Forwarded-For` as the operator
+has declared trustworthy. `API_TRUSTED_PROXY_HOPS` is that declaration and it
+**defaults to 0**, which means the header is not read at all — an unconfigured
+deployment behaves exactly as one with no such setting. The rules are owned by
+`internal/platform/clientip` and are, in full:
+
+- **Entries are counted from the RIGHT.** With N trusted hops the client is the
+  Nth entry from the end, because the rightmost entries were appended by our own
+  infrastructure and everything to the left of them was written by the caller.
+  Taking the leftmost entry — the classic implementation — takes the value the
+  attacker chose.
+- **Too few entries falls back to the peer address**, never leftward. A caller
+  who sends a short or absent header must not get a better outcome than one who
+  sends none.
+- **A malformed entry falls back to the peer address.** Each hop is parsed as an
+  IP (bare, bracketed, or carrying a port); a hostname, a `for=` fragment or a
+  CIDR block is not an address and buys nothing.
+- **IPv6 is bucketed by its /64.** The smallest allocation anybody receives is a
+  /64, so keyed on the full address a 20-per-hour ceiling is defeated at zero cost
+  by anyone with an ordinary VPS. IPv4 is used whole.
+
+**Deployment contract — set it to the number of proxies that APPEND to
+`X-Forwarded-For`, and no more.** Neither mistake has a runtime symptom, and they
+are not symmetric:
+
+| Mistake | Consequence |
+| --- | --- |
+| Left at `0` behind a terminating proxy | Every caller shares one bucket; the per-caller rule becomes a global ceiling of 20 resends an hour for the whole deployment, and legitimate users are refused at random as traffic grows. Never exploitable. |
+| Set above the real hop count | The selected entry is one the CALLER wrote. An attacker mints a fresh bucket per request to evade the ceiling, or borrows a victim's address to burn their budget. |
+
+The value is refused above 8 at boot and logged at startup as
+`trusted_proxy_hops`. See INFRA §13.1 for the topology table.
 
 ---
 
@@ -644,13 +915,45 @@ thought was tenant-scoped.
 `SecondFactorChallenged` · `SecondFactorSucceeded` · `SessionCreated` ·
 `SessionElevated` · `SessionRevoked` · `SessionExpired` ·
 `SessionCompromiseDetected` · `DeviceRegistered` · `DeviceTrusted` ·
-`ApiKeyCreated` · `ApiKeyRotated` · `ApiKeyRevoked` · `ApiKeyUsed` ·
+`ApiKeyCreated` · `ApiKeyRotated` · `ApiKeyRevoked` ·
 `ServiceAccountCreated` · `UserDeactivated` · `UserSuspended` ·
 `UserDeletionRequested`
 
 **Every one carries `SubjectID` pseudonyms only** — no email, no IP, no device
 name, no user agent in the payload (ADR-002). Those live in the PII vault,
 joined at projection time.
+
+### There is deliberately no `ApiKeyUsed`
+
+It was listed here beside `ApiKeyCreated` and `ApiKeyRevoked`, and it does not
+belong with them. Those record a **state change**; a key being used is not one.
+
+Under ADR-013 the event log is permanent and is replayed in full on every
+projection rebuild, so an event per API *request* makes the log grow with
+**traffic rather than with state**. A single busy integration key would then
+dominate the stream it shares with every account, credential and session event in
+the system, and rebuild time — which is the recovery procedure for every
+projection — would grow with last month's request volume. The cost is not paid at
+write time, where it would be noticed, but at rebuild time, when it is least
+affordable.
+
+The two things `ApiKeyUsed` was reaching for are both real, and each has a home
+that is sized for request volume:
+
+- **`last_used_at`** (§13's key-management screen) is a **coalesced projection
+  write** — at most once per key per minute, debounced through Valkey. It is
+  derived, approximate by construction, and rebuildable from nothing because
+  nobody needs its history. "Last used about a minute ago" is the whole product
+  requirement.
+- **The audit trail** §10 promises belongs in `compliance`, which is append-only
+  storage designed for exactly this shape and retained on its own schedule. An
+  audit record is not an aggregate's decision input, and putting it in the
+  aggregate's stream conflates "what the system must replay to know the truth"
+  with "what an auditor must be able to read".
+
+Deleting it is free today because API keys are not built. It stops being free the
+moment the first key exists, because by then the events are in a log that ADR-013
+does not permit rewriting.
 
 ---
 

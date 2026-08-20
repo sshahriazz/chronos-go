@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"testing"
 
+	identityreactor "github.com/chronos/chronos-go/internal/modules/identity/reactor"
 	"github.com/chronos/chronos-go/internal/platform/config"
 	"github.com/chronos/chronos-go/internal/platform/notify"
 	"github.com/chronos/chronos-go/internal/platform/workflow"
@@ -66,14 +67,24 @@ func TestEnablingDurableWorkRegistersTheWorkflows(t *testing.T) {
 	// notification path never reaches is the same failure as not building them:
 	// every send still goes inline, and the retry policy the workflow owns never
 	// applies.
+	var sawVerification bool
 	for _, r := range reactors(newCodec(), d) {
-		er, ok := r.(*notify.EventReactor)
-		if !ok {
-			continue
+		switch typed := r.(type) {
+		case *notify.EventReactor:
+			if !typed.Durable() {
+				t.Fatal("the notification reactor still delivers inline while durable work is " +
+					"enabled; an SMTP outage would park a backlog instead of being retried")
+			}
+		case *identityreactor.VerificationMail:
+			sawVerification = true
+			if !typed.Durable() {
+				t.Fatal("the verification mail still delivers inline while durable work is " +
+					"enabled; an SMTP outage would park the one message a new account " +
+					"cannot proceed without")
+			}
 		}
-		if !er.Durable() {
-			t.Fatal("the notification reactor still delivers inline while durable work is " +
-				"enabled; an SMTP outage would park a backlog instead of being retried")
-		}
+	}
+	if !sawVerification {
+		t.Fatal("no verification-mail reactor was registered at all")
 	}
 }

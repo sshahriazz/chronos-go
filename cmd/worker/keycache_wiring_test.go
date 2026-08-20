@@ -32,8 +32,7 @@ func TestStartKeyCacheRunsItsDuties(t *testing.T) {
 
 	d := &dependencies{keyCache: kc, cacheTTL: time.Minute,
 		cacheEvery: 10 * time.Millisecond, cacheRetry: 10 * time.Millisecond}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	d.startKeyCache(ctx, slog.New(slog.DiscardHandler))
 
 	select {

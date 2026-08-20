@@ -391,13 +391,122 @@ permits — but note the collision with erasure: a **shredded subject cannot be
 re-indexed**. Rotation must treat "cannot decrypt" as "skip, mark tombstone", or
 the first rotation after the first erasure halts.
 
-### [ ] C8 🟡 — Three of five pre-account-takeover variants are unaddressed
+### [x] C8 🟡 — Pre-hijacking by unverified registration is CLOSED; three variants remain
+
+> **Variant status verified 2026-08-16, by reading the RPC surface and the
+> aggregates rather than by inference.**
+>
+> | Variant | Status | What makes it so |
+> | --- | --- | --- |
+> | Classic-federated merge | Covered | §7.5 "prove control of both" |
+> | Pre-hijack via unverified registration | **CLOSED** | No credential exists before the proof (§4.3); attack test asserts the refusal |
+> | Unexpired session | **Enforced, currently a no-op** | `VerifyEmail` calls `RevokeAllSessions` with no `Except` before appending |
+> | Trojan identifier | **Unreachable — flow absent** | No federated linking: no RPC, no use case, no event |
+> | Unexpired email change | **Unreachable — flow absent** | No email-change flow: no RPC, no use case, no event |
+>
+> **Two of the three "remaining" variants are unreachable because the flows they
+> attack DO NOT EXIST**, and that is an absence rather than a mitigation — it
+> expires the day either is built. So the rule is written into the sections those
+> flows will be built in (§4.4, §4.5, §7, §12), not only recorded here.
+>
+> The third — unexpired session — is now ENFORCED: `VerifyEmail` voids every
+> session for the subject, before the append, with no exception. Today it revokes
+> nothing, because a pre-verification account has no credential and therefore no
+> session; that is the argument for writing it now rather than against, since it
+> is free while it is a no-op and expensive to retrofit once it is not.
+> `TestVerifyEmailVoidsEverySessionEstablishedBeforeTheProof` asserts the call is
+> MADE — not that the result is empty, which would pass with the call deleted.
+>
+> **The squat is self-clearing at the lease, and NOT dependent on the sweep** —
+> checked because a broken sweep would have turned a bounded 48h denial into a
+> permanent one, which is a materially worse finding than the one recorded.
+> `EmailReservation.Available` returns true once `expiresAt` has passed, and
+> `Reserve` takes over a lapsed claim directly, recording `EmailReleased` and then
+> the new `EmailReserved`. So the real owner can claim the address at expiry even
+> if the sweep never ran; the sweep is housekeeping that keeps the projection
+> tidy, not the mechanism that frees the address. Covered by
+> `domain/reservation_test.go`.
+
+> **Resolved 2026-08-16 by option (a): registration creates no credential.**
+> `Register` takes an address and nothing else; `VerifyEmail` takes the token and
+> the password and creates the credential in the same request as the proof. The
+> premise of the attack — a credential that exists before the proof — is gone,
+> so there is nothing for the mailbox owner's click to activate.
+>
+> Enforced at three independent layers: `RegisterRequest` has no password field
+> and field 2 is reserved; `domain.User.SetPassword` refuses a password while the
+> address is unproven; a passwordless account has no usable credential for the
+> bootstrap carve-out to admit.
+>
+> `internal/adapter/identityit/prehijack_integration_test.go` still executes the
+> full attack sequence over real HTTP and now asserts the refusal. Its central
+> assertion is that a registration leaves ZERO credential rows, and it also
+> asserts that the victim's own password works — without that half, a
+> `VerifyEmail` that stored nothing would refuse the attacker too and the test
+> would pass against a broken flow.
+>
+> Option (b) — ship reset first, then void on verification — was considered and
+> rejected: voiding a password with no reset flow locks out every legitimate
+> registrant.
+>
+> **What it does NOT fix, stated rather than glossed:** an attacker can still
+> claim an address they do not own and deny it to its real owner until the
+> reservation lapses (48h), and registration's indistinguishability means the
+> owner is told nothing actionable. That is a bounded, self-clearing denial of
+> service on one identifier — strictly less than takeover, and not zero.
+>
+> Downgraded to 🟡 rather than closed outright: the three OTHER variants in the
+> table below (unexpired session, trojan identifier, unexpired email change) are
+> untouched by this change and still need the one rule at the end of this entry.
+>
+> The original 🔴 entry follows, unedited.
+
+> **Escalated to 🔴 on 2026-08-15: the attack was EXECUTED against the running
+> system and it succeeded end to end.**
+> `internal/adapter/identityit/prehijack_integration_test.go` performs it over
+> real HTTP and is committed asserting the CURRENT (vulnerable) behaviour, so the
+> fix cannot land silently — when it does, that test fails and is rewritten as
+> the refusal, exactly as `TestEnrolmentDeadlock` was retired.
+>
+> The sequence needs no credential of the victim's and no mailbox access:
+>
+>  1. The attacker registers the VICTIM's address with a password of their own
+>     choosing. The account sits Pending.
+>  2. The victim receives a verification mail they never requested — an ordinary
+>     mail from a real service — and clicks it, believing they are finishing
+>     their own signup.
+>  3. Verification proves control of the MAILBOX. It does not prove that whoever
+>     set the password controls that mailbox, and here they are different people.
+>  4. The attacker signs in with the password only they know. The **bootstrap
+>     carve-out** admits them at AAL1 (verified address, no second factor), and
+>     that session may enrol a first factor — so they confirm their own
+>     authenticator and the account activates.
+>
+> Outcome: an active account bearing the victim's address, with the attacker's
+> password and the attacker's TOTP. The victim cannot start again — the address
+> is claimed, and registration's indistinguishability (correct on its own terms)
+> means they are told nothing actionable.
+>
+> Note the interaction: the bootstrap carve-out did not CREATE this — the paper
+> predates it — but it removed the step that used to stall the attack, because
+> before it no session could be minted for a factorless account at all. The two
+> features are individually defensible and jointly exploitable.
+>
+> **This needs a decision, not a patch.** The paper's rule — on verification,
+> void every session and every credential not proven by the verifying party —
+> cannot be applied as written today: there is no password-reset flow, so voiding
+> the password locks every legitimate user out. The realistic options are (a)
+> don't create the credential until the link is clicked, supplying the password
+> at that point, which reshapes registration and the reservation stream; or (b)
+> ship reset first, then void on verification. (a) is the stronger fix and the
+> larger change.
 
 Sudhodanan & Paverd, *Pre-hijacked accounts*, **USENIX Security 2022**: roughly
 **half of 75 popular services** tested were vulnerable to at least one variant.
 
 | Variant | Status |
 | --- | --- |
+| Unverified-registration pre-hijack | **Closed** — registration creates no credential (identity.md §4.3) |
 | Classic-federated merge | **Covered** — §7.5's "prove control of both" is the best-designed part of the doc |
 | Unexpired session | **Open** — attacker keeps a live session across the victim's reset |
 | Trojan identifier | **Open** — attacker pre-attaches their own email or federated link; survives the reset |
@@ -408,7 +517,23 @@ One rule closes all three: **when an identifier becomes verified — and on any
 password reset or recovery — void every session, every pending identifier change,
 and every identifier not proven by the acting party.**
 
-### [ ] C9 🟡 — `ApiKeyUsed` makes the event log grow with request volume
+### [x] C9 🟡 — `ApiKeyUsed` makes the event log grow with request volume
+
+> **RESOLVED 2026-08-16 by deleting the event from the spec**, which is free
+> today and would not have been later: API keys are not built, so there is no
+> stream to rewrite and ADR-013 would have forbidden rewriting one.
+>
+> `identity.md` §13 now carries a "There is deliberately no `ApiKeyUsed`" section
+> stating the reasoning, so the event cannot reappear as an obvious-looking
+> addition beside `ApiKeyCreated`/`Revoked`. The two real needs are routed to
+> storage sized for request volume: `last_used_at` is a coalesced projection
+> write (≤1/key/minute via Valkey, approximate by construction), and the audit
+> trail is `compliance`'s. §13's API-key bullets now say both inline, because
+> that is where somebody implementing keys will be reading.
+>
+> The argument worth keeping: the cost of an event-per-request is not paid at
+> write time where it would be noticed, but at REBUILD time — the recovery
+> procedure for every projection — where it is least affordable.
 
 §13 lists it beside `ApiKeyCreated`/`Revoked`. Under **ADR-013** every event is
 permanent and replayed on every projection rebuild. An event per API *request*
@@ -418,7 +543,21 @@ means the log grows with **traffic, not state changes**.
 Valkey). The audit trail §10 promises belongs in `compliance`, which is
 append-only storage sized for request volume.
 
-### [ ] C10 🟡 — "Constant-time token lookup" is not implementable, and hides the real rule
+### [x] C10 🟡 — "Constant-time token lookup" is not implementable, and hides the real rule
+
+> **Verified 2026-08-15 — the code already does the right thing; the SPEC wording
+> is what still needs the fix.** `internal/modules/identity/adapter/token/token.go:130`
+> hashes with `crypto/sha256` — a fast hash, which is the correct choice here for
+> exactly the ASVS reason given below, and not something to "improve" into a KDF
+> later. `db/query/identity/guard.sql:52` (`ConsumeToken`) is a single
+> `DELETE … WHERE digest = $1 AND purpose = $2 AND expires_at > $3 RETURNING
+> subject_id`, so single-use is atomic rather than read-then-write, and an expired
+> token is indistinguishable from an unknown one because the expiry is checked in
+> the same statement. `TestIdentitySliceEndToEnd` exercises the replay refusal
+> over HTTP.
+>
+> Remaining: reword §4 and §12, which still say "constant-time lookup". The reset
+> flow itself does not exist yet, so C11's reset-specific bullets stay open.
 
 §4 and §12 both specify it. You cannot do a constant-time lookup through a B-tree
 index, and you do not need to.
@@ -546,6 +685,23 @@ own rule that `FLUSHALL` must be survivable.
 
 ### [ ] A3 🟡 — Our own RPC framework opens a CSRF surface
 
+> **Verified 2026-08-15 — real, but not yet exploitable, and the trigger is
+> precise.** Four identity RPCs are `NO_SIDE_EFFECTS` and therefore GET-routable
+> (`GetUser`, `ListSessions`, `ListMethods`, `ListLoginHistory`,
+> `identity.proto:1063-1108`). There is no `Sec-Fetch-Site` or `Origin` check
+> anywhere in `internal/server/`. **But CSRF needs credentials the browser
+> attaches by itself, and this server has none:** `grep` for `Cookie`,
+> `SetCookie` and `http.Cookie` across `internal/server/`,
+> `internal/modules/identity/` and `cmd/api/` returns nothing. Authentication is
+> `Authorization: Bearer` only, and a cross-site navigation does not carry it.
+>
+> So the finding is a **precondition, not a live hole**. It becomes live the
+> moment a session cookie exists — which is exactly what the Apple `form_post`
+> flow below requires. Whoever introduces the first cookie owns this control, and
+> it must land in the same change, not after it. A `Sec-Fetch-Site` check is not
+> written today because a control with no threat to stop cannot be tested against
+> one, and untested security machinery is how a false sense of coverage starts.
+
 ConnectRPC serves **GET** routes for RPCs marked `IdempotencyLevel =
 NO_SIDE_EFFECTS`. Those are top-level navigable, and `SameSite=Lax` permits
 cross-site top-level GET.
@@ -599,10 +755,30 @@ floor is now unreachable and inert, leaving only the 0–200 jitter, which is
 narrower than natural inter-prefix variance. `Add-Padding: true` also bypasses
 the Cloudflare edge cache entirely, so padded requests hit origin.
 
-### [ ] A5 🟢 — Smaller contradictions
+### [~] A5 🟢 — Smaller contradictions
 
-- **§3 vs ADR-018 idle timeout.** §3 says idle > 14d; ADR-018 says the refresh
-  token is "30 days sliding", which *is* a 30-day idle timeout. Pick one.
+> **Partially resolved 2026-08-16 — two bullets were settled by the CODE, and the
+> spec was the thing that had drifted. The rest stand.** Marked `[~]` rather than
+> `[x]`: what remains is real, and the §6 cookie-tossing item is the one with
+> teeth.
+>
+> **Idle timeout — settled, and neither document said it.** The implementation
+> uses TWO windows, not one: `DefaultIdleWindow = 14 * 24h` and
+> `DefaultAbsoluteWindow = 30 * 24h` (`app/authentication.go:80-87`), with the
+> idle deadline pushed forward on each authenticated request and **clamped to the
+> absolute deadline**. So §3's "idle > 14d" is right, and ADR-018's "30 days
+> sliding" describes the absolute ceiling while calling it sliding — which is the
+> one thing it is not. A session here cannot outlive 30 days however active it
+> is. ADR-018's table wording is the remaining inaccuracy; ADRs are settled by
+> policy, so this is flagged rather than edited.
+>
+> **`Elevated` as attributes — already true in the code.** `session_view` carries
+> `aal`, `elevated_scope` and `elevated_until` as columns, and `ElevateSession`
+> clamps with `LEAST($4::timestamptz, absolute_expires_at)`
+> (`db/query/identity/session.sql:157`). So elevation is scoped and time-boxed
+> exactly as this bullet asked, and it is §3's state-machine diagram — which
+> draws `Elevated` as a peer state of `Active` — that is now the stale artifact.
+> The review's own warning applies to the diagram, not to the build.
 - **§3's `Elevated` should be attributes, not a state** — `(aal, elevated_until,
   elevation_scope)` on `Active`. A single state cannot express "elevated to AAL2
   but this action needs AAL3", and elevation must be scoped to the ceremony that
@@ -611,20 +787,26 @@ the Cloudflare edge cache entirely, so padded requests hit origin.
   token holding a 5-minute elevation outlives its own window.
 - **§3's diagram contradicts its table** — the diagram draws `Compromised`
   reachable only from `Elevated`; the table correctly says any state.
-- **§6's session-ring rationale is wrong.** "No single cookie contains a joinable
-  set of identities" does not follow — the browser sends every matching cookie on
-  every request, so the server receives the joinable set regardless. Splitting
-  buys independent revocation and independent overwrite, which is sufficient
-  justification. Correct the stated reason or someone will later "optimise" back
-  to one cookie having refuted an argument that was never load-bearing.
-- **§6's account selector is trusted as authority.** Invariant 1 rejects a
+- **§6's session-ring rationale is wrong.** ✅ **Corrected 2026-08-16.** The
+  false claim is now stated and refuted in place rather than deleted, so the
+  refutation cannot be rediscovered as an argument for collapsing to one cookie.
+  "No single cookie contains a joinable set of identities" does not follow — the
+  browser sends every matching cookie on every request, so the server receives the
+  joinable set regardless. Splitting buys independent revocation and independent
+  overwrite, which is sufficient justification.
+- **§6's account selector is trusted as authority.** ✅ **Specified 2026-08-16**
+  — §6 now states all three requirements (request names the account, `__Host-` on
+  the selector, CSRF validated against the named account) and names cookie
+  tossing as the attack. Still UNBUILT: no cookie exists in the server today
+  (auth is bearer-only), so this is a contract for whoever adds the first one. Invariant 1 rejects a
   request naming two accounts but does not require a request to name one. If the
   selector cookie is the sole authority, **cookie tossing** from any subdomain
   flips it. Required: the request MUST name the account explicitly (the cookie is
   a UI hint only), the selector MUST also carry `__Host-`, and the CSRF token
   must be validated against the account the request names.
-- **§6 has no ring-size cap.** An unbounded ring is an unbounded `Cookie` header
-  on every request.
+- **§6 has no ring-size cap.** ✅ **Stated 2026-08-16** as a requirement with its
+  reason. The NUMBER is still unchosen — it wants a real answer about how many
+  accounts one person plausibly holds, not a guess written into a doc.
 - **§10's key format has no checksum**, which is what makes a secret-scanning
   partner pattern viable at an acceptable false-positive rate. Also: `<keyid>`
   must be random and never derived from the org ID — the AWS `AKIA` lesson is

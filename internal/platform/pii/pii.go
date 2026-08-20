@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -58,12 +59,7 @@ var AllFields = []Field{FieldEmail, FieldName, FieldPhone, FieldLocale, FieldTim
 
 // Valid reports whether a field is one the vault knows.
 func (f Field) Valid() bool {
-	for _, known := range AllFields {
-		if f == known {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(AllFields, f)
 }
 
 // Profile is everything the vault holds about one subject.

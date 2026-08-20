@@ -153,8 +153,7 @@ func TestInvalidatePublishesAndWatchApplies(t *testing.T) {
 
 	remote.put("subj_1", []byte("0123456789abcdef0123456789abcdef"))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	watching := make(chan struct{})
 	go func() { close(watching); _ = remote.Watch(ctx) }()
 	<-watching

@@ -1,0 +1,11 @@
+Hello{{if .Name}} {{.Name}}{{end}},
+
+Confirm that this address belongs to you to finish setting up your Chronos
+account:
+
+  {{url (printf "/verify-email?token=%s" .Token)}}
+
+This link expires in {{.ExpiresIn}} and can be used once.
+
+If you did not create a Chronos account, ignore this message — nothing was
+activated, and the address is released when the link expires.

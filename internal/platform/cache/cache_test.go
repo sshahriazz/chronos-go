@@ -184,15 +184,13 @@ func TestMemoLoadCollapsesConcurrentMisses(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 20 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, _ = m.Load(context.Background(), "a", "a", func(context.Context) (string, error) {
 				loads.Add(1)
 				<-release
 				return "A", nil
 			})
-		}()
+		})
 	}
 	// Let them all pile up on the same key before the loader returns.
 	time.Sleep(50 * time.Millisecond)
@@ -377,15 +375,13 @@ func TestStoreLoadCollapsesConcurrentMisses(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 20 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, _ = s.Load(context.Background(), func(context.Context) (value, error) {
 				loads.Add(1)
 				<-release
 				return value{Name: "a"}, nil
 			}, "k1")
-		}()
+		})
 	}
 	time.Sleep(50 * time.Millisecond)
 	close(release)

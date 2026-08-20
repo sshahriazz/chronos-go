@@ -63,9 +63,9 @@ func TestPayloadShapeIsClosed(t *testing.T) {
 	allowed := map[string]struct{}{
 		"Title": {}, "Body": {}, "NotificationID": {}, "URL": {},
 	}
-	ty := reflect.TypeOf(Payload{})
-	for i := range ty.NumField() {
-		name := ty.Field(i).Name
+	ty := reflect.TypeFor[Payload]()
+	for field := range ty.Fields() {
+		name := field.Name
 		if _, ok := allowed[name]; !ok {
 			t.Errorf("Payload gained the field %q. A push payload transits a "+
 				"third-party service and may render on a lock screen — if this "+

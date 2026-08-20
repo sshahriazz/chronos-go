@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"io/fs"
+	"maps"
 	"strings"
 )
 
@@ -72,8 +73,6 @@ func (o Overlay) Templates(ctx context.Context) (map[string][]byte, error) {
 		//nolint:nilerr // falling back to the embedded set is the intended outcome
 		return base, nil
 	}
-	for k, v := range over {
-		base[k] = v
-	}
+	maps.Copy(base, over)
 	return base, nil
 }

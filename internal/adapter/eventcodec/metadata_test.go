@@ -182,9 +182,9 @@ var metadataWireKeys = map[string]string{
 
 // A new field on Metadata must be deliberately accounted for.
 func TestEveryMetadataFieldIsAccountedFor(t *testing.T) {
-	typ := reflect.TypeOf(eventsourcing.Metadata{})
-	for i := range typ.NumField() {
-		name := typ.Field(i).Name
+	typ := reflect.TypeFor[eventsourcing.Metadata]()
+	for field := range typ.Fields() {
+		name := field.Name
 		if _, known := metadataWireKeys[name]; !known {
 			t.Fatalf("Metadata.%s is new and has no entry in metadataWireKeys.\n\n"+
 				"Event metadata is written as map[string]string because KurrentDB's v2 "+
@@ -292,7 +292,7 @@ func populatedMetadata(t *testing.T) eventsourcing.Metadata {
 		switch {
 		case name == "SubjectIDs":
 			f.Set(reflect.ValueOf([]string{"sub_a", "sub_b"}))
-		case f.Type() == reflect.TypeOf(time.Time{}):
+		case f.Type() == reflect.TypeFor[time.Time]():
 			f.Set(reflect.ValueOf(time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)))
 		case f.Kind() == reflect.String:
 			f.SetString("v_" + name)

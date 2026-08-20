@@ -5,16 +5,27 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
 	"github.com/chronos/chronos-go/internal/adapter/kurrentdb"
 	"github.com/chronos/chronos-go/internal/adapter/openbao"
 	fgaadapter "github.com/chronos/chronos-go/internal/adapter/openfga"
+	"github.com/chronos/chronos-go/internal/adapter/piivault"
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
 	valkeyadapter "github.com/chronos/chronos-go/internal/adapter/valkey"
+	"github.com/chronos/chronos-go/internal/modules/identity"
+	"github.com/chronos/chronos-go/internal/modules/identity/adapter/argon2id"
+	identityapi "github.com/chronos/chronos-go/internal/modules/identity/api"
+	"github.com/chronos/chronos-go/internal/modules/identity/app"
 	"github.com/chronos/chronos-go/internal/platform/authz"
+	"github.com/chronos/chronos-go/internal/platform/clientip"
 	"github.com/chronos/chronos-go/internal/platform/config"
 	"github.com/chronos/chronos-go/internal/platform/cqrs"
+	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/platform/obs"
+	"github.com/chronos/chronos-go/internal/platform/ratelimit"
 	"github.com/chronos/chronos-go/internal/server/health"
+	"github.com/chronos/chronos-go/internal/server/interceptor"
+	"github.com/chronos/chronos-go/internal/server/policy"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/valkey-io/valkey-go"
 )
@@ -60,10 +71,124 @@ type dependencies struct {
 	// rather than a constant so a test can observe the sweep without waiting an
 	// hour for it.
 	sweepEvery time.Duration
+
+	// ---- identity (S1-27) ------------------------------------------------
+	//
+	// Everything below was built, tested, and constructed by no binary until this
+	// wiring existed. Each field is held on the struct rather than kept in a
+	// local for one reason: a composition-root test can assert it. Six seams in
+	// this repository have shipped fully tested and wired into nothing, and every
+	// one of them was invisible precisely because the wiring left no artefact.
+
+	// store is the event store, as the MultiAppender every identity command
+	// writes through. Nil when KurrentDB could not be dialled.
+	store *kurrentdb.Store
+
+	// codec and upcasters are the ONE event registry this binary has. One,
+	// because a second is a second place to forget a type: the store encodes
+	// through it on append and the aggregate repositories decode through it on
+	// load, and a type registered in one and not the other is a command that
+	// writes an event nothing can read back.
+	codec     *eventcodec.JSON
+	upcasters *eventsourcing.UpcasterRegistry
+
+	// vault turns a pseudonym into somewhere an email address can legally live
+	// (ADR-002). Nil when Postgres or OpenBao is unreachable, and identity cannot
+	// be built without it: registration has nowhere to put the address.
+	vault app.SubjectVault
+
+	// counter backs the authentication attempt ceiling. Nil when Valkey is
+	// unreachable — and identity is then refused outright, because a login path
+	// with no ceiling permits unlimited guessing with nothing reporting it.
+	counter ratelimit.Counter
+
+	// identity is the Connect handler. Nil means the module could not be built,
+	// and main leaves the service UNREGISTERED rather than registering something
+	// that panics on first use.
+	identity *identityapi.Service
+
+	// revocations is the authentication service, held ONLY so a composition-root
+	// test can assert that revoking a session also invalidates the authorization
+	// decisions cached for that principal (ADR-045).
+	//
+	// Nothing at runtime can notice this wiring going missing: with no epochs the
+	// service logs once at construction and every revocation then succeeds
+	// locally while a cached permit keeps authorizing for up to
+	// authz.MaxDecisionTTL. The assertion is the only detector.
+	revocations *app.Authentication
+
+	// hasher is held so a test can assert the concurrency bound is the resolved
+	// CPU limit rather than GOMAXPROCS. Each concurrent hash holds 32 MiB, so
+	// that bound IS the memory ceiling on password verification.
+	hasher *argon2id.Hasher
+
+	// cpuLimit is what this process may actually use (see resolveCPULimit), and
+	// hashConcurrency is what the hasher was built with. Both recorded, because
+	// the interesting assertion is the RELATIONSHIP between them.
+	cpuLimit        int
+	hashConcurrency int
+
+	// limiter is the attempt ceiling. Held so a test can assert the rule set,
+	// which is a policy decision that would otherwise exist only inside a
+	// constructor's arguments.
+	limiter *ratelimit.Limiter
+
+	// mailAddressLimiter and mailCallerLimiter are the two axes of the
+	// verification-mail ceiling. Held for the same reason as limiter, and with a
+	// sharper edge: a resend that is not rate limited still works perfectly, so
+	// nothing at runtime distinguishes "the ceiling is configured" from "the
+	// ceiling was never wired" until somebody's mailbox is full. Only a
+	// composition-root assertion can tell the difference.
+	mailAddressLimiter *ratelimit.Limiter
+	mailCallerLimiter  *ratelimit.Limiter
+
+	// callerScope is the trust boundary the per-caller ceiling's bucket key is
+	// derived through. Held for the sharpest version of the reason above: every
+	// value of it produces a working server, and the difference between "trusts
+	// one proxy" and "trusts the caller's own header" is invisible at runtime,
+	// visible in no log line, and only ever discovered as an abuse incident.
+	callerScope clientip.Resolver
+
+	// totpEnroller and authObserver are the two collaborators the composition
+	// root SYNTHESISES rather than receives: a func type over the TOTP adapter,
+	// and the metrics observer for the two authentication outcomes that leave no
+	// event behind. Both default to something harmless inside app, so their
+	// absence is silent by construction — which is why they are asserted here.
+	totpEnroller app.TotpEnroller
+	authObserver app.AuthObserver
+
+	// ---- the enforcement pipeline (ADR-021) -------------------------------
+
+	// policies is every method this server will serve, with its declared gates.
+	policies *policy.Set
+
+	// authn resolves the bearer token. Nil means every authenticated RPC is
+	// refused, which is the correct direction and must still be logged.
+	authn *interceptor.SessionAuthenticator
+
+	// idempotencyGate is gate 5, over the same cqrs.Once as `once`.
+	idempotencyGate *interceptor.Idempotency
+
+	// gates is the interceptor every Connect handler in this binary is built
+	// with. Nil means no service is registered at all — serving a method whose
+	// gates are unknown is worse than not serving it.
+	gates *interceptor.Gates
 }
 
 // tombstonesOrNil and decisionsOrNil avoid the typed-nil trap.
 func tombstonesOrNil(a *valkeyadapter.Authz) authz.Tombstones {
+	if a == nil {
+		return nil
+	}
+	return a
+}
+
+// epochsOrNil avoids the same typed-nil trap for the revocation epochs.
+//
+// A nil *Authz inside a non-nil interface passes NewAuthentication's nil check,
+// so revocation would look wired, log nothing, and panic on the first sign-out —
+// which is the worst possible moment to discover it.
+func epochsOrNil(a *valkeyadapter.Authz) app.RevocationEpochs {
 	if a == nil {
 		return nil
 	}
@@ -79,6 +204,15 @@ func decisionsOrNil(a *valkeyadapter.Authz) authz.Decisions {
 
 func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func()) {
 	d := &dependencies{metrics: obs.New()}
+
+	// The event registry, built before anything that reads or writes an event.
+	// Types come from each module's own composition surface rather than from a
+	// list here: a list in this file is a second place to forget a type, and the
+	// module test that guards the schema registry checks the module's list.
+	d.upcasters = eventsourcing.NewUpcasterRegistry()
+	identity.RegisterSchemas(d.upcasters)
+	d.codec = eventcodec.NewJSON(d.upcasters)
+	identity.RegisterEvents(d.codec)
 
 	// ---- PostgreSQL: lazy pool, no connection attempted here -------------
 	if pool, err := pgadapter.NewPool(context.Background(), cfg.Postgres.AppDSN(), cfg.Postgres.MaxConns); err != nil {
@@ -149,9 +283,17 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 	} else {
 		authzCache = valkeyadapter.NewAuthz(vk)
 		d.authzCache = authzCache
+		// The same connection carries the authentication attempt ceiling. One
+		// client rather than two: they are the same store, and a second connection
+		// would double the failure surface for no isolation — losing Valkey costs
+		// both regardless.
+		d.counter = counterOrNil(valkeyadapter.NewCounter(vk))
 		d.probes = append(d.probes, valkeyadapter.Probe{Client: vk})
 		d.closes = append(d.closes, vk.Close)
 	}
+	// A nil counter is NOT silently optional: startIdentity substitutes a counter
+	// that fails, which makes every attempt Degraded and counted, and says so at
+	// ERROR. The decision and its reasoning live there, beside the limiter.
 
 	// ---- OpenFGA over gRPC (ADR-037) ------------------------------------
 	//
@@ -211,20 +353,48 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 	// Dial parses the connection string but does not connect; the client
 	// reconnects on its own, which is what ADR-010 requires.
 	if kc, err := kurrentdb.Dial(cfg.KurrentDB.ConnectionString); err != nil {
-		log.Error("kurrentdb client unavailable", "error", err)
+		log.Error("kurrentdb client unavailable; NO command can be accepted, because every "+
+			"write in this system is an append", "error", err)
 		d.probes = append(d.probes, kurrentdb.Probe{})
 	} else {
+		// The Store is built with identity's own codec inside startIdentity. This
+		// one carries the codec the store needs to APPEND, which is the same
+		// registry: a codec that cannot encode an event cannot write it, and a
+		// type missing from it is a hard error rather than a silent skip.
+		d.store = kurrentdb.NewStore(kc, d.codec)
 		d.probes = append(d.probes, kurrentdb.Probe{Client: kc})
 		d.closes = append(d.closes, func() { _ = kc.Close() })
 	}
 
 	// ---- OpenBao: official SDK -------------------------------------------
+	//
+	// The PII vault is the single point at which a pseudonym becomes a real
+	// address, and identity cannot be built without it: an email has nowhere else
+	// it is allowed to go (ADR-002).
 	if bc, err := openbao.Dial(cfg.OpenBao.Address, cfg.OpenBao.Token.Expose()); err != nil {
-		log.Error("openbao client unavailable", "error", err)
+		log.Error("openbao client unavailable; no address can be stored or resolved, so "+
+			"registration cannot complete", "error", err)
 		d.probes = append(d.probes, openbao.Probe{})
 	} else {
 		d.probes = append(d.probes, openbao.Probe{Client: bc})
+		if d.pool == nil {
+			log.Error("no PII vault: postgres is unreachable, so there is nowhere to store " +
+				"the ciphertext an address becomes")
+		} else {
+			// No key cache here, deliberately. cmd/worker caches unwrapped subject
+			// keys because it fans one notification out to many recipients; the API
+			// resolves at most one subject per request, so a cache would buy nothing
+			// and would widen the window in which an erased subject's key is still
+			// usable in a replica that missed its invalidation (ADR-041).
+			d.vault = vaultOrNil(piivault.New(pgadapter.New(d.pool),
+				openbao.NewKeyRing(bc, cfg.OpenBao.KEKName)))
+		}
 	}
+
+	// Identity LAST: it needs the pool, the store, the vault and the counter, and
+	// a thing constructed before what it depends on is how a composition root
+	// grows a nil that nobody notices until a request arrives.
+	d.startIdentity(cfg, log)
 
 	return d, func() {
 		for _, c := range d.closes {

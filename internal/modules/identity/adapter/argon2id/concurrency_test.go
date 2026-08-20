@@ -47,13 +47,11 @@ func TestConcurrentHashingNeverExceedsTheLimit(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 24 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if _, err := h.Hash(context.Background(), "correct horse battery", user, cred); err != nil {
 				t.Errorf("hash: %v", err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	close(stop)
@@ -106,13 +104,11 @@ func TestConcurrentVerificationNeverExceedsTheLimit(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 16 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if _, err := h.Verify(context.Background(), "correct horse battery", v, user, cred); err != nil {
 				t.Errorf("verify: %v", err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	close(stop)

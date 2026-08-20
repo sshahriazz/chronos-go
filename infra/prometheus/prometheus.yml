@@ -15,6 +15,11 @@ global:
     stack: chronos
     env: local
 
+# Alerting rules. Globbed rather than listed one by one so a new file is picked
+# up by adding it, not by remembering to edit two places.
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
 scrape_configs:
   - job_name: prometheus
     static_configs:

@@ -129,8 +129,7 @@ func (c *Client) Start(ctx context.Context, s workflow.Start) (workflow.Run, err
 		WorkflowExecutionErrorWhenAlreadyStarted: true,
 	}, s.Name, s.Input)
 	if err != nil {
-		var already *serviceerror.WorkflowExecutionAlreadyStarted
-		if errors.As(err, &already) {
+		if _, ok := errors.AsType[*serviceerror.WorkflowExecutionAlreadyStarted](err); ok {
 			return workflow.Run{ID: s.ID}, fmt.Errorf("%w: %s", workflow.ErrAlreadyStarted, s.ID)
 		}
 		// Everything else means the work did NOT start. Wrapping it as

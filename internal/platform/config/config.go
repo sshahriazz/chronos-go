@@ -14,6 +14,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -69,8 +70,148 @@ type Config struct {
 	Temporal  TemporalConfig
 	Tracing   TracingConfig
 	API       APIConfig
+	Identity  IdentityConfig
 
 	location *time.Location
+}
+
+// IdentityConfig is the key material and the two tuning knobs the identity
+// module cannot be built without.
+//
+// Every key here is 32 bytes, hex-encoded — 64 characters. Hex rather than
+// base64 because a mistyped base64 key is frequently still decodable at a
+// different length, and the failure then surfaces as "this key is 31 bytes"
+// somewhere deep in a constructor rather than as a refusal to boot.
+//
+// None of them is `required`. A deployment that has not yet provisioned identity
+// keys must still start: the composition root reports at ERROR that the identity
+// service could not be built and leaves it unregistered, which is ADR-010's rule
+// applied to our own configuration rather than to an unreachable dependency.
+// Outside local, validate() upgrades that to a refusal to boot — an API server
+// in production with no login is not a degraded mode anybody wants discovered
+// from a log line.
+type IdentityConfig struct {
+	// EmailIndexKey keys the blind index over email addresses. It is the one key
+	// in this struct that can NEVER be rotated: the index names a KurrentDB
+	// stream, stream names are immutable, and a new key orphans every reservation
+	// ever written — after which uniqueness silently stops being enforced for
+	// everything registered before the change (IDENTITY-SLICE-1).
+	EmailIndexKey Secret `env:"IDENTITY_EMAIL_INDEX_KEY"`
+
+	// PasswordPepperKey is the current pepper. The verifier is Argon2id sealed
+	// under it, so a stolen database alone is not crackable offline (ADR-028).
+	PasswordPepperKey Secret `env:"IDENTITY_PASSWORD_PEPPER_KEY"`
+
+	// PasswordPepperVersion is the version the current key seals under, written
+	// to the `pepper_version` column beside each verifier. It must be at least 1:
+	// a row at 0 is invisible to the rotation job's `pepper_version < n` query, so
+	// it is skipped silently and the account is locked out for good when the old
+	// key is destroyed.
+	PasswordPepperVersion int `env:"IDENTITY_PASSWORD_PEPPER_VERSION" envDefault:"1"`
+
+	// PasswordPepperRetired carries the keys a PREVIOUS version sealed under, as
+	// `version:hex` pairs separated by commas — e.g. `2:aabb…,1:ccdd…`.
+	//
+	// # Why this exists, and why rotation is broken without it
+	//
+	// A pepper rotation does not rewrite anything. Existing rows keep their old
+	// `pepper_version` until the re-sealing job reaches them, and a verifier is
+	// AEAD-sealed under the key of its own version — so a process holding only the
+	// new key cannot open them at all.
+	//
+	// The consequence is not "the re-seal job stalls". It is that every user whose
+	// verifier has not yet been re-sealed CANNOT LOG IN, immediately, from the
+	// moment the new key is deployed. Verification reports the value as
+	// unreadable, which is deliberately not the same as a wrong password — but the
+	// user is locked out either way. A rotation without this field is an outage
+	// with a delayed trigger.
+	//
+	// So the deployment order is: add the new key here as the current one, keep
+	// every still-referenced version in this list, let the re-sealing job run to
+	// zero rows (`CountCredentialsAtKeyVersion`), and only then remove the retired
+	// entry and destroy the key in OpenBao. Nothing in code can enforce that
+	// ordering, which is why the count query exists as the check.
+	//
+	// Empty is the normal steady state: one key, never rotated.
+	PasswordPepperRetired Secret `env:"IDENTITY_PASSWORD_PEPPER_RETIRED"`
+
+	// TotpSealKey seals shared TOTP secrets, and TotpSealKeyVersion is its
+	// version, with exactly the same rotation-visibility rule as the pepper.
+	TotpSealKey        Secret `env:"IDENTITY_TOTP_SEAL_KEY"`
+	TotpSealKeyVersion int    `env:"IDENTITY_TOTP_SEAL_KEY_VERSION" envDefault:"1"`
+
+	// TotpSealRetired is the same list for the TOTP sealing key, in the same
+	// format and with the same deployment order.
+	//
+	// The failure it prevents is worse here than for passwords, because there is
+	// no reset flow to fall back on: a TOTP secret that cannot be opened is a
+	// second factor the user can never satisfy, and the account is locked behind a
+	// factor nobody can produce. A password lockout ends with an email; this one
+	// ends with support.
+	TotpSealRetired Secret `env:"IDENTITY_TOTP_SEAL_RETIRED"`
+
+	// TotpIssuer is the label a user sees above the account in their
+	// authenticator app. An empty one produces an unlabelled entry, which is how
+	// people delete the wrong credential.
+	TotpIssuer string `env:"IDENTITY_TOTP_ISSUER" envDefault:"Chronos"`
+
+	// PasswordHashConcurrency bounds simultaneous Argon2id hashes. Each one holds
+	// 32 MiB for its whole duration, so this is the ceiling on how much memory
+	// password verification can consume no matter what arrives.
+	//
+	// Zero means "resolve it from the CPU limit this process actually has", which
+	// is what cmd/api does — see resolveCPULimit there for why GOMAXPROCS is the
+	// wrong answer under a CFS quota. Set it explicitly only when a measurement on
+	// the target hardware says otherwise; the measured saturation point is the
+	// core count, and beyond it throughput DECLINES while memory grows linearly.
+	PasswordHashConcurrency int `env:"IDENTITY_PASSWORD_HASH_CONCURRENCY" envDefault:"0"`
+}
+
+// IdentityKeySize is the length every identity key must decode to. It matches
+// crypto.DEKSize and blindindex.KeySize; the value is repeated rather than
+// imported because config sits beneath both in the import contract
+// (CONVENTIONS §2).
+const IdentityKeySize = 32
+
+// Configured reports whether enough key material is present to build the
+// identity module at all. Partial configuration is NOT configured — see
+// validate, which names each missing key.
+func (i IdentityConfig) Configured() bool {
+	return !i.EmailIndexKey.IsZero() &&
+		!i.PasswordPepperKey.IsZero() &&
+		!i.TotpSealKey.IsZero()
+}
+
+// EmailIndexKeyBytes, PasswordPepperKeyBytes and TotpSealKeyBytes decode the hex
+// forms. validate has already refused anything malformed, so a caller reaching
+// an error here is looking at a Config nobody validated.
+func (i IdentityConfig) EmailIndexKeyBytes() ([]byte, error) {
+	return decodeIdentityKey("IDENTITY_EMAIL_INDEX_KEY", i.EmailIndexKey)
+}
+
+func (i IdentityConfig) PasswordPepperKeyBytes() ([]byte, error) {
+	return decodeIdentityKey("IDENTITY_PASSWORD_PEPPER_KEY", i.PasswordPepperKey)
+}
+
+func (i IdentityConfig) TotpSealKeyBytes() ([]byte, error) {
+	return decodeIdentityKey("IDENTITY_TOTP_SEAL_KEY", i.TotpSealKey)
+}
+
+// decodeIdentityKey turns a hex secret into bytes, refusing anything that is not
+// exactly IdentityKeySize long.
+//
+// The error names the variable and the observed length, and deliberately never
+// the value: an error string is the one place a key is most likely to reach a
+// log aggregator.
+func decodeIdentityKey(name string, s Secret) ([]byte, error) {
+	raw, err := hex.DecodeString(strings.TrimSpace(s.Expose()))
+	if err != nil {
+		return nil, fmt.Errorf("%s is not valid hex", name)
+	}
+	if len(raw) != IdentityKeySize {
+		return nil, fmt.Errorf("%s decodes to %d bytes, want %d", name, len(raw), IdentityKeySize)
+	}
+	return raw, nil
 }
 
 // APIConfig tunes the request pipeline.
@@ -90,6 +231,35 @@ type APIConfig struct {
 	// turns a double-click into an error the user sees rather than the answer
 	// they were about to get.
 	IdempotencyWait time.Duration `env:"API_IDEMPOTENCY_WAIT" envDefault:"5s"`
+
+	// TrustedProxyHops is how many proxies in front of this server APPEND to
+	// X-Forwarded-For. It is the trust boundary every per-source rate limit is
+	// scoped by (internal/platform/clientip).
+	//
+	// # Zero is not "unset", it is a policy
+	//
+	// Zero means trust nothing: the header is not read at all and the
+	// connection's peer address is the scope. That is the only value that is safe
+	// without knowing the topology, so it is the default, and a deployment that
+	// sets nothing behaves exactly as one that had no such setting.
+	//
+	// # The contract, and why it is asymmetric
+	//
+	// Set it to the number of proxies that append, AND NO MORE.
+	//
+	//   - Too LOW: every caller behind the proxy shares one bucket and the
+	//     per-caller rule degrades into a global ceiling. Users are refused at
+	//     random once traffic grows. Bad, never exploitable.
+	//   - Too HIGH: the entry selected moves left, into the part of the header the
+	//     CALLER wrote. An attacker then mints a fresh bucket per request to evade
+	//     the ceiling, or borrows a victim's address to burn their budget. The
+	//     control is not weakened, it is inverted into a weapon.
+	//
+	// There is no observable difference between the two at runtime, so the number
+	// has to come from the topology diagram rather than from experiment. A load
+	// balancer that terminates TLS and appends is one; an L4 balancer that
+	// forwards the TCP connection untouched is ZERO, because it appends nothing.
+	TrustedProxyHops int `env:"API_TRUSTED_PROXY_HOPS" envDefault:"0"`
 }
 
 // MaxIdempotencyTTL is the ceiling for API_IDEMPOTENCY_TTL. It mirrors
@@ -97,6 +267,18 @@ type APIConfig struct {
 // so the failure is a refusal to BOOT with a named environment variable, rather
 // than an error from a constructor at some later point in wiring.
 const MaxIdempotencyTTL = 7 * 24 * time.Hour
+
+// MaxTrustedProxyHops caps API_TRUSTED_PROXY_HOPS. It mirrors
+// clientip.MaxTrustedHops, which the kernel enforces again when the resolver is
+// built — the value is repeated rather than imported because config sits beneath
+// the kernel in the import contract (CONVENTIONS §2), exactly as
+// MaxRebuildShards and IdentityKeySize are.
+//
+// This one exists so the failure is a refusal to BOOT naming the environment
+// variable. The alternative is worse than for the other caps: a hop count set
+// far too high does not fail at all, it quietly makes the client address
+// attacker-chosen, and nothing at runtime reports the difference.
+const MaxTrustedProxyHops = 8
 
 type KurrentDBConfig struct {
 	// ConnectionString is the kurrentdb:// URI. tls=false is refused outside
@@ -586,6 +768,23 @@ func (c *Config) validate() error {
 		add("API_IDEMPOTENCY_WAIT must not be negative, got %s", c.API.IdempotencyWait)
 	}
 
+	// The trust boundary for X-Forwarded-For. Both bounds are refused at boot
+	// because neither mistake has a runtime symptom: a negative value is a typo,
+	// and a value above the cap silently hands the rate-limit bucket key to
+	// whoever is calling.
+	if c.API.TrustedProxyHops < 0 {
+		add("API_TRUSTED_PROXY_HOPS is %d; it cannot be negative (0 means trust nothing "+
+			"and scope per-caller limits by the connection's peer address)",
+			c.API.TrustedProxyHops)
+	}
+	if c.API.TrustedProxyHops > MaxTrustedProxyHops {
+		add("API_TRUSTED_PROXY_HOPS %d exceeds the cap of %d: set it to the number of "+
+			"proxies that APPEND to X-Forwarded-For and no more, because every hop above "+
+			"that number selects an entry the caller wrote, which makes the client "+
+			"address — and therefore every per-caller rate-limit bucket — spoofable",
+			c.API.TrustedProxyHops, MaxTrustedProxyHops)
+	}
+
 	// A dedup window shorter than the redelivery gap means a reactor forgets it
 	// already sent an email before the server stops trying to redeliver it. The
 	// floor is deliberately generous: parked events are replayed by hand, often
@@ -601,11 +800,196 @@ func (c *Config) validate() error {
 			c.Reactor.DedupSweepEvery)
 	}
 
+	c.validateIdentity(add)
+
 	if len(problems) == 0 {
 		return nil
 	}
 	return fmt.Errorf("invalid configuration:\n  - %s", strings.Join(problems, "\n  - "))
 }
 
+// validateIdentity checks the identity key material.
+//
+// Split out of validate because it has a shape the rest of that function does
+// not: the keys are optional as a SET and mandatory individually once any of
+// them is present. Half-configured identity is the dangerous state — two of
+// three keys present means the module cannot be built, and a reader looking at
+// the environment sees identity keys and concludes login works.
+func (c *Config) validateIdentity(add func(string, ...any)) {
+	id := c.Identity
+
+	// Outside local, a server with no identity keys serves no login at all. That
+	// is a deployment mistake rather than a degraded dependency, so it stops the
+	// boot rather than being reported by a probe.
+	if !c.Env.IsLocal() && !id.Configured() {
+		add("IDENTITY_EMAIL_INDEX_KEY, IDENTITY_PASSWORD_PEPPER_KEY and IDENTITY_TOTP_SEAL_KEY "+
+			"must all be set when APP_ENV=%s: without them no identity service can be built "+
+			"and the server would start serving no registration, no login and no session", c.Env)
+	}
+
+	// Each key that IS present must be usable, whatever the environment. A
+	// malformed key is never a deliberate "identity is off" — it is a typo, and
+	// discovering it from a constructor at wiring time costs an incident.
+	for name, key := range map[string]Secret{
+		"IDENTITY_EMAIL_INDEX_KEY":     id.EmailIndexKey,
+		"IDENTITY_PASSWORD_PEPPER_KEY": id.PasswordPepperKey,
+		"IDENTITY_TOTP_SEAL_KEY":       id.TotpSealKey,
+	} {
+		if key.IsZero() {
+			if id.Configured() {
+				continue
+			}
+			// Some keys set and this one not: name it, because the partial state
+			// is exactly what looks configured and is not.
+			if !id.EmailIndexKey.IsZero() || !id.PasswordPepperKey.IsZero() || !id.TotpSealKey.IsZero() {
+				add("%s is not set while other identity keys are: identity cannot be built "+
+					"from a partial key set, so login is off despite the configuration "+
+					"suggesting otherwise", name)
+			}
+			continue
+		}
+		if _, err := decodeIdentityKey(name, key); err != nil {
+			add("%s", err.Error())
+		}
+	}
+
+	// A version below 1 is invisible to the rotation work list, which selects on
+	// `pepper_version < n`. The row is skipped silently and the account loses its
+	// password — or its second factor — when the old key is destroyed.
+	if id.PasswordPepperVersion < 1 {
+		add("IDENTITY_PASSWORD_PEPPER_VERSION is %d; a verifier stored below version 1 is "+
+			"invisible to key rotation and is lost when the old key is destroyed",
+			id.PasswordPepperVersion)
+	}
+	if id.TotpSealKeyVersion < 1 {
+		add("IDENTITY_TOTP_SEAL_KEY_VERSION is %d; a TOTP secret stored below version 1 is "+
+			"invisible to key rotation", id.TotpSealKeyVersion)
+	}
+
+	if strings.TrimSpace(id.TotpIssuer) == "" {
+		add("IDENTITY_TOTP_ISSUER must not be empty: it is the label a user sees above the " +
+			"account in their authenticator app, and an unlabelled entry is one people delete")
+	}
+
+	// Negative is refused; zero means "resolve it from the CPU limit".
+	if id.PasswordHashConcurrency < 0 {
+		add("IDENTITY_PASSWORD_HASH_CONCURRENCY is %d; it must be zero (resolve from the "+
+			"container's CPU limit) or positive", id.PasswordHashConcurrency)
+	}
+	// Each concurrent hash holds 32 MiB for its whole duration, so this bound IS
+	// the memory ceiling on password verification. Measured on an 11-core machine:
+	// 128 concurrent hashes is 4 GiB spent to do slightly less work than 16.
+	if id.PasswordHashConcurrency > MaxPasswordHashConcurrency {
+		add("IDENTITY_PASSWORD_HASH_CONCURRENCY %d exceeds the %d cap: at 32 MiB per hash "+
+			"that is %d MiB of resident memory reachable by unauthenticated requests, and "+
+			"throughput saturates at the core count long before it",
+			id.PasswordHashConcurrency, MaxPasswordHashConcurrency,
+			id.PasswordHashConcurrency*32)
+	}
+}
+
+// MaxPasswordHashConcurrency caps IDENTITY_PASSWORD_HASH_CONCURRENCY.
+//
+// 256 concurrent hashes is 8 GiB of Argon2id working set, which is already well
+// past any machine on which the setting is a good idea. The cap exists because
+// the value is reachable by unauthenticated traffic: it is the supply-side half
+// of the pair of controls that stop password verification being a memory
+// amplification vector.
+const MaxPasswordHashConcurrency = 256
+
 // ErrMissing is returned when a required variable is absent.
 var ErrMissing = errors.New("config: required environment variable is not set")
+
+// PasswordPepperKeySet and TotpSealKeySet return every key version the process
+// must be able to OPEN, current included, ready for argon2id.NewPepperKeys and
+// totpseal.NewKeys.
+//
+// One function per key set rather than one shared helper taking two fields,
+// because the error messages name the variable an operator has to fix, and a
+// shared helper would either lose that or take the name as an argument nobody
+// checks against the field it was read from.
+func (i IdentityConfig) PasswordPepperKeySet() (map[int][]byte, error) {
+	return identityKeySet(
+		"IDENTITY_PASSWORD_PEPPER_KEY", i.PasswordPepperKey, i.PasswordPepperVersion,
+		"IDENTITY_PASSWORD_PEPPER_RETIRED", i.PasswordPepperRetired)
+}
+
+func (i IdentityConfig) TotpSealKeySet() (map[int][]byte, error) {
+	return identityKeySet(
+		"IDENTITY_TOTP_SEAL_KEY", i.TotpSealKey, i.TotpSealKeyVersion,
+		"IDENTITY_TOTP_SEAL_RETIRED", i.TotpSealRetired)
+}
+
+// identityKeySet merges the current key with the retired list.
+//
+// Every failure here is refused at BOOT rather than tolerated, and that is the
+// whole design. A malformed retired list means some rows cannot be opened, and
+// the symptom is a subset of users unable to authenticate — distributed over
+// whoever happens not to have been re-sealed yet, which is the hardest possible
+// shape to diagnose from a bug report. A startup error naming the variable costs
+// one failed deploy instead.
+func identityKeySet(
+	currentName string, current Secret, currentVersion int,
+	retiredName string, retired Secret,
+) (map[int][]byte, error) {
+	if err := validVersionNumber(currentName+"_VERSION", currentVersion); err != nil {
+		return nil, err
+	}
+	key, err := decodeIdentityKey(currentName, current)
+	if err != nil {
+		return nil, err
+	}
+	set := map[int][]byte{currentVersion: key}
+
+	for entry := range strings.SplitSeq(retired.Expose(), ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		version, material, found := strings.Cut(entry, ":")
+		if !found {
+			// The value is NOT echoed. This variable is entirely key material, and
+			// an error string is the one place a key most reliably reaches a log
+			// aggregator.
+			return nil, fmt.Errorf("%s: an entry is not in `version:hex` form", retiredName)
+		}
+		n, convErr := strconv.Atoi(strings.TrimSpace(version))
+		if convErr != nil {
+			return nil, fmt.Errorf("%s: %q is not a version number", retiredName, version)
+		}
+		if err := validVersionNumber(retiredName, n); err != nil {
+			return nil, err
+		}
+		if n == currentVersion {
+			// Refused rather than merged. Two entries for one version is either a
+			// copy-paste of the current key — harmless but a lie about what is
+			// retired — or two DIFFERENT keys for one version, which silently
+			// decides that half the rows at that version can never be opened.
+			return nil, fmt.Errorf("%s: version %d is also %s_VERSION; a version has exactly "+
+				"one key", retiredName, n, currentName)
+		}
+		if _, dup := set[n]; dup {
+			return nil, fmt.Errorf("%s: version %d appears twice", retiredName, n)
+		}
+		decoded, err := decodeIdentityKey(retiredName, Secret(strings.TrimSpace(material)))
+		if err != nil {
+			return nil, err
+		}
+		set[n] = decoded
+	}
+	return set, nil
+}
+
+// validVersionNumber refuses a version below 1.
+//
+// Zero is the zero value of the `pepper_version` column, so a row written at 0 is
+// invisible to the re-sealing job's `pepper_version < n` work list: it is skipped
+// silently, the operator's done check reports zero rows outstanding, and the
+// account loses its credential when the old key is destroyed.
+func validVersionNumber(name string, v int) error {
+	if v < 1 {
+		return fmt.Errorf("%s is %d; a key version must be at least 1, because 0 is "+
+			"indistinguishable from an unset column and the re-sealing job cannot see it", name, v)
+	}
+	return nil
+}

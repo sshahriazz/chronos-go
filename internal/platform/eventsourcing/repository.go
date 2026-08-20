@@ -356,3 +356,49 @@ func (r *Repository[T]) Save(
 }
 
 func isNotFound(err error) bool { return errors.Is(err, ErrStreamNotFound) }
+
+// SchemaVersions reports the current schema version of an event type.
+//
+// Declared as an interface so a multi-stream caller can be given the registry
+// without depending on its concrete type, and so a test can drive the
+// unversioned branch. *UpcasterRegistry satisfies it.
+type SchemaVersions interface {
+	CurrentVersion(eventType string) (int, bool)
+}
+
+// StampSchemaVersion returns meta with SchemaVersion filled in for one event
+// type, if it is not already set.
+//
+// # Why this is exported rather than private to Save
+//
+// Repository.Save has always done this, on the single-stream path. A caller that
+// appends to SEVERAL streams at once cannot use Save — the whole point of
+// MultiAppender is that two appends are not atomic — so it builds its own
+// PendingEvents, and every such caller has to remember a step the kernel
+// otherwise performs for it.
+//
+// Identity did not remember, and the result is the most expensive shape of bug
+// this codebase has produced. Every identity event was written at version 0
+// while the registry declares them at 1, so a stored event is *older* than the
+// schema and loading it demands a 0→1 upcaster that should never exist. The
+// account could be written and never read back: one command succeeded, and the
+// next command against the same aggregate failed to load it.
+//
+// What made it survive every test up to that point is that the two paths
+// disagree. Projections do not upcast, so `user_view` filled in correctly and
+// every read model, dashboard and probe stayed green; only the AGGREGATE path
+// upcasts, and that is the path every command takes. A green read side is not
+// evidence that the write side can be replayed.
+//
+// So the logic lives here, once, and multi-stream callers use it. A future
+// module doing the same thing gets it right by calling the same function rather
+// than by remembering the same rule.
+func StampSchemaVersion(meta Metadata, versions SchemaVersions, eventType string) Metadata {
+	if meta.SchemaVersion != 0 || versions == nil {
+		return meta
+	}
+	if v, ok := versions.CurrentVersion(eventType); ok {
+		meta.SchemaVersion = v
+	}
+	return meta
+}

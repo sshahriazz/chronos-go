@@ -11,9 +11,11 @@ import (
 	"time"
 
 	"github.com/chronos/chronos-go/internal/modules/identity/contract"
+	"github.com/chronos/chronos-go/internal/platform/authz"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/platform/ids"
 	"github.com/chronos/chronos-go/internal/platform/pii"
+	"github.com/chronos/chronos-go/internal/platform/ratelimit"
 )
 
 // PasswordHasher turns a password into a stored verifier, and checks one.
@@ -70,6 +72,246 @@ type PasswordHasher interface {
 // support tickets say "wrong password" and the cause is an operational mistake
 // nobody is looking for.
 var ErrVerifierUnreadable = errors.New("identity: stored password verifier cannot be read")
+
+// TotpSealer encrypts the TOTP shared secret for storage, and recovers it.
+//
+// It is the one authentication secret in this system that is SEALED rather than
+// digested, and the reason is structural: RFC 6238 derives the code from the
+// secret, so verification needs the plaintext back. A one-way function — the
+// treatment every password verifier, token and recovery code gets — would produce
+// a credential nothing could ever check.
+//
+// The port has no Compare method for the same reason PasswordHasher has none:
+// only the implementation knows the encoding, the key version and the binding,
+// and a caller handed two strings will eventually compare them with ==.
+//
+// There is no context parameter. The keys are held in memory (see the totpseal
+// package), so there is no round trip to cancel, and an unused ctx on a port is a
+// promise of cancellability that nothing behind it honours.
+type TotpSealer interface {
+	// Seal encrypts a shared secret, bound to this subject and credential.
+	//
+	// Both ids are authenticated into the ciphertext, so a row copied from one
+	// account to another fails to open rather than handing the attacker a working
+	// second factor on an account they chose.
+	Seal(secret, subjectID string, cred ids.CredentialID) (string, error)
+
+	// Open recovers a shared secret.
+	//
+	// Returns ErrSecretUnreadable when the value does not authenticate. It is
+	// never "the code was wrong" — see that error's doc.
+	Open(sealed, subjectID string, cred ids.CredentialID) (string, error)
+
+	// KeyVersion reports the key version Seal is currently sealing under, for the
+	// `pepper_version` column. It must be >= 1: a row at 0 is invisible to the
+	// re-sealing job's `pepper_version < n` query, so it is skipped silently and
+	// the account loses its second factor when the old key is destroyed.
+	KeyVersion() int32
+}
+
+// ErrSecretUnreadable means a stored TOTP secret could not be parsed or opened.
+//
+// It is NOT a wrong code, and conflating the two is how a key destroyed too early
+// looks exactly like every user suddenly mistyping: the tickets say "my
+// authenticator stopped working" and the cause is an operational mistake nobody
+// is looking for. The caller still answers the WIRE identically for both — a
+// distinguishable response would say which accounts have a second factor
+// enrolled — and distinguishes them in the log.
+var ErrSecretUnreadable = errors.New("identity: stored TOTP secret cannot be read")
+
+// TotpSecrets stores the sealed TOTP shared secret.
+//
+// It is the second consumer of the `credential` table and the second port that is
+// NOT a projection: like a password verifier, a shared secret may never enter an
+// event (identity.md §4, ADR-002), so these rows are authoritative and a
+// projection rebuild must not be able to reach them.
+//
+// The sealed value is OPAQUE here. This port does not open it, does not know its
+// encoding and does not hold a key — that belongs to TotpSealer. A store that
+// peeked inside would be a second parser for a format with exactly one authority.
+type TotpSecrets interface {
+	// Provision records a secret that is not yet proven.
+	//
+	// The row is written UNUSABLE: enrollment is two-step, and a secret the user
+	// scanned but never produced a code from may exist only on this side of the
+	// exchange. Writing it enabled would let an account satisfy the
+	// mandatory-second-factor rule with a factor nobody has ever demonstrated.
+	//
+	// Idempotent for the same credential id, so a handler that crashed between
+	// writing the row and appending its event can retry the whole command.
+	Provision(ctx context.Context, secret NewTotpSecret) error
+
+	// Find returns the subject's TOTP credential, PROVEN OR NOT.
+	//
+	// Deliberately unlike PasswordCredentials.Find, which returns only usable
+	// rows: confirmation has to open a secret that is by definition not yet
+	// usable. Disabled rows are still excluded — a locked-out authenticator must
+	// not be resurrected by a confirmation.
+	//
+	// Returns ErrNoTotpCredential when there is none. An unknown subject and an
+	// account with no authenticator land there together, and the caller must
+	// answer both exactly as it answers a wrong code.
+	Find(ctx context.Context, subjectID string) (TotpSecret, error)
+
+	// Enable makes a provisioned credential usable, after a live code has proven
+	// it.
+	//
+	// Idempotent: confirming twice is not an error, because the caller wants the
+	// credential usable and it is. Returns ErrCredentialNotFound when the row is
+	// gone or disabled — which means something removed the authenticator between
+	// the verification and this write, and enabling it anyway would restore a
+	// factor that was deliberately taken away.
+	Enable(ctx context.Context, cred ids.CredentialID) error
+}
+
+// NewTotpSecret is everything needed to provision an enrollment.
+//
+// A struct rather than positional arguments because two of the fields are strings
+// that must not be swapped — a pseudonym and an opaque ciphertext — and the
+// compiler cannot tell them apart.
+type NewTotpSecret struct {
+	// ID is minted by the handler and authenticated INTO the sealed secret.
+	// Storing it under any other id produces a row that can never be opened, and
+	// the failure surfaces when the user next presents a code rather than here.
+	ID ids.CredentialID
+
+	// SubjectID is the pseudonym, never an address. It is the other half of the
+	// seal's binding.
+	SubjectID string
+
+	// Sealed is opaque to this layer. See the interface doc.
+	Sealed string
+
+	// KeyVersion duplicates the version encoded inside Sealed so the re-sealing
+	// job can select rows without parsing them.
+	KeyVersion int32
+}
+
+// TotpSecret is a stored enrollment.
+//
+// Deliberately not the whole row: no created_at, no failure count and no
+// disabled_at, because a caller that can see them will eventually make an
+// authentication decision from them, and the only decisions this port supports
+// are the two it already made — this row exists, and this is whether it is proven.
+type TotpSecret struct {
+	ID        ids.CredentialID
+	SubjectID string
+
+	// Sealed is opaque. Hand it to TotpSealer.Open; never compare it.
+	Sealed string
+
+	KeyVersion int32
+
+	// Enabled reports whether the enrollment has been proven. It is reported
+	// rather than filtered on so a confirmation can find its own pending row.
+	Enabled bool
+}
+
+// ErrNoTotpCredential means the subject has no authenticator enrolled.
+//
+// Unknown subject, never-enrolled account and disabled authenticator all land
+// here and cannot be told apart: a caller that could distinguish them would be an
+// oracle for which accounts have a second factor, which is precisely the list an
+// attacker choosing targets wants.
+var ErrNoTotpCredential = errors.New("identity: no TOTP credential")
+
+// RecoveryCodes stores recovery-code digests and spends them.
+//
+// Digests, never codes. A recovery code is a user-presented secret checked for
+// equality, so the same rule as an emailed token applies — store what a
+// presentation hashes to, and a stolen database yields nothing presentable.
+type RecoveryCodes interface {
+	// Credential returns the recovery-code credential this subject's digests hang
+	// from, spent or not.
+	//
+	// It exists so a regenerated set reuses the id the store already holds. The
+	// alternative — mint a fresh id every time — collides with the partial unique
+	// index that allows one usable credential per kind, and it collides for good:
+	// a handler that crashed after writing rows and before appending its event
+	// would then fail on every retry, leaving the account unable to generate codes
+	// at all.
+	//
+	// Returns ErrNoRecoveryCode when there is none.
+	Credential(ctx context.Context, subjectID string) (ids.CredentialID, error)
+
+	// Replace swaps the WHOLE set atomically, and creates the credential row the
+	// digests hang from.
+	//
+	// Whole-set replacement, never incremental top-up: a mix of old and new codes
+	// makes "how many do I have left" unanswerable and leaves codes the user
+	// believes were replaced still live. The delete and the inserts are one
+	// transaction, so there is no instant at which the account has no codes while
+	// believing it has ten.
+	Replace(ctx context.Context, set NewRecoveryCodeSet) error
+
+	// Consume redeems one digest exactly once and returns which credential owned
+	// it.
+	//
+	// Must be ATOMIC, in ONE statement. A read-then-write races two presentations
+	// of the same code and both win, which is exactly what an attacker holding a
+	// photographed sheet produces on purpose.
+	//
+	// Returns ErrNoRecoveryCode for a digest that is unknown, already spent, or
+	// belongs to another subject. The three are deliberately one answer.
+	Consume(ctx context.Context, subjectID string, digest []byte) (ids.CredentialID, error)
+}
+
+// NewRecoveryCodeSet is a freshly minted set, ready to store.
+type NewRecoveryCodeSet struct {
+	// CredentialID is the recovery-code credential the digests belong to. The
+	// digest rows carry a foreign key to it, so it is created by the same
+	// transaction rather than assumed to exist.
+	CredentialID ids.CredentialID
+
+	SubjectID string
+
+	// Digests are 32 bytes each — the column has a CHECK to that effect — and are
+	// all this system ever learns about the codes it issued.
+	Digests [][]byte
+
+	// GeneratedAt is when the set became usable, UTC.
+	GeneratedAt time.Time
+}
+
+// ErrNoRecoveryCode means the presented code matched no unspent digest.
+var ErrNoRecoveryCode = errors.New("identity: no such recovery code")
+
+// TotpVerifier checks a code and claims its time step.
+//
+// Satisfied directly by the totp adapter's Authenticator. The claim is part of
+// the same call rather than a second one the caller could forget: a verifier that
+// only returned "valid" would leave replay protection optional, and optional
+// replay protection is absent replay protection for the one caller that forgets
+// (ADR-049).
+type TotpVerifier interface {
+	// Verify reports whether the code is valid, and spends its step.
+	//
+	// (false, nil) is a wrong code. (false, ErrCodeReplayed) is a VALID code
+	// presented a second time — a different fact, worth alerting on, and still the
+	// same refusal on the wire.
+	Verify(ctx context.Context, secret, code string, cred ids.CredentialID, now time.Time) (bool, error)
+}
+
+// TotpEnrollment is a freshly minted shared secret and its provisioning URI.
+type TotpEnrollment struct {
+	// Secret is base32. It is returned to the enrolling user exactly once and must
+	// never be logged, echoed back, or placed in an event.
+	Secret string
+
+	// URI is the otpauth:// value the QR code encodes. It CONTAINS THE SECRET and
+	// the account label, which is personal data, so it goes to the enrolling
+	// user's own screen and nowhere else.
+	URI string
+}
+
+// TotpEnroller mints a shared secret and its provisioning URI.
+//
+// A FUNCTION type rather than an interface, for the same structural reason
+// TokenDigest is one: the adapter that generates these imports this package for
+// TOTPReplayGuard, so this package cannot import it back to name its return type.
+// A func type is satisfied by a three-line adapter at the composition root
+// without either side gaining a dependency on the other.
+type TotpEnroller func(accountName string) (TotpEnrollment, error)
 
 // TOTPReplayGuard records that a time step has been used, and refuses a repeat.
 //
@@ -148,6 +390,54 @@ type TokenStore interface {
 
 // ErrTokenNotFound covers unknown, spent and expired digests alike.
 var ErrTokenNotFound = errors.New("identity: no such token")
+
+// MintedToken is a freshly generated single-use secret, in the two forms the
+// system needs it in and the one deadline that bounds it.
+//
+// The two forms are deliberately produced together and by ONE component. A
+// caller that received only the plaintext would have to derive the digest
+// itself, and the moment two places derive it, one of them can derive it
+// differently — a purpose left out, a separator changed — and every redemption
+// then looks up a row that was never written. That failure is silent on both
+// sides: the issue succeeds, the mail is sent, and the link is simply refused.
+type MintedToken struct {
+	// Plaintext is the secret that goes into the emailed URL. It is produced
+	// exactly once and must never be stored, logged, returned to an API caller,
+	// or placed in an event — a token in any of those is a live credential
+	// sitting in a medium that outlives it by months.
+	Plaintext string
+
+	// Digest is the only form that reaches storage. See TokenDigest: the purpose
+	// is mixed INTO it, so this value is meaningless to a lookup made under any
+	// other purpose.
+	Digest []byte
+
+	// ExpiresAt is when the token stops being redeemable, UTC. It comes from the
+	// minter rather than from the caller because the lifetime is a property of
+	// the PURPOSE — a reset link is far more dangerous than a verification link
+	// and gets a much shorter window — and a caller free to choose it will
+	// eventually choose the long one for both.
+	ExpiresAt time.Time
+}
+
+// TokenMinter produces a single-use token for a purpose.
+//
+// A FUNCTION type rather than an interface, for the same structural reason
+// TokenDigest and TotpEnroller are function types: the adapter that generates
+// these imports this package for TokenPurpose, so this package cannot import it
+// back to name its return type. A three-line closure at the composition root
+// satisfies this without either side gaining a dependency on the other.
+//
+// It takes `now` rather than reading a clock, so the token's expiry is stamped
+// from the SAME instant as the events of the command that issued it. A minter
+// with its own clock would put the expiry a few microseconds after the event
+// that announces it, which is harmless until a test or an auditor compares the
+// two and finds the log disagreeing with the row.
+//
+// An unknown purpose must be an ERROR, never a default lifetime. A fallback
+// hands a newly added flow whichever window happened to be first in a switch,
+// and the dangerous direction is the long one.
+type TokenMinter func(purpose TokenPurpose, now time.Time) (MintedToken, error)
 
 // BreachChecker reports whether a password appears in a known breach corpus.
 //
@@ -253,3 +543,188 @@ type UserDirectory interface {
 
 // ErrNoSuchSubject means the directory holds no account for a pseudonym.
 var ErrNoSuchSubject = errors.New("identity: no account for that subject")
+
+// AccountDirectory resolves an email blind index to the account claiming it.
+//
+// This is the LOGIN lookup, and it is a separate port from UserDirectory rather
+// than a second method on it because the two are asked in opposite directions: a
+// verification knows a pseudonym and needs the account, an authentication knows
+// an identifier and needs the pseudonym. Keeping them apart is what lets the
+// verification flow stay unable to turn an address into an account.
+//
+// It reads a PROJECTION, so it is eventually consistent, and that is safe for
+// exactly the reason it is safe in UserDirectory: the answer only NAMES a stream,
+// and every decision afterwards is taken against that stream's events. A row that
+// has not arrived yet costs one failed login the user can retry — never a wrong
+// decision — and a row that is stale names an account whose own log then refuses.
+type AccountDirectory interface {
+	// AccountByEmailIndex returns the account that claims an index.
+	//
+	// Returns ErrNoSuchAccount when nothing claims it. The caller must answer
+	// that identically to a wrong password, down to the cost of the answer: this
+	// is the one lookup in the system whose miss is cheap and whose hit is not,
+	// which is precisely the shape of an enumeration oracle.
+	AccountByEmailIndex(ctx context.Context, index contract.EmailIndex) (Account, error)
+}
+
+// Account is the pair of identifiers an authentication needs, and nothing else.
+//
+// No state, no email index echoed back, no verification flag. A caller holding
+// those would eventually decide an authentication from them, and that decision
+// belongs to the aggregate rebuilt from the account's own events — the projection
+// is behind the log by construction, so a decision taken from it can be taken
+// twice with two different answers.
+type Account struct {
+	UserID    ids.UserID
+	SubjectID string
+}
+
+// ErrNoSuchAccount means no account claims that identifier.
+var ErrNoSuchAccount = errors.New("identity: no account for that identifier")
+
+// AttemptLimiter is the attempt ceiling consulted before any credential work.
+//
+// Declared as a port over *ratelimit.Limiter so a use-case test can drive both
+// the refusal and the DEGRADED branch, which is the one that matters: the limiter
+// fails open, and a ceiling that has silently stopped counting is
+// indistinguishable from one that is never reached unless the caller surfaces it.
+type AttemptLimiter interface {
+	// Allow records an attempt against a scope and reports whether it may
+	// proceed. Every attempt is counted, allowed or not.
+	Allow(ctx context.Context, scope string) (ratelimit.Decision, error)
+}
+
+// SessionTokens stores the bearer-token digest that resolves a session.
+//
+// It is the third identity port that is NOT a projection, and it is authoritative
+// for the same reason the other two are: a session token is a secret, so it may
+// never enter an event (ADR-002), so no replay can restore it. The projected half
+// of a session — who it belongs to, its assurance level, its absolute deadline —
+// is written by the session projector from SessionCreated, and a session resolves
+// only when BOTH halves exist (migration 00010).
+//
+// There is no lookup method here. Resolving a token is the authenticator's
+// question and lives with the authenticator (S1-25); a login only ever ISSUES.
+type SessionTokens interface {
+	// Issue records the digest of a freshly minted bearer token.
+	//
+	// Called AFTER SessionCreated has been appended. Both orders lose something if
+	// the process dies between them, and this is the recoverable one — see
+	// Authentication.CreateSession, where the reasoning belongs.
+	Issue(ctx context.Context, token NewSessionToken) error
+}
+
+// NewSessionToken is everything the authoritative half of a session needs.
+//
+// A struct rather than three positional arguments because the digest and the
+// session id are both opaque and the compiler cannot tell a swapped pair apart.
+type NewSessionToken struct {
+	// Digest is SHA-256 over the token under its own domain separator. The token
+	// itself is returned to the caller once and stored nowhere.
+	Digest []byte
+
+	SessionID ids.SessionID
+
+	// IdleExpiresAt is the deadline that MOVES. It lives here rather than in the
+	// projection because recording each refresh as an event would make every
+	// authenticated read a write to the log.
+	IdleExpiresAt time.Time
+}
+
+// LiveSessions lists the sessions a subject can still use.
+//
+// The work list for "sign out everywhere". It is READ-ONLY, deliberately: the
+// revocation itself is a SessionRevoked event on each session's own stream, and
+// the projector clears revoked_at from it. A port that could also write the view
+// would be able to end a session with no event saying so, and session_view would
+// stop being reconstructable by replaying the log (ADR-019).
+//
+// A stale list is therefore harmless in one direction and visible in the other: a
+// session that has since been revoked is reloaded, found revoked, and skipped,
+// while a session created after the list was taken is simply not in it — which is
+// why the caller states the instant it asked.
+type LiveSessions interface {
+	// List returns the unrevoked sessions whose absolute deadline is still ahead
+	// of now, newest first.
+	List(ctx context.Context, subjectID string, now time.Time) ([]ids.SessionID, error)
+}
+
+// RevocationEpochs invalidates the authorization decisions cached for a
+// principal (ADR-045).
+//
+// # Why a session revocation touches the authorization cache at all
+//
+// A revoked session stops resolving once the session projection applies
+// SessionRevoked, so the bearer token dies on its own. The decision cache does
+// not: the kernel keys a cached permit on
+// `(principal kind, principal id, relation, resource, epoch)` — see the Valkey
+// adapter's decisionKey — and on NOTHING about the session that produced it. No
+// session id, no assurance level, no device trust. A permit computed while a
+// session was elevated is therefore served to any request that resolves to the
+// same principal, for as long as the entry lives (up to authz.MaxDecisionTTL,
+// fifteen minutes).
+//
+// That is the gap this port closes. Bumping the epoch invalidates every decision
+// cached for the principal at once, which is the only invalidation available: a
+// session revocation is not about one resource, so there is no key to evict and
+// no authz.Query to build a tombstone from.
+//
+// # Why this is an epoch bump and not a tombstone
+//
+// A tombstone is keyed by an authz.Query — a principal, a relation and a
+// resource — and it is cleared by the access projector CONFIRMING that it removed
+// the corresponding OpenFGA tuple. A session revocation removes no tuple, so
+// nothing would ever confirm one written here: it would sit until its garbage-
+// collection TTL, which ADR-045 defines as an alert meaning the access projector
+// is broken. Writing a tombstone no projector can answer for would manufacture
+// that alert on every sign-out, and an alert that fires routinely is an alert
+// nobody reads.
+//
+// The epoch has the opposite lifecycle and needs no confirmation: it is a
+// monotonic counter with no expiry, and bumping it can only ever cause a cache
+// MISS, which is answered by asking OpenFGA. Nothing here can grant anything —
+// the worst outcome of a spurious bump is one round trip.
+//
+// # Satisfied by the same adapter the Guard holds
+//
+// The signature is exactly (*valkey.Authz).BumpEpoch, so the composition root
+// passes the object it already built for authz.Decisions rather than
+// constructing a second client with its own view of the epoch.
+type RevocationEpochs interface {
+	// BumpEpoch invalidates every decision cached for the principal.
+	//
+	// An error means the invalidation did not happen, and it must be reported
+	// rather than logged: the caller decides whether a revocation whose cache
+	// invalidation failed may be reported as done. It may not — see
+	// Authentication.invalidateAuthorization.
+	BumpEpoch(ctx context.Context, p authz.Principal) error
+}
+
+// SessionRevoker ends every live session for a subject.
+//
+// Satisfied by *Authentication, whose RevokeAllSessions this is the exact
+// signature of. It is declared as a port rather than taken as the concrete type
+// so the dependency reads in one direction — registration asks for "something
+// that can void sessions", not for the authentication handlers — and so a use
+// case that needs the rule can be driven in a test without an event store, a
+// session projection and a Valkey client.
+//
+// # Why registration holds this at all (IDENTITY-REVIEW C8)
+//
+// Sudhodanan & Paverd, "Pre-hijacked accounts" (USENIX Security 2022), closes
+// its five variants with ONE rule: when an identifier becomes verified — and on
+// any password reset or recovery — void every session, every pending identifier
+// change, and every identifier not proven by the acting party. Verification is
+// the moment the system learns WHO it has been talking to, and everything
+// established before that moment was established by somebody unproven.
+//
+// The session half of that rule is the half that is enforceable today, and
+// Registration.VerifyEmail is where it is enforced.
+type SessionRevoker interface {
+	// RevokeAllSessions ends every live session for the subject, sparing only
+	// cmd.Except. A verification passes a zero Except: it spares nothing,
+	// because it is not performed from a session at all.
+	RevokeAllSessions(
+		ctx context.Context, cmd RevokeAllSessionsCommand,
+	) (RevokeAllSessionsResult, error)
+}

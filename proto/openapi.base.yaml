@@ -1,11 +1,41 @@
-# Document-level OpenAPI metadata.
+# Document-level OpenAPI content.
 #
 # GENERATOR INPUT — merged into the generated spec by protoc-gen-connect-openapi
 # via `base=`. Never edit docs/api/chronos-openapi.yaml directly; it is output.
 #
-# Paths, schemas, operation summaries and descriptions all come from the .proto
-# comments, so they cannot drift. Only what protobuf has no way to express lives
-# here: contact details, servers, security schemes and prose.
+# THIS FILE CARRIES NO `paths:` BLOCK, AND MUST NEVER CARRY ONE AGAIN.
+#
+# It used to. ~440 lines described about fifteen operations by hand: their
+# `security`, their `Idempotency-Key` parameter, their response prose and their
+# worked examples. Two things were wrong with that.
+#
+# The first is mechanical and it broke the build. A `paths:` entry here does not
+# decorate the generated operation, it REPLACES it — generating without this file
+# emitted 20 operationIds, generating with it emitted zero, and `make api-validate`
+# failed with 20 missing operationIds while `make api` reported success.
+#
+# The second is the reason the first was allowed to happen: an operation
+# described here is described NOWHERE THE SERVER READS. It cannot be lint-gated,
+# it cannot be breaking-change-gated, and nothing makes it wrong when the RPC
+# changes. That is exactly the drift CONVENTIONS §7.1 exists to prevent.
+#
+# Everything that block carried now lives in the .proto as
+# `(gnostic.openapi.v3.operation)`: `security: [{}]` on the public methods, the
+# `Idempotency-Key` parameter on the authenticated mutations, and the `200`
+# description and example on both. See proto/chronos/identity/v1/identity.proto.
+#
+# What belongs here, and what does not:
+#
+#   - Operation summaries, descriptions, parameters, security, examples, request
+#     and response SCHEMAS, field types, field documentation and every validation
+#     rule come from the .proto. NONE of them may be restated here.
+#   - The reason-code enum comes from Go — `internal/tools/gendocs` writes
+#     docs/api/openapi.errors.yaml from `errs.Catalogue()`, and the generator
+#     merges it as `override=`.
+#   - What is left, and all that is left, is DOCUMENT-level metadata that has no
+#     RPC to hang off: `info`, `servers`, `externalDocs`, the document-level
+#     `security` default and the `securitySchemes` it names. Protobuf can express
+#     none of these, and none of them describes an endpoint.
 
 openapi: 3.1.0
 
@@ -14,48 +44,241 @@ info:
   version: v1
   summary: Multi-tenant workspace platform — identity, organizations, workspaces and access.
   description: |
-    Chronos exposes a single API surface over **three protocols on one port**:
-    gRPC, gRPC-Web, and HTTP/JSON. This document describes the HTTP/JSON
-    surface; gRPC clients should generate from the `.proto` sources instead.
+    ## What this document is
+
+    Chronos serves **one schema over three protocols on one port** — gRPC,
+    gRPC-Web and HTTP/JSON (ADR-007). This document describes the HTTP/JSON
+    surface, and it is the only published reference. A gRPC client generates from
+    the `.proto` sources instead, or explores a running server through
+    reflection; the schema is the same either way, so nothing here can disagree
+    with what a gRPC client sees.
+
+    Everything below — every path, type, field, constraint and example — is
+    generated from that schema. Nothing is written by hand against the
+    implementation, so no part of this document can describe an endpoint the
+    server does not serve.
+
+    ## Calling an endpoint
+
+    The HTTP surface is RPC-shaped rather than resource-shaped. There are no path
+    parameters and no collection URLs: the path IS the fully-qualified method
+    name, and every argument travels in the body.
+
+    ```
+    POST /chronos.identity.v1.IdentityService/Register
+    ```
+
+    ```
+    /<proto package>.<Service>/<Method>
+    ```
+
+    Three consequences worth internalising before writing a client:
+
+    1. **The path never varies per resource.** `RevokeSession` names the session
+       in its body, not in its URL. Nothing needs URL-encoding, and no identifier
+       ever appears in a log line that records the path.
+    2. **`POST` is the default for every method**, including reads. Methods
+       declared free of side effects additionally accept `GET`, which is what
+       makes them cacheable — see below.
+    3. **HTTP status alone is not the outcome.** See *Errors*.
+
+    ### Headers on a request
+
+    | Header | Required | Value |
+    | --- | --- | --- |
+    | `Content-Type` | on `POST` | `application/json` |
+    | `Connect-Protocol-Version` | **yes** | `1` |
+    | `Connect-Timeout-Ms` | no | Milliseconds; the server cancels the call when it elapses. |
+    | `Authorization` | on authenticated methods | `Bearer <token>` — see *Authentication* |
+    | `Idempotency-Key` | on authenticated mutations | See *Idempotency* |
+
+    ### Content type
+
+    Requests and responses are `application/json`. The encoding is protobuf-JSON,
+    with one deliberate deviation from its defaults: **default values are
+    emitted**. `false`, `0` and `""` appear in responses rather than being
+    omitted, so a field is never `undefined` when a client expected `false` — a
+    distinction that otherwise misbehaves only in the failure case, which is
+    exactly when it matters. Field names are `camelCase`.
+
+    Unknown fields in a REQUEST are discarded rather than rejected, so a client
+    built against a newer schema keeps working against an older server.
+
+    ### Reads over GET
+
+    Methods declared `NO_SIDE_EFFECTS` are additionally exposed as `GET`, so a
+    browser or CDN can cache them. The request message travels in the query
+    string:
+
+    ```
+    GET /chronos.system.v1.SystemService/GetStatus?encoding=json&message=%7B%7D&connect=v1
+    ```
+
+    | Query parameter | Meaning |
+    | --- | --- |
+    | `message` | The request message, JSON-encoded |
+    | `encoding` | `json` (or `proto`) |
+    | `base64` | `true` if `message` is base64-encoded, which binary data may require |
+    | `compression` | Optional content encoding of `message` |
+    | `connect` | Protocol version, `v1` |
+
+    The `POST` form of the same method is always available and is simpler to
+    hand-craft. Use `GET` when you want caching.
+
+    ## Authentication
+
+    Authenticated methods take a session bearer token:
+
+    ```
+    Authorization: Bearer <token>
+    ```
+
+    The token comes from `IdentityService/CreateSession`, which returns it
+    **once**. Only its digest is stored, so no endpoint can re-display it; a
+    client that loses it starts a new session. Keep it out of URLs, logs and
+    analytics.
+
+    Five `IdentityService` methods are public and are shown in this document with
+    an empty security requirement — `Register`, `VerifyEmail`,
+    `ResendEmailVerification`, `Authenticate` and `CreateSession` — plus
+    `SystemService/GetStatus`. They must work before a session exists, and
+    `GetStatus` must additionally answer while the system is degraded, including
+    when authentication itself is unavailable.
+
+    The list above is not maintained here: each of those methods declares
+    `(chronos.options.v1.public) = true` in the `.proto`, which is what the
+    authentication interceptor reads, and `scripts/check_openapi.py` fails the
+    build if the published document and that option disagree.
+
+    A session carries an **assurance level**. Every session this system mints is
+    at least AAL2 — two factors — and the methods that change a credential or end
+    a session require it explicitly. A session below the level a method requires
+    is refused with `STEP_UP_REQUIRED`, which means *re-authenticate*, not *you
+    may not*.
+
+    ## Idempotency
+
+    Every **authenticated mutating** call requires an `Idempotency-Key` header —
+    a client-generated ULID or UUID.
+
+    ```
+    Idempotency-Key: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+    ```
+
+    | Situation | Result |
+    | --- | --- |
+    | First call | Executes, and the response is stored |
+    | Replay, same key, **same** body | The stored response, not a re-execution |
+    | Replay, same key, **different** body | `CONFLICT` — this catches a client bug rather than returning someone else's answer |
+    | Replay while the first is still running | `CONFLICT`; retry with the same key |
+    | No key on a call that needs one | `VALIDATION_FAILED` |
+
+    The key is scoped to `(principal, method, key)`, so it cannot be replayed
+    across accounts or reused on a different method. Records are retained for 24
+    hours.
+
+    The **public** methods take no key, because the gate that claims one runs
+    after authentication and there is no principal to scope it to. That is why
+    `Register` is instead designed to be safe to repeat: its response is identical
+    whether or not the address was free.
+
+    Generate a key per logical operation, not per HTTP attempt — a retry of the
+    same operation must reuse the same key, which is the entire point.
+
+    Distinct from event-level idempotency, where consumers deduplicate on an event
+    id. Both exist; they solve different problems.
 
     ## Errors
 
-    Clients branch on the machine-readable `reason` field, **never** on the HTTP
-    status or the human-readable message. The status exists for transport
-    handling only.
+    A failed call returns a Connect error:
 
-    Two refusals that look alike and must never be collapsed:
+    ```json
+    {
+      "code": "permission_denied",
+      "message": "human-readable, and NOT a contract",
+      "details": [
+        {
+          "type": "chronos.errors.v1.ErrorDetail",
+          "value": { "reason": "PLAN_UPGRADE_REQUIRED", "metadata": {}, "traceId": "4bf9…" }
+        }
+      ]
+    }
+    ```
 
-    | reason | means | client should |
+    **Branch on `reason`. Never on the HTTP status, and never on `message`.** The
+    status exists for transport handling — retry, redirect, cache — and one status
+    covers several reasons that lead to completely different user journeys:
+
+    | reason | means | the client should |
     | --- | --- | --- |
     | `ACCESS_DENIED` | authenticated, but lacks the relation | ask an admin |
     | `PLAN_UPGRADE_REQUIRED` | the plan does not include this | offer an upgrade |
 
-    `NOT_FOUND` is deliberately ambiguous: it covers "absent", "invisible to
-    you", and "refused" so identifiers cannot be probed for existence across a
-    tenant boundary. Inside a tenant, errors are specific.
+    A client that cannot tell those two apart sends people down the wrong path,
+    which is why the reason is a typed field rather than a substring of a message.
 
-    The full catalogue is published separately — see External Documentation.
+    `NOT_FOUND` is deliberately ambiguous: it covers "absent", "invisible to you"
+    and "refused", so an identifier cannot be probed for existence across a tenant
+    boundary. Inside a tenant, where the caller has already proven membership,
+    errors are specific.
 
-    ## Idempotency
+    The complete set of reasons is the `reason` enum on the `ErrorDetail` schema
+    below — generated from the server's own table, so it cannot fall behind. The
+    same table is published as a catalogue; see *External Documentation*.
 
-    Every mutating call **requires** an `Idempotency-Key` header (a ULID or
-    UUID). Replaying a key with the same body returns the stored response
-    rather than re-executing. Replaying it with a *different* body returns
-    `CONFLICT` — that catches client bugs instead of silently returning
-    someone else's result.
+    Detail is deliberately withheld: no SQL, no driver text, no stack traces.
+    `traceId` is the handle — an operator finds the full server-side cause by
+    searching traces for it, so a user can paste it into a support ticket and lose
+    nothing.
 
-    ## Tenancy
+    ### Validation
 
-    Every request resolves to exactly one organization. Resource identifiers are
-    prefixed and self-describing (`org_01H8…`, `ws_01H8…`); passing an
-    identifier of the wrong type is rejected as `VALIDATION_FAILED` at the
-    boundary rather than surfacing as a confusing `NOT_FOUND`.
+    Constraints are declared in the schema and enforced by an interceptor before
+    any handler runs, so what this document publishes and what the server refuses
+    are the same rules. A violation is `invalid_argument` / `VALIDATION_FAILED`,
+    and the response names the offending field.
+
+    Each field's constraints appear on the field itself in this document —
+    `minLength`, `maximum`, `pattern`, `required` — and rules protobuf cannot
+    express as keywords are appended to the field's description as
+    `<rule id> // <message>`.
+
+    One asymmetry is worth understanding rather than treating as an omission: the
+    credential fields on `Authenticate` and `CreateSession` carry **no** rules. A
+    request refused as malformed would tell the caller their guess was
+    structurally wrong, which is information a wrong password does not give. The
+    same fields on `Register` carry the full policy, because there the rules are
+    public and printed beside the form.
+
+    ## Pagination
+
+    Cursor-based everywhere. Never offsets: they break under concurrent writes.
+
+    - Send `pageSize` and `pageToken`.
+    - Read `nextPageToken`. **Empty means done** — it is the only termination
+      signal.
+    - Do NOT infer the end from a short page. The server clamps an oversized
+      `pageSize`, so short pages are ordinary.
+    - `pageSize: 0` means the server's default (50). The maximum is 200, and
+      anything larger is clamped rather than refused.
+    - A `pageToken` is opaque and bound to the query that produced it. Presenting
+      one against a different query is an error, not a silent restart.
+
+    ## Identifiers
+
+    Every public identifier is a prefixed ULID and is self-describing:
+    `sess_01ARZ3NDEKTSV4RRFFQ69G5FAV`, `usr_…`, `cred_…`, `org_…`, `ws_…`.
+    Passing an identifier of the wrong type is rejected as `VALIDATION_FAILED` at
+    the boundary rather than surfacing later as a confusing `NOT_FOUND`.
+
+    Accounts are named on the wire by a `subjectId` pseudonym, never by an email
+    address. No response in this document returns an address.
 
     ## Timestamps
 
-    All timestamps are RFC 3339 in **UTC**. The server's presentation timezone
-    is reported by `SystemService/GetStatus` and never affects stored values.
+    RFC 3339, always **UTC**. An unset timestamp means the event never happened —
+    not "unknown". The server's presentation timezone is reported by
+    `SystemService/GetStatus` and never affects a stored value.
 
   contact:
     name: Chronos Platform
@@ -64,7 +287,7 @@ info:
     name: Proprietary
 
 externalDocs:
-  description: Error catalogue, architecture and domain specifications
+  description: The error catalogue — every reason code, its transport mapping, and what a client should do
   url: https://github.com/chronos/chronos-go/blob/main/docs/api/errors.md
 
 servers:
@@ -75,6 +298,9 @@ servers:
   - url: https://api.chronos.example
     description: Production
 
+# The document-level default. Every public operation overrides it with an
+# explicit empty requirement, so "unauthenticated" is a statement in this
+# document rather than the absence of one.
 security:
   - bearerAuth: []
 
@@ -83,33 +309,17 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
-      bearerFormat: JWT
       description: |
-        Short-lived access token (10 minutes) obtained from the session
-        endpoints. Revocation takes effect immediately on the refresh path and
-        within the token's lifetime otherwise.
-    apiKeyAuth:
-      type: http
-      scheme: bearer
-      description: |
-        Machine credential, format `chr_<env>_<keyid>_<secret>`. A key is bound
-        to exactly one organization at creation and cannot be moved. Its
-        effective permission is the intersection of its scopes and its owning
-        principal's access, so it can never exceed its creator.
+        The session token returned by `IdentityService/CreateSession`, sent as
+        `Authorization: Bearer <token>`.
 
-  parameters:
-    IdempotencyKey:
-      name: Idempotency-Key
-      in: header
-      required: true
-      description: ULID or UUID. Required on every mutating call.
-      schema:
-        type: string
+        Returned by that call and by no other, ever: only its digest is stored,
+        so there is no endpoint that can re-display it. It is opaque — do not
+        parse it.
 
-  headers:
-    Chronos-Consistency-Token:
-      description: |
-        Commit position of the write. Pass it back on a subsequent read to get
-        read-your-writes; the server waits briefly if projections lag.
-      schema:
-        type: string
+        Two deadlines bound it, and both are returned with it. The IDLE deadline
+        moves forward on each authenticated request; the ABSOLUTE one does not,
+        and it is what bounds a stolen token held by an attacker who keeps it
+        warm, which an idle deadline alone cannot do. Revocation through
+        `RevokeSession` or `RevokeAllSessions` is immediate.
+

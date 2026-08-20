@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sort"
+	"slices"
 	"time"
 )
 
@@ -103,7 +103,7 @@ func (d *Dispatcher) Channels() []Channel {
 	for ch := range d.transports {
 		out = append(out, ch)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	slices.Sort(out)
 	return out
 }
 

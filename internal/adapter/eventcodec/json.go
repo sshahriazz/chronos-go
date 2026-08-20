@@ -28,6 +28,7 @@ package eventcodec
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -131,9 +132,7 @@ func (c *JSON) register(eventType string, newFn func() eventsourcing.Event) {
 	// in-flight decode, and the race detector only catches it if a test happens
 	// to register while decoding.
 	next := &table{factories: make(map[string]func() eventsourcing.Event, len(old.factories)+1)}
-	for k, v := range old.factories {
-		next.factories[k] = v
-	}
+	maps.Copy(next.factories, old.factories)
 	next.factories[eventType] = newFn
 	next.names = append(slices.Clone(old.names), eventType)
 	slices.Sort(next.names)

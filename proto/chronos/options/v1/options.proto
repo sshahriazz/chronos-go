@@ -78,6 +78,43 @@ extend google.protobuf.MethodOptions {
   // Minimum assurance level. Defaults to AAL1 when unset.
   chronos.options.v1.AssuranceLevel min_aal = 51004;
 
+  // The assurance floor that applies while — and only while — the caller's
+  // account has never held a proven second factor.
+  //
+  // It exists because `min_aal = ASSURANCE_LEVEL_2` on second-factor management
+  // is otherwise a deadlock, not a policy. A second factor is mandatory before
+  // an account activates (identity.md §2), and AAL2 means a second factor was
+  // presented, so an account that has none can never obtain the one it must
+  // have: the only calls that could give it one are the calls it cannot reach.
+  //
+  // The distinction the floor draws is between FIRST enrolment, where there is
+  // no factor to present and nothing yet to protect, and adding or replacing a
+  // factor, where the existing one must be presented — which is exactly the
+  // step that stops an attacker holding a stolen password from making their
+  // access durable. Only the first is exempted, and the exemption ends the
+  // moment the first factor is proven.
+  //
+  // Three properties make it safe, and all three are enforced rather than
+  // documented:
+  //
+  //   - The condition is a fact about the caller's own account, read
+  //     server-side from the session. No request field, no header and no claim
+  //     the caller controls takes part in it, so it cannot be asserted.
+  //   - It is one-way. The account leaves the bootstrap window when its first
+  //     factor is proven, and nothing returns it — removing or losing a factor
+  //     later does NOT re-open the exemption, which is what stops "delete the
+  //     factor, then enrol my own".
+  //   - The policy loader refuses every incoherent declaration at startup: on a
+  //     public method, on a method that is not scoped to the caller's own
+  //     account, with no `min_aal` to be an exemption from, or at a level that
+  //     is not strictly below it. A floor that could be misdeclared silently
+  //     would be worse than the deadlock it removes.
+  //
+  // Unset means no exemption: `min_aal` applies in every state. That is the
+  // right default — a method that says nothing about bootstrap gets the strict
+  // answer.
+  chronos.options.v1.AssuranceLevel bootstrap_min_aal = 51006;
+
   // Marks a method as public — no authentication, no gates. Used only by
   // health and discovery endpoints. Mutually exclusive with authz.
   bool public = 51005;

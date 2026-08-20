@@ -111,6 +111,14 @@ type dependencies struct {
 	// "the sweep could not be constructed" rather than as nothing at all.
 	reservations *app.ReservationSweep
 
+	// verification mints the emailed proof-of-control link. It is held here, and
+	// built whether or not durable work is enabled, because its absence is
+	// otherwise invisible: registration appends EmailVerificationRequested and
+	// drops the plaintext, so a worker that cannot mint simply never sends the
+	// mail — every account stays Pending, every address stays claimed, and
+	// nothing anywhere reports it (ADR-002, identity.md §7).
+	verification *app.VerificationIssuer
+
 	// retention deletes identity rows that can no longer affect a decision:
 	// spent TOTP steps, expired token digests, the secret half of dead sessions,
 	// and two projections past their horizon. Housekeeping rather than a security
@@ -121,6 +129,18 @@ type dependencies struct {
 	// be visible as "retention could not be constructed" rather than as nothing at
 	// all. Nothing else in this system reports a table that stopped being swept.
 	retention *app.Retention
+
+	// reseal carries password verifiers and TOTP shared secrets from an old
+	// sealing key version onto the current one, without ever needing the
+	// plaintext. It is what makes a key rotation completable at all: nothing else
+	// re-seals anything, so without it the count of rows at the old version never
+	// falls and the only safe action is to keep every retired key alive forever
+	// (identity.md §4, ADR-028).
+	//
+	// Built whether or not Temporal is enabled, like the two above, so the gap is
+	// visible as "re-sealing could not be constructed" rather than as nothing at
+	// all. Nothing else in this system reports a rotation that cannot finish.
+	reseal *app.KeyReseal
 
 	closes []func()
 }
@@ -311,6 +331,18 @@ func newDependencies(cfg *config.Config, log *slog.Logger, codec *eventcodec.JSO
 		d.reservations = sweep
 	}
 
+	// The verification-mail issuer. Constructed here, before the reactors are
+	// assembled, so that a worker which cannot mint says so once at startup
+	// instead of running a reactor that consumes the event and acks it having
+	// done nothing.
+	if issuer, err := newVerificationIssuer(d); err != nil {
+		log.Error("verification mail is NOT wired; every registration will claim its "+
+			"address and mail nobody, so the account can never be verified and the "+
+			"address can never be registered again", "error", err)
+	} else {
+		d.verification = issuer
+	}
+
 	// Identity retention. Constructed before the worker for the same reason the
 	// sweep is — the worker registers it — and constructed whether or not durable
 	// work is enabled, so that a deployment without Temporal logs why retention is
@@ -321,6 +353,18 @@ func newDependencies(cfg *config.Config, log *slog.Logger, codec *eventcodec.JSO
 			"deployment", "error", err)
 	} else {
 		d.retention = retention
+	}
+
+	// Credential re-sealing. Constructed before the worker for the same reason as
+	// the two above, and it is the one of the three whose absence produces no
+	// symptom anywhere in the system: an operator simply reads a count that never
+	// falls, and either keeps a key they meant to retire or destroys it anyway.
+	if reseal, err := newCredentialReseal(d, cfg, log); err != nil {
+		log.Error("credential re-sealing is NOT wired; a password pepper or TOTP sealing key "+
+			"rotation can never be completed, and every retired key must be kept alive for "+
+			"the lifetime of the deployment", "error", err)
+	} else {
+		d.reseal = reseal
 	}
 
 	// Durable work. Built LAST because its activities need the dispatcher above:
@@ -352,7 +396,8 @@ func (d *dependencies) startTemporal(cfg *config.Config, log *slog.Logger) {
 		// being a line in a startup log nobody reads again.
 		d.probes = append(d.probes,
 			temporaladapter.SweepReservationsProbe(nil),
-			temporaladapter.PurgeRetentionProbe(nil))
+			temporaladapter.PurgeRetentionProbe(nil),
+			temporaladapter.ResealCredentialKeysProbe(nil))
 		return
 	}
 
@@ -392,6 +437,7 @@ func (d *dependencies) startTemporal(cfg *config.Config, log *slog.Logger) {
 
 	d.scheduleSweep(log)
 	d.scheduleRetention(log)
+	d.scheduleReseal(log)
 
 	// After scheduling, not before: a probe asks the server whether the schedule
 	// exists, and asking before the attempt would report a state this process was
@@ -399,7 +445,8 @@ func (d *dependencies) startTemporal(cfg *config.Config, log *slog.Logger) {
 	// create is the case the probes are for.
 	d.probes = append(d.probes,
 		temporaladapter.SweepReservationsProbe(d.temporal),
-		temporaladapter.PurgeRetentionProbe(d.temporal))
+		temporaladapter.PurgeRetentionProbe(d.temporal),
+		temporaladapter.ResealCredentialKeysProbe(d.temporal))
 }
 
 // newTemporalWorker builds the worker and registers EVERYTHING this binary can
@@ -460,7 +507,26 @@ func (d *dependencies) newTemporalWorker(
 	if err != nil {
 		return nil, nil, fmt.Errorf("registering identity retention: %w", err)
 	}
-	return w, append(names, retained...), nil
+	names = append(names, retained...)
+
+	// Credential re-sealing, checked the same way and for the same typed-nil
+	// reason: a resealAdapter wrapping a nil use case is a NON-nil interface, so
+	// NewResealActivities' own nil check would pass and the failure would move to
+	// a panic on the first scheduled run — hourly, forever, in a job whose whole
+	// output is the input to an irreversible decision about destroying a key.
+	if d.reseal == nil {
+		return nil, nil, errors.New("credential re-sealing was not constructed; registering " +
+			"it would queue runs that panic")
+	}
+	reseal, err := temporaladapter.NewResealActivities(resealAdapter{reseal: d.reseal})
+	if err != nil {
+		return nil, nil, fmt.Errorf("credential re-sealing activities: %w", err)
+	}
+	resealed, err := w.RegisterCredentialReseal(reseal)
+	if err != nil {
+		return nil, nil, fmt.Errorf("registering credential re-sealing: %w", err)
+	}
+	return w, append(names, resealed...), nil
 }
 
 // scheduleSweep makes the lapsed-reservation sweep recur.

@@ -31,9 +31,7 @@ func TestConcurrentDecodeIsRaceFree(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 64 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 100 {
 				e, err := c.Unmarshal("conc.event", payload)
 				if err != nil {
@@ -45,7 +43,7 @@ func TestConcurrentDecodeIsRaceFree(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -67,26 +65,22 @@ func TestConcurrentRegistrationAndDecodeIsRaceFree(t *testing.T) {
 	const registrations = 50
 	var wg sync.WaitGroup
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for i := range registrations {
 			c.Register("late.type."+strconv.Itoa(i),
 				func() eventsourcing.Event { return &concEvent{} })
 		}
-	}()
+	})
 
 	for range 16 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 200 {
 				if _, err := c.Unmarshal("conc.event", payload); err != nil {
 					t.Errorf("a decode failed while registration was in progress: %v", err)
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 

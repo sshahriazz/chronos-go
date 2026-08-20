@@ -164,15 +164,15 @@ func findSuffix(body interface{ Read([]byte) (int, error) }, suffix string) (int
 	scanner := bufio.NewScanner(body)
 	for scanner.Scan() {
 		line := scanner.Text()
-		colon := strings.IndexByte(line, ':')
-		if colon < 0 {
+		before, after, ok := strings.Cut(line, ":")
+		if !ok {
 			continue
 		}
-		if !strings.EqualFold(strings.TrimSpace(line[:colon]), suffix) {
+		if !strings.EqualFold(strings.TrimSpace(before), suffix) {
 			continue
 		}
 		var count int
-		if _, err := fmt.Sscanf(strings.TrimSpace(line[colon+1:]), "%d", &count); err != nil {
+		if _, err := fmt.Sscanf(strings.TrimSpace(after), "%d", &count); err != nil {
 			// A malformed count on a line that DID match. Reported as a hit with
 			// an unknown count rather than as no match or as an error: the suffix
 			// is present, which is the finding, and the count only distinguishes

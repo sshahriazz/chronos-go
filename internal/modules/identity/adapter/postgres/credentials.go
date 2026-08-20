@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	identitydb "github.com/chronos/chronos-go/gen/sqlc/identity"
 	"github.com/chronos/chronos-go/internal/modules/identity/app"
@@ -26,7 +27,17 @@ import (
 // Practically that means every statement here is issued by a COMMAND HANDLER
 // rather than a projector, and there is no Reset, no checkpoint and no replay
 // path in this file — their absence is the design, not an omission.
-type Credentials struct{ tx db.SystemTX }
+type Credentials struct {
+	tx db.SystemTX
+
+	// log carries the one event in this file that is not returned to a caller:
+	// an orphaned verifier being replaced (StoreFirst). It defaults to
+	// slog.Default() rather than being a constructor parameter, because every
+	// call site already exists and a signature change would be a wiring edit in
+	// three binaries for one warning line. Nothing here logs personal data — the
+	// only identifier it can reach is a pseudonym.
+	log *slog.Logger
+}
 
 var _ app.PasswordCredentials = (*Credentials)(nil)
 
@@ -51,11 +62,87 @@ func NewCredentials(tx db.SystemTX) (*Credentials, error) {
 		return nil, errors.New("identity/postgres: a system transaction is required; " +
 			"identity's tables carry no RLS, so the transaction helper is the whole boundary")
 	}
-	return &Credentials{tx: tx}, nil
+	return &Credentials{tx: tx, log: slog.Default()}, nil
 }
 
 // Store records the verifier for a newly set password.
 func (c *Credentials) Store(ctx context.Context, cred app.NewPasswordCredential) error {
+	if err := validateNewPassword(cred); err != nil {
+		return err
+	}
+
+	return c.tx.InSystemTx(ctx, func(ctx context.Context, q db.Querier) error {
+		_, err := q.Exec(ctx, identitydb.UpsertCredential,
+			cred.ID.String(), cred.SubjectID, kindPassword,
+			cred.Verifier, cred.PepperVersion, cred.EnabledAt.UTC())
+		if err != nil {
+			// The upsert absorbs a repeat of the SAME credential id, which is what
+			// makes a crashed-and-retried registration land in the same state. It
+			// cannot absorb a SECOND usable password under a NEW id: that
+			// contends on the partial unique index instead, and the index is what
+			// keeps one subject from holding two live verifiers.
+			var pg *pgconn.PgError
+			if errors.As(err, &pg) && pg.ConstraintName == oneUsablePerKind {
+				return app.ErrPasswordAlreadySet
+			}
+			return fmt.Errorf("identity/postgres: storing a password verifier: %w", err)
+		}
+		return nil
+	})
+}
+
+// StoreFirst records an account's first verifier, clearing any orphan first.
+//
+// The DELETE and the INSERT are ONE transaction. Split, a crash between them
+// leaves the account with no verifier at all and no row to collide with — which
+// is recoverable — but a concurrent reader would observe a passwordless instant
+// on an account the log says has a password. One statement pair, one commit.
+//
+// The precondition that makes the DELETE safe belongs to the CALLER and is
+// stated on app.PasswordCredentials.StoreFirst: the aggregate must already have
+// accepted a first SetPassword, which it does only when its own stream records
+// no usable password. This adapter cannot read a stream and does not try.
+func (c *Credentials) StoreFirst(ctx context.Context, cred app.NewPasswordCredential) error {
+	if err := validateNewPassword(cred); err != nil {
+		return err
+	}
+	return c.tx.InSystemTx(ctx, func(ctx context.Context, q db.Querier) error {
+		removed, err := q.Exec(ctx, identitydb.DeleteOrphanedPasswordCredential, cred.SubjectID)
+		if err != nil {
+			return fmt.Errorf("identity/postgres: clearing an orphaned password verifier: %w", err)
+		}
+		if removed > 0 {
+			// Worth a line, because it is evidence of a crash between the verifier
+			// write and the append — the window this method exists for. Silent
+			// recovery would make that window unobservable, and an unobservable
+			// window is one nobody notices widening. The subject is a pseudonym.
+			c.log.WarnContext(ctx, "replaced an orphaned password verifier while setting a first password",
+				"module", "identity", "reason", "orphaned_password_verifier",
+				"subject_id", cred.SubjectID, "rows", removed)
+		}
+		if _, err := q.Exec(ctx, identitydb.UpsertCredential,
+			cred.ID.String(), cred.SubjectID, kindPassword,
+			cred.Verifier, cred.PepperVersion, cred.EnabledAt.UTC()); err != nil {
+			// A collision here means a row survived the DELETE, which the DELETE's
+			// predicate makes impossible for anything but a concurrent writer. Two
+			// first-password attempts for one subject is exactly that, and stopping
+			// is right: the other one won.
+			var pg *pgconn.PgError
+			if errors.As(err, &pg) && pg.ConstraintName == oneUsablePerKind {
+				return app.ErrPasswordAlreadySet
+			}
+			return fmt.Errorf("identity/postgres: storing a first password verifier: %w", err)
+		}
+		return nil
+	})
+}
+
+// validateNewPassword is the shared argument check for Store and StoreFirst.
+//
+// Shared rather than duplicated because each of these refusals exists to turn a
+// silent, late-surfacing failure into an immediate one, and a copy that drifted
+// would leave one of the two writers without that protection.
+func validateNewPassword(cred app.NewPasswordCredential) error {
 	switch {
 	case cred.ID.IsZero():
 		// The id is authenticated into the verifier by the hasher. Storing under
@@ -84,25 +171,7 @@ func (c *Credentials) Store(ctx context.Context, cred app.NewPasswordCredential)
 		return errors.New("identity/postgres: a credential needs an enabled-at instant, " +
 			"or it is stored and never usable")
 	}
-
-	return c.tx.InSystemTx(ctx, func(ctx context.Context, q db.Querier) error {
-		_, err := q.Exec(ctx, identitydb.UpsertCredential,
-			cred.ID.String(), cred.SubjectID, kindPassword,
-			cred.Verifier, cred.PepperVersion, cred.EnabledAt.UTC())
-		if err != nil {
-			// The upsert absorbs a repeat of the SAME credential id, which is what
-			// makes a crashed-and-retried registration land in the same state. It
-			// cannot absorb a SECOND usable password under a NEW id: that
-			// contends on the partial unique index instead, and the index is what
-			// keeps one subject from holding two live verifiers.
-			var pg *pgconn.PgError
-			if errors.As(err, &pg) && pg.ConstraintName == oneUsablePerKind {
-				return app.ErrPasswordAlreadySet
-			}
-			return fmt.Errorf("identity/postgres: storing a password verifier: %w", err)
-		}
-		return nil
-	})
+	return nil
 }
 
 // Find returns the usable password credential for a subject.

@@ -257,12 +257,10 @@ func swapHost(url, internal, public string) string {
 }
 
 func isNotFound(err error) bool {
-	var nsk *s3types.NoSuchKey
-	if errors.As(err, &nsk) {
+	if _, ok := errors.AsType[*s3types.NoSuchKey](err); ok {
 		return true
 	}
-	var nf *s3types.NotFound
-	if errors.As(err, &nf) {
+	if _, ok := errors.AsType[*s3types.NotFound](err); ok {
 		return true
 	}
 	// SeaweedFS answers a HEAD on a missing object with a bare 404 that the SDK

@@ -42,6 +42,26 @@ type Principal struct {
 
 	// AAL is the assurance level this session actually reached.
 	AAL optionsv1.AssuranceLevel
+
+	// Enrolment is what the caller's ACCOUNT has: whether it has ever held a
+	// proven second factor. It is what a bootstrap assurance floor is relaxed
+	// against (policy.Enrolment).
+	//
+	// It belongs on the principal rather than being looked up here for the same
+	// reason AAL does: it is a property of who is calling, resolved once by the
+	// authenticator from the session's own account, and a gate that went and read
+	// it itself would be a second source of the answer that could disagree with
+	// the first. The zero value is policy.EnrolmentUnknown, which relaxes
+	// nothing — so an authenticator that does not set it produces the strict
+	// floor, and every existing Principal literal keeps the behaviour it had.
+	Enrolment policy.Enrolment
+
+	// RequiresCredentialRotation marks a session established with a credential
+	// the system has decided must be replaced — a password found in a breach
+	// corpus. identity.md §3 restricts such a session to profile and credential
+	// endpoints, and enforce applies that restriction: it is a property of the
+	// session, so it is enforced where the session is read, not in nine handlers.
+	RequiresCredentialRotation bool
 }
 
 // Authenticator resolves the caller. Implemented by the identity module.
@@ -257,18 +277,59 @@ func (g *Gates) enforce(
 		return ctx, nil, unavailable(GateAuthn, p)
 	}
 	principal, err := g.deps.Authn.Authenticate(ctx, header)
+	if errors.Is(err, ErrAuthenticationUnavailable) {
+		// "Could not tell" is not "bad credential". Reporting an outage as
+		// UNAUTHENTICATED makes every client in the fleet sign its user out during
+		// a database blip, and they then all re-authenticate against the database
+		// that is already struggling. The request is refused either way — ADR-010's
+		// resilience governs what the caller is told, never whether an
+		// unauthenticated request proceeds.
+		return ctx, nil, srvconnect.Error(errs.Internalf("authentication is unavailable").Wrap(err))
+	}
 	if err != nil {
 		return ctx, nil, srvconnect.Error(errs.Unauthenticatedf("authentication failed"))
 	}
 
 	// Step-up is checked here, not in the authz gate, because it is a property
-	// of the SESSION rather than of the graph. Comparing against RequiredAAL()
+	// of the SESSION rather than of the graph. Comparing against a resolved floor
 	// and not against the raw option matters: the option's zero value is
 	// UNSPECIFIED, and comparing a session against that is satisfied by
 	// anything.
-	if principal.AAL < p.RequiredAAL() {
+	//
+	// AALFloor is that floor, and it differs from RequiredAAL for exactly one
+	// combination: a method that declared a bootstrap exemption, called by an
+	// account the AUTHENTICATOR reports has never held a proven second factor.
+	// That combination is how an account gets its first factor at all — AAL2
+	// means a second factor was presented, so demanding it of an account that has
+	// none is a requirement nothing can satisfy, and the account can never
+	// activate (identity.md §2).
+	//
+	// The enrolment state is read from the principal and from nowhere else. It is
+	// not in the request, not in a header, and not in a context value a handler
+	// could have written — the same argument that makes selfCheck's subject
+	// safe. So a caller cannot claim to be bootstrapping, and an account that
+	// HAS a factor faces the strict floor no matter what it sends.
+	if principal.AAL < p.AALFloor(principal.Enrolment) {
 		return ctx, nil, srvconnect.Error(errs.StepUpRequiredf(
 			"this action requires a stronger authentication level"))
+	}
+
+	// A session flagged for credential rotation is restricted to the caller's own
+	// account (identity.md §3): the password behind it is known to an attacker,
+	// so what it may still do is exactly the work of replacing that password and
+	// inspecting the damage. Enforced HERE because it is a property of the
+	// SESSION — the same argument that puts the AAL comparison here rather than in
+	// the authz gate — and because a rule of the form "every handler remembers to
+	// check the flag" is forgotten exactly once and then permanently.
+	//
+	// Self-scoped is the closest available spelling of "profile and credential
+	// endpoints". It is deliberately coarse in the SAFE direction: it admits only
+	// the caller's own account, so a method wrongly refused is an inconvenience
+	// and a method wrongly admitted is impossible.
+	if principal.RequiresCredentialRotation && !p.SelfScoped() {
+		return ctx, nil, srvconnect.Error(errs.AccessDeniedf(
+			"this session must replace the credential it was established with before it can " +
+				"be used for anything else"))
 	}
 
 	// Attached here, once, and never again. Every later gate and the handler read
@@ -277,6 +338,10 @@ func (g *Gates) enforce(
 	// which depends on the principal to stay tenant-isolated, cannot be built
 	// from anything a client sent.
 	ctx = withPrincipal(ctx, principal)
+
+	if p.SelfScoped() {
+		return ctx, nil, selfCheck(p, principal)
+	}
 
 	if g.deps.Org == nil {
 		return ctx, nil, unavailable(GateOrgContext, p)
@@ -328,6 +393,43 @@ func (g *Gates) enforce(
 	return ctx, release, nil
 }
 
+// selfCheck answers the authz gate for a method scoped to the caller's own
+// account.
+//
+// Identity is not organization-scoped: a person exists before any organization
+// does. Gates 1 and 3 are both questions ABOUT an organization — which one is
+// this request in, and does its lifecycle permit this operation class — so for a
+// self-scoped method there is nothing for them to resolve and nothing to
+// consult. An organization whose payment lapsed must not be able to stop
+// somebody signing out of a stolen device.
+//
+// Gate 2 is answered here rather than skipped. The question is "may this
+// principal act on user:<principal>", and the answer follows from the principal
+// alone; asking OpenFGA would add a round trip that can fail, to confirm
+// something the session already established. Note what that does NOT weaken: the
+// caller still had to authenticate, and still had to reach the declared
+// assurance level, before this line runs.
+//
+// The resource is taken from principal.Subject.ID and from nowhere else. It is
+// not read from the request, not read from a header, and not read from a context
+// value any package could have written — withPrincipal is unexported and called
+// once, by the line above. So a caller cannot aim this check at another
+// subject's account: the id substituted is the one their own session carries.
+//
+// The empty-subject guard is unreachable through SessionAuthenticator, which
+// refuses a row whose subject does not parse. It is kept because the interface
+// admits any implementation, and an empty subject would turn "act on your own
+// account" into "act on the account named by the empty string" — one row, shared
+// by everyone who authenticated badly.
+func selfCheck(p policy.Policy, principal Principal) error {
+	if principal.Subject.ID == "" {
+		return srvconnect.Error(errs.Internalf(
+			"%s is self-scoped but the authenticated principal carries no subject; refusing "+
+				"rather than checking a relation against an empty resource", p.Method))
+	}
+	return nil
+}
+
 // unavailable turns a missing gate into a refusal.
 //
 // INTERNAL, not NOT_FOUND: this is our misconfiguration, not the caller doing
@@ -347,6 +449,10 @@ func unavailable(gate Gate, p policy.Policy) error {
 // request, which is not implemented yet — and an unresolvable id is a REFUSAL,
 // never a fallback to the org. Falling back would check a permission the schema
 // did not ask for, and answer a different question than the one declared.
+//
+// A self-scoped method never reaches here: enforce takes the selfCheck branch
+// above, where the resource is the principal's own subject. Both shapes below
+// are org-scoped, which is why identity needed the third one.
 func resourceIDFor(p policy.Policy, principal Principal, _ Header) (string, error) {
 	if p.ResourceIDField == "" {
 		if principal.Context.ActiveOrg == "" {

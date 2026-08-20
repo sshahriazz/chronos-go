@@ -185,10 +185,7 @@ func supervise(ctx context.Context, views []projection.Projection, d *dependenci
 }
 
 func serveHealth(ctx context.Context, addr string, d *dependencies, log *slog.Logger) {
-	registry := health.New(clock.System{}, 2*time.Second)
-	for _, p := range d.probes {
-		registry.Register(p)
-	}
+	registry := newHealthRegistry(d)
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", d.metrics.Handler())
@@ -283,4 +280,22 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// newHealthRegistry builds the probe registry, WITH the observer that publishes
+// results to Prometheus.
+//
+// Extracted from serveHealth so a composition-root test can assert the observer
+// is attached. A registry without one answers /readyz and GetStatus exactly as
+// this does and exports nothing, which is indistinguishable at runtime from a
+// healthy system: the dashboards fall back to `up{job=...}`, which reports
+// whether Prometheus can scrape this process rather than whether its
+// dependencies work.
+func newHealthRegistry(d *dependencies) *health.Registry {
+	registry := health.New(clock.System{}, 2*time.Second,
+		health.WithObserver(d.metrics.Health()))
+	for _, p := range d.probes {
+		registry.Register(p)
+	}
+	return registry
 }

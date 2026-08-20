@@ -1,6 +1,17 @@
 version: v2
 managed:
   enabled: true
+  disable:
+    # protovalidate is a DEPENDENCY, not our schema. Managed mode rewrites
+    # go_package for every file it sees, which relabelled buf/validate as
+    # github.com/chronos/chronos-go/gen/proto/buf/validate — an import path no
+    # module provides, because we consume the upstream Go SDK rather than
+    # generating it. Disabling the override here keeps the dependency's own
+    # go_package, which is the package protovalidate-go itself uses.
+    - module: buf.build/bufbuild/protovalidate
+    # Same reasoning for gnostic's OpenAPI annotations: a dependency, consumed
+    # from its own published Go SDK rather than regenerated under our path.
+    - module: buf.build/gnostic/gnostic
   override:
     - file_option: go_package_prefix
       value: github.com/chronos/chronos-go/gen/proto

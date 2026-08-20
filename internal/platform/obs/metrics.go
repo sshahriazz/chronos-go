@@ -149,6 +149,92 @@ type Metrics struct {
 	// the one to alert on, because a rising rate is users losing access to
 	// resources they own.
 	AuthzFailed *prometheus.CounterVec
+
+	// ---- dependency health ------------------------------------------------
+
+	// DependencyHealth is OUR probe's answer about a dependency, which is not
+	// what `up{job="postgres"}` reports. That one says whether Prometheus can
+	// reach an exporter; this one says whether the thing works FOR US. They
+	// disagree exactly when it matters: a PostgreSQL that accepts connections
+	// and rejects our credentials is up=1 and health down, and a sealed OpenBao
+	// is up=1 and health down. Both panels are worth keeping — they answer
+	// different questions.
+	//
+	// It is a state set: one series per (dependency, state), exactly one of
+	// which is 1. That costs three series per probe and buys alert rules that
+	// read as English, with no magic numeric encoding to remember at 3am.
+	//
+	//	chronos_dependency_health{state="down", criticality="critical"} == 1
+	//	chronos_dependency_health{dependency="email_reservation_sweep", state="up"} == 0
+	//	sum by (state) (chronos_dependency_health)
+	DependencyHealth *prometheus.GaugeVec
+
+	// DependencyCheckSeconds is how long a probe took. A dependency that is up
+	// but answering in seconds is the state that precedes an outage, and it is
+	// invisible in a boolean.
+	//
+	//	histogram_quantile(0.99, sum by (le, dependency) (rate(chronos_dependency_check_seconds_bucket[5m])))
+	DependencyCheckSeconds *prometheus.HistogramVec
+
+	// DependencyChecks counts evaluations by outcome. The gauge alone cannot
+	// tell a dependency that has been down for an hour from one that flaps
+	// between scrapes, and it cannot tell a healthy dependency from one nobody
+	// is checking at all — a registry is only evaluated when something calls
+	// the readiness or status endpoint.
+	//
+	//	rate(chronos_dependency_checks_total{state="down"}[5m]) > 0
+	//	sum(rate(chronos_dependency_checks_total[5m])) == 0   # nothing is polling us
+	DependencyChecks *prometheus.CounterVec
+
+	// RPCInternal counts requests answered with a code that told the caller
+	// nothing — INTERNAL, or the UNKNOWN that connect assigns an error which
+	// reached the transport through no mapping at all.
+	//
+	// It is the alertable half of the same event `ErrorLog` logs. Every one of
+	// these is a request a user could do nothing about and a cause only the
+	// server saw: a classified refusal (NOT_FOUND, QUOTA_EXCEEDED,
+	// VALIDATION_FAILED) is the system working and is deliberately NOT counted
+	// here, so any value at all is a fault.
+	//
+	// Labelled by PROCEDURE and CODE and by nothing else. Both are closed sets —
+	// the procedures are the ones registered at boot, the codes are a Connect
+	// enum — and the obvious third label, the error text, is exactly what must
+	// never be one: it is attacker-influenceable and unbounded, and it would take
+	// the metrics backend down with the same traffic this counter exists to
+	// reveal.
+	//
+	//	sum(rate(chronos_rpc_internal_total[5m])) > 0        # page: users are seeing 500s
+	//	topk(5, sum by (procedure) (rate(chronos_rpc_internal_total[5m])))
+	//	sum by (procedure) (rate(chronos_rpc_internal_total{code="unknown"}[5m])) > 0
+	//	  # an error reached the wire through no mapping: a defect, not an incident
+	RPCInternal *prometheus.CounterVec
+
+	// AuthThrottled counts authentication attempts refused by the attempt
+	// ceiling, by the rule that tripped.
+	//
+	// These attempts appear NOWHERE else. Every other outcome on the login path
+	// is an event, projected into login_history_view, which is what the
+	// credential-stuffing signal counts — but an attempt refused above the
+	// ceiling appends nothing, deliberately, because refusals are unbounded and
+	// one event each would let an unauthenticated caller drive unbounded writes
+	// into the log. So the attempts that most indicate an attack in progress are
+	// precisely the ones the log cannot show, and this is the only place they
+	// are visible.
+	//
+	//	sum(rate(chronos_auth_throttled_total[5m])) by (rule)
+	//	sum(rate(chronos_auth_throttled_total[5m])) > 50   # a campaign, not a forgotten password
+	AuthThrottled *prometheus.CounterVec
+
+	// AuthCeilingUnavailable counts attempts allowed because the ceiling could
+	// not be evaluated.
+	//
+	// The limiter fails OPEN (ratelimit.Limiter.Allow), so this counts requests
+	// that proceeded UNTHROTTLED. That trade is defensible only while somebody
+	// can see it has been taken; until this existed the only trace was a log
+	// line, which nothing alerts on.
+	//
+	//	rate(chronos_auth_ceiling_unavailable_total[5m]) > 0   # page: guessing is unthrottled
+	AuthCeilingUnavailable prometheus.Counter
 }
 
 // New builds the metric set and its own registry.
@@ -245,6 +331,34 @@ func New() *Metrics {
 		AuthzFailed: counter(reg, "chronos_authz_failed_total",
 			"Checks that could not be evaluated. All of them denied. ALERT ON THIS.",
 			"relation", "resource_type"),
+
+		DependencyHealth: gauge(reg, "chronos_dependency_health",
+			"Our own probe's answer per dependency: 1 on the current state, 0 on the others. "+
+				"Not the same question as up{job=...}, which is scrape reachability.",
+			"dependency", "criticality", "state"),
+		DependencyCheckSeconds: histogram(reg, "chronos_dependency_check_seconds",
+			"Time one dependency probe took to answer.",
+			// The registry's per-probe timeout is 2s, so the top bucket is
+			// where "timed out" lands and the resolution belongs below it:
+			// most probes are a single round trip on a local network.
+			[]float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2},
+			"dependency"),
+		DependencyChecks: counter(reg, "chronos_dependency_checks_total",
+			"Dependency probe evaluations, by outcome.", "dependency", "state"),
+
+		RPCInternal: counter(reg, "chronos_rpc_internal_total",
+			"Requests answered with a code that disclosed nothing to the caller. "+
+				"Classified refusals are NOT counted. ALERT ON THIS.",
+			"procedure", "code"),
+
+		// Labelled by RULE only. The identifier being attempted is unbounded and
+		// chosen by the caller, so it is not a label — putting it in one is how a
+		// metrics backend is taken down by the same traffic this counter exists
+		// to reveal.
+		AuthThrottled: counter(reg, "chronos_auth_throttled_total",
+			"Authentication attempts refused by the attempt ceiling, by rule.", "rule"),
+		AuthCeilingUnavailable: counterOne(reg, "chronos_auth_ceiling_unavailable_total",
+			"Authentication attempts allowed because the attempt ceiling could not be evaluated."),
 	}
 	return m
 }
@@ -292,6 +406,19 @@ func (m *Metrics) InitReactor(name string) {
 
 func counter(reg prometheus.Registerer, name, help string, labels ...string) *prometheus.CounterVec {
 	c := prometheus.NewCounterVec(prometheus.CounterOpts{Name: name, Help: help}, labels)
+	reg.MustRegister(c)
+	return c
+}
+
+// counterOne is a counter with no labels.
+//
+// Separate from counter because a CounterVec with zero labels exports NOTHING
+// until somebody calls WithLabelValues, so a metric that has legitimately never
+// fired is absent rather than zero — and absent means `rate(...) > 0` cannot
+// alert and a dashboard renders a gap. A plain Counter is registered at zero and
+// is therefore visibly "not happening" rather than missing.
+func counterOne(reg prometheus.Registerer, name, help string) prometheus.Counter {
+	c := prometheus.NewCounter(prometheus.CounterOpts{Name: name, Help: help})
 	reg.MustRegister(c)
 	return c
 }

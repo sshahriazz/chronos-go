@@ -829,6 +829,46 @@ Named so nobody adds them by reflex:
   (§12); log search and alert thresholds are the next additions, and both want
   real traffic before being designed.
 
+### 13.1 The setting that must change the day a proxy appears
+
+Locally, browsers and tests connect to `cmd/api` directly, so the connection's
+peer address IS the caller's address. Every per-caller rate limit — the
+verification-mail ceiling today, anything per-source added later — is bucketed by
+it.
+
+The moment an ingress, a load balancer, a CDN or a sidecar sits in front of the
+API, that stops being true and **`API_TRUSTED_PROXY_HOPS` has to be set**:
+
+| Topology | Value | Why |
+| --- | --- | --- |
+| Direct (local, `make up`) | `0` | The peer address is the client. |
+| L4 balancer that forwards TCP untouched | `0` | It appends nothing to `X-Forwarded-For`. |
+| One L7 proxy / ingress that terminates TLS | `1` | It appends the address it saw. |
+| CDN → ingress, both appending | `2` | Each appends one entry. |
+
+**Set it to the number of proxies that APPEND to `X-Forwarded-For`, and no
+more.** It is not a count of network devices and it is not a safety margin. The
+two mistakes are not symmetric, and neither has a runtime symptom:
+
+- **Too low (including the default `0` behind a proxy):** every caller collapses
+  into one bucket, the per-caller ceiling silently becomes a global one, and
+  legitimate users start being refused at random as traffic grows.
+- **Too high:** the entry selected moves left, into the part of the header **the
+  caller wrote**. An attacker then mints a fresh bucket per request to evade the
+  ceiling, or spoofs a victim's address to burn their budget. The control is not
+  weakened — it is inverted into a weapon.
+
+The server refuses to boot above 8, logs the value it resolved
+(`trusted_proxy_hops` on the `identity service constructed` line), and reads the
+header not at all at `0`. Verifying the number against the topology diagram is
+the only check that exists — nothing at runtime can tell a correct value from a
+wrong one. The extraction rules live in `internal/platform/clientip`.
+
+Two things must hold in the proxy itself for any non-zero value to mean anything:
+the proxy must **append** to `X-Forwarded-For` rather than replace it, and the
+API must not be reachable by bypassing the proxy — a direct connection carries
+whatever header its sender chose, and one trusted hop then makes it authoritative.
+
 ---
 
 ## 14. Bringing it up

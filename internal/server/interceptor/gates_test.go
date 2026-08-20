@@ -3,6 +3,7 @@ package interceptor_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -45,16 +46,16 @@ func mutatingService(t *testing.T, pkg string) (protoreflect.FullName, string) {
 		optionsv1.OperationClass_OPERATION_CLASS_WRITE)
 
 	fd := &descriptorpb.FileDescriptorProto{
-		Name:       proto.String(pkg + "/svc.proto"),
-		Package:    proto.String(pkg),
-		Syntax:     proto.String("proto3"),
+		Name:       new(pkg + "/svc.proto"),
+		Package:    new(pkg),
+		Syntax:     new("proto3"),
 		Dependency: []string{"chronos/system/v1/system.proto"},
 		Service: []*descriptorpb.ServiceDescriptorProto{{
-			Name: proto.String("SyntheticService"),
+			Name: new("SyntheticService"),
 			Method: []*descriptorpb.MethodDescriptorProto{{
-				Name:       proto.String("Mutate"),
-				InputType:  proto.String(".chronos.system.v1.GetStatusRequest"),
-				OutputType: proto.String(".chronos.system.v1.GetStatusResponse"),
+				Name:       new("Mutate"),
+				InputType:  new(".chronos.system.v1.GetStatusRequest"),
+				OutputType: new(".chronos.system.v1.GetStatusResponse"),
 				Options:    opts,
 			}},
 		}},
@@ -863,4 +864,607 @@ func TestACorrelationIDIsTheTraceIDWhenOneExists(t *testing.T) {
 	if seen.CausationID != key {
 		t.Errorf("causation %q, want the idempotency key %q", seen.CausationID, key)
 	}
+}
+
+// ---- self-scoped methods (identity acts on the caller's own account) ----
+
+// selfScopedService registers a synthetic method carrying the self-scoped
+// declaration the identity service uses: relation "self" on resource type
+// "user", with no resource_id_field.
+func selfScopedService(
+	t *testing.T, pkg string, op optionsv1.OperationClass, aal optionsv1.AssuranceLevel,
+) (protoreflect.FullName, string) {
+	t.Helper()
+	opts := &descriptorpb.MethodOptions{}
+	proto.SetExtension(opts, optionsv1.E_Authz, &optionsv1.Authz{
+		Relation: "self", ResourceType: "user",
+	})
+	proto.SetExtension(opts, optionsv1.E_Operation, op)
+	if aal != optionsv1.AssuranceLevel_ASSURANCE_LEVEL_UNSPECIFIED {
+		proto.SetExtension(opts, optionsv1.E_MinAal, aal)
+	}
+
+	fd := &descriptorpb.FileDescriptorProto{
+		Name:       new(pkg + "/svc.proto"),
+		Package:    new(pkg),
+		Syntax:     new("proto3"),
+		Dependency: []string{"chronos/system/v1/system.proto"},
+		Service: []*descriptorpb.ServiceDescriptorProto{{
+			Name: new("SelfService"),
+			Method: []*descriptorpb.MethodDescriptorProto{{
+				Name:       new("Act"),
+				InputType:  new(".chronos.system.v1.GetStatusRequest"),
+				OutputType: new(".chronos.system.v1.GetStatusResponse"),
+				Options:    opts,
+			}},
+		}},
+	}
+	f, err := protodesc.NewFile(fd, protoregistry.GlobalFiles)
+	if err != nil {
+		t.Fatalf("descriptor: %v", err)
+	}
+	if err := protoregistry.GlobalFiles.RegisterFile(f); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	return protoreflect.FullName(pkg + ".SelfService"), "/" + pkg + ".SelfService/Act"
+}
+
+// bootstrapSelfService registers a self-scoped method requiring AAL2 with a
+// bootstrap floor of AAL1 — the shape EnrollTotp and ConfirmTotp declare.
+func bootstrapSelfService(t *testing.T, pkg string) (protoreflect.FullName, string) {
+	t.Helper()
+	opts := &descriptorpb.MethodOptions{}
+	proto.SetExtension(opts, optionsv1.E_Authz, &optionsv1.Authz{
+		Relation: "self", ResourceType: "user",
+	})
+	proto.SetExtension(opts, optionsv1.E_Operation,
+		optionsv1.OperationClass_OPERATION_CLASS_READ)
+	proto.SetExtension(opts, optionsv1.E_MinAal,
+		optionsv1.AssuranceLevel_ASSURANCE_LEVEL_2)
+	proto.SetExtension(opts, optionsv1.E_BootstrapMinAal,
+		optionsv1.AssuranceLevel_ASSURANCE_LEVEL_1)
+
+	fd := &descriptorpb.FileDescriptorProto{
+		Name:       new(pkg + "/svc.proto"),
+		Package:    new(pkg),
+		Syntax:     new("proto3"),
+		Dependency: []string{"chronos/system/v1/system.proto"},
+		Service: []*descriptorpb.ServiceDescriptorProto{{
+			Name: new("SelfService"),
+			Method: []*descriptorpb.MethodDescriptorProto{{
+				Name:       new("Act"),
+				InputType:  new(".chronos.system.v1.GetStatusRequest"),
+				OutputType: new(".chronos.system.v1.GetStatusResponse"),
+				Options:    opts,
+			}},
+		}},
+	}
+	f, err := protodesc.NewFile(fd, protoregistry.GlobalFiles)
+	if err != nil {
+		t.Fatalf("descriptor: %v", err)
+	}
+	if err := protoregistry.GlobalFiles.RegisterFile(f); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	return protoreflect.FullName(pkg + ".SelfService"), "/" + pkg + ".SelfService/Act"
+}
+
+// runSelf drives one request through a pipeline wired with just an
+// authenticator, and reports whether the handler ran.
+func runSelf(
+	t *testing.T, set *policy.Set, procedure string, p interceptor.Principal,
+) (int, error) {
+	t.Helper()
+	g, err := interceptor.NewGates(interceptor.Deps{Policies: set, Authn: stubAuthn{principal: p}})
+	if err != nil {
+		t.Fatalf("NewGates: %v", err)
+	}
+	calls := 0
+	_, err = g.WrapUnary(okHandler(&calls))(context.Background(),
+		request(t, procedure, statusMethod(t), nil))
+	return calls, err
+}
+
+// THE HOLE. An AAL1 caller may enrol a first second factor and NOTHING else.
+//
+// This is the test the bootstrap floor exists to pass, and the second row is the
+// one that matters: an attacker holding a stolen password, on an account that
+// already has a second factor, is refused. Enrolling their own authenticator is
+// precisely how they would make that access durable and survive the victim's
+// password change, and the existing factor they cannot present is what stops
+// them.
+//
+// The third and fourth rows close the routes around it. An authenticator that
+// does not report an enrolment state gets the strict floor, so the relaxation
+// cannot be reached by a Principal built carelessly or by an implementation that
+// forgets the field. And on an account whose factor was REMOVED, the enrolment
+// state is Established rather than Bootstrap — "has ever had", not "has" — so
+// "remove the factor, then enrol my own" is refused at the same rung as adding
+// one directly. That property is the authenticator's to preserve; what is proven
+// here is that the gate honours it and has no second, looser path of its own.
+func TestOnlyAFirstEnrolmentIsReachableBelowTheDeclaredAssuranceLevel(t *testing.T) {
+	svc, procedure := bootstrapSelfService(t, "chronos.test.gates.bootstrap.v1")
+	set := policies(t, svc)
+
+	const subject = "subj_01J000000000000000000010"
+	tests := []struct {
+		name      string
+		aal       optionsv1.AssuranceLevel
+		enrolment policy.Enrolment
+		admit     bool
+		why       string
+	}{
+		{
+			name:      "a first enrolment, single factor",
+			aal:       optionsv1.AssuranceLevel_ASSURANCE_LEVEL_1,
+			enrolment: policy.EnrolmentBootstrap,
+			admit:     true,
+			why: "an account with no second factor cannot present one, so refusing here is " +
+				"a requirement nothing can satisfy and the account never activates",
+		},
+		{
+			name:      "an account that already has a second factor",
+			aal:       optionsv1.AssuranceLevel_ASSURANCE_LEVEL_1,
+			enrolment: policy.EnrolmentEstablished,
+			why: "this is the stolen-password attacker enrolling their own authenticator; " +
+				"the existing factor is what they must present and cannot",
+		},
+		{
+			name:      "an authenticator that did not report an enrolment state",
+			aal:       optionsv1.AssuranceLevel_ASSURANCE_LEVEL_1,
+			enrolment: policy.EnrolmentUnknown,
+			why:       "the zero value must deny, in the same sense authz.Decision's does",
+		},
+		{
+			name:      "the ordinary case: a full session on an established account",
+			aal:       optionsv1.AssuranceLevel_ASSURANCE_LEVEL_2,
+			enrolment: policy.EnrolmentEstablished,
+			admit:     true,
+			why:       "the strict floor is met, so nothing about it was relaxed away",
+		},
+		{
+			name:      "a session with no assurance level at all",
+			aal:       optionsv1.AssuranceLevel_ASSURANCE_LEVEL_UNSPECIFIED,
+			enrolment: policy.EnrolmentBootstrap,
+			why: "UNSPECIFIED is below AAL1, and the bootstrap floor is a floor rather " +
+				"than an exemption from having one",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := selfPrincipal(subject)
+			p.AAL = tt.aal
+			p.Context.AAL = int(tt.aal)
+			p.Enrolment = tt.enrolment
+
+			calls, err := runSelf(t, set, procedure, p)
+			switch {
+			case tt.admit && err != nil:
+				t.Fatalf("refused: %v — %s", err, tt.why)
+			case tt.admit && calls != 1:
+				t.Fatalf("the handler ran %d times, want 1 — %s", calls, tt.why)
+			case !tt.admit && err == nil:
+				t.Fatalf("ADMITTED below the declared assurance level — %s", tt.why)
+			case !tt.admit && calls != 0:
+				t.Fatalf("the handler ran below the declared assurance level — %s", tt.why)
+			}
+			if !tt.admit {
+				if got := connect.CodeOf(err); got != connect.CodePermissionDenied {
+					t.Errorf("got %v, want PermissionDenied: a step-up refusal tells the "+
+						"client to raise the session, not that the session is bad", got)
+				}
+			}
+		})
+	}
+}
+
+// The relaxation requires the DECLARATION, not merely the account state.
+//
+// Without this, a bootstrap account would be relaxed on every method it touches,
+// and the exemption would be a property of the caller instead of a property of
+// the two methods that need it. RevokeAllSessions and GenerateRecoveryCodes are
+// AAL2 self-scoped methods that declare no exemption, and they must stay out of
+// reach of a single-factor session whatever state its account is in.
+func TestAFirstEnrolmentIsNotRelaxedOnMethodsThatDeclaredNoExemption(t *testing.T) {
+	svc, procedure := selfScopedService(t, "chronos.test.gates.noexemption.v1",
+		optionsv1.OperationClass_OPERATION_CLASS_READ,
+		optionsv1.AssuranceLevel_ASSURANCE_LEVEL_2)
+
+	p := selfPrincipal("subj_01J000000000000000000011")
+	p.AAL = optionsv1.AssuranceLevel_ASSURANCE_LEVEL_1
+	p.Context.AAL = 1
+	p.Enrolment = policy.EnrolmentBootstrap
+
+	calls, err := runSelf(t, policies(t, svc), procedure, p)
+	if err == nil {
+		t.Fatal("a single-factor session reached an AAL2 method that declares no bootstrap " +
+			"exemption: the relaxation has become a property of the caller rather than of " +
+			"the method")
+	}
+	if calls != 0 {
+		t.Fatal("the handler ran below the declared assurance level")
+	}
+}
+
+// A bootstrap account is not exempt from AUTHENTICATION, nor from the
+// credential-rotation confinement.
+//
+// The floor lowers one comparison. Everything that runs before and after it is
+// untouched, and this is what says so — the alternative reading of "AAL1 is
+// enough here" is "this method is nearly public", which it is not.
+func TestABootstrapExemptionRelaxesNothingButTheAssuranceComparison(t *testing.T) {
+	svc, procedure := bootstrapSelfService(t, "chronos.test.gates.bootstrapauthn.v1")
+	set := policies(t, svc)
+
+	t.Run("an unauthenticated caller is still refused", func(t *testing.T) {
+		g, err := interceptor.NewGates(interceptor.Deps{
+			Policies: set,
+			Authn:    stubAuthn{err: errors.New("no session")},
+		})
+		if err != nil {
+			t.Fatalf("NewGates: %v", err)
+		}
+		calls := 0
+		_, err = g.WrapUnary(okHandler(&calls))(context.Background(),
+			request(t, procedure, statusMethod(t), nil))
+		if err == nil || calls != 0 {
+			t.Fatal("an unauthenticated caller reached a bootstrap-exempt method")
+		}
+		if got := connect.CodeOf(err); got != connect.CodeUnauthenticated {
+			t.Fatalf("got %v, want Unauthenticated", got)
+		}
+	})
+
+	t.Run("a principal carrying no subject is still refused", func(t *testing.T) {
+		p := selfPrincipal("")
+		p.AAL = optionsv1.AssuranceLevel_ASSURANCE_LEVEL_1
+		p.Enrolment = policy.EnrolmentBootstrap
+
+		calls, err := runSelf(t, set, procedure, p)
+		if err == nil || calls != 0 {
+			t.Fatal("a principal with no subject reached a bootstrap-exempt method, so the " +
+				"self check ran against an empty resource")
+		}
+	})
+}
+
+// stubAuthn is an authenticator whose answer the test chooses.
+type stubAuthn struct {
+	principal interceptor.Principal
+	err       error
+}
+
+func (s stubAuthn) Authenticate(context.Context, interceptor.Header) (interceptor.Principal, error) {
+	return s.principal, s.err
+}
+
+func selfPrincipal(subject string) interceptor.Principal {
+	return interceptor.Principal{
+		Subject: authz.Principal{Kind: authz.KindUser, ID: subject},
+		Context: authz.AuthContext{AAL: 2, SessionID: "sess_01J000000000000000000000"},
+		AAL:     optionsv1.AssuranceLevel_ASSURANCE_LEVEL_2,
+	}
+}
+
+// A self-scoped method is served with NO organization anywhere in the request.
+//
+// This is the whole point of the third shape. Identity is not org-scoped — a
+// person exists before any organization does — so the org-context, authz and
+// subscription gates have nothing to resolve, consult or ask. Before this
+// existed, every authenticated identity RPC was refused with an INTERNAL error.
+func TestASelfScopedMethodIsServedWithNoOrganization(t *testing.T) {
+	svc, procedure := selfScopedService(t, "chronos.test.gates.self.v1",
+		optionsv1.OperationClass_OPERATION_CLASS_READ,
+		optionsv1.AssuranceLevel_ASSURANCE_LEVEL_UNSPECIFIED)
+
+	// Org, Authz, Subscriptions and Idempotency are deliberately ABSENT.
+	g, err := interceptor.NewGates(interceptor.Deps{
+		Policies: policies(t, svc),
+		Authn:    stubAuthn{principal: selfPrincipal("subj_01J000000000000000000001")},
+	})
+	if err != nil {
+		t.Fatalf("NewGates: %v", err)
+	}
+
+	var seen interceptor.Principal
+	handler := func(ctx context.Context, _ connect.AnyRequest) (connect.AnyResponse, error) {
+		var ok bool
+		seen, ok = interceptor.PrincipalFrom(ctx)
+		if !ok {
+			t.Error("the handler received no principal")
+		}
+		return connect.NewResponse(&systemv1.GetStatusResponse{}), nil
+	}
+	if _, err := g.WrapUnary(handler)(context.Background(),
+		request(t, procedure, statusMethod(t), nil)); err != nil {
+		t.Fatalf("a self-scoped method was refused: %v", err)
+	}
+	if seen.Subject.ID != "subj_01J000000000000000000001" {
+		t.Fatalf("the handler sees %q as the caller", seen.Subject.ID)
+	}
+}
+
+// The self check is satisfied by the caller's OWN subject, and there is no input
+// through which another subject could be named.
+//
+// Two different callers reach the same method and each is scoped to themselves;
+// no header, field or context value the client controls changes which subject
+// the check is about.
+func TestASelfScopedCheckIsAlwaysAboutTheCaller(t *testing.T) {
+	svc, procedure := selfScopedService(t, "chronos.test.gates.selfwho.v1",
+		optionsv1.OperationClass_OPERATION_CLASS_READ,
+		optionsv1.AssuranceLevel_ASSURANCE_LEVEL_UNSPECIFIED)
+	set := policies(t, svc)
+
+	for _, subject := range []string{
+		"subj_01J00000000000000000000A",
+		"subj_01J00000000000000000000B",
+	} {
+		g, err := interceptor.NewGates(interceptor.Deps{
+			Policies: set,
+			Authn:    stubAuthn{principal: selfPrincipal(subject)},
+		})
+		if err != nil {
+			t.Fatalf("NewGates: %v", err)
+		}
+		var seen string
+		handler := func(ctx context.Context, _ connect.AnyRequest) (connect.AnyResponse, error) {
+			p, _ := interceptor.PrincipalFrom(ctx)
+			seen = p.Subject.ID
+			return connect.NewResponse(&systemv1.GetStatusResponse{}), nil
+		}
+		if _, err := g.WrapUnary(handler)(context.Background(),
+			request(t, procedure, statusMethod(t), map[string]string{
+				// A caller attempting to name somebody else's account.
+				"X-Subject-Id":  "subj_01J00000000000000000000Z",
+				"Resource-Id":   "subj_01J00000000000000000000Z",
+				"Authorization": "Bearer whatever",
+			})); err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if seen != subject {
+			t.Fatalf("the request was scoped to %q, but the caller is %q", seen, subject)
+		}
+	}
+}
+
+// A self-scoped method whose principal has no subject is REFUSED.
+//
+// "Act on your own account" with an empty subject is "act on the account named
+// by the empty string" — one row, shared by everyone who authenticated badly.
+func TestASelfScopedMethodWithNoSubjectIsRefused(t *testing.T) {
+	svc, procedure := selfScopedService(t, "chronos.test.gates.selfnosubj.v1",
+		optionsv1.OperationClass_OPERATION_CLASS_READ,
+		optionsv1.AssuranceLevel_ASSURANCE_LEVEL_UNSPECIFIED)
+	g, err := interceptor.NewGates(interceptor.Deps{
+		Policies: policies(t, svc),
+		Authn:    stubAuthn{principal: selfPrincipal("")},
+	})
+	if err != nil {
+		t.Fatalf("NewGates: %v", err)
+	}
+	calls := 0
+	_, err = g.WrapUnary(okHandler(&calls))(context.Background(),
+		request(t, procedure, statusMethod(t), nil))
+	if err == nil {
+		t.Fatal("a self-scoped method ran for a principal with no subject")
+	}
+	if calls != 0 {
+		t.Fatal("the handler ran for a principal with no subject")
+	}
+	if got := connect.CodeOf(err); got != connect.CodeInternal {
+		t.Fatalf("got %v, want Internal", got)
+	}
+}
+
+// Self-scoped is not a way around authentication.
+func TestASelfScopedMethodStillRequiresAuthentication(t *testing.T) {
+	svc, procedure := selfScopedService(t, "chronos.test.gates.selfauthn.v1",
+		optionsv1.OperationClass_OPERATION_CLASS_READ,
+		optionsv1.AssuranceLevel_ASSURANCE_LEVEL_UNSPECIFIED)
+	set := policies(t, svc)
+
+	tests := []struct {
+		name string
+		deps interceptor.Deps
+		want connect.Code
+	}{
+		{
+			name: "no authenticator wired",
+			deps: interceptor.Deps{Policies: set},
+			want: connect.CodeInternal,
+		},
+		{
+			name: "the token resolved to nothing",
+			deps: interceptor.Deps{Policies: set, Authn: stubAuthn{err: errors.New("no session")}},
+			want: connect.CodeUnauthenticated,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g, err := interceptor.NewGates(tt.deps)
+			if err != nil {
+				t.Fatalf("NewGates: %v", err)
+			}
+			calls := 0
+			_, err = g.WrapUnary(okHandler(&calls))(context.Background(),
+				request(t, procedure, statusMethod(t), nil))
+			if err == nil {
+				t.Fatal("an unauthenticated caller reached a self-scoped method")
+			}
+			if calls != 0 {
+				t.Fatal("the handler ran for an unauthenticated caller")
+			}
+			if got := connect.CodeOf(err); got != tt.want {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// Nor around step-up.
+func TestASelfScopedMethodStillEnforcesItsAssuranceLevel(t *testing.T) {
+	svc, procedure := selfScopedService(t, "chronos.test.gates.selfaal.v1",
+		optionsv1.OperationClass_OPERATION_CLASS_READ,
+		optionsv1.AssuranceLevel_ASSURANCE_LEVEL_2)
+
+	weak := selfPrincipal("subj_01J000000000000000000002")
+	weak.AAL = optionsv1.AssuranceLevel_ASSURANCE_LEVEL_1
+
+	g, err := interceptor.NewGates(interceptor.Deps{
+		Policies: policies(t, svc),
+		Authn:    stubAuthn{principal: weak},
+	})
+	if err != nil {
+		t.Fatalf("NewGates: %v", err)
+	}
+	calls := 0
+	_, err = g.WrapUnary(okHandler(&calls))(context.Background(),
+		request(t, procedure, statusMethod(t), nil))
+	if err == nil {
+		t.Fatal("an AAL1 session reached a method requiring AAL2")
+	}
+	if calls != 0 {
+		t.Fatal("the handler ran below the required assurance level")
+	}
+}
+
+// Nor around idempotency: a self-scoped WRITE is still a mutation.
+func TestASelfScopedMutationStillNeedsTheIdempotencyGate(t *testing.T) {
+	svc, procedure := selfScopedService(t, "chronos.test.gates.selfwrite.v1",
+		optionsv1.OperationClass_OPERATION_CLASS_WRITE,
+		optionsv1.AssuranceLevel_ASSURANCE_LEVEL_UNSPECIFIED)
+	g, err := interceptor.NewGates(interceptor.Deps{
+		Policies: policies(t, svc),
+		Authn:    stubAuthn{principal: selfPrincipal("subj_01J000000000000000000003")},
+	})
+	if err != nil {
+		t.Fatalf("NewGates: %v", err)
+	}
+	calls := 0
+	_, err = g.WrapUnary(okHandler(&calls))(context.Background(),
+		request(t, procedure, statusMethod(t), map[string]string{
+			interceptor.IdempotencyHeader: "01J0000000000000000000009",
+		}))
+	if err == nil {
+		t.Fatal("a self-scoped mutation ran with no idempotency gate")
+	}
+	if calls != 0 {
+		t.Fatal("the handler ran with no idempotency gate")
+	}
+}
+
+// The org-scoped shape did NOT become more permissive.
+//
+// An org-scoped method whose caller has no active organization is still refused:
+// the self branch answers a different question and must not have loosened this
+// one.
+func TestAnOrgScopedMethodWithNoOrganizationIsStillRefused(t *testing.T) {
+	svc, procedure := mutatingService(t, "chronos.test.gates.noorg.v1")
+	deps := fullDeps(t, svc, allowChecker{})
+	orgless := selfPrincipal("subj_01J000000000000000000004")
+	deps.Authn = stubAuthn{principal: orgless} // ActiveOrg is empty
+
+	g, err := interceptor.NewGates(deps)
+	if err != nil {
+		t.Fatalf("NewGates: %v", err)
+	}
+	calls := 0
+	_, err = g.WrapUnary(okHandler(&calls))(context.Background(),
+		request(t, procedure, statusMethod(t), map[string]string{
+			interceptor.IdempotencyHeader: "01J000000000000000000000A",
+		}))
+	if err == nil {
+		t.Fatal("an org-scoped method ran with no organization resolved: the authz check " +
+			"would have been made against an empty resource id")
+	}
+	if calls != 0 {
+		t.Fatal("the handler ran with no organization")
+	}
+}
+
+// An authentication OUTAGE is a server fault, not a credential failure.
+//
+// Reported as UNAUTHENTICATED, every client in the fleet signs its user out
+// during a database blip and then re-authenticates against the database that is
+// already struggling.
+func TestAnAuthenticationOutageIsNotReportedAsABadCredential(t *testing.T) {
+	svc, procedure := selfScopedService(t, "chronos.test.gates.selfoutage.v1",
+		optionsv1.OperationClass_OPERATION_CLASS_READ,
+		optionsv1.AssuranceLevel_ASSURANCE_LEVEL_UNSPECIFIED)
+	g, err := interceptor.NewGates(interceptor.Deps{
+		Policies: policies(t, svc),
+		Authn: stubAuthn{err: fmt.Errorf("%w: connection refused",
+			interceptor.ErrAuthenticationUnavailable)},
+	})
+	if err != nil {
+		t.Fatalf("NewGates: %v", err)
+	}
+	calls := 0
+	_, err = g.WrapUnary(okHandler(&calls))(context.Background(),
+		request(t, procedure, statusMethod(t), nil))
+	if err == nil {
+		t.Fatal("a request was ADMITTED while authentication was unavailable")
+	}
+	if calls != 0 {
+		t.Fatal("the handler ran while authentication was unavailable")
+	}
+	if got := connect.CodeOf(err); got != connect.CodeInternal {
+		t.Fatalf("got %v, want Internal: an outage told to a client as UNAUTHENTICATED signs "+
+			"every user out during a blip", got)
+	}
+}
+
+// A session that must rotate its credential reaches its own account and nothing
+// else (identity.md §3).
+func TestASessionAwaitingCredentialRotationIsConfinedToItsOwnAccount(t *testing.T) {
+	rotating := selfPrincipal("subj_01J000000000000000000005")
+	rotating.RequiresCredentialRotation = true
+
+	t.Run("its own account is reachable", func(t *testing.T) {
+		svc, procedure := selfScopedService(t, "chronos.test.gates.rotself.v1",
+			optionsv1.OperationClass_OPERATION_CLASS_READ,
+			optionsv1.AssuranceLevel_ASSURANCE_LEVEL_UNSPECIFIED)
+		g, err := interceptor.NewGates(interceptor.Deps{
+			Policies: policies(t, svc),
+			Authn:    stubAuthn{principal: rotating},
+		})
+		if err != nil {
+			t.Fatalf("NewGates: %v", err)
+		}
+		calls := 0
+		if _, err := g.WrapUnary(okHandler(&calls))(context.Background(),
+			request(t, procedure, statusMethod(t), nil)); err != nil {
+			t.Fatalf("a rotation-flagged session could not reach its own account: %v", err)
+		}
+		if calls != 1 {
+			t.Fatal("the handler did not run")
+		}
+	})
+
+	t.Run("everything else is refused", func(t *testing.T) {
+		svc, procedure := mutatingService(t, "chronos.test.gates.rotother.v1")
+		deps := fullDeps(t, svc, allowChecker{})
+		withOrg := rotating
+		withOrg.Context.ActiveOrg = "org_01H8XG5N2QK7VB3C9WPYZR4TFM"
+		deps.Authn = stubAuthn{principal: withOrg}
+
+		g, err := interceptor.NewGates(deps)
+		if err != nil {
+			t.Fatalf("NewGates: %v", err)
+		}
+		calls := 0
+		_, err = g.WrapUnary(okHandler(&calls))(context.Background(),
+			request(t, procedure, statusMethod(t), map[string]string{
+				interceptor.IdempotencyHeader: "01J000000000000000000000B",
+			}))
+		if err == nil {
+			t.Fatal("a session established with a breached credential acted beyond its own " +
+				"account")
+		}
+		if calls != 0 {
+			t.Fatal("the handler ran for a session awaiting credential rotation")
+		}
+	})
 }

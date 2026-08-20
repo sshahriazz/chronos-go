@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
@@ -298,4 +299,152 @@ func TestRebuildShardsDefaultsToSequential(t *testing.T) {
 	if c.Projector.RebuildShards != 1 {
 		t.Fatalf("default rebuild shards = %d, want 1", c.Projector.RebuildShards)
 	}
+}
+
+// The trust boundary for X-Forwarded-For defaults to trusting NOTHING.
+//
+// This is the assertion that keeps an upgrade from silently changing how every
+// per-caller rate limit is bucketed: a deployment that sets nothing must behave
+// exactly as one that had no such setting, which means the header is not read.
+func TestTrustedProxyHopsDefaultsToZero(t *testing.T) {
+	withEnv(t, base())
+	c, err := config.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.API.TrustedProxyHops != 0 {
+		t.Fatalf("default API_TRUSTED_PROXY_HOPS = %d, want 0: any other default "+
+			"reads a header the caller writes on a deployment that never asked for it",
+			c.API.TrustedProxyHops)
+	}
+}
+
+// Both ends are refused at BOOT, because neither has a runtime symptom. A
+// negative value is a typo; a value above the cap silently hands the rate-limit
+// bucket key to whoever is calling.
+func TestValidate_TrustedProxyHopsBounds(t *testing.T) {
+	for name, value := range map[string]string{
+		"negative":                      "-1",
+		"above the cap":                 "9",
+		"a fat-fingered hop count":      "100",
+		"a plausible-looking big value": "64",
+	} {
+		t.Run(name, func(t *testing.T) {
+			withEnv(t, base())
+			t.Setenv("API_TRUSTED_PROXY_HOPS", value)
+			_, err := config.Load()
+			if err == nil {
+				t.Fatalf("API_TRUSTED_PROXY_HOPS=%s must be refused at startup", value)
+			}
+			if !strings.Contains(err.Error(), "API_TRUSTED_PROXY_HOPS") {
+				t.Fatalf("the error must name the variable an operator has to fix, got %q", err)
+			}
+		})
+	}
+}
+
+func TestValidate_AcceptsARealProxyTopology(t *testing.T) {
+	for _, hops := range []string{"0", "1", "2", "8"} {
+		t.Run("hops="+hops, func(t *testing.T) {
+			withEnv(t, base())
+			t.Setenv("API_TRUSTED_PROXY_HOPS", hops)
+			if _, err := config.Load(); err != nil {
+				t.Fatalf("API_TRUSTED_PROXY_HOPS=%s must be accepted: %v", hops, err)
+			}
+		})
+	}
+}
+
+// A retired key set is what makes a rotation survivable, so its parsing is
+// tested for the failures that would otherwise surface as "some users cannot log
+// in" rather than as a bad deploy.
+func TestIdentityKeySetCarriesEveryVersionAProcessMustOpen(t *testing.T) {
+	t.Parallel()
+
+	const (
+		current = "11111111111111111111111111111111111111111111111111111111111111aa"
+		older   = "22222222222222222222222222222222222222222222222222222222222222bb"
+		oldest  = "33333333333333333333333333333333333333333333333333333333333333cc"
+	)
+
+	t.Run("current plus every retired version", func(t *testing.T) {
+		t.Parallel()
+		id := config.IdentityConfig{
+			PasswordPepperKey:     config.Secret(current),
+			PasswordPepperVersion: 3,
+			PasswordPepperRetired: config.Secret("2:" + older + ", 1:" + oldest),
+		}
+		set, err := id.PasswordPepperKeySet()
+		if err != nil {
+			t.Fatalf("PasswordPepperKeySet: %v", err)
+		}
+		// Three versions, because a verifier is sealed under the key of ITS OWN
+		// version: a process missing one cannot open those rows at all, and every
+		// user still on that version is locked out the moment it deploys.
+		if len(set) != 3 {
+			t.Fatalf("loaded %d versions, want 3: %v", len(set), keysOf(set))
+		}
+		for _, v := range []int{1, 2, 3} {
+			if len(set[v]) != config.IdentityKeySize {
+				t.Errorf("version %d decoded to %d bytes, want %d",
+					v, len(set[v]), config.IdentityKeySize)
+			}
+		}
+	})
+
+	t.Run("empty retired list is the steady state", func(t *testing.T) {
+		t.Parallel()
+		id := config.IdentityConfig{
+			PasswordPepperKey: config.Secret(current), PasswordPepperVersion: 1,
+		}
+		set, err := id.PasswordPepperKeySet()
+		if err != nil {
+			t.Fatalf("an unrotated deployment was refused: %v", err)
+		}
+		if len(set) != 1 {
+			t.Errorf("loaded %d versions, want 1", len(set))
+		}
+	})
+
+	// Each of these is refused at BOOT. Tolerated, they produce a subset of users
+	// who cannot authenticate, distributed over whoever has not been re-sealed
+	// yet — the hardest possible shape to diagnose from a bug report.
+	for _, tc := range []struct {
+		name, retired string
+		version       int
+	}{
+		{"a version with no key", "2", 3},
+		{"a version that is not a number", "two:" + older, 3},
+		{"version zero, invisible to the re-seal work list", "0:" + older, 3},
+		{"a duplicate version", "2:" + older + ",2:" + oldest, 3},
+		{"a retired entry claiming the current version", "3:" + older, 3},
+		{"a key of the wrong length", "2:abcd", 3},
+	} {
+		t.Run(tc.name+" is refused", func(t *testing.T) {
+			t.Parallel()
+			id := config.IdentityConfig{
+				PasswordPepperKey:     config.Secret(current),
+				PasswordPepperVersion: tc.version,
+				PasswordPepperRetired: config.Secret(tc.retired),
+			}
+			set, err := id.PasswordPepperKeySet()
+			if err == nil {
+				t.Fatalf("accepted %q, loading %d versions", tc.retired, len(set))
+			}
+			// The value is key material. An error string is the one place a key
+			// most reliably reaches a log aggregator.
+			if strings.Contains(err.Error(), older) || strings.Contains(err.Error(), oldest) {
+				t.Errorf("the error carries key material: %v", err)
+			}
+		})
+	}
+}
+
+func keysOf(m map[int][]byte) []int {
+	out := make([]int, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Ints(out)
+	return out
 }

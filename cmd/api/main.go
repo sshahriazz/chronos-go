@@ -16,13 +16,17 @@ import (
 	"syscall"
 	"time"
 
+	connectrpc "connectrpc.com/connect"
 	"connectrpc.com/grpcreflect"
+	"connectrpc.com/validate"
+	"github.com/chronos/chronos-go/gen/proto/chronos/identity/v1/identityv1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/system/v1/systemv1connect"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/config"
 	"github.com/chronos/chronos-go/internal/platform/obs"
 	"github.com/chronos/chronos-go/internal/server/connect"
 	"github.com/chronos/chronos-go/internal/server/health"
+	"github.com/chronos/chronos-go/internal/server/interceptor"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
@@ -83,10 +87,7 @@ func run(addr string, log *slog.Logger) error {
 	deps, closeDeps := newDependencies(cfg, log)
 	defer closeDeps()
 
-	registry := health.New(clk, 2*time.Second)
-	for _, p := range deps.probes {
-		registry.Register(p)
-	}
+	registry := newHealthRegistry(clk, deps)
 
 	mux := http.NewServeMux()
 
@@ -113,14 +114,14 @@ func run(addr string, log *slog.Logger) error {
 
 	// One handler, three protocols.
 	systemSvc := health.NewService(registry, version, cfg.Timezone, startedAt)
-	// JSONOptions makes protobuf-JSON emit default values, so `false` and `0`
-	// never vanish from a response (see internal/server/connect/codec.go).
-	mux.Handle(systemv1connect.NewSystemServiceHandler(systemSvc, connect.JSONOptions()...))
+	served := registerServices(mux, deps, systemSvc, log)
 
-	// Reflection lets grpcurl and Postman explore a running server. The docs
-	// binary also ships a descriptor set, so tooling works when reflection is
-	// disabled in production.
-	reflector := grpcreflect.NewStaticReflector(systemv1connect.SystemServiceName)
+	// Reflection lets grpcurl and Postman explore a running server. It advertises
+	// exactly what was REGISTERED, not what this build could serve: a reflector
+	// naming a service the mux does not route sends every tool that trusts it to a
+	// 404, which reads as a broken server rather than as a service this process
+	// could not construct.
+	reflector := grpcreflect.NewStaticReflector(served...)
 	mux.Handle(grpcreflect.NewHandlerV1(reflector))
 	mux.Handle(grpcreflect.NewHandlerV1Alpha(reflector))
 
@@ -162,6 +163,106 @@ func run(addr string, log *slog.Logger) error {
 	logInitialHealth(ctx, registry, log)
 
 	return srv.Run(ctx)
+}
+
+// handlerOptions is the option set EVERY Connect handler in this binary is
+// built with.
+//
+// It is a function rather than an inline argument so that exactly one list
+// exists. A service registered with its own hand-rolled options is a service
+// with different guarantees from every other one, and the difference is
+// invisible at the call site — which is how a validation interceptor comes to be
+// applied to eight endpoints out of nine.
+//
+// It is also what makes the wiring TESTABLE. `TestValidationIsWired` builds a
+// real handler from this list and pushes a request that violates a declared rule
+// through it, so "protovalidate is wired" is an assertion about the composition
+// root rather than about a package that happens to be imported.
+// It takes the enforcement pipeline as an optional argument rather than reading
+// it from a package-level variable, so that the list stays a pure function of
+// its inputs and a test can build the same handler with and without gates. The
+// variadic form is what lets `handlerOptions()` keep meaning "everything except
+// the gates" for the validation test, which needs a handler it can reach without
+// authenticating.
+func handlerOptions(gates ...connectrpc.Interceptor) []connectrpc.HandlerOption {
+	// ORDER MATTERS, and it is the ADR-021 order: connect applies the first
+	// interceptor outermost for handlers, so the gates run BEFORE protovalidate.
+	//
+	// That direction is deliberate. Validation ahead of authentication would
+	// answer an unauthenticated caller with a field-level description of a
+	// request they were never entitled to make — ADR-036 puts the disclosure
+	// boundary at the authz gate, and "your email field is malformed" is above it.
+	// Running gates first also means a refused request never pays for validating
+	// a message it will not serve.
+	interceptors := make([]connectrpc.Interceptor, 0, len(gates)+1)
+	for _, g := range gates {
+		if g != nil {
+			interceptors = append(interceptors, g)
+		}
+	}
+	// Constraints are declared in the .proto and enforced HERE, before any
+	// handler runs (ADR-007, CONVENTIONS §7). Without this line every rule in
+	// identity.proto is a comment: the schema documents a constraint, the
+	// generated OpenAPI publishes it, and nothing refuses input that breaks
+	// it. Handlers do not re-check.
+	interceptors = append(interceptors, validate.NewInterceptor())
+
+	opts := []connectrpc.HandlerOption{connectrpc.WithInterceptors(interceptors...)}
+	// JSONOptions makes protobuf-JSON emit default values, so `false` and `0`
+	// never vanish from a response (see internal/server/connect/codec.go).
+	return append(opts, connect.JSONOptions()...)
+}
+
+// registerServices mounts every Connect handler this binary serves and returns
+// the fully-qualified names it registered.
+//
+// Returning the names is what makes the wiring ASSERTABLE. A service that was
+// built and mounted leaves no artefact otherwise — mux registration is a side
+// effect on an http.ServeMux — and this repository has shipped six seams that
+// were fully built, fully tested, and constructed by no binary. The reflector is
+// also driven from this list, so what tooling is told matches what is served.
+//
+// Nothing here is registered over a nil collaborator. The two failure modes are
+// deliberately different: a service that could not be CONSTRUCTED is left off
+// (callers get `unimplemented`), and a pipeline that could not be BUILT takes
+// every service off with it, because serving a method whose gates are unknown is
+// worse than not serving it (ADR-021).
+func registerServices(
+	mux *http.ServeMux,
+	d *dependencies,
+	systemSvc systemv1connect.SystemServiceHandler,
+	log *slog.Logger,
+) []string {
+	if d.gates == nil {
+		log.Error("NO CONNECT SERVICE IS REGISTERED: the enforcement pipeline could not be " +
+			"built, so every RPC this binary could serve is unreachable. /healthz, /readyz " +
+			"and /metrics still answer, which is what makes this state findable")
+		return nil
+	}
+	// The error gate goes FIRST, which makes it outermost: it has to see the
+	// failures the gates themselves produce, not only the ones handlers return.
+	// Without it, an error that reached the wire unclassified was reported to
+	// nobody — `internal: internal error` to the caller and silence in the log.
+	opts := handlerOptions(interceptor.NewErrorLog(log, d.metrics.RPC()), d.gates)
+
+	var served []string
+
+	mux.Handle(systemv1connect.NewSystemServiceHandler(systemSvc, opts...))
+	served = append(served, systemv1connect.SystemServiceName)
+
+	if d.identity == nil {
+		// Already logged in full by startIdentity. Repeated here at the moment of
+		// non-registration because this is the line that answers "why does my
+		// login return unimplemented" from a log search for the service name.
+		log.Error("IdentityService is NOT registered; every identity RPC answers " +
+			"'unimplemented'")
+	} else {
+		mux.Handle(identityv1connect.NewIdentityServiceHandler(d.identity, opts...))
+		served = append(served, identityv1connect.IdentityServiceName)
+	}
+
+	log.Info("connect services registered", "services", served)
+	return served
 }
 
 // backgroundTask is a duty this binary owns beyond serving requests.
@@ -238,4 +339,22 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// newHealthRegistry builds the probe registry, WITH the observer that publishes
+// results to Prometheus.
+//
+// Extracted from main so a composition-root test can assert the observer is
+// attached. Without it the registry answers /readyz and GetStatus exactly as it
+// does now and exports nothing, so every dashboard silently falls back to
+// `up{job=...}` — which reports whether Prometheus can scrape this process, not
+// whether its dependencies work. The two differ precisely when it matters: a
+// Postgres that accepts connections and rejects our credentials is up=1 and
+// probe-DOWN, and a sealed OpenBao is up=1 and probe-DOWN.
+func newHealthRegistry(clk clock.Clock, deps *dependencies) *health.Registry {
+	registry := health.New(clk, 2*time.Second, health.WithObserver(deps.metrics.Health()))
+	for _, p := range deps.probes {
+		registry.Register(p)
+	}
+	return registry
 }

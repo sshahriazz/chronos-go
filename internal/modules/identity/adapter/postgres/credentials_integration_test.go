@@ -236,6 +236,81 @@ func TestASecondUsablePasswordIsRefused(t *testing.T) {
 	}
 }
 
+// TestStoreFirstDisplacesAnOrphanedVerifierThatStoreCannot is the lockout that
+// StoreFirst exists to prevent, demonstrated against the real unique index.
+//
+// The situation: setting an account's FIRST password writes the verifier and
+// then appends PasswordSet. A crash between the two leaves a row that no event
+// refers to — the aggregate rebuilt from the log has no password method, so
+// nothing can authenticate against it and nothing will clean it up. The user's
+// only recovery is a fresh verification link, which mints a NEW credential id.
+//
+// Under Store that retry hits credential_one_usable_per_kind_idx and fails, and
+// it fails every time, forever: the account can never acquire the password it
+// never got. The first half of this test asserts exactly that, so the second
+// half is measured against a real obstacle rather than an imagined one.
+//
+// StoreFirst replaces the orphan instead. That is only safe because of a
+// precondition the caller carries — domain.User.SetPassword has already refused
+// if the account's own stream records a usable password — which is why the
+// method is separate rather than being Store made more forgiving.
+func TestStoreFirstDisplacesAnOrphanedVerifierThatStoreCannot(t *testing.T) {
+	ctx := context.Background()
+	pool := openPool(t)
+	store := newCredentialsOn(t, pool)
+	subject := testSubject(t)
+
+	// The orphan: written by an attempt that never appended its event.
+	orphan := newCredentialID()
+	mustStore(t, store, subject, orphan, "$argon2id$fixture$orphan", 1)
+
+	// The retry, through the ordinary path. It is refused, and the refusal is
+	// permanent — nothing in this system deletes the orphan on its own.
+	retry := newCredentialID()
+	err := store.Store(ctx, app.NewPasswordCredential{
+		ID: retry, SubjectID: subject,
+		Verifier: "$argon2id$fixture$retry", PepperVersion: 1, EnabledAt: time.Now().UTC(),
+	})
+	if !errors.Is(err, app.ErrPasswordAlreadySet) {
+		t.Fatalf("Store returned %v, want ErrPasswordAlreadySet; without that collision "+
+			"this test proves nothing about what StoreFirst is for", err)
+	}
+
+	// The same retry, through the path that knows the log says otherwise.
+	if err := store.StoreFirst(ctx, app.NewPasswordCredential{
+		ID: retry, SubjectID: subject,
+		Verifier: "$argon2id$fixture$retry", PepperVersion: 1, EnabledAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("StoreFirst: %v — the account cannot acquire a first password, and the "+
+			"only symptom in production is a constraint name in a log line", err)
+	}
+
+	got, err := store.Find(ctx, subject)
+	if err != nil {
+		t.Fatalf("finding after StoreFirst: %v", err)
+	}
+	if got.ID != retry {
+		t.Errorf("the usable credential is %s, want the retry's %s", got.ID, retry)
+	}
+	if got.Verifier != "$argon2id$fixture$retry" {
+		t.Errorf("the usable verifier is %q, want the retry's", got.Verifier)
+	}
+
+	// And the orphan is GONE, not merely shadowed. A row left behind would be
+	// invisible to Find and visible to the pepper-rotation job, which would then
+	// re-seal a verifier belonging to nobody on every pass.
+	var rows int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM credential WHERE credential_id = $1`,
+		orphan.String()).Scan(&rows); err != nil {
+		t.Fatalf("counting the orphan: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("the orphaned credential row survives (%d rows); Find hides it and the "+
+			"rotation job does not", rows)
+	}
+}
+
 func TestStoringTheSameCredentialTwiceIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	store := newCredentials(t)

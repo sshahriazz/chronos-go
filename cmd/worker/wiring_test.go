@@ -2,6 +2,7 @@ package main
 
 import (
 	"log/slog"
+	"slices"
 	"testing"
 
 	"github.com/chronos/chronos-go/internal/platform/config"
@@ -79,12 +80,7 @@ func testConfig(t *testing.T) *config.Config {
 }
 
 func slicesContains(haystack []notify.Channel, needle notify.Channel) bool {
-	for _, h := range haystack {
-		if h == needle {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(haystack, needle)
 }
 
 // Durable work is off by default, and the binary must say so rather than

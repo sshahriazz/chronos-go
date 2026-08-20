@@ -1,0 +1,189 @@
+# -----------------------------------------------------------------------------
+# Alerts on OUR dependency probes.
+#
+# These fire on chronos_dependency_health, which is not `up{job=...}`. That one
+# answers "can Prometheus reach the exporter"; this one answers "does the
+# dependency work for us". They come apart exactly when it matters: a PostgreSQL
+# that accepts connections and rejects our credentials is up=1 and probe DOWN, a
+# sealed OpenBao is up=1 and probe DOWN, and a Temporal schedule that was never
+# created leaves Temporal itself perfectly healthy.
+#
+# The gauge is a state set: one series per (dependency, criticality, state), of
+# which exactly one is 1. Every series is published at 0 when the probe is
+# registered, so `== 0` on a schedule probe is a real assertion rather than a
+# rule that silently never evaluates.
+#
+# Every rule carries a `for:` duration. A probe runs when something calls
+# readiness or the status endpoint, so a single evaluation can catch a
+# dependency mid-restart; paging on one scrape would page on every deploy.
+# -----------------------------------------------------------------------------
+groups:
+  - name: chronos-dependencies
+    rules:
+      # ---- critical ---------------------------------------------------------
+      - alert: ChronosCriticalDependencyDown
+        expr: chronos_dependency_health{criticality="critical", state="down"} == 1
+        for: 2m
+        labels:
+          severity: page
+          component: dependency
+        annotations:
+          summary: >-
+            CRITICAL dependency {{ $labels.dependency }} is down on {{ $labels.job }}
+          description: >-
+            Our own probe for {{ $labels.dependency }} has failed for two minutes.
+            A CRITICAL dependency failing means readiness fails, so this instance
+            has already left the load balancer and is serving nothing. Note this
+            is NOT the same as up{job="..."}, which may well still be 1 — rejected
+            credentials, a full disk and a sealed vault all look reachable to a
+            scraper.
+          first_check: >-
+            GET /rpc/chronos.system.v1.SystemService/GetStatus on the affected
+            instance: it carries the probe's error text, which is deliberately not
+            a metric label. Then compare with up{job="..."} — up=1 with the probe
+            down points at credentials, permissions or a sealed secret store
+            rather than at the network.
+
+      # ---- fail-closed ------------------------------------------------------
+      #
+      # Kept separate from the critical rule because the response is different.
+      # Readiness deliberately still passes (ADR-010): taking every instance out
+      # of the load balancer at once would turn a clear "authorization
+      # unavailable" into a connection error that hides the cause. So the
+      # service is up, answering, and denying everything.
+      - alert: ChronosFailClosedDependencyDown
+        expr: chronos_dependency_health{criticality="fail_closed", state="down"} == 1
+        for: 2m
+        labels:
+          severity: page
+          component: dependency
+        annotations:
+          summary: >-
+            {{ $labels.dependency }} is down and every authorization check is DENYING
+          description: >-
+            A FAIL_CLOSED dependency — the authorization service — has been
+            unreachable for two minutes. By design it denies rather than allows,
+            so the product is up and every user is losing access to resources they
+            own. Readiness still passes on purpose, which is why no other signal
+            shows an outage.
+          first_check: >-
+            chronos_authz_failed_total should be climbing; if it is not, nothing
+            is reaching authorization at all. Then the OpenFGA container's own
+            health and its store connectivity.
+
+      # ---- degradable -------------------------------------------------------
+      #
+      # A long `for:` on purpose. Degradable means the product keeps serving with
+      # a capability missing, so the thing worth waking someone for is not the
+      # failure but its PERSISTENCE — a cache that reconnects in ninety seconds
+      # is the design working.
+      #
+      # The two schedule probes are excluded because they have their own rules
+      # below with their own wording and urgency. Without the exclusion every
+      # missing schedule pages twice, and a duplicate alert is how a real one
+      # gets muted.
+      - alert: ChronosDegradableDependencyDegraded
+        expr: >-
+          chronos_dependency_health{
+            criticality="degradable",
+            state="degraded",
+            dependency!~"email_reservation_sweep|identity_retention"
+          } == 1
+        for: 15m
+        labels:
+          severity: ticket
+          component: dependency
+        annotations:
+          summary: >-
+            {{ $labels.dependency }} has been degraded for 15 minutes
+          description: >-
+            A degradable dependency has been failing for fifteen minutes. Nothing
+            is down: some capability is simply gone, and the product has absorbed
+            it. Fifteen minutes is past the point where that is a blip.
+          first_check: >-
+            The status endpoint names, in product terms, exactly what a client
+            loses while this dependency is not up — read that first, because it
+            decides whether this can wait for morning.
+
+      # ---- the two schedule probes -----------------------------------------
+      #
+      # These get their own rules rather than being covered by the degradable
+      # rule above, because the failure they describe is not "a dependency is
+      # unwell" but "work that was supposed to happen will never happen". There
+      # is no error, no failed workflow and no other metric that moves: the
+      # absence of work looks exactly like the absence of work to do.
+      - alert: ChronosEmailReservationSweepNotScheduled
+        expr: chronos_dependency_health{dependency="email_reservation_sweep", state="up"} == 0
+        for: 15m
+        labels:
+          severity: page
+          component: schedule
+        annotations:
+          summary: >-
+            The lapsed email reservation sweep has no schedule and will never run
+          description: >-
+            The recurring sweep that releases email reservations whose lease has
+            lapsed is not scheduled. Every lapsed claim now stays claimed
+            indefinitely, so an address claimed by someone who never proved they
+            own it blocks its real owner from registering — permanently, and with
+            nothing else reporting it. This is a security control that has become
+            a no-op, which is why it pages rather than files a ticket.
+          first_check: >-
+            `tctl schedule describe --sid <sweep schedule id>` (or the Temporal UI
+            at :8233). A missing schedule is usually a worker that started without
+            creating it, or TEMPORAL_ENABLED=false — in which case nothing
+            recurring runs at all and the other schedule alert will be firing too.
+
+      - alert: ChronosIdentityRetentionNotScheduled
+        expr: chronos_dependency_health{dependency="identity_retention", state="up"} == 0
+        for: 30m
+        labels:
+          severity: ticket
+          component: schedule
+        annotations:
+          summary: >-
+            Identity retention has no schedule and will never run
+          description: >-
+            The daily retention job that prunes spent TOTP steps, expired token
+            digests and dead session secrets is not scheduled. Nothing fails and
+            nothing degrades: the tables simply grow. totp_replay gains a row on
+            every second-factor verification and PostgreSQL has no TTL to bound it
+            (ADR-049), so the cost arrives later, as a table nobody is watching.
+            Thirty minutes because there is no urgency within a day — only within
+            a month.
+          first_check: >-
+            `tctl schedule describe --sid <retention schedule id>`. If it is
+            absent, check the worker's start-up logs for the schedule-creation
+            step; a registered workflow that is never started leaves no other
+            trace.
+
+      # ---- the meta-alert ---------------------------------------------------
+      #
+      # Every gauge above is a LAST OBSERVATION. The registry evaluates probes
+      # only when something calls readiness or the status endpoint, so if that
+      # stops — a removed liveness check, a load balancer reconfigured — the
+      # gauges freeze at their last value and go on reporting a healthy system
+      # forever. A frozen 1 is indistinguishable from a true 1 in every rule
+      # above; this is the one rule that can tell them apart.
+      #
+      # It cannot fire when the process is gone entirely: no process, no series,
+      # and rate() over nothing is nothing. That is deliberately the `up` job's
+      # question, not this one's.
+      - alert: ChronosDependencyProbesNotRunning
+        expr: sum by (job) (rate(chronos_dependency_checks_total[10m])) == 0
+        for: 30m
+        labels:
+          severity: ticket
+          component: dependency
+        annotations:
+          summary: >-
+            No dependency probe has run on {{ $labels.job }} for 30 minutes
+          description: >-
+            The process is exporting metrics but has not evaluated a single
+            dependency probe in half an hour. Every chronos_dependency_health
+            gauge is therefore stale, and a stale gauge reads as healthy. Whatever
+            was polling readiness or the status endpoint has stopped.
+          first_check: >-
+            Curl /readyz on the instance by hand; if it answers, the probes work
+            and the caller is what disappeared — look at the load balancer or
+            orchestrator health check configuration.

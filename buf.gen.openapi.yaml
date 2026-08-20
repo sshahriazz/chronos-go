@@ -7,12 +7,28 @@ version: v2
 plugins:
   - local: protoc-gen-connect-openapi
     out: docs/api
+    # ALL, not the default `directory`. buf invokes a plugin once per directory
+    # by default, and this plugin merges every file it is given into ONE document
+    # named by `path=` below — so a per-directory run produced one document per
+    # package, all with the same filename, and buf kept the first and dropped the
+    # rest with a warning. The visible symptom was an OpenAPI spec containing
+    # `paths: {}` or only whichever package sorted first, while `buf lint`,
+    # `make api` and the build all reported success.
+    strategy: all
     opt:
       - path=chronos-openapi.yaml
       # Document-level metadata protobuf cannot express: info, servers,
       # security schemes, prose. Versioned generator INPUT, never hand-edited
       # output.
       - base=proto/openapi.base.yaml
+      # GENERATED, by internal/tools/gendocs, from the same errs.Catalogue() the
+      # server raises errors from. It carries chronos.errors.v1.ErrorDetail with
+      # `reason` as a closed enum — the generator cannot emit it itself, because
+      # `trim-unused-types` correctly drops a message no operation references and
+      # this one reaches a client only inside an error's `details`.
+      #
+      # `override=` replaces components by key, so this must run AFTER gendocs.
+      - override=docs/api/openapi.errors.yaml
       # Idempotent RPCs are exposed as GET so they are cacheable and REST-shaped
       - allow-get
       # Drop schemas that no operation references (the options.proto leakage)

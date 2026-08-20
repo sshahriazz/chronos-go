@@ -50,6 +50,41 @@ type PasswordCredentials interface {
 	// existing verifier replaced by one bound to a different row.
 	Store(ctx context.Context, cred NewPasswordCredential) error
 
+	// StoreFirst records the account's FIRST password verifier, replacing any row
+	// left behind by an attempt that failed before it could append.
+	//
+	// # Why this is not Store
+	//
+	// Store refuses a second usable password under a new credential id, and that
+	// refusal is right for every caller that has one: it is the database saying
+	// "this account already has a password", and replacing it would be a silent
+	// credential swap.
+	//
+	// It is wrong for exactly one caller. Setting the first password
+	// (Registration.VerifyEmail) writes this row and THEN appends PasswordSet. A
+	// crash in between leaves a verifier that no event refers to: the aggregate
+	// rebuilt from the log has no password method, so nothing can authenticate
+	// against the row and nothing will ever clean it up. The user's recovery is a
+	// resend and a second verification — which mints a NEW credential id, hits
+	// the partial unique index, and fails. Forever. The account would be
+	// permanently unable to acquire the password it never got, and the only
+	// evidence would be a constraint name in a log line.
+	//
+	// So this call replaces instead of refusing, and it is safe to do so for a
+	// reason the caller must establish first: the LOG is the authority on whether
+	// an account has a password, and domain.User.SetPassword has already refused
+	// if it thinks one exists. A row present when the log says there is none can
+	// only be that orphan.
+	//
+	// # The contract on the caller
+	//
+	// It MUST have taken a successful domain.User.SetPassword decision on the
+	// aggregate it loaded, in the same command. Calling this on an account whose
+	// log records a usable password destroys a working credential. There is no
+	// way for the store to check that itself — it cannot see the stream — which
+	// is why it is written here as a precondition rather than implied by the name.
+	StoreFirst(ctx context.Context, cred NewPasswordCredential) error
+
 	// Find returns the usable password credential for a subject.
 	//
 	// "Usable" excludes a disabled credential and one that was never enabled. The

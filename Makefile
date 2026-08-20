@@ -114,26 +114,40 @@ proto-lint: ## Lint proto, including mandatory doc comments
 
 .PHONY: proto-breaking
 proto-breaking: ## Fail on a breaking API change vs the main branch
-	@buf breaking --against '.git#branch=main,subdir=.' 2>/dev/null \
-		|| buf breaking --against '.git#ref=HEAD~1,subdir=.' 2>/dev/null \
-		|| echo "  (no baseline yet — first commit)"
+	@# The baseline is SELECTED first, and buf then runs exactly once, unguarded.
+	@#
+	@# The previous form was a `||` chain ending in `echo`, which made this recipe
+	@# incapable of failing: buf's non-zero exit fell through to the echo, the echo
+	@# succeeded, and `make check` reported success on a breaking change. `2>/dev/null`
+	@# hid the diagnosis on the way past. Verified by renaming a message that exists
+	@# in the baseline — buf printed the error, the recipe printed "(no baseline yet)",
+	@# and make exited 0.
+	@#
+	@# "no baseline" and "breaking change detected" are different answers and must not
+	@# share an exit code. Only the first is benign.
+	@if git rev-parse --verify --quiet main >/dev/null 2>&1; then \
+		buf breaking --against '.git#branch=main,subdir=.'; \
+	elif git rev-parse --verify --quiet HEAD~1 >/dev/null 2>&1; then \
+		buf breaking --against '.git#ref=HEAD~1,subdir=.'; \
+	else \
+		echo "  (no baseline yet — first commit)"; \
+	fi
 
 .PHONY: api-docs
-api-docs: ## Generate OpenAPI, the gRPC descriptor set and the error catalogue
-	@buf generate --template buf.gen.openapi.yaml --path proto/chronos/system
+api-docs: ## Generate the REST/OpenAPI reference and the error catalogue
+	@# gendocs FIRST: it writes docs/api/openapi.errors.yaml, which the OpenAPI
+	@# run below merges in as `override=`. Reversed, the spec publishes whatever
+	@# reason enum the previous build left behind.
 	@go run ./internal/tools/gendocs
+	@buf generate --template buf.gen.openapi.yaml
 	@echo "  wrote docs/api/chronos-openapi.yaml"
-	@buf generate --template buf.gen.docs.yaml
-	@echo "  wrote docs/api/grpc.html (human-readable gRPC reference)"
-	@buf build -o docs/api/descriptor.binpb
-	@echo "  wrote docs/api/descriptor.binpb (gRPC, for grpcurl/Postman without reflection)"
 	@$(MAKE) --no-print-directory docs-assets
 
 .PHONY: docs-assets
 docs-assets: ## Copy generated artifacts into the docs binary for embedding
 	@mkdir -p cmd/apidocs/assets/proto
 	@cp docs/api/chronos-openapi.yaml cmd/apidocs/assets/openapi.yaml
-	@cp docs/api/errors.md docs/api/descriptor.binpb docs/api/grpc.html cmd/apidocs/assets/
+	@cp docs/api/errors.md cmd/apidocs/assets/
 	@rsync -a --delete --include='*/' --include='*.proto' --exclude='*' proto/ cmd/apidocs/assets/proto/
 	@echo "  embedded assets refreshed (cmd/apidocs/assets)"
 
@@ -195,18 +209,19 @@ docs-open: ## Run the docs server and open the reference in a browser
 
 .PHONY: grpc-ui
 grpc-ui: ## Interactive gRPC console against a running cmd/api
+	@# Driven by the server's REFLECTION service, not by a generated descriptor
+	@# set. Reflection is a runtime capability of cmd/api; the descriptor set was
+	@# a documentation artifact, and the published documentation is REST only.
+	@# Against a deployment with reflection disabled, generate from proto/ instead.
 	@curl -sf http://localhost:$${API_PORT:-8090}/healthz >/dev/null 2>&1 \
 		|| { echo "  cmd/api is not responding on :$${API_PORT:-8090} — start it with 'make run'"; exit 1; }
-	@test -f docs/api/descriptor.binpb || $(MAKE) --no-print-directory api-docs
 	@echo "  console  http://localhost:$${GRPCUI_PORT:-8092}"
-	@echo "  target   localhost:$${API_PORT:-8090}  (via descriptor set — works with reflection disabled)"
+	@echo "  target   localhost:$${API_PORT:-8090}  (via server reflection)"
 	@if command -v grpcui >/dev/null; then \
-		grpcui -plaintext -protoset docs/api/descriptor.binpb \
-			-port $${GRPCUI_PORT:-8092} localhost:$${API_PORT:-8090}; \
+		grpcui -plaintext -port $${GRPCUI_PORT:-8092} localhost:$${API_PORT:-8090}; \
 	else \
 		echo "  (grpcui not installed — running it with 'go run', first start is slow)"; \
 		go run github.com/fullstorydev/grpcui/cmd/grpcui@latest -plaintext \
-			-protoset docs/api/descriptor.binpb \
 			-port $${GRPCUI_PORT:-8092} localhost:$${API_PORT:-8090}; \
 	fi
 
@@ -268,6 +283,7 @@ sql-check: ## Fail if SQL appears in Go source outside the kernel carve-out (CON
 
 .PHONY: bench-integration
 bench-integration: ## Benchmarks that need the live stack (make up first)
+	@set -a; [ -f .env ] && . ./.env; set +a; \
 	go test -tags=integration ./... -run=XXX -bench=. -benchmem -benchtime=2000x
 
 .PHONY: leaks
@@ -276,6 +292,17 @@ leaks: ## Run tests with goroutine-leak detection (Go 1.26)
 
 .PHONY: test-integration
 test-integration: ## Integration tests against the running stack (make up first)
+	@# .env is SOURCED, because these tests read credentials from the environment
+	@# and half of them fail without it in a way that looks like a code defect:
+	@# `failed SASL auth: FATAL: password authentication failed for user
+	@# "chronos_app"`. The piivault and centrifugo suites read POSTGRES_APP_PASSWORD
+	@# and the Centrifugo API key directly, while others build their own harness —
+	@# so a bare `go test -tags=integration ./...` fails 13 tests in two packages
+	@# while the rest pass, which reads as "those two packages are broken".
+	@#
+	@# Guarded on the file existing so this still runs in an environment that
+	@# supplies the variables some other way (CI does).
+	@set -a; [ -f .env ] && . ./.env; set +a; \
 	go test -tags=integration ./... -count=1
 
 .PHONY: cover
@@ -306,11 +333,42 @@ fmt-check: ## Fail if anything is unformatted — CI must VERIFY, never rewrite
 	@echo "  formatting OK"
 
 .PHONY: check
-check: fmt-check proto-lint proto-breaking api-validate proto-thirdparty-check migrate-check sqlc-check sql-check lint test ## Everything CI runs
+check: fmt-check proto-lint proto-breaking api-validate proto-thirdparty-check migrate-check sqlc-check sql-check lint vet-integration test ## Everything CI runs
+
+.PHONY: vet-integration
+vet-integration: ## Type-check the integration-tagged tests without running them
+	@# `go test`, `go build` and `golangci-lint` all skip files behind
+	@# `//go:build integration`, so nothing in `make check` ever COMPILED them.
+	@# A change to an interface therefore broke three integration files while every
+	@# gate stayed green: a stub missing a new method, a test calling a use case
+	@# whose signature had grown a field, and two fakes panicking on a call the
+	@# flow had newly acquired. All three were invisible until someone happened to
+	@# run the integration suite against live infrastructure.
+	@#
+	@# This compiles them and runs vet. It needs NO running stack — it never
+	@# executes a test — so it belongs in the fast gate rather than beside
+	@# `test-integration`.
+	@go vet -tags=integration ./...
+	@echo "  integration-tagged tests compile"
 
 .PHONY: api-validate
 api-validate: ## Validate the generated OpenAPI spec is complete and non-empty
-	@python3 scripts/check_openapi.py
+	@# Bootstraps a venv when PyYAML is missing rather than skipping the check.
+	@# The checker used to exit 0 without PyYAML, so this gate passed without ever
+	@# parsing the spec — on every developer machine AND in CI, which installs no
+	@# Python dependencies. It now fails instead, and this target makes that
+	@# failure fixable without a manual step: PEP 668 blocks `pip install` into
+	@# the system interpreter on macOS, so a local venv is the only path that
+	@# works out of the box.
+	@if python3 -c "import yaml" >/dev/null 2>&1; then \
+		python3 scripts/check_openapi.py; \
+	else \
+		if [ ! -x .venv/bin/python ]; then \
+			echo "  bootstrapping .venv for PyYAML (the OpenAPI check needs it)"; \
+			python3 -m venv .venv >/dev/null 2>&1 && .venv/bin/pip install --quiet pyyaml; \
+		fi; \
+		.venv/bin/python scripts/check_openapi.py; \
+	fi
 
 ## ---------------------------------------------------------------------------
 ## Telemetry
@@ -342,7 +400,6 @@ urls: ## Print every local endpoint
 	@echo "  Reference (Scalar)   http://localhost:$${DOCS_PORT:-8091}/reference"
 	@echo "  Index                http://localhost:$${DOCS_PORT:-8091}/"
 	@echo "  OpenAPI spec         http://localhost:$${DOCS_PORT:-8091}/openapi.yaml"
-	@echo "  gRPC descriptor set  http://localhost:$${DOCS_PORT:-8091}/descriptor.binpb"
 	@echo "  Proto sources        http://localhost:$${DOCS_PORT:-8091}/proto/"
 	@echo "  Error catalogue      http://localhost:$${DOCS_PORT:-8091}/errors.md"
 	@echo "  gRPC console         http://localhost:$${GRPCUI_PORT:-8092}   (make grpc-ui)"

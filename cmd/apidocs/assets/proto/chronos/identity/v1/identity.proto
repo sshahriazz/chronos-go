@@ -1,0 +1,1983 @@
+syntax = "proto3";
+
+// Package identity is the wire contract for accounts, credentials, sessions and
+// the security-settings screen.
+//
+// Three properties of this schema are load-bearing, and each of them is a rule
+// the messages below are shaped by rather than a convention they happen to
+// follow.
+//
+// **Nothing personal is here.** Identity holds the most personal data in the
+// system and puts the least of it in the log (ADR-002). Every account is named
+// on the wire by its `subject_id` pseudonym, and an address appears in exactly
+// three places: `RegisterRequest.email`,
+// `ResendEmailVerificationRequest.email` and `AuthenticateRequest.identifier`,
+// where the user has just typed it. No response returns one. That is what makes
+// erasure the destruction of a key rather than a migration across every
+// projection that ever copied an address.
+//
+// **A password is set by the party that proved the mailbox, and by nobody
+// else.** `RegisterRequest` carries NO password and field 2 is reserved so it
+// can never carry one again; `VerifyEmailRequest` carries it instead. The
+// ordering is the whole defence against the pre-hijacking attack (Sudhodanan &
+// Paverd, USENIX Security 2022): a credential set at registration is set by
+// whoever typed the address, and the verification click that follows proves
+// control of the MAILBOX rather than authorship of that credential. With no
+// credential in existence until the link is followed, there is nothing for a
+// stranger's registration to leave behind.
+//
+// **A secret crosses this boundary at most once.** The session token, the TOTP
+// shared secret and its provisioning URI, and the plaintext recovery codes are
+// returned by the single call that mints them and are then unrecoverable. There
+// is deliberately no endpoint that re-displays any of them: one that did would
+// turn a stolen session into a permanent bypass of every factor on the account.
+// No password, verifier, digest, sealed secret or blind index appears anywhere
+// in this file, in either direction.
+//
+// **A refusal says nothing (ADR-036).** An unknown identifier, a wrong password,
+// a wrong code, a replayed code, an unverified address, a deactivated account, a
+// suspended account and a throttled attempt all produce one undifferentiated
+// error. No message here carries a field that could distinguish them. The real
+// reason is recorded in the event log, where an operator can read it and an
+// attacker cannot, and it is surfaced to the account HOLDER — after the fact,
+// about their own account — by ListLoginHistory.
+//
+// **Validation here is deliberately asymmetric, and the asymmetry is the third
+// property enforced rather than described.** Constraints are declarative
+// protovalidate rules (ADR-007, CONVENTIONS §7) and the interceptor applies them
+// before a handler runs — so on the ENROLMENT side, where the rules are public
+// and printed next to the signup form, they are stated in full: RegisterRequest
+// carries the whole address and password policy.
+//
+// On the AUTHENTICATION side they are almost entirely absent, and their absence
+// is load-bearing. A request refused as malformed tells the caller their guess
+// was structurally wrong, which is information a wrong password does not give.
+// AuthenticateRequest.password, AuthenticateRequest.code,
+// CreateSessionRequest.password and CreateSessionRequest.code therefore carry NO
+// rules at all: no length, no shape, no `required`. A validation rule on a
+// credential being presented is an oracle, and ADR-036's single undifferentiated
+// refusal cannot survive one.
+package chronos.identity.v1;
+
+import "buf/validate/validate.proto";
+import "gnostic/openapi/v3/annotations.proto";
+import "chronos/options/v1/options.proto";
+import "google/protobuf/timestamp.proto";
+
+// MethodKind labels an authentication method.
+//
+// The wire enum mirrors the module's stored labels, which are strings that live
+// in events forever. New kinds are added here as they become implementable, so a
+// client must treat an unrecognised value as "some factor this build does not
+// render" rather than as an error.
+enum MethodKind {
+  METHOD_KIND_UNSPECIFIED = 0;
+
+  // A knowledge factor. Never sufficient alone on this system.
+  METHOD_KIND_PASSWORD = 1;
+
+  // A time-based one-time password from an authenticator app.
+  METHOD_KIND_TOTP = 2;
+
+  // A single-use printed code, for when every other factor is unavailable.
+  METHOD_KIND_RECOVERY_CODE = 3;
+
+  // A WebAuthn credential. With user verification it reaches AAL2 alone.
+  METHOD_KIND_PASSKEY = 4;
+
+  // An external identity provider.
+  METHOD_KIND_FEDERATED = 5;
+}
+
+// AccountState is where an account sits in its lifecycle (identity.md §1).
+//
+// Deactivated and Suspended look identical from outside and are kept apart
+// because they behave differently: the holder may reverse the first and may
+// never reverse the second. Collapsing them would make suspension decorative.
+enum AccountState {
+  ACCOUNT_STATE_UNSPECIFIED = 0;
+
+  // Registered but not yet usable. Leaving it needs a verified address AND a
+  // proven second factor.
+  ACCOUNT_STATE_PENDING = 1;
+
+  // Usable.
+  ACCOUNT_STATE_ACTIVE = 2;
+
+  // Switched off by the holder, and reversible by them.
+  ACCOUNT_STATE_DEACTIVATED = 3;
+
+  // Switched off administratively, and not reversible by the holder.
+  ACCOUNT_STATE_SUSPENDED = 4;
+}
+
+// FailureReason classifies a failed authentication attempt in the account
+// holder's own history.
+//
+// It is NOT what a failing caller is told — every refusal is one
+// undifferentiated error (ADR-036), because naming which factor was wrong hands
+// an attacker a working oracle for the other. Showing the same fact to the
+// account holder, after the fact, about their own account, is the opposite
+// situation: it is the difference between "somebody guessed at my password" and
+// "somebody already has my password and is stuck on my authenticator", and only
+// the second is worth waking up for.
+enum FailureReason {
+  FAILURE_REASON_UNSPECIFIED = 0;
+
+  // No account claims the identifier that was presented.
+  FAILURE_REASON_NO_SUCH_IDENTIFIER = 1;
+
+  FAILURE_REASON_WRONG_PASSWORD = 2;
+
+  FAILURE_REASON_WRONG_SECOND_FACTOR = 3;
+
+  // A genuine code was presented a second time. Worth alerting on: a wrong code
+  // is a typo, a replayed one means somebody OBSERVED a real code.
+  FAILURE_REASON_REPLAYED_CODE = 4;
+
+  // Correct credentials on an account whose address was never proven.
+  FAILURE_REASON_UNVERIFIED_EMAIL = 5;
+
+  // Correct credentials on an account that never finished enrolling a factor.
+  FAILURE_REASON_INCOMPLETE_ENROLLMENT = 6;
+
+  FAILURE_REASON_DEACTIVATED = 7;
+
+  FAILURE_REASON_SUSPENDED = 8;
+
+  // Refused by the attempt ceiling before any credential was examined.
+  FAILURE_REASON_RATE_LIMITED = 9;
+}
+
+// RegisterRequest claims an address and creates the account that claims it.
+//
+// It creates NO CREDENTIAL. The account it produces is Pending, passwordless
+// and cannot be signed into by anybody, including whoever sent this request —
+// the password is supplied to `VerifyEmail`, by whoever holds the link that was
+// mailed to the address. Field 2 is reserved to keep it that way: it carried a
+// password, and a password here is the premise of the pre-hijacking attack
+// rather than a step in it.
+message RegisterRequest {
+  // Field 2 held `password`. It is reserved rather than reused because the
+  // reason it is gone is a security property, and a future field at this number
+  // would be indistinguishable on the wire from the one that was removed.
+  reserved 2;
+  reserved "password";
+
+  // The address as typed. It is normalized server-side, and the normalized form
+  // is the only one that reaches the vault or the blind indexer. It appears in
+  // no event, no log line and no error message.
+  //
+  // The rules mirror `domain.NormalizeEmail` rather than approximating it, which
+  // is why they are CEL rather than the built-in `email` rule: that rule is
+  // ASCII-only, and this system accepts internationalized domains and converts
+  // them to punycode. A rule stricter than the handler would refuse an address
+  // the handler would have accepted, which is worse than no rule.
+  //
+  // Every bound is measured on the TRIMMED value, because the handler trims
+  // first. Bounds are BYTES, not characters — RFC 5321 counts octets, and so
+  // does the normalizer.
+  string email = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "ada@example.com"}},
+    (buf.validate.field) = {
+      required: true
+    cel: [
+      {
+        id: "identity.email.length"
+        message: "an email address may not exceed 254 bytes"
+        expression: "bytes(this.trim()).size() <= 254"
+      },
+      {
+        id: "identity.email.shape"
+        message: "an email address must contain a local part and a fully qualified domain"
+        expression:
+          "this.trim().lastIndexOf('@') > 0"
+          " && this.trim().lastIndexOf('@') < this.trim().size() - 1"
+          " && this.trim().substring(this.trim().lastIndexOf('@') + 1).contains('.')"
+      },
+      {
+        id: "identity.email.local_part"
+        message: "the local part of an email address may not exceed 64 bytes"
+        expression:
+          "this.trim().lastIndexOf('@') <= 0"
+          " || bytes(this.trim().substring(0, this.trim().lastIndexOf('@'))).size() <= 64"
+      }
+    ]
+  }
+  ];
+}
+
+// RegisterResponse is deliberately empty, and its emptiness is the feature.
+//
+// The handler reports whether the address was free; this message does not, and
+// must not gain a field that does. Registration is one of the four flows
+// identity.md §11 names as leaking account existence when written naively, and
+// the fix is not a vague message — it is that the two outcomes are
+// indistinguishable in content.
+//
+// The client renders one sentence for both: "if that address can be registered,
+// we have sent it a link".
+message RegisterResponse {}
+
+// VerifyEmailRequest presents the token from a verification link, and the
+// password the account will be signed into with.
+//
+// The two travel together because that pairing IS the security property. The
+// token proves control of the mailbox; the password is the credential that
+// control authorises. Splitting them — a credential set earlier, activated by a
+// later proof — is the shape the pre-hijacking attack needs, because the party
+// that sets the credential and the party that proves the mailbox are then
+// allowed to be different people.
+message VerifyEmailRequest {
+  // The plaintext from the link. It is hashed and spent server-side and is never
+  // stored, logged or placed in an event: a token in a log line is a live
+  // credential in a system whose logs outlive it by months.
+  //
+  // `required` matches the handler, which refuses an empty token. The ceiling is
+  // a DENIAL-OF-SERVICE bound rather than a format rule, and it is deliberately
+  // far above any token this system mints: it must not become a probe for the
+  // token's real length. A wrong token and a spent one remain one refusal.
+  string token = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-not-a-real-verification-token"}},
+    (buf.validate.field) = {
+      required: true
+      string: {max_len: 512}
+    }
+  ];
+
+  // The secret as typed. Normalized under RFC 8265's OpaqueString profile before
+  // it is screened against the breach corpus and hashed.
+  //
+  // Stated in full, and only here. This is the ENROLMENT side, where the
+  // password policy is PUBLIC — it is printed beside the field the user is
+  // typing into — so enforcing it declaratively costs nothing and tells an
+  // attacker nothing they could not read off the form. The same two numbers are
+  // deliberately NOT repeated on AuthenticateRequest or CreateSessionRequest;
+  // see the package comment.
+  //
+  // Declaring it here is not an oracle, and the reason is the order the handler
+  // runs in: this rule is evaluated by the interceptor BEFORE the handler, and
+  // the handler screens the password before it spends the token. Both refusals
+  // are therefore functions of the caller's own input alone — they say nothing
+  // about whether the token was real, and they leave it unspent, so a person who
+  // chose a breached password still has their link.
+  //
+  // `min_len` counts CHARACTERS and `max_bytes` counts BYTES, matching
+  // `domain.MinPasswordRunes` (8) and `domain.MaxPasswordBytes` (4096). The
+  // minimum is checked here against the raw input and by the handler against the
+  // NFC-normalized one, which can only be shorter — so this rule is never
+  // stricter than the handler it fronts.
+  string password = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-not-a-real-password"}},
+    (buf.validate.field).string = {
+      min_len: 8
+      max_bytes: 4096
+    }
+  ];
+}
+
+// VerifyEmailResponse reports what the verification established.
+//
+// Unlike registration, this call is not an existence oracle: presenting a valid
+// single-use token IS proof of control over the address, so the caller is
+// entitled to learn whose account it belongs to. An invalid, spent or expired
+// token is one undifferentiated refusal.
+message VerifyEmailResponse {
+  // The account's pseudonym. Every other call names the account by this.
+  string subject_id = 1;
+
+  // The account's public identifier, a prefixed ULID (ADR-030).
+  string user_id = 2;
+
+  // False when the token was valid but everything it asserts was already
+  // recorded — a link clicked twice, or prefetched by a mail client. Nothing was
+  // appended, and it is not an error.
+  bool changed = 3;
+}
+
+// ResendEmailVerificationRequest asks for a fresh verification link.
+//
+// It names an ADDRESS rather than an account, and it has to: the population that
+// needs this call is exactly the population that cannot sign in. A Pending
+// account holds no session (identity.md §1), so there is no principal to read
+// from the context and no identifier available to the caller other than the
+// address they typed into the registration form.
+message ResendEmailVerificationRequest {
+  // The address as typed. Reduced to a blind index server-side; neither the raw
+  // nor the normalized form reaches an event, a log line or an error message.
+  //
+  // The rules are RegisterRequest.email's, character for character, and the
+  // duplication is deliberate rather than lazy. This call fronts the same
+  // normalizer, so a rule that differed in either direction would be visible on
+  // the wire: stricter and it refuses an address that was successfully
+  // registered, looser and "that is not an address" becomes a cheaper answer
+  // than "that address has no pending account", which is the first half of an
+  // enumeration oracle.
+  string email = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "ada@example.com"}},
+    (buf.validate.field) = {
+      required: true
+    cel: [
+      {
+        id: "identity.email.length"
+        message: "an email address may not exceed 254 bytes"
+        expression: "bytes(this.trim()).size() <= 254"
+      },
+      {
+        id: "identity.email.shape"
+        message: "an email address must contain a local part and a fully qualified domain"
+        expression:
+          "this.trim().lastIndexOf('@') > 0"
+          " && this.trim().lastIndexOf('@') < this.trim().size() - 1"
+          " && this.trim().substring(this.trim().lastIndexOf('@') + 1).contains('.')"
+      },
+      {
+        id: "identity.email.local_part"
+        message: "the local part of an email address may not exceed 64 bytes"
+        expression:
+          "this.trim().lastIndexOf('@') <= 0"
+          " || bytes(this.trim().substring(0, this.trim().lastIndexOf('@'))).size() <= 64"
+      }
+    ]
+  }
+  ];
+}
+
+// ResendEmailVerificationResponse is deliberately empty, for RegisterResponse's
+// reason and one more.
+//
+// RegisterResponse hides whether an address was free. This message hides four
+// outcomes rather than two: no account claims the address, an account claims it
+// and is still Pending, an account claims it and is already verified, and an
+// account claims it and is deactivated or suspended. Exactly one of those four
+// appends an event and sends mail; all four answer with these zero bytes.
+//
+// A field here — `sent`, `already_verified`, anything — would turn an
+// unauthenticated endpoint into a precise account-existence and account-state
+// oracle for any address a prober can type. The client renders one sentence for
+// all four: "if that address has an account waiting to be verified, we have sent
+// it a new link".
+message ResendEmailVerificationResponse {}
+
+// AuthenticateRequest is one login attempt, presenting whichever factors the
+// caller has (ADR-050).
+message AuthenticateRequest {
+  // The address as typed. Reduced to a blind index server-side; neither the raw
+  // nor the normalized form reaches an event, a log line or an error message.
+  //
+  // Bounded, and NOT format-checked — unlike RegisterRequest.email, which
+  // carries the full address grammar. The ceiling is the same 254 bytes the
+  // normalizer enforces, so it refuses only input no account could ever have
+  // been registered with; that is a denial-of-service bound and discloses
+  // nothing. A SHAPE rule would disclose something: it would split ADR-036's one
+  // undifferentiated refusal into "that is not an address" and "that is an
+  // address, and the answer is still no", and the second is the answer an
+  // enumerating attacker is trying to buy.
+  string identifier = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "ada@example.com"}},
+    (buf.validate.field).cel = {
+      id: "identity.identifier.length"
+      message: "an identifier may not exceed 254 bytes"
+      expression: "bytes(this.trim()).size() <= 254"
+    }
+  ];
+
+  // The secret as typed.
+  //
+  // NO RULES, and their absence is the decision. Not `required`, not a minimum,
+  // not a maximum: every one of them answers a guess with "your guess was
+  // structurally wrong", which is strictly more than a wrong password tells the
+  // caller and is exactly the oracle ADR-036 exists to close. The floor and the
+  // ceiling are stated on RegisterRequest.password, where they are public.
+  //
+  // Length is still bounded — by `domain.MaxPasswordBytes` inside the handler
+  // and by Connect's message size cap in front of it — so declaring nothing here
+  // costs no denial-of-service protection.
+  string password = 2 [(gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-not-a-real-password"}}];
+
+  // The second factor, and OPTIONAL. Sent empty on a first leg, which is
+  // answered with the kinds the account can complete with rather than with a
+  // session.
+  //
+  // There is no challenge token, and that is a decision rather than an omission
+  // (ADR-050): every place to put one — a token row, an in-process map, a signed
+  // stateless artifact — makes a partial authentication into a bearer credential
+  // an attacker can steal and replay. The cost of not having one is a second
+  // Argon2id evaluation on the completing call, paid by legitimate users only.
+  //
+  // Should that cost ever become the binding constraint, the challenge arrives
+  // as an OPTIONAL field on this message and an optional one on the response,
+  // which `buf breaking` permits. Nothing here has to be designed for it now.
+  //
+  // NO RULES, for the reason given on `password` and one more that is specific
+  // to this field: it carries EITHER a TOTP code or a recovery code, and those
+  // have different shapes. A rule admitting one shape and refusing the other
+  // would report which second factors the account holds — the inventory
+  // AuthenticateResponse.offered is deliberately trimmed to kinds in order not
+  // to publish.
+  string code = 3 [(gnostic.openapi.v3.property) = {example: {yaml: "000000"}}];
+
+  // An opaque pseudonym for the client. It is NOT a device name, a platform
+  // string, a user agent or an address — all of those are personal data and
+  // belong in the vault under this handle, because this value enters events.
+  //
+  // Optional, and bounded only. This is not a credential — nothing is proven by
+  // presenting it — so a bound on it is not an oracle. The bound is here because
+  // the value ENTERS EVENTS, and an event is append-only: an unbounded field
+  // that reaches the log is unbounded there forever.
+  string device_id = 4 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "dev_9f2c1b7e"}},
+    (buf.validate.field).string.max_len = 128
+  ];
+}
+
+// AuthenticateResponse reports what an attempt established, and never why one
+// failed.
+//
+// A refusal does not arrive here at all: it is an error, and it is the same
+// error for every cause (ADR-036). What this distinguishes is only the two
+// SUCCESSFUL shapes — the first factor passed and a second is owed, or every
+// factor passed.
+message AuthenticateResponse {
+  // True when the password was correct and the authentication is not finished.
+  bool second_factor_required = 1;
+
+  // The second-factor KINDS this account can complete with, so a client can show
+  // the right prompt.
+  //
+  // Kinds only. Credential ids are deliberately absent: a list of them would let
+  // anyone holding a correct password enumerate the account's authenticators,
+  // which is the inventory an attacker choosing an attack wants. Empty when no
+  // second factor is owed.
+  repeated MethodKind offered = 2;
+}
+
+// CreateSessionRequest completes a login and asks for a bearer token.
+//
+// It re-presents the credentials rather than redeeming something Authenticate
+// handed back, because the evidence of a completed authentication is
+// deliberately not serializable (ADR-050): it exists only inside the process
+// that performed the ceremony, so there is no artifact for this message to
+// carry. A caller that does not yet know whether a second factor is owed asks
+// Authenticate first; one that arrives here without a required code gets the
+// same undifferentiated refusal as any other failure.
+message CreateSessionRequest {
+  // The address as typed, as in AuthenticateRequest — bounded, not
+  // format-checked, for the same reason.
+  string identifier = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "ada@example.com"}},
+    (buf.validate.field).cel = {
+      id: "identity.identifier.length"
+      message: "an identifier may not exceed 254 bytes"
+      expression: "bytes(this.trim()).size() <= 254"
+    }
+  ];
+
+  // The secret as typed. NO RULES, as on AuthenticateRequest.password.
+  string password = 2 [(gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-not-a-real-password"}}];
+
+  // The second factor. Required in practice for every account on this system,
+  // because a session is never minted below AAL2.
+  //
+  // NOT declared `required`, despite that sentence. The message's own contract
+  // is that a caller arriving here without a code "gets the same undifferentiated
+  // refusal as any other failure", and a `required` rule would replace that
+  // refusal with a distinct VALIDATION_FAILED — turning the absence of a second
+  // factor into a separately observable outcome. Shape rules are absent for the
+  // reason given on AuthenticateRequest.code.
+  string code = 3 [(gnostic.openapi.v3.property) = {example: {yaml: "000000"}}];
+
+  // An opaque pseudonym for the client, as in AuthenticateRequest.
+  string device_id = 4 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "dev_9f2c1b7e"}},
+    (buf.validate.field).string.max_len = 128
+  ];
+}
+
+// CreateSessionResponse carries the bearer token back to the caller ONCE.
+message CreateSessionResponse {
+  // The session's public identifier, a prefixed ULID (ADR-030). It is not a
+  // secret: it appears in the device list of every screen that renders one.
+  string session_id = 1;
+
+  // The authenticated account's pseudonym.
+  string subject_id = 2;
+
+  // The plaintext bearer token. Only its digest is stored, so this is the only
+  // moment it exists anywhere this system can reach: it is returned here and by
+  // no other call, ever. Clients must keep it out of URLs, logs and analytics.
+  string token = 3;
+
+  // The assurance level this session was established at. Always at least AAL2 —
+  // a lower one is refused rather than downgraded, because a session recording
+  // AAL1 would honestly satisfy every `min_aal` that asks for AAL1, which is
+  // precisely the half-authenticated session identity.md §3 names as a complete
+  // authentication bypass.
+  chronos.options.v1.AssuranceLevel assurance_level = 4;
+
+  // The deadline that MOVES: every authenticated request pushes it forward,
+  // clamped to the absolute one. UTC (ADR-008).
+  google.protobuf.Timestamp idle_expires_at = 5;
+
+  // The deadline that does NOT move. It is what bounds a stolen token held by an
+  // attacker who keeps it warm, which an idle deadline alone cannot do because a
+  // thief can refresh it indefinitely. UTC.
+  google.protobuf.Timestamp absolute_expires_at = 6;
+
+  // True when the password that established this session was found in a breach
+  // corpus. The session is restricted to profile and credential endpoints: the
+  // login is not blocked, because blocking locks a person out of the only place
+  // they can fix the problem (identity.md §4).
+  bool requires_credential_rotation = 7;
+}
+
+// GetUserRequest is empty: the account it describes is the caller's own,
+// resolved from the session rather than named in the request.
+//
+// A subject id field would make this an existence probe for any pseudonym a
+// caller can obtain, which is the shape identity.md §11 warns about.
+message GetUserRequest {}
+
+// GetUserResponse is the account, its lifecycle position, and whether the
+// address on it has been proven.
+//
+// No address comes back, by construction rather than by omission. The caller
+// holds a subject id and resolves it against the vault, which is what keeps
+// erasure a key destruction rather than a sweep across every projection that
+// ever copied an address (ADR-002).
+message GetUserResponse {
+  // The account's pseudonym. Whatever renders a human-readable identity resolves
+  // this against the vault.
+  string subject_id = 1;
+
+  // The account's public identifier, a prefixed ULID (ADR-030).
+  string user_id = 2;
+
+  // Where the account sits in its lifecycle.
+  AccountState state = 3;
+
+  // Whether the address was ever proven. This is a DIFFERENT question from the
+  // state: an account can be verified and still Pending, because a second factor
+  // is also required before it activates (identity.md §2).
+  bool email_verified = 4;
+
+  // When the account was registered, UTC. Always set.
+  google.protobuf.Timestamp registered_at = 5;
+
+  // When the account activated, UTC. Unset means it never has — not "unknown".
+  google.protobuf.Timestamp activated_at = 6;
+
+  // When the holder switched the account off, UTC. Unset means never.
+  google.protobuf.Timestamp deactivated_at = 7;
+
+  // When the account was suspended administratively, UTC. Unset means never.
+  google.protobuf.Timestamp suspended_at = 8;
+}
+
+// ListSessionsRequest asks for a page of the caller's device list.
+message ListSessionsRequest {
+  // How many entries to return. Zero means the server's default (50), and the
+  // server CLAMPS anything above its maximum (200) rather than refusing it — so
+  // a client must read the returned page's length rather than assume it got what
+  // it asked for.
+  //
+  // Only the negative half is refused, and that mirrors `page.Clamp` exactly: it
+  // treats a negative size as a caller bug and an oversized one as a request to
+  // satisfy with less. Declaring `lte: 200` here would REFUSE what the server
+  // deliberately clamps, which is the contradiction this file avoids.
+  int32 page_size = 1 [(buf.validate.field).int32.gte = 0];
+
+  // An opaque cursor from a previous response's next_page_token. Empty starts at
+  // the beginning.
+  //
+  // Opaque means opaque: it is bound to the query that produced it, and a token
+  // presented against a different query, sort or filter is an ERROR rather than
+  // a silent restart. A client that treated an unreadable token as "begin again"
+  // would loop forever with nothing in the loop looking like a failure.
+  //
+  // Optional — empty is the first page. Bounded because it is echoed back into a
+  // query, and the server mints it, so no legitimate client produces a long one.
+  string page_token = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-opaque-cursor-from-a-previous-response"}},
+    (buf.validate.field).string.max_len = 1024
+  ];
+}
+
+// Session is one entry in the device list.
+//
+// No token and no digest. The digest lives in a table this list joins for the
+// idle deadline and last-seen time and never selects the secret from — a device
+// list that returned anything derived from the bearer token would put a
+// credential on the one screen whose entire purpose is to let a user revoke one.
+message Session {
+  // The session's public identifier, and what RevokeSession names.
+  string session_id = 1;
+
+  // The opaque client-supplied handle, empty when the client sent none. It is
+  // NOT a device name: a name is personal data the user typed, and personal data
+  // may not enter a projection.
+  string device_id = 2;
+
+  // The level this session was established at, so a screen can mark one that has
+  // only ever presented a single factor.
+  chronos.options.v1.AssuranceLevel assurance_level = 3;
+
+  // When this device is signed out for inactivity, UTC.
+  google.protobuf.Timestamp idle_expires_at = 4;
+
+  // When this device is signed out regardless, UTC. Both deadlines are shown
+  // because they answer different questions.
+  google.protobuf.Timestamp absolute_expires_at = 5;
+
+  // When the session was established, UTC. It is here because the list is
+  // ordered by it — a caller cannot page this list without the server having
+  // sorted on something stable.
+  google.protobuf.Timestamp created_at = 6;
+
+  // The last request this session made, UTC. Unset for a session that has made
+  // none since it was issued.
+  google.protobuf.Timestamp last_seen_at = 7;
+}
+
+// ListSessionsResponse is one page of the device list, newest first.
+message ListSessionsResponse {
+  // The page, newest first.
+  repeated Session sessions = 1;
+
+  // The cursor for the next page. EMPTY MEANS DONE — it is the only termination
+  // signal, and a client must not infer the end from a short page, because a
+  // clamped page size makes short pages ordinary.
+  string next_page_token = 2;
+}
+
+// ListMethodsRequest is empty: it lists the caller's own methods.
+message ListMethodsRequest {}
+
+// AuthMethod is one enrolled authentication method.
+//
+// Nothing that verifies anything is here. There is no verifier, no sealed TOTP
+// secret, no recovery-code digest and no pepper version — and no field this
+// message could grow that would hold one. The consecutive-failure count is
+// absent on its own merits: it is a lockout counter, and publishing it tells
+// whoever reaches this screen how many attempts remain before a factor locks.
+message AuthMethod {
+  // The credential's identifier, a prefixed ULID (ADR-030).
+  string credential_id = 1;
+
+  // What kind of factor this is.
+  MethodKind kind = 2;
+
+  // Whether it can be used right now: enabled, and not locked out. This is
+  // computed from the account's own events rather than re-derived by the client,
+  // so a screen cannot come to show a factor the login refuses or hide one it
+  // accepts.
+  bool usable = 3;
+
+  // When the method was first provisioned, UTC. This is NOT enabled_at: a TOTP
+  // secret is scanned before it is proven, and the gap between the two is
+  // exactly the enrolment the user may have abandoned.
+  google.protobuf.Timestamp added_at = 4;
+
+  // When possession was first proven, UTC. Unset while the method is
+  // provisioned but unproven, which is also when it is not usable.
+  google.protobuf.Timestamp enabled_at = 5;
+
+  // When the method last took part in an authentication, UTC. UNSET IS THE
+  // INTERESTING VALUE: this screen is really asked "is there something enrolled
+  // here that I did not enrol", and the answer is only credible if a method that
+  // has never been used says so.
+  google.protobuf.Timestamp last_used_at = 6;
+}
+
+// ListMethodsResponse is every authentication method on the caller's account.
+//
+// Unpaginated, and that is a bounded claim rather than an oversight: an account
+// holds at most one usable credential per kind, and there are five kinds.
+message ListMethodsResponse {
+  // The methods, in no guaranteed order.
+  repeated AuthMethod methods = 1;
+}
+
+// ListLoginHistoryRequest asks for a page of the caller's recent activity.
+message ListLoginHistoryRequest {
+  // How many entries to return. Zero means the server's default (50), and the
+  // server clamps at its maximum (200). Only a negative size is refused, as on
+  // ListSessionsRequest.page_size.
+  int32 page_size = 1 [(buf.validate.field).int32.gte = 0];
+
+  // An opaque cursor from a previous response, with the same rules as
+  // ListSessionsRequest.page_token. Empty starts at the beginning.
+  string page_token = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-opaque-cursor-from-a-previous-response"}},
+    (buf.validate.field).string.max_len = 1024
+  ];
+}
+
+// LoginAttempt is one entry in "recent activity".
+//
+// The row's server-side sequence number is deliberately not exposed. It is
+// global across every account, so its gaps would leak how much authentication
+// traffic the whole system carries; it exists to make the page boundary correct
+// and is folded into the opaque cursor instead.
+message LoginAttempt {
+  // Whether the attempt succeeded. FAILURES ARE THE POINT of this list: the
+  // screen exists to answer "was that me?", and a history of successes shows a
+  // compromised account as a quiet, ordinary list.
+  bool succeeded = 1;
+
+  // Why a failure failed. Unspecified on success. See FailureReason for why the
+  // account holder may be told this when the failing caller may not.
+  FailureReason reason = 2;
+
+  // The factors presented. Empty for an attempt refused before any credential
+  // was examined.
+  repeated MethodKind methods = 3;
+
+  // The level the attempt established. Unspecified for a failure — nothing was
+  // established.
+  chronos.options.v1.AssuranceLevel assurance_level = 4;
+
+  // The opaque client pseudonym the attempt came from, empty when none was sent.
+  // Never a device name (see Session.device_id).
+  string device_id = 5;
+
+  // When the attempt happened, UTC.
+  google.protobuf.Timestamp occurred_at = 6;
+}
+
+// ListLoginHistoryResponse is one page of recent activity, newest first.
+message ListLoginHistoryResponse {
+  // The page, newest first.
+  repeated LoginAttempt attempts = 1;
+
+  // The cursor for the next page. Empty means done.
+  string next_page_token = 2;
+}
+
+// EnrollTotpRequest asks for a new authenticator secret.
+message EnrollTotpRequest {
+  // What the user sees under the issuer in their authenticator app, normally
+  // their own address.
+  //
+  // It is PERSONAL DATA, and it is supplied by the caller rather than read
+  // server-side because the vault port is write-only by design — a port that
+  // could read is a port through which an address reaches a log. It is placed in
+  // the provisioning URI returned below, rendered to the enrolling user's own
+  // screen, and reaches no event, no log line and no error message.
+  //
+  // An empty value is refused. The authenticator app would show an unlabelled
+  // entry, which is how people delete the wrong credential.
+  //
+  // `required` matches the handler, which refuses a value that is empty or
+  // whitespace-only; this rule catches the first case and the handler still
+  // catches the second, so the two do not disagree. The ceiling is the ONE rule
+  // in this file stricter than the code behind it — the handler imposes no
+  // maximum — and it is here because this value is embedded verbatim in the
+  // otpauth:// URI rendered into a QR code. It is sized at RFC 5321's 320-byte
+  // path, comfortably above the address this normally holds.
+  string account_name = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "ada@example.com"}},
+    (buf.validate.field) = {
+      required: true
+      string: {max_bytes: 320}
+    }
+  ];
+}
+
+// EnrollTotpResponse carries the provisioning material back to the caller ONCE.
+//
+// Both secrets below are returned by this call and are then unrecoverable:
+// nothing stores them in the clear, and the sealed copy is opened only to check
+// a code. A caller that loses them starts the enrolment again, which is the
+// correct outcome — the alternative is an endpoint that re-displays a shared
+// secret to anyone holding a session, turning a stolen session into a permanent
+// second factor.
+message EnrollTotpResponse {
+  // The credential this enrolment provisioned, a prefixed ULID (ADR-030).
+  string credential_id = 1;
+
+  // The base32 shared secret, for manual entry when a camera is unavailable.
+  // Returned ONLY here. Never log it, never persist it client-side.
+  string secret = 2;
+
+  // The otpauth:// value behind the QR code. It CONTAINS the secret and the
+  // account label. Returned ONLY here. Never log it.
+  string provisioning_uri = 3;
+
+  // When this unproven secret stops being confirmable, UTC.
+  //
+  // Short by design: the window is the time in which a secret exists that nobody
+  // has demonstrated possession of, so a secret captured from a screen — a
+  // screenshot, a shoulder-surf, a shared screen — stops being usable quickly. A
+  // user who takes longer starts again at no cost.
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+// ConfirmTotpRequest presents a live code against a provisioned secret.
+message ConfirmTotpRequest {
+  // The digits from the authenticator app. Never logged, stored, or placed in an
+  // event.
+  //
+  // `required` matches the handler, which refuses an empty or whitespace-only
+  // code. It is declared here and NOT on AuthenticateRequest.code, and the
+  // difference is who is asking: this call runs on an AAL2 session, against the
+  // caller's OWN account, confirming a secret the same caller was handed
+  // moments ago. There is no account to enumerate and no factor inventory to
+  // disclose, so a refusal for malformed input reveals nothing a login refusal
+  // would have hidden.
+  //
+  // Still no digit-count or character-class rule: the code's length is the
+  // verifier's business, and pinning it in the schema would refuse a longer code
+  // if the verifier is ever configured to issue one.
+  string code = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "000000"}},
+    (buf.validate.field) = {
+      required: true
+      string: {max_len: 32}
+    }
+  ];
+}
+
+// ConfirmTotpResponse reports what the confirmation produced.
+message ConfirmTotpResponse {
+  // The credential that was proven.
+  string credential_id = 1;
+
+  // True when this confirmation was the event that completed the account: a
+  // verified address plus a REAL second factor. Only a TOTP confirmation can set
+  // it — generating recovery codes must never be what activates an account.
+  bool activated = 2;
+
+  // False when the authenticator was already proven — a retried confirmation.
+  // Nothing was appended, and it is not an error.
+  bool changed = 3;
+}
+
+// GenerateRecoveryCodesRequest asks for a fresh set, replacing any existing one.
+message GenerateRecoveryCodesRequest {
+  // How many codes to mint. Zero means the server's default (10). The server
+  // bounds it at 20: every code is a row plus a hash, so an unbounded count is a
+  // request that asks for a million of them inside one transaction.
+  //
+  // Both ends are refused rather than clamped, and that is `app.MaxRecoveryCodeCount`
+  // exactly — unlike a page size, an over-large count is not a request the server
+  // can satisfy with less, because the caller would then be shown a set smaller
+  // than the one they asked to write down.
+  int32 count = 1 [(buf.validate.field).int32 = {
+    gte: 0
+    lte: 20
+  }];
+}
+
+// GenerateRecoveryCodesResponse carries the plaintext codes back ONCE.
+//
+// Only digests are stored, so this is the only moment the codes exist anywhere
+// this system can reach. A caller that loses them generates a new set, which
+// invalidates the old one — that is the correct outcome, and an endpoint that
+// could re-display them would turn a stolen session into a permanent bypass of
+// every factor on the account.
+message GenerateRecoveryCodesResponse {
+  // The credential holding this set, a prefixed ULID (ADR-030).
+  string credential_id = 1;
+
+  // The plaintext codes, in the order they should be presented. Returned ONLY
+  // here. Never log them; show them once and tell the user to store them.
+  repeated string codes = 2;
+}
+
+// RevokeSessionRequest ends one of the caller's sessions.
+message RevokeSessionRequest {
+  // The session to end. It must belong to the caller: a request naming somebody
+  // else's session gets the same answer as one naming a session that does not
+  // exist, because telling the two apart would turn the device list into a probe
+  // for which session ids exist.
+  //
+  // A prefixed ULID, `sess_` followed by 26 Crockford base32 characters
+  // (ADR-030). Rejecting the wrong TYPE of identifier at the boundary is
+  // CONVENTIONS §4, and it is not the probe the paragraph above forbids: it
+  // separates "that is not a session id at all" from "no such session of yours",
+  // and the first is a fact the caller already had. Which session ids EXIST
+  // stays indistinguishable.
+  string session_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "sess_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field) = {
+      required: true
+      string: {pattern: "^sess_[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}$"}
+    }
+  ];
+
+  // A short machine-readable label recorded with the revocation, for example
+  // "user_signed_out". It enters an event, so it carries no personal data and no
+  // free text a user typed.
+  //
+  // Optional. The pattern is what makes "machine-readable" and "no free text"
+  // true rather than merely stated: lower-case snake, so a sentence a user typed
+  // — which is where personal data arrives in a field like this — cannot reach
+  // an append-only log (ADR-002).
+  string reason = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "user_signed_out"}},
+    (buf.validate.field).string = {
+      max_len: 64
+      pattern: "^$|^[a-z][a-z0-9_]*$"
+    }
+  ];
+}
+
+// RevokeSessionResponse reports what the revocation did.
+message RevokeSessionResponse {
+  // False when the session was already revoked or already expired. Nothing was
+  // appended, and it is NOT an error: the caller wanted the session unusable and
+  // it is.
+  bool changed = 1;
+}
+
+// RevokeAllSessionsRequest ends every live session on the caller's account.
+message RevokeAllSessionsRequest {
+  // The session to SPARE — "sign out everywhere else", so the caller is not
+  // signed out of the device they are asking from.
+  //
+  // Empty spares nothing, which is what a compromise response needs: identity.md
+  // §7 requires a password reset to void every session including the one that
+  // asked, because the party asking may be the attacker.
+  //
+  // OPTIONAL, so the pattern admits the empty string explicitly. Declaring
+  // `required` here would make "sign out everywhere, including me" — the
+  // compromise response — unexpressible.
+  string except_session_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "sess_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string.pattern = "^$|^sess_[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}$"
+  ];
+
+  // A short machine-readable label recorded with each revocation, as in
+  // RevokeSessionRequest.
+  string reason = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "user_signed_out"}},
+    (buf.validate.field).string = {
+      max_len: 64
+      pattern: "^$|^[a-z][a-z0-9_]*$"
+    }
+  ];
+}
+
+// RevokeAllSessionsResponse reports what the fan-out did.
+//
+// The whole operation is one atomic append: "sign out everywhere" that half
+// happened is worse than one that failed, because the user is told every device
+// is signed out, one is not, and nothing in the system disagrees with them.
+message RevokeAllSessionsResponse {
+  // How many sessions this call ended. Sessions already revoked or expired are
+  // not counted — nothing was appended for them.
+  int32 revoked = 1;
+
+  // How many live sessions the work list returned, the spared one included.
+  // Reported so a client can tell "nothing to do" apart from "the list came back
+  // empty because it is broken".
+  int32 scanned = 2;
+}
+
+// IdentityService is the account, its credentials and its sessions.
+//
+// # The gates, and the one that is not honest yet
+//
+// Every RPC declares its enforcement policy or the server refuses to boot
+// (ADR-021). Four of these are public because they run before any session
+// exists; the other nine act on the CALLER'S OWN account, which identity has no
+// established annotation for.
+//
+// Identity is not organization-scoped — a person exists before any organization
+// does, so there is no org for the org-context gate to resolve and no
+// `workspace_id` for row-level security to scope by. The authz gate's two
+// shapes both assume otherwise: an empty `resource_id_field` means "the org
+// already resolved for this request", and a named one means "read the id from
+// this request field", which no message here carries because the account is
+// resolved from the session rather than named by the caller.
+//
+// So `{relation: "self", resource_type: "user"}` below names a self-scoped
+// convention that the authz gate now implements: `selfCheck` answers gate 2
+// from the principal alone, substituting `principal.Subject.ID` as the resource
+// and skipping gates 1 and 3, which are both questions ABOUT an organization
+// that a self-scoped method has none of. The resource is read from the session
+// and from nowhere else — not from the request, not from a header — so a caller
+// cannot aim the check at somebody else's account.
+//
+// The convention is keyed on the STRING "self", which is the weak part of it.
+// A method that declares a relation this gate does not recognise falls through
+// to the org-scoped shape and fails closed for want of an active organization,
+// so the failure direction is safe; a method that MISSPELLS "self" gets the same
+// treatment and is simply unreachable. Both are safe and neither is obvious.
+// Replacing the string with a declared marker is tracked separately.
+//
+// # Assurance levels
+//
+// A session is normally AAL2, but AAL1 SESSIONS EXIST: an account with a
+// verified address and no second factor may mint exactly one, for the sole
+// purpose of enrolling its first factor (the bootstrap carve-out). So an
+// unannotated method is NOT automatically two-factor any more — its floor is
+// AAL1 by declaration, and the four read methods here that declare no `min_aal`
+// are reachable from a bootstrap session.
+//
+// That makes the explicit declarations on the credential- and session-changing
+// methods load-bearing rather than documentary: they are what stops a
+// password-only session from touching credentials or sessions. A method added
+// here without a `min_aal` is single-factor by default, and the enrolment
+// carve-out is what makes that reachable in practice.
+service IdentityService {
+  // Register claims an address and creates the account that claims it.
+  //
+  // Public: the caller has no session and, by definition, no account. It is a
+  // WRITE rather than a GROW — a person is not a seat, and seats are consumed
+  // when an organization adds a member, not when a human being signs up.
+  //
+  // It sets NO PASSWORD and creates no credential of any kind. The account is
+  // unusable by everybody until the link mailed to the address is followed and
+  // VerifyEmail supplies one.
+  //
+  // The response is identical whether or not the address was free. See
+  // RegisterResponse.
+  rpc Register(RegisterRequest) returns (RegisterResponse) {
+    option (chronos.options.v1.public) = true;
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    // See SystemService/GetStatus for why the OpenAPI facts below are stated
+    // as annotations: the generator reads gnostic, not this repo's options, and
+    // it REPLACES a status code it is given rather than merging into it.
+    option (gnostic.openapi.v3.operation) = {
+      security: [{}]
+      responses: {
+        response_or_reference: [
+          {
+            name: "200"
+            value: {
+              response: {
+                description:
+                  "Accepted. The body is empty, and its emptiness is the feature: this\n"
+                  "response is identical whether or not the address was free, and the\n"
+                  "server pays the same cost either way, so neither content nor timing\n"
+                  "reveals whether an account exists. Render one sentence for both — \"if\n"
+                  "that address can be registered, we have sent it a link\".\n"
+                content: {
+                  additional_properties: [
+                    {
+                      name: "application/json"
+                      value: {
+                        schema: {reference: {_ref: "#/components/schemas/chronos.identity.v1.RegisterResponse"}}
+                        example: {yaml: "{}"}
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    };
+  }
+
+  // VerifyEmail proves control of an address, sets the account's first
+  // password, and makes the claim on the address permanent.
+  //
+  // Public: it is reached from a link in a mailbox, by a browser that has never
+  // authenticated. The token IS the authentication, and it is single-use.
+  //
+  // It is the ONLY call that can give a brand-new account a password, and that
+  // is the pre-hijacking defence: the credential is created by the party that
+  // has just proven the mailbox, in the same request as the proof.
+  rpc VerifyEmail(VerifyEmailRequest) returns (VerifyEmailResponse) {
+    option (chronos.options.v1.public) = true;
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    option (gnostic.openapi.v3.operation) = {
+      security: [{}]
+      responses: {
+        response_or_reference: [
+          {
+            name: "200"
+            value: {
+              response: {
+                description:
+                  "The token was valid and has been spent. Unlike registration this is\n"
+                  "not an existence oracle — presenting a valid single-use token IS proof\n"
+                  "of control over the address — so the caller is told whose account it\n"
+                  "belongs to. `changed: false` means a link clicked twice, or prefetched\n"
+                  "by a mail client; nothing was appended and it is not an error.\n"
+                content: {
+                  additional_properties: [
+                    {
+                      name: "application/json"
+                      value: {
+                        schema: {reference: {_ref: "#/components/schemas/chronos.identity.v1.VerifyEmailResponse"}}
+                        example: {
+                          yaml:
+                            "subjectId: subj_01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
+                            "userId: usr_01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
+                            "changed: true\n"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    };
+  }
+
+  // ResendEmailVerification issues a new verification link for an address whose
+  // account has not proven it yet.
+  //
+  // Public, and the choice is forced rather than preferred. A Pending account
+  // can hold no session, so requiring one would make this call unavailable to
+  // every account that needs it — the endpoint would exist and serve nobody.
+  //
+  // The cost of being public is that it is an unauthenticated mail trigger
+  // pointed at a third party's mailbox, so it is rate limited on TWO axes before
+  // anything is looked up: per address, which bounds mail-bombing one victim, and
+  // per caller, which bounds an enumeration sweep. Both counters are consumed
+  // whether or not an account exists, so the ceiling itself is not an oracle.
+  //
+  // A WRITE: the successful path appends EmailVerificationRequested to the
+  // account's stream, and the verification reactor does the rest.
+  rpc ResendEmailVerification(ResendEmailVerificationRequest) returns (ResendEmailVerificationResponse) {
+    option (chronos.options.v1.public) = true;
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    option (gnostic.openapi.v3.operation) = {security: [{}]};
+  }
+
+  // Authenticate verifies the factors presented and reports what remains
+  // (ADR-050).
+  //
+  // Public: this is where a session comes from, so requiring one is circular.
+  //
+  // A WRITE, and not a read despite minting nothing: every attempt appends to
+  // the authentication journal, and classing it as a read would let it through
+  // gates whose whole purpose is to stop writes. There is no `min_aal` for the
+  // same reason there is no authz — the caller has no session to have a level.
+  rpc Authenticate(AuthenticateRequest) returns (AuthenticateResponse) {
+    option (chronos.options.v1.public) = true;
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    option (gnostic.openapi.v3.operation) = {
+      security: [{}]
+      responses: {
+        response_or_reference: [
+          {
+            name: "200"
+            value: {
+              response: {
+                description:
+                  "The factors presented were correct. A refusal does not arrive here at\n"
+                  "all — it is an error, and it is the SAME error for every cause — so\n"
+                  "this response distinguishes only the two successful shapes.\n"
+                  "\n"
+                  "The example is the first leg: the password was correct and a second\n"
+                  "factor is owed. `offered` lists KINDS only; credential identifiers are\n"
+                  "deliberately absent, so a correct password does not enumerate the\n"
+                  "account's authenticators. When nothing further is owed,\n"
+                  "`secondFactorRequired` is `false` and `offered` is empty.\n"
+                content: {
+                  additional_properties: [
+                    {
+                      name: "application/json"
+                      value: {
+                        schema: {reference: {_ref: "#/components/schemas/chronos.identity.v1.AuthenticateResponse"}}
+                        example: {
+                          yaml:
+                            "secondFactorRequired: true\n"
+                            "offered:\n"
+                            "  - METHOD_KIND_TOTP\n"
+                            "  - METHOD_KIND_RECOVERY_CODE\n"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    };
+  }
+
+  // CreateSession completes a login and mints the bearer token.
+  //
+  // Public, for the same reason as Authenticate: it is the call that creates the
+  // session everything else requires.
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse) {
+    option (chronos.options.v1.public) = true;
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    option (gnostic.openapi.v3.operation) = {
+      security: [{}]
+      responses: {
+        response_or_reference: [
+          {
+            name: "200"
+            value: {
+              response: {
+                description:
+                  "The session, and the ONLY delivery of its token. Store the token\n"
+                  "immediately; no endpoint returns it again.\n"
+                  "\n"
+                  "`requiresCredentialRotation` is `true` when the password that\n"
+                  "established this session was found in a breach corpus. The session is\n"
+                  "then restricted to profile and credential endpoints — the login is not\n"
+                  "blocked, because blocking locks a person out of the only place they\n"
+                  "can fix the problem.\n"
+                content: {
+                  additional_properties: [
+                    {
+                      name: "application/json"
+                      value: {
+                        schema: {reference: {_ref: "#/components/schemas/chronos.identity.v1.CreateSessionResponse"}}
+                        example: {
+                          yaml:
+                            "sessionId: sess_01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
+                            "subjectId: subj_01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
+                            "token: PLACEHOLDER-not-a-real-token-the-real-one-is-opaque\n"
+                            "assuranceLevel: ASSURANCE_LEVEL_2\n"
+                            "idleExpiresAt: '2026-08-14T12:04:55Z'\n"
+                            "absoluteExpiresAt: '2026-08-21T11:04:55Z'\n"
+                            "requiresCredentialRotation: false\n"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    };
+  }
+
+  // GetUser returns the caller's own account: what it is, where it is in its
+  // lifecycle, and whether its address has been proven.
+  //
+  // AAL1 — no `min_aal` declared, so the default applies. This discloses nothing
+  // an attacker holding a session does not already have, and demanding step-up
+  // to render the account screen would make step-up routine, which is how people
+  // learn to approve it without reading it.
+  rpc GetUser(GetUserRequest) returns (GetUserResponse) {
+    // No side effects, so Connect may serve it over GET and it is cacheable.
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_READ;
+
+    // Authenticated: no `security` here, so the document-level `bearerAuth`
+    // default applies. Only a PUBLIC method states a security requirement, and
+    // it states the empty one.
+    option (gnostic.openapi.v3.operation) = {
+      responses: {
+        response_or_reference: [
+          {
+            name: "200"
+            value: {
+              response: {
+                description:
+                  "The caller's own account. No address comes back, by construction: the\n"
+                  "caller holds a `subjectId` and resolves it against the vault, which is\n"
+                  "what keeps erasure a key destruction rather than a sweep across every\n"
+                  "projection that ever copied an address.\n"
+                  "\n"
+                  "`state` and `emailVerified` answer DIFFERENT questions. An account can\n"
+                  "be verified and still `PENDING`, because a proven second factor is also\n"
+                  "required before it activates. An unset timestamp means never — not\n"
+                  "unknown.\n"
+                content: {
+                  additional_properties: [
+                    {
+                      name: "application/json"
+                      value: {
+                        schema: {reference: {_ref: "#/components/schemas/chronos.identity.v1.GetUserResponse"}}
+                        example: {
+                          yaml:
+                            "subjectId: subj_01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
+                            "userId: usr_01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
+                            "state: ACCOUNT_STATE_ACTIVE\n"
+                            "emailVerified: true\n"
+                            "registeredAt: '2026-07-02T08:15:00Z'\n"
+                            "activatedAt: '2026-07-02T08:19:41Z'\n"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    };
+  }
+
+  // ListSessions returns the caller's device list, newest first, one page at a
+  // time.
+  //
+  // AAL1. It is a read of a list the holder needs in order to NOTICE a
+  // compromise, and putting step-up in front of noticing is backwards — the
+  // revocation that follows is what carries the AAL2 requirement.
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_READ;
+
+    option (gnostic.openapi.v3.operation) = {
+      responses: {
+        response_or_reference: [
+          {
+            name: "200"
+            value: {
+              response: {
+                description:
+                  "One page of the device list, newest first. No token and no digest\n"
+                  "appears here: a device list that returned anything derived from the\n"
+                  "bearer token would put a credential on the one screen whose purpose is\n"
+                  "to let a user revoke one.\n"
+                  "\n"
+                  "`nextPageToken` empty means done. Do not infer the end from a short\n"
+                  "page — the server clamps an oversized `pageSize`, so short pages are\n"
+                  "ordinary. `lastSeenAt` is unset for a session that has made no request\n"
+                  "since it was issued.\n"
+                content: {
+                  additional_properties: [
+                    {
+                      name: "application/json"
+                      value: {
+                        schema: {reference: {_ref: "#/components/schemas/chronos.identity.v1.ListSessionsResponse"}}
+                        example: {
+                          yaml:
+                            "sessions:\n"
+                            "  - sessionId: sess_01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
+                            "    deviceId: dev_9f2c1b7e\n"
+                            "    assuranceLevel: ASSURANCE_LEVEL_2\n"
+                            "    idleExpiresAt: '2026-08-14T12:04:55Z'\n"
+                            "    absoluteExpiresAt: '2026-08-21T11:04:55Z'\n"
+                            "    createdAt: '2026-08-14T11:04:55Z'\n"
+                            "    lastSeenAt: '2026-08-14T11:39:12Z'\n"
+                            "  - sessionId: sess_01ARZ3NDEKTSV4RRFFQ69G5FB2\n"
+                            "    deviceId: ''\n"
+                            "    assuranceLevel: ASSURANCE_LEVEL_2\n"
+                            "    idleExpiresAt: '2026-08-14T10:22:00Z'\n"
+                            "    absoluteExpiresAt: '2026-08-20T09:22:00Z'\n"
+                            "    createdAt: '2026-08-13T09:22:00Z'\n"
+                            "nextPageToken: ''\n"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    };
+  }
+
+  // ListMethods returns the authentication methods on the caller's account:
+  // which exist, what kind each is, whether it can be used now, and when it last
+  // was.
+  //
+  // AAL1, on the same argument as ListSessions: this is the screen on which
+  // somebody discovers an authenticator they did not enrol.
+  rpc ListMethods(ListMethodsRequest) returns (ListMethodsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_READ;
+
+    option (gnostic.openapi.v3.operation) = {
+      responses: {
+        response_or_reference: [
+          {
+            name: "200"
+            value: {
+              response: {
+                description:
+                  "Every authentication method on the caller's account. Unpaginated, and\n"
+                  "that is a bounded claim rather than an oversight: an account holds at\n"
+                  "most one usable credential per kind, and there are five kinds.\n"
+                  "\n"
+                  "Nothing that verifies anything is here — no verifier, no sealed TOTP\n"
+                  "secret, no recovery-code digest. The consecutive-failure count is\n"
+                  "absent on its own merits: publishing it would tell whoever reaches this\n"
+                  "screen how many attempts remain before a factor locks.\n"
+                  "\n"
+                  "`usable` is computed server-side from the account's own events, so a\n"
+                  "screen cannot come to show a factor the login refuses. An unset\n"
+                  "`lastUsedAt` is the INTERESTING value: this screen is really asked \"is\n"
+                  "there something enrolled here that I did not enrol\", and the answer is\n"
+                  "only credible if a method that has never been used says so.\n"
+                content: {
+                  additional_properties: [
+                    {
+                      name: "application/json"
+                      value: {
+                        schema: {reference: {_ref: "#/components/schemas/chronos.identity.v1.ListMethodsResponse"}}
+                        example: {
+                          yaml:
+                            "methods:\n"
+                            "  - credentialId: cred_01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
+                            "    kind: METHOD_KIND_PASSWORD\n"
+                            "    usable: true\n"
+                            "    addedAt: '2026-07-02T08:15:00Z'\n"
+                            "    enabledAt: '2026-07-02T08:15:00Z'\n"
+                            "    lastUsedAt: '2026-08-14T11:04:55Z'\n"
+                            "  - credentialId: cred_01ARZ3NDEKTSV4RRFFQ69G5FB2\n"
+                            "    kind: METHOD_KIND_TOTP\n"
+                            "    usable: true\n"
+                            "    addedAt: '2026-07-02T08:18:20Z'\n"
+                            "    enabledAt: '2026-07-02T08:19:41Z'\n"
+                            "    lastUsedAt: '2026-08-14T11:04:55Z'\n"
+                            "  - credentialId: cred_01ARZ3NDEKTSV4RRFFQ69G5FC7\n"
+                            "    kind: METHOD_KIND_RECOVERY_CODE\n"
+                            "    usable: true\n"
+                            "    addedAt: '2026-07-02T08:20:05Z'\n"
+                            "    enabledAt: '2026-07-02T08:20:05Z'\n"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    };
+  }
+
+  // ListLoginHistory returns recent authentication attempts against the caller's
+  // account, successes and failures alike, newest first.
+  //
+  // AAL1, and deliberately so even though this is the most sensitive read here.
+  // It is the account holder's own security log, and it is only useful if they
+  // actually look at it.
+  rpc ListLoginHistory(ListLoginHistoryRequest) returns (ListLoginHistoryResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_READ;
+
+    option (gnostic.openapi.v3.operation) = {
+      responses: {
+        response_or_reference: [
+          {
+            name: "200"
+            value: {
+              response: {
+                description:
+                  "Recent authentication attempts against the caller's account, successes\n"
+                  "and failures alike, newest first.\n"
+                  "\n"
+                  "FAILURES ARE THE POINT of this list: it exists to answer \"was that\n"
+                  "me?\", and a history of successes shows a compromised account as a\n"
+                  "quiet, ordinary list. `reason` is what the account HOLDER may be told\n"
+                  "about their own account after the fact — it is never what a failing\n"
+                  "caller is told, because naming which factor was wrong hands an attacker\n"
+                  "a working oracle for the other.\n"
+                  "\n"
+                  "`FAILURE_REASON_REPLAYED_CODE` is worth alerting on: a wrong code is a\n"
+                  "typo, a replayed one means somebody OBSERVED a real code.\n"
+                content: {
+                  additional_properties: [
+                    {
+                      name: "application/json"
+                      value: {
+                        schema: {reference: {_ref: "#/components/schemas/chronos.identity.v1.ListLoginHistoryResponse"}}
+                        example: {
+                          yaml:
+                            "attempts:\n"
+                            "  - succeeded: true\n"
+                            "    reason: FAILURE_REASON_UNSPECIFIED\n"
+                            "    methods:\n"
+                            "      - METHOD_KIND_PASSWORD\n"
+                            "      - METHOD_KIND_TOTP\n"
+                            "    assuranceLevel: ASSURANCE_LEVEL_2\n"
+                            "    deviceId: dev_9f2c1b7e\n"
+                            "    occurredAt: '2026-08-14T11:04:55Z'\n"
+                            "  - succeeded: false\n"
+                            "    reason: FAILURE_REASON_WRONG_SECOND_FACTOR\n"
+                            "    methods:\n"
+                            "      - METHOD_KIND_PASSWORD\n"
+                            "      - METHOD_KIND_TOTP\n"
+                            "    assuranceLevel: ASSURANCE_LEVEL_UNSPECIFIED\n"
+                            "    deviceId: ''\n"
+                            "    occurredAt: '2026-08-14T03:41:02Z'\n"
+                            "  - succeeded: false\n"
+                            "    reason: FAILURE_REASON_RATE_LIMITED\n"
+                            "    methods: []\n"
+                            "    assuranceLevel: ASSURANCE_LEVEL_UNSPECIFIED\n"
+                            "    deviceId: ''\n"
+                            "    occurredAt: '2026-08-14T03:40:58Z'\n"
+                            "nextPageToken: PLACEHOLDER-opaque-cursor-pass-this-back-verbatim\n"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    };
+  }
+
+  // EnrollTotp provisions a new authenticator secret and returns it once.
+  //
+  // AAL2. Enrolling a second factor is how an attacker holding one factor makes
+  // their access durable, so it must not be reachable from a session that only
+  // ever presented one. It replaces any unproven enrolment on the account, so
+  // the abandoned secret stops existing at the moment the new one is written
+  // rather than lingering as a second confirmable factor.
+  //
+  // AAL1 while the account has never held a proven second factor, and only
+  // then. Read the two levels together and they say: presenting the existing
+  // factor is what buys the right to add another, and an account with no
+  // existing factor is exempt from a demand nothing could satisfy. Without the
+  // exemption an account registered through this API could never activate — the
+  // factor it must have to reach AAL2 is the factor this call exists to give it
+  // (identity.md §2).
+  //
+  // The exemption is not a weaker version of the same permission. It applies to
+  // a strictly poorer target: an account with no second factor, whose password
+  // is therefore already the only thing standing between an attacker and it. An
+  // attacker who enrols there has gained nothing they did not already have. On
+  // an account that HAS a factor the floor is AAL2, so the same attacker must
+  // present that factor — and it does not re-open when a factor is removed,
+  // because the window closes on first proof and never re-opens.
+  rpc EnrollTotp(EnrollTotpRequest) returns (EnrollTotpResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+    option (chronos.options.v1.min_aal) = ASSURANCE_LEVEL_2;
+    option (chronos.options.v1.bootstrap_min_aal) = ASSURANCE_LEVEL_1;
+
+    // An authenticated MUTATION, so it carries an Idempotency-Key. The header
+    // is described once, in proto/openapi.base.yaml's components, and every
+    // operation that requires it references that one description.
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            description:
+              "A client-generated ULID or UUID, required on every authenticated mutating\n"
+              "call. Replaying it with the SAME body returns the stored response instead\n"
+              "of re-executing; replaying it with a DIFFERENT body returns `CONFLICT`.\n"
+              "Scoped to `(principal, method, key)` and retained 24 hours — see\n"
+              "*Idempotency* in the introduction.\n"
+            schema: {
+              schema: {
+                type: "string"
+                example: {yaml: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+              }
+            }
+          }
+        }
+      ]
+      responses: {
+        response_or_reference: [
+          {
+            name: "200"
+            value: {
+              response: {
+                description:
+                  "The provisioning material, delivered ONCE. Both `secret` and\n"
+                  "`provisioningUri` are returned here and are then unrecoverable —\n"
+                  "nothing stores them in the clear, and the sealed copy is opened only to\n"
+                  "check a code. `provisioningUri` CONTAINS the secret. Never log either;\n"
+                  "render the URI as a QR code and the secret for manual entry.\n"
+                  "\n"
+                  "`expiresAt` is short by design: it bounds the window in which a secret\n"
+                  "exists that nobody has demonstrated possession of, so a secret captured\n"
+                  "from a screen stops being usable quickly. A user who takes longer\n"
+                  "starts again at no cost.\n"
+                  "\n"
+                  "This call replaces any unproven enrolment on the account, so an\n"
+                  "abandoned secret stops existing rather than lingering as a second\n"
+                  "confirmable factor.\n"
+                  "\n"
+                  "The secret below is a placeholder and is not valid anywhere.\n"
+                content: {
+                  additional_properties: [
+                    {
+                      name: "application/json"
+                      value: {
+                        schema: {reference: {_ref: "#/components/schemas/chronos.identity.v1.EnrollTotpResponse"}}
+                        example: {
+                          yaml:
+                            "credentialId: cred_01ARZ3NDEKTSV4RRFFQ69G5FB2\n"
+                            "secret: PLACEHOLDERSECRETNOTREAL234567AB\n"
+                            "provisioningUri: otpauth://totp/Chronos:ada@example.com?secret=PLACEHOLDERSECRETNOTREAL234567AB&issuer=Chronos&algorithm=SHA1&digits=6&period=30\n"
+                            "expiresAt: '2026-08-14T11:19:55Z'\n"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    };
+  }
+
+  // ConfirmTotp proves possession of a provisioned secret, and may be what
+  // activates the account.
+  //
+  // AAL2, matching EnrollTotp: a confirmation is the half of an enrolment that
+  // makes a factor real, and letting it run at a lower level than the enrolment
+  // itself would leave the pair only as strong as its weaker call.
+  //
+  // The bootstrap floor matches EnrollTotp for the same reason. The two calls
+  // are one operation split in half, and exempting only the first would leave
+  // an account able to provision a secret it could never prove — the deadlock
+  // moved one call to the right rather than removed.
+  //
+  // This is the call that CLOSES the window: the account it activates has a
+  // proven second factor from that moment, so the next call to either method
+  // faces AAL2. The exemption is therefore self-limiting, and it is limited by
+  // the very thing it was granted to produce.
+  rpc ConfirmTotp(ConfirmTotpRequest) returns (ConfirmTotpResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+    option (chronos.options.v1.min_aal) = ASSURANCE_LEVEL_2;
+    option (chronos.options.v1.bootstrap_min_aal) = ASSURANCE_LEVEL_1;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            description:
+              "A client-generated ULID or UUID, required on every authenticated mutating\n"
+              "call. Replaying it with the SAME body returns the stored response instead\n"
+              "of re-executing; replaying it with a DIFFERENT body returns `CONFLICT`.\n"
+              "Scoped to `(principal, method, key)` and retained 24 hours — see\n"
+              "*Idempotency* in the introduction.\n"
+            schema: {
+              schema: {
+                type: "string"
+                example: {yaml: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+              }
+            }
+          }
+        }
+      ]
+      responses: {
+        response_or_reference: [
+          {
+            name: "200"
+            value: {
+              response: {
+                description:
+                  "Possession of the provisioned secret has been proven.\n"
+                  "\n"
+                  "`activated: true` means this confirmation was the event that completed\n"
+                  "the account — a verified address plus a REAL second factor. Only a TOTP\n"
+                  "confirmation can set it; generating recovery codes never activates an\n"
+                  "account. `changed: false` means the authenticator was already proven,\n"
+                  "so nothing was appended and it is not an error.\n"
+                content: {
+                  additional_properties: [
+                    {
+                      name: "application/json"
+                      value: {
+                        schema: {reference: {_ref: "#/components/schemas/chronos.identity.v1.ConfirmTotpResponse"}}
+                        example: {
+                          yaml:
+                            "credentialId: cred_01ARZ3NDEKTSV4RRFFQ69G5FB2\n"
+                            "activated: true\n"
+                            "changed: true\n"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    };
+  }
+
+  // GenerateRecoveryCodes replaces the whole recovery-code set and returns the
+  // new plaintext codes once.
+  //
+  // AAL2. A recovery code is a standing bypass of every other factor, so minting
+  // a fresh set from a single-factor session would hand an attacker a permanent
+  // credential that survives the password change the victim makes in response.
+  // Generating codes never activates an account — only a real second factor
+  // does.
+  //
+  // NO bootstrap exemption, deliberately, and this is the method where the
+  // decision is load-bearing. The exemption exists to break a deadlock, and
+  // there is no deadlock here: recovery codes cannot activate an account, so
+  // nothing about the path from registered to Active runs through this call. An
+  // account reaches its first AAL2 session by confirming a TOTP secret, and only
+  // then asks for codes — by which time the strict floor is satisfiable. Granting
+  // the exemption anyway would mean a single-factor session could mint the one
+  // credential that outlives every remedy the account holder has, on an account
+  // that has no second factor to lose. That is the exact hole the floor is
+  // shaped to keep shut, and it would be opened for no gain.
+  rpc GenerateRecoveryCodes(GenerateRecoveryCodesRequest) returns (GenerateRecoveryCodesResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+    option (chronos.options.v1.min_aal) = ASSURANCE_LEVEL_2;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            description:
+              "A client-generated ULID or UUID, required on every authenticated mutating\n"
+              "call. Replaying it with the SAME body returns the stored response instead\n"
+              "of re-executing; replaying it with a DIFFERENT body returns `CONFLICT`.\n"
+              "Scoped to `(principal, method, key)` and retained 24 hours — see\n"
+              "*Idempotency* in the introduction.\n"
+            schema: {
+              schema: {
+                type: "string"
+                example: {yaml: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+              }
+            }
+          }
+        }
+      ]
+      responses: {
+        response_or_reference: [
+          {
+            name: "200"
+            value: {
+              response: {
+                description:
+                  "The plaintext codes, delivered ONCE, in the order they should be\n"
+                  "presented. Only digests are stored, so this is the only moment they\n"
+                  "exist anywhere this system can reach.\n"
+                  "\n"
+                  "This REPLACES the whole existing set — any previous codes stop working.\n"
+                  "Show them once, tell the user to store them offline, and never log\n"
+                  "them. A caller who loses them generates a new set, which is the correct\n"
+                  "outcome: an endpoint that could re-display them would turn a stolen\n"
+                  "session into a permanent bypass of every factor on the account.\n"
+                  "\n"
+                  "The codes below are placeholders and are not valid anywhere.\n"
+                content: {
+                  additional_properties: [
+                    {
+                      name: "application/json"
+                      value: {
+                        schema: {reference: {_ref: "#/components/schemas/chronos.identity.v1.GenerateRecoveryCodesResponse"}}
+                        example: {
+                          yaml:
+                            "credentialId: cred_01ARZ3NDEKTSV4RRFFQ69G5FC7\n"
+                            "codes:\n"
+                            "  - PLACEHOLDER-code-01\n"
+                            "  - PLACEHOLDER-code-02\n"
+                            "  - PLACEHOLDER-code-03\n"
+                            "  - PLACEHOLDER-code-04\n"
+                            "  - PLACEHOLDER-code-05\n"
+                            "  - PLACEHOLDER-code-06\n"
+                            "  - PLACEHOLDER-code-07\n"
+                            "  - PLACEHOLDER-code-08\n"
+                            "  - PLACEHOLDER-code-09\n"
+                            "  - PLACEHOLDER-code-10\n"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    };
+  }
+
+  // RevokeSession ends one of the caller's sessions.
+  //
+  // AAL2. Revocation is the control a person reaches for when they believe they
+  // are compromised, and it must not be usable BY the compromise: a
+  // single-factor session that could end sessions could sign the legitimate
+  // holder out of the device they are using to investigate.
+  rpc RevokeSession(RevokeSessionRequest) returns (RevokeSessionResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+    option (chronos.options.v1.min_aal) = ASSURANCE_LEVEL_2;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            description:
+              "A client-generated ULID or UUID, required on every authenticated mutating\n"
+              "call. Replaying it with the SAME body returns the stored response instead\n"
+              "of re-executing; replaying it with a DIFFERENT body returns `CONFLICT`.\n"
+              "Scoped to `(principal, method, key)` and retained 24 hours — see\n"
+              "*Idempotency* in the introduction.\n"
+            schema: {
+              schema: {
+                type: "string"
+                example: {yaml: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+              }
+            }
+          }
+        }
+      ]
+      responses: {
+        response_or_reference: [
+          {
+            name: "200"
+            value: {
+              response: {
+                description:
+                  "The session is no longer usable.\n"
+                  "\n"
+                  "`changed: false` means it was already revoked or already expired.\n"
+                  "Nothing was appended, and it is NOT an error: the caller wanted the\n"
+                  "session unusable, and it is.\n"
+                  "\n"
+                  "A request naming a session that is not the caller's own gets the same\n"
+                  "answer as one naming a session that does not exist — telling the two\n"
+                  "apart would turn the device list into a probe for which session ids\n"
+                  "exist.\n"
+                content: {
+                  additional_properties: [
+                    {
+                      name: "application/json"
+                      value: {
+                        schema: {reference: {_ref: "#/components/schemas/chronos.identity.v1.RevokeSessionResponse"}}
+                        example: {yaml: "changed: true\n"}
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    };
+  }
+
+  // RevokeAllSessions ends every live session on the caller's account, in one
+  // atomic append.
+  //
+  // AAL2, on the same argument as RevokeSession and more so: this is the
+  // account-wide version, so the denial of service an attacker could inflict
+  // with it is total.
+  rpc RevokeAllSessions(RevokeAllSessionsRequest) returns (RevokeAllSessionsResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+    option (chronos.options.v1.min_aal) = ASSURANCE_LEVEL_2;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            description:
+              "A client-generated ULID or UUID, required on every authenticated mutating\n"
+              "call. Replaying it with the SAME body returns the stored response instead\n"
+              "of re-executing; replaying it with a DIFFERENT body returns `CONFLICT`.\n"
+              "Scoped to `(principal, method, key)` and retained 24 hours — see\n"
+              "*Idempotency* in the introduction.\n"
+            schema: {
+              schema: {
+                type: "string"
+                example: {yaml: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+              }
+            }
+          }
+        }
+      ]
+      responses: {
+        response_or_reference: [
+          {
+            name: "200"
+            value: {
+              response: {
+                description:
+                  "Every live session on the account has ended, in one atomic append —\n"
+                  "\"sign out everywhere\" that half happened is worse than one that failed,\n"
+                  "because the user is told every device is signed out, one is not, and\n"
+                  "nothing in the system disagrees with them.\n"
+                  "\n"
+                  "`revoked` counts what this call ended; sessions already revoked or\n"
+                  "expired are not counted, because nothing was appended for them.\n"
+                  "`scanned` is how many live sessions the work list returned, the spared\n"
+                  "one included — reported so a client can tell \"nothing to do\" apart from\n"
+                  "\"the list came back empty because it is broken\".\n"
+                  "\n"
+                  "Send an empty `exceptSessionId` to spare nothing, which is what a\n"
+                  "compromise response needs: the party asking may be the attacker.\n"
+                content: {
+                  additional_properties: [
+                    {
+                      name: "application/json"
+                      value: {
+                        schema: {reference: {_ref: "#/components/schemas/chronos.identity.v1.RevokeAllSessionsResponse"}}
+                        example: {
+                          yaml:
+                            "revoked: 3\n"
+                            "scanned: 4\n"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    };
+  }
+}

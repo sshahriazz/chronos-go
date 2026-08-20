@@ -172,6 +172,24 @@ def health(title, job, unit="short"):
                 desc=f"1 = Prometheus is successfully scraping {job}.")
 
 
+# `up{job=...}` and chronos_dependency_health answer DIFFERENT questions, and
+# both panels are kept because the gap between them is where incidents live.
+# `up` is scrape reachability: can Prometheus open a socket to the exporter.
+# chronos_dependency_health is our own probe's answer: does the dependency work
+# FOR US. A PostgreSQL that accepts connections and rejects our credentials is
+# up=1 and health down. A sealed OpenBao is up=1 and health down. And the two
+# Temporal schedule probes have no `up` equivalent at all — Temporal is
+# perfectly reachable while the recurring job it was supposed to run does not
+# exist.
+DEP_STEPS = [{"color": "green", "value": None}, {"color": "red", "value": 1}]
+DEGRADED_STEPS = [{"color": "green", "value": None}, {"color": "orange", "value": 1}]
+
+# The two schedule probes, named explicitly. They are the only signal that a
+# background job will ever run: a schedule that was never created produces no
+# error, no failed workflow and no other metric that moves.
+SCHEDULE_PROBES = "email_reservation_sweep|identity_retention"
+
+
 # ===========================================================================
 # 1. Stack overview — the "is anything on fire" dashboard
 # ===========================================================================
@@ -187,6 +205,33 @@ def overview():
         health("Workflows", "temporal"),
         health("Object store", "seaweedfs"),
         health("SMTP", "mailpit"),
+
+        row("Dependency health — our probes, not scrape reachability"),
+        stat("Dependencies down", 'sum(chronos_dependency_health{state="down"})',
+             steps=DEP_STEPS,
+             desc="Dependencies our own probes report as DOWN. This is not the row "
+                  "above: that one says Prometheus can reach an exporter, this one says "
+                  "the dependency works for us. Credentials rejected, a sealed vault or "
+                  "a missing schedule all show here and nowhere else."),
+        stat("Dependencies degraded", 'sum(chronos_dependency_health{state="degraded"})',
+             steps=DEGRADED_STEPS,
+             desc="Degradable dependencies that are failing. The product still serves; "
+                  "some capability is gone. Sustained is the alertable state — brief is "
+                  "the design working."),
+        stat("Recurring jobs scheduled",
+             f'sum(chronos_dependency_health{{dependency=~"{SCHEDULE_PROBES}", state="up"}})',
+             steps=[{"color": "red", "value": None}, {"color": "green", "value": 2}],
+             desc="Should be 2: the lapsed-email-reservation sweep and identity "
+                  "retention. Below 2 means a recurring job has no schedule and will "
+                  "never run — silently, with nothing else reporting it."),
+        table("Dependency probes",
+              [target("chronos_dependency_health == 1", instant=True, fmt="table")],
+              w=12, h=8,
+              desc="One row per dependency, showing the state currently in effect and "
+                   "its criticality. CRITICAL down fails readiness; FAIL_CLOSED down "
+                   "means authorization denies everything but the instance stays in the "
+                   "load balancer (ADR-010). The error text is deliberately not a label "
+                   "— read it from the status endpoint."),
 
         row("Throughput — one panel per owned question"),
         ts("What happened? — KurrentDB event I/O",
@@ -711,6 +756,40 @@ def application():
            desc="For the PII key cache this is the erasure-propagation signal: erasures "
                 "happening with NO invalidations recorded means destroyed keys are still "
                 "cached somewhere (ADR-041)."),
+
+        row("Dependency probes — what the status endpoint says"),
+        ts("Recurring jobs scheduled",
+           [target(f'chronos_dependency_health{{dependency=~"{SCHEDULE_PROBES}", state="up"}}',
+                   "{{dependency}}")],
+           minval=0,
+           desc="1 = the Temporal schedule EXISTS. Not that its last run succeeded — a "
+                "failed run is Temporal's to retry and shows in its own UI. A schedule "
+                "that was never created is invisible everywhere else: no error, no failed "
+                "workflow, no metric that moves. At 0, lapsed email reservations are never "
+                "released and identity retention never runs, so totp_replay grows without "
+                "bound (ADR-049)."),
+        ts("Dependencies not up",
+           [target('sum by (dependency) (chronos_dependency_health{state="down"})',
+                   "down {{dependency}}"),
+            target('sum by (dependency) (chronos_dependency_health{state="degraded"})',
+                   "degraded {{dependency}}")],
+           minval=0,
+           desc="Our probes' answer, which is not up{job=...}: that one is scrape "
+                "reachability, this one is whether the dependency works for us. Rejected "
+                "credentials and a sealed vault are up=1 here and down."),
+        ts("Probe latency p99",
+           [target("histogram_quantile(0.99, sum(rate(chronos_dependency_check_seconds_bucket[5m])) "
+                   "by (le, dependency))", "{{dependency}}")],
+           unit="s",
+           desc="A dependency that is up but answering slowly is the state that precedes "
+                "an outage, and a boolean cannot show it. The probe timeout is 2s, so a "
+                "line pinned at the top bucket is a probe timing out."),
+        ts("Probe evaluations",
+           [target("sum by (state) (rate(chronos_dependency_checks_total[5m]))", "{{state}}")],
+           unit="ops",
+           desc="The registry is only evaluated when something calls readiness or the "
+                "status endpoint. Flat at zero means NOBODY IS ASKING — the gauges above "
+                "are then stale, not healthy."),
     ]
     return dashboard("chronos-application", "Chronos — Application",
                      "The Go services' own metrics. Projection liveness and parked events "

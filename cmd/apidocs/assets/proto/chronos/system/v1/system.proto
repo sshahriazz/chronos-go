@@ -6,6 +6,7 @@ syntax = "proto3";
 package chronos.system.v1;
 
 import "chronos/options/v1/options.proto";
+import "gnostic/openapi/v3/annotations.proto";
 import "google/protobuf/timestamp.proto";
 
 // Health is a dependency's current state.
@@ -104,5 +105,82 @@ service SystemService {
     option idempotency_level = NO_SIDE_EFFECTS;
     option (chronos.options.v1.public) = true;
     option (chronos.options.v1.operation) = OPERATION_CLASS_READ;
+
+    // OpenAPI facts the generator cannot infer, stated here so the published
+    // REST document is generated from this schema rather than written beside
+    // it (CONVENTIONS §7.1).
+    //
+    // `security: [{}]` restates `public` for the generator, which reads gnostic
+    // annotations and knows nothing of this repo's own options. The empty
+    // requirement overrides the document-level `bearerAuth`, so
+    // "unauthenticated" is a statement in the document rather than the absence
+    // of one. scripts/check_openapi.py asserts the two agree, so this cannot
+    // drift away from the option the interceptor actually reads.
+    //
+    // The `200` response is restated in full because the generator REPLACES a
+    // status code it is given rather than merging into it; the `schema`
+    // reference below is the one it would have emitted, and a wrong one is
+    // caught by the dangling-$ref check in scripts/check_openapi.py.
+    option (gnostic.openapi.v3.operation) = {
+      security: [{}]
+      responses: {
+        response_or_reference: [
+          {
+            name: "200"
+            value: {
+              response: {
+                description:
+                  "Server and dependency state.\n"
+                  "\n"
+                  "The example is the interesting case rather than the happy one: `ready` is\n"
+                  "true because every CRITICAL dependency is up, and `fullyOperational` is\n"
+                  "false because a DEGRADABLE one is not. A client greys out the affected\n"
+                  "feature and leaves the rest alone.\n"
+                content: {
+                  additional_properties: [
+                    {
+                      name: "application/json"
+                      value: {
+                        schema: {reference: {_ref: "#/components/schemas/chronos.system.v1.GetStatusResponse"}}
+                        example: {
+                          yaml:
+                            "ready: true\n"
+                            "fullyOperational: false\n"
+                            "version: 1.4.0\n"
+                            "startedAt: '2026-08-14T09:12:03Z'\n"
+                            "timezone: UTC\n"
+                            "dependencies:\n"
+                            "  - name: postgres\n"
+                            "    health: HEALTH_UP\n"
+                            "    criticality: CRITICALITY_CRITICAL\n"
+                            "    detail: ''\n"
+                            "    impact: Nothing can be read or written.\n"
+                            "    lastCheckedAt: '2026-08-14T11:04:55Z'\n"
+                            "    latencyMs: '3'\n"
+                            "  - name: openfga\n"
+                            "    health: HEALTH_UP\n"
+                            "    criticality: CRITICALITY_FAIL_CLOSED\n"
+                            "    detail: ''\n"
+                            "    impact: Every authorization check is denied while this is down.\n"
+                            "    lastCheckedAt: '2026-08-14T11:04:55Z'\n"
+                            "    latencyMs: '7'\n"
+                            "  - name: centrifugo\n"
+                            "    health: HEALTH_DEGRADED\n"
+                            "    criticality: CRITICALITY_DEGRADABLE\n"
+                            "    detail: 'connect: connection refused'\n"
+                            "    impact: Live updates stop; reloading a page still shows current data.\n"
+                            "    lastCheckedAt: '2026-08-14T11:04:55Z'\n"
+                            "    latencyMs: '1004'\n"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    };
   }
 }

@@ -1,10 +1,19 @@
 version: v2
 modules:
   - path: proto
-# Re-add when the OpenFGA gRPC adapter is built (ADR-037) — their official Go
-# SDK is HTTP-only, so the gRPC client is generated from their protos:
-#   deps:
-#     - buf.build/openfga/api
+deps:
+  # protovalidate's rule extensions (ADR-007). Constraints live in the .proto
+  # and are enforced by an interceptor before a handler runs, so a documented
+  # constraint and an enforced one are the same artefact (CONVENTIONS §7).
+  - buf.build/bufbuild/protovalidate
+  # gnostic's OpenAPI v3 annotations. The REST reference is the only published
+  # surface, and a worked example per operation is part of it (CONVENTIONS §7.1);
+  # protobuf has no native way to carry one, so it is carried here — next to the
+  # message it exemplifies, rather than in a side file that can drift from it.
+  - buf.build/gnostic/gnostic
+  # Re-add when the OpenFGA gRPC adapter is built (ADR-037) — their official Go
+  # SDK is HTTP-only, so the gRPC client is generated from their protos:
+  #   - buf.build/openfga/api
 lint:
   use:
     - STANDARD

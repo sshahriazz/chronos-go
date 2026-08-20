@@ -1474,6 +1474,258 @@
           "legendFormat": "{{cache}}"
         }
       ]
+    },
+    {
+      "type": "row",
+      "title": "Dependency probes \u2014 what the status endpoint says",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 89
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Recurring jobs scheduled",
+      "description": "1 = the Temporal schedule EXISTS. Not that its last run succeeded \u2014 a failed run is Temporal's to retry and shows in its own UI. A schedule that was never created is invisible everywhere else: no error, no failed workflow, no metric that moves. At 0, lapsed email reservations are never released and identity retention never runs, so totp_replay grows without bound (ADR-049).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "chronos-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 90
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "gradientMode": "opacity"
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "chronos_dependency_health{dependency=~\"email_reservation_sweep|identity_retention\", state=\"up\"}",
+          "refId": "C",
+          "format": "time_series",
+          "legendFormat": "{{dependency}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Dependencies not up",
+      "description": "Our probes' answer, which is not up{job=...}: that one is scrape reachability, this one is whether the dependency works for us. Rejected credentials and a sealed vault are up=1 here and down.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "chronos-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 90
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "gradientMode": "opacity"
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "sum by (dependency) (chronos_dependency_health{state=\"down\"})",
+          "refId": "D",
+          "format": "time_series",
+          "legendFormat": "down {{dependency}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "sum by (dependency) (chronos_dependency_health{state=\"degraded\"})",
+          "refId": "E",
+          "format": "time_series",
+          "legendFormat": "degraded {{dependency}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Probe latency p99",
+      "description": "A dependency that is up but answering slowly is the state that precedes an outage, and a boolean cannot show it. The probe timeout is 2s, so a line pinned at the top bucket is a probe timing out.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "chronos-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 98
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "gradientMode": "opacity"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum(rate(chronos_dependency_check_seconds_bucket[5m])) by (le, dependency))",
+          "refId": "F",
+          "format": "time_series",
+          "legendFormat": "{{dependency}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Probe evaluations",
+      "description": "The registry is only evaluated when something calls readiness or the status endpoint. Flat at zero means NOBODY IS ASKING \u2014 the gauges above are then stale, not healthy.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "chronos-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 98
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true,
+            "gradientMode": "opacity"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "sum by (state) (rate(chronos_dependency_checks_total[5m]))",
+          "refId": "G",
+          "format": "time_series",
+          "legendFormat": "{{state}}"
+        }
+      ]
     }
   ],
   "annotations": {

@@ -10,9 +10,10 @@ import (
 
 // AUTHORITATIVE, not a projection. Verifiers never enter events, so a rebuild cannot restore this.
 type Credential struct {
-	CredentialID  string
-	SubjectID     string
-	Kind          string
+	CredentialID string
+	SubjectID    string
+	Kind         string
+	// password: PHC-shaped one-way verifier. totp: the sealed shared secret (AES-256-GCM, AAD-bound to subject_id:credential_id) — NOT the vault, which holds personal data only. recovery_code/passkey: NULL.
 	Verifier      pgtype.Text
 	PepperVersion pgtype.Int4
 	EnabledAt     pgtype.Timestamptz

@@ -74,6 +74,21 @@ type User struct {
 	state         State
 	emailVerified bool
 
+	// everSecondFactor records that this account has, at some point in its
+	// history, held a PROVEN second factor. It is set by Apply and never cleared
+	// by anything, which is the whole property: `methods` is a picture of the
+	// account NOW — TotpDisabled deletes from it, a lockout makes an entry
+	// unusable — and a rule that keyed off "has" rather than "has ever had" would
+	// hand an attacker who knows the password a route back to the first-enrolment
+	// exemption by removing the factor they cannot pass (policy.Enrolment).
+	//
+	// Monotone by construction rather than by care taken at each call site: no
+	// case in Apply assigns false, so a rebuild from position zero reaches the
+	// same answer as the live aggregate however the events are ordered, and a
+	// future event that takes a factor away cannot flip it back without somebody
+	// writing that line deliberately.
+	everSecondFactor bool
+
 	methods map[ids.CredentialID]Method
 
 	// recoveryRemaining is the count of unused recovery codes. Held here rather
@@ -190,6 +205,13 @@ func (u *User) Apply(e eventsourcing.Event) {
 
 	case *contract.UserActivated:
 		u.state = StateActive
+		// Activation is only ever recorded once a real second factor is proven
+		// (maybeActivate), so this is the same fact arriving a second way. It is
+		// set here as well as on TotpEnabled so the property survives a stream
+		// whose factor was proven by some event this build does not know about —
+		// an older enrolment path, or a second-factor kind added later — rather
+		// than depending on the list of enabling events staying exhaustive.
+		u.everSecondFactor = true
 
 	case *contract.UserDeactivated:
 		u.state = StateDeactivated
@@ -212,6 +234,11 @@ func (u *User) Apply(e eventsourcing.Event) {
 
 	case *contract.TotpEnabled:
 		u.enable(ev.CredentialID, contract.MethodTOTP, ev.EnabledAt)
+		// A code verified against a secret this account provisioned. That is the
+		// moment a second factor becomes PROVEN, and it is recorded permanently:
+		// TotpDisabled below removes the method and deliberately does not touch
+		// this.
+		u.everSecondFactor = true
 
 	case *contract.TotpDisabled:
 		if id, err := ids.Parse[ids.Credential](ev.CredentialID); err == nil {
@@ -315,9 +342,35 @@ func (u *User) VerifyEmail(index contract.EmailIndex, at time.Time) error {
 }
 
 // SetPassword enrolls the account's first password.
+//
+// # The address must be PROVEN first, and that ordering is a security control
+//
+// This is the aggregate's half of the pre-hijacking defence (Sudhodanan &
+// Paverd, USENIX Security 2022; IDENTITY-REVIEW C8). The attack is: a stranger
+// registers somebody else's address with a password of their own, the mailbox
+// owner receives a genuine-looking verification mail and follows it, and that
+// click — which proves control of the MAILBOX and nothing else — activates the
+// stranger's credential. The stranger then signs in.
+//
+// The premise is a credential that exists BEFORE the proof. Refusing to record
+// one on an unverified account removes the premise rather than mitigating its
+// consequences: there is no attacker-set password for the victim's proof to
+// switch on, because a password can only be recorded in the same breath as the
+// proof itself (Registration.VerifyEmail records EmailVerified first, then
+// this).
+//
+// It is stated HERE, in the aggregate, rather than only in the use case,
+// because the use case is one call site and the aggregate is the boundary. A
+// second path to a first password — an admin tool, a migration, a future
+// federated link — inherits the rule by construction instead of having to
+// remember it.
 func (u *User) SetPassword(credentialID ids.CredentialID, at time.Time) error {
 	if err := u.mutable(); err != nil {
 		return err
+	}
+	if !u.emailVerified {
+		return errs.Conflictf(
+			"this account has not proven its address; a password may not be set before verification")
 	}
 	if credentialID.IsZero() {
 		return errs.ValidationFailedf("a credential id is required")
@@ -552,6 +605,54 @@ func (u *User) Suspend(actorID, reason string, at time.Time) error {
 // Authentication
 // ---------------------------------------------------------------------------
 
+// HasEverHadSecondFactor reports whether this account has, at any point, held a
+// proven second factor.
+//
+// One-way: nothing in this aggregate sets it back to false. Removing a factor,
+// losing one to a lockout, deactivating and suspending all leave it true, and a
+// rebuild recomputes the same answer from the log. That is what makes it safe to
+// key an exemption off — see NeedsFirstSecondFactor.
+func (u *User) HasEverHadSecondFactor() bool { return u.everSecondFactor }
+
+// NeedsFirstSecondFactor reports that this account is in the ONE state a
+// password-only authentication may be honoured in: registered, address proven,
+// and no second factor ever held.
+//
+// # Why the state exists at all
+//
+// A second factor is mandatory before an account activates (identity.md §2), and
+// enrolling one requires a session, and a session requires the factor. Read
+// literally that is a deadlock and no account registered through the public API
+// could ever become Active. The way out is a session whose AUTHORITY is bounded
+// rather than a rule that is quietly dropped: this predicate admits a
+// password-only authentication, the resulting session records AAL1 honestly, and
+// what AAL1 can reach is decided by the declared policy — only EnrollTotp and
+// ConfirmTotp carry a bootstrap assurance floor, and every other method still
+// compares against its ordinary min_aal (policy.Policy.AALFloor).
+//
+// # Why each conjunct is here
+//
+//   - Pending only. An Active, Deactivated or Suspended account is not enrolling
+//     its first factor; the first has one, and the other two may not authenticate
+//     at all.
+//   - The address must be VERIFIED. Without it, anyone who registers an address
+//     they do not control holds a session on it, which turns registration itself
+//     into an account-takeover primitive against a person who has not signed up
+//     yet.
+//   - Never held a factor, and does not hold one now. The first is the property
+//     that closes "remove the factor, then enrol my own"; the second is a
+//     belt-and-braces reading of the same state that costs nothing and does not
+//     depend on the history flag having been maintained correctly.
+//
+// It says nothing about a PRIMARY factor, because the caller has to have passed
+// one to be asking: the login path reaches this only after a password verified.
+func (u *User) NeedsFirstSecondFactor() bool {
+	return u.state == StatePending &&
+		u.emailVerified &&
+		!u.everSecondFactor &&
+		!u.hasRealSecondFactor()
+}
+
 // CanAuthenticate reports why an authentication may not proceed, before any
 // credential is examined.
 //
@@ -559,6 +660,21 @@ func (u *User) Suspend(actorID, reason string, at time.Time) error {
 // these produces the same undifferentiated refusal on the wire: telling an
 // attacker that the account exists but is unverified is an account-existence
 // oracle, and telling them it is suspended is worse (identity.md §7).
+//
+// # The one Pending account that may authenticate
+//
+// A Pending account whose address is proven and which has never held a second
+// factor is admitted, because it has to be: it is the state every new account
+// passes through, and the session it earns is what carries the first enrolment
+// (NeedsFirstSecondFactor). Every other Pending account is still refused with
+// ReasonIncomplete, which is what that reason continues to mean — an account
+// that is unfinished in a way authenticating cannot fix. The unverified,
+// deactivated and suspended refusals are untouched.
+//
+// Note what admitting it does NOT decide. This says the ceremony may proceed; it
+// does not say what the resulting session may do. The assurance level such a
+// login reaches is AAL1 (domain.AALFor over a password alone), and the gate
+// compares that against each method's declared floor.
 func (u *User) CanAuthenticate() (contract.FailureReason, bool) {
 	switch u.state {
 	case StateNone:
@@ -566,6 +682,9 @@ func (u *User) CanAuthenticate() (contract.FailureReason, bool) {
 	case StatePending:
 		if !u.emailVerified {
 			return contract.ReasonUnverifiedEmail, false
+		}
+		if u.NeedsFirstSecondFactor() {
+			return "", true
 		}
 		return contract.ReasonIncomplete, false
 	case StateDeactivated:
@@ -600,6 +719,184 @@ func (u *User) IsDowngrade(used []contract.MethodKind) bool {
 		}
 	}
 	return false
+}
+
+// LockoutThreshold is how many CONSECUTIVE failures against ONE authenticator
+// disable it.
+//
+// # What is being counted
+//
+// The signal is `credential.failures`, which is incremented on every failed
+// presentation and set to zero by any success (TouchCredential). It is therefore
+// a consecutive count and not a lifetime one, which is what makes a threshold
+// safe to state as an absolute number: a person who fumbles a code and then gets
+// one right is back at zero, so reaching ten means ten in a row with no working
+// presentation in between.
+//
+// # Why there is no time window
+//
+// A window — "ten failures in an hour" — is the textbook shape and this table
+// cannot express it: there is no per-failure timestamp, only a counter and a
+// `last_used_at` that moves on SUCCESS. Adding one is a migration, and it would
+// buy less here than it looks. A window exists to stop a legitimate user's
+// scattered mistakes from accumulating into a lockout over months; a
+// consecutive-since-last-success counter already does that for anyone whose
+// authenticator works, because using it successfully clears it. The residual case
+// is a user who fails ten times in a row over a long period and never once
+// succeeds — and an authenticator that has not produced a working code in ten
+// consecutive tries is already broken from that user's point of view. The
+// recovery they need is the same one the lockout sends them to.
+//
+// # Why ten
+//
+// The search space this is defending is a six-digit TOTP code with a small
+// acceptance window: on the order of 10^6 candidates, of which a handful verify
+// at any instant. Ten consecutive guesses is a chance in the region of 10^-5 of
+// landing one before the authenticator is taken away, and it is more fumbles in a
+// row than a working authenticator produces. Lower would start locking real
+// people out during a clock-skew episode; much higher starts to matter against an
+// attacker who already holds the password and is grinding the second factor
+// slowly enough to stay under the attempt ceiling — which is precisely the attack
+// this layer exists for, since that ceiling FAILS OPEN (ratelimit.Limiter.Allow)
+// and can therefore be absent without anything refusing.
+const LockoutThreshold = 10
+
+// RecordAuthenticatorFailure counts one failed presentation against one
+// authenticator and disables it once the ceiling is crossed.
+//
+// failures is the NEW total reported by the store's own increment, not a value
+// this aggregate maintains: the count is per credential and lives in the one
+// identity table that is not rebuildable from the log (identity.md §4), so the
+// aggregate is the authority on the RULE and the row is the authority on the
+// COUNT. Reading it back separately would be a second transaction's view, and two
+// concurrent failures could then both observe a pre-increment total and neither
+// would see the ceiling crossed — which is exactly the concurrency an online
+// guessing attack produces.
+//
+// # A PRIMARY method is never disabled here, and that is the whole safety case
+//
+// Anyone who knows an address can produce failures against that account's
+// password: the identifier is the address, and reaching the password check needs
+// no secret at all. So a lockout that could disable a password would let an
+// attacker lock any account they can name, and therefore every account they can
+// enumerate — a denial of service that is cheaper to mount than the online
+// guessing attack the lockout is defending against, and one whose damage is
+// permanent rather than bounded (the recovery is a password reset per victim).
+// That trade is refused outright rather than tuned, which is why the rule is
+// expressed as a property of the method's ROLE rather than as a threshold that
+// could be raised until the DoS "stopped mattering".
+//
+// A second factor is different in the one way that decides this: reaching it
+// requires having already passed a primary factor. An attacker can only grind an
+// authenticator on an account whose password they already hold, so the lockout
+// cannot be aimed at a stranger, and the person it inconveniences is one an
+// attacker is already most of the way to compromising. Locking it is the safer
+// side of that trade, because the alternative is letting the grind continue until
+// a six-digit code eventually verifies.
+//
+// The same rule is what keeps a lockout from stranding an account: refusing to
+// disable a primary method means hasUsable(RolePrimary) — the condition
+// CanAuthenticate checks last — cannot be falsified by this path at all. An
+// account cannot be locked into a state where it has no way to start an
+// authentication, because the only methods this removes are ones that could never
+// have started one.
+//
+// # Recovery is by rebinding, not by waiting
+//
+// There is no expiry on the lockout and no unlock timer, which is the decision
+// Method.DisabledAt and contract.AuthenticatorDisabled already record. A timer is
+// something the attacker waits out as easily as the user does: a grind that
+// resumes every fifteen minutes forever is slower than an unthrottled one and is
+// otherwise the same attack. The user re-enrols the authenticator through the
+// second-factor flow, which is a ceremony that proves possession again.
+//
+// Returns true when this call disabled the authenticator. Every other outcome is
+// (false, nil) — below the threshold, already disabled, or a primary method —
+// because none of them is an error the login path could act on differently.
+func (u *User) RecordAuthenticatorFailure(
+	credentialID ids.CredentialID, failures int, at time.Time,
+) (bool, error) {
+	if u.state == StateNone {
+		return false, errs.NotFoundf("no such account")
+	}
+	if credentialID.IsZero() {
+		return false, errs.ValidationFailedf("a credential id is required")
+	}
+	// Deliberately NOT gated on mutable(): a lockout only ever REMOVES a
+	// capability, so refusing it for a suspended account would keep a grindable
+	// authenticator alive on the account most likely to be under attack. Only a
+	// nonexistent account is refused, because there is nothing to record against.
+	m, ok := u.methods[credentialID]
+	if !ok {
+		// The credential store named a method this account's own log does not
+		// have. Reported rather than ignored: it means the row and the stream
+		// disagree, which is the tampering the AAD binding makes expensive rather
+		// than impossible.
+		return false, errs.NotFoundf("no such authenticator")
+	}
+	if !m.Usable() {
+		// Already disabled, or never proven. Not an error — the caller wants the
+		// authenticator unusable and it is — and recording a second
+		// AuthenticatorDisabled would put a second lockout in the log for one
+		// lockout that happened.
+		return false, nil
+	}
+	if RoleOf(m.Kind) == RolePrimary {
+		return false, nil
+	}
+	if failures < LockoutThreshold {
+		return false, nil
+	}
+	eventsourcing.Record(u, &contract.AuthenticatorDisabled{
+		SubjectID:    u.subjectID,
+		CredentialID: credentialID.String(),
+		Failures:     failures,
+		DisabledAt:   at.UTC(),
+	})
+	return true, nil
+}
+
+// RecordPasswordRehash records that a stored verifier was re-derived under
+// current policy, after a login proved the plaintext.
+//
+// The rehash itself is not a domain operation — it needs the plaintext, an
+// algorithm and a key, none of which this package may hold — so what is enforced
+// here is the part the aggregate is the authority on: that the credential being
+// re-sealed is a password this account's own log records as usable. Without that
+// check the event would be appended from whatever the credential table happened to
+// return, and a row moved between accounts would produce a rehash recorded against
+// the wrong person's stream.
+//
+// Nothing about the verifier, the parameters or the pepper reaches the event.
+// PasswordRehashed says only THAT a credential was upgraded and when, which is the
+// evidence a parameter bump or a pepper rotation is actually progressing — a
+// rotation that quietly rehashes nothing is indistinguishable from one that
+// worked, and that ambiguity is what makes an operator destroy the old key too
+// early.
+//
+// The state changes nothing: a rehashed verifier is the same credential, still
+// usable, still bound to the same ids, so Apply has no case for this event and
+// must not grow one.
+func (u *User) RecordPasswordRehash(credentialID ids.CredentialID, at time.Time) error {
+	if err := u.mutable(); err != nil {
+		return err
+	}
+	m, ok := u.methods[credentialID]
+	if !ok || m.Kind != contract.MethodPassword {
+		return errs.NotFoundf("no such password credential")
+	}
+	if !m.Usable() {
+		// Disabled or never enabled. Recording an upgrade to a credential that
+		// cannot authenticate would report progress for a row the rotation job is
+		// entitled to consider dead.
+		return errs.Conflictf("this password credential is not usable")
+	}
+	eventsourcing.Record(u, &contract.PasswordRehashed{
+		SubjectID:    u.subjectID,
+		CredentialID: credentialID.String(),
+		RehashedAt:   at.UTC(),
+	})
+	return nil
 }
 
 // ---------------------------------------------------------------------------

@@ -551,13 +551,259 @@
     },
     {
       "type": "row",
-      "title": "Throughput \u2014 one panel per owned question",
+      "title": "Dependency health \u2014 our probes, not scrape reachability",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 5
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Dependencies down",
+      "description": "Dependencies our own probes report as DOWN. This is not the row above: that one says Prometheus can reach an exporter, this one says the dependency works for us. Credentials rejected, a sealed vault or a missing schedule all show here and nowhere else.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "chronos-prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "sum(chronos_dependency_health{state=\"down\"})",
+          "refId": "I",
+          "format": "time_series",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Dependencies degraded",
+      "description": "Degradable dependencies that are failing. The product still serves; some capability is gone. Sustained is the alertable state \u2014 brief is the design working.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "chronos-prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "sum(chronos_dependency_health{state=\"degraded\"})",
+          "refId": "J",
+          "format": "time_series",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Recurring jobs scheduled",
+      "description": "Should be 2: the lapsed-email-reservation sweep and identity retention. Below 2 means a recurring job has no schedule and will never run \u2014 silently, with nothing else reporting it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "chronos-prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 2
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "sum(chronos_dependency_health{dependency=~\"email_reservation_sweep|identity_retention\", state=\"up\"})",
+          "refId": "K",
+          "format": "time_series",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Dependency probes",
+      "description": "One row per dependency, showing the state currently in effect and its criticality. CRITICAL down fails readiness; FAIL_CLOSED down means authorization denies everything but the instance stays in the load balancer (ADR-010). The error text is deliberately not a label \u2014 read it from the status endpoint.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "chronos-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "chronos-prometheus"
+          },
+          "expr": "chronos_dependency_health == 1",
+          "refId": "L",
+          "format": "table",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Throughput \u2014 one panel per owned question",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
       },
       "panels": []
     },
@@ -573,7 +819,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 6
+        "y": 15
       },
       "fieldConfig": {
         "defaults": {
@@ -612,7 +858,7 @@
             "uid": "chronos-prometheus"
           },
           "expr": "sum(rate(kurrentdb_io_events_total[5m])) by (activity)",
-          "refId": "I",
+          "refId": "M",
           "format": "time_series",
           "legendFormat": "{{activity}}"
         }
@@ -630,7 +876,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 6
+        "y": 15
       },
       "fieldConfig": {
         "defaults": {
@@ -669,7 +915,7 @@
             "uid": "chronos-prometheus"
           },
           "expr": "sum(rate(grpc_server_started_total{job=\"openfga\"}[5m])) by (grpc_method)",
-          "refId": "J",
+          "refId": "N",
           "format": "time_series",
           "legendFormat": "{{grpc_method}}"
         }
@@ -687,7 +933,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 6
+        "y": 15
       },
       "fieldConfig": {
         "defaults": {
@@ -726,7 +972,7 @@
             "uid": "chronos-prometheus"
           },
           "expr": "sum(rate(service_requests{job=\"temporal\"}[5m])) by (operation)",
-          "refId": "K",
+          "refId": "O",
           "format": "time_series",
           "legendFormat": "{{operation}}"
         }
@@ -744,7 +990,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 14
+        "y": 23
       },
       "fieldConfig": {
         "defaults": {
@@ -783,7 +1029,7 @@
             "uid": "chronos-prometheus"
           },
           "expr": "centrifugo_node_num_clients",
-          "refId": "L",
+          "refId": "P",
           "format": "time_series",
           "legendFormat": "clients"
         },
@@ -793,7 +1039,7 @@
             "uid": "chronos-prometheus"
           },
           "expr": "centrifugo_node_num_subscriptions",
-          "refId": "M",
+          "refId": "Q",
           "format": "time_series",
           "legendFormat": "subscriptions"
         },
@@ -803,7 +1049,7 @@
             "uid": "chronos-prometheus"
           },
           "expr": "centrifugo_node_num_channels",
-          "refId": "N",
+          "refId": "R",
           "format": "time_series",
           "legendFormat": "channels"
         }
@@ -821,7 +1067,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 14
+        "y": 23
       },
       "fieldConfig": {
         "defaults": {
@@ -860,7 +1106,7 @@
             "uid": "chronos-prometheus"
           },
           "expr": "rate(redis_commands_processed_total[5m])",
-          "refId": "O",
+          "refId": "S",
           "format": "time_series",
           "legendFormat": "commands/s"
         },
@@ -870,7 +1116,7 @@
             "uid": "chronos-prometheus"
           },
           "expr": "redis_connected_clients",
-          "refId": "P",
+          "refId": "T",
           "format": "time_series",
           "legendFormat": "clients"
         }
@@ -888,7 +1134,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 14
+        "y": 23
       },
       "fieldConfig": {
         "defaults": {
@@ -931,7 +1177,7 @@
             "uid": "chronos-prometheus"
           },
           "expr": "sum(pg_stat_activity_count) by (datname)",
-          "refId": "Q",
+          "refId": "U",
           "format": "time_series",
           "legendFormat": "{{datname}}"
         }
@@ -945,7 +1191,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 22
+        "y": 31
       },
       "panels": []
     },
@@ -961,7 +1207,7 @@
         "h": 4,
         "w": 4,
         "x": 0,
-        "y": 23
+        "y": 32
       },
       "fieldConfig": {
         "defaults": {
@@ -1002,7 +1248,7 @@
             "uid": "chronos-prometheus"
           },
           "expr": "sum(SeaweedFS_s3_bucket_object_count)",
-          "refId": "R",
+          "refId": "V",
           "format": "time_series"
         }
       ]
@@ -1019,7 +1265,7 @@
         "h": 4,
         "w": 4,
         "x": 4,
-        "y": 23
+        "y": 32
       },
       "fieldConfig": {
         "defaults": {
@@ -1060,7 +1306,7 @@
             "uid": "chronos-prometheus"
           },
           "expr": "sum(SeaweedFS_s3_bucket_size_bytes)",
-          "refId": "S",
+          "refId": "W",
           "format": "time_series"
         }
       ]
@@ -1077,7 +1323,7 @@
         "h": 4,
         "w": 4,
         "x": 8,
-        "y": 23
+        "y": 32
       },
       "fieldConfig": {
         "defaults": {
@@ -1118,7 +1364,7 @@
             "uid": "chronos-prometheus"
           },
           "expr": "sum(pg_database_size_bytes{datname=\"chronos\"})",
-          "refId": "T",
+          "refId": "X",
           "format": "time_series"
         }
       ]
@@ -1135,7 +1381,7 @@
         "h": 4,
         "w": 4,
         "x": 12,
-        "y": 23
+        "y": 32
       },
       "fieldConfig": {
         "defaults": {
@@ -1176,7 +1422,7 @@
             "uid": "chronos-prometheus"
           },
           "expr": "redis_memory_used_bytes",
-          "refId": "U",
+          "refId": "Y",
           "format": "time_series"
         }
       ]
@@ -1193,7 +1439,7 @@
         "h": 4,
         "w": 4,
         "x": 16,
-        "y": 23
+        "y": 32
       },
       "fieldConfig": {
         "defaults": {
@@ -1234,7 +1480,7 @@
             "uid": "chronos-prometheus"
           },
           "expr": "kurrentdb_proc_mem_bytes",
-          "refId": "V",
+          "refId": "Z",
           "format": "time_series"
         }
       ]
@@ -1251,7 +1497,7 @@
         "h": 4,
         "w": 4,
         "x": 20,
-        "y": 23
+        "y": 32
       },
       "fieldConfig": {
         "defaults": {
@@ -1292,7 +1538,7 @@
             "uid": "chronos-prometheus"
           },
           "expr": "mailpit_messages",
-          "refId": "W",
+          "refId": "A",
           "format": "time_series"
         }
       ]

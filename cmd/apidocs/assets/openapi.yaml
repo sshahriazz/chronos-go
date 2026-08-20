@@ -4,55 +4,248 @@ info:
   version: v1
   summary: Multi-tenant workspace platform — identity, organizations, workspaces and access.
   description: |
-    Chronos exposes a single API surface over **three protocols on one port**:
-    gRPC, gRPC-Web, and HTTP/JSON. This document describes the HTTP/JSON
-    surface; gRPC clients should generate from the `.proto` sources instead.
+    ## What this document is
+
+    Chronos serves **one schema over three protocols on one port** — gRPC,
+    gRPC-Web and HTTP/JSON (ADR-007). This document describes the HTTP/JSON
+    surface, and it is the only published reference. A gRPC client generates from
+    the `.proto` sources instead, or explores a running server through
+    reflection; the schema is the same either way, so nothing here can disagree
+    with what a gRPC client sees.
+
+    Everything below — every path, type, field, constraint and example — is
+    generated from that schema. Nothing is written by hand against the
+    implementation, so no part of this document can describe an endpoint the
+    server does not serve.
+
+    ## Calling an endpoint
+
+    The HTTP surface is RPC-shaped rather than resource-shaped. There are no path
+    parameters and no collection URLs: the path IS the fully-qualified method
+    name, and every argument travels in the body.
+
+    ```
+    POST /chronos.identity.v1.IdentityService/Register
+    ```
+
+    ```
+    /<proto package>.<Service>/<Method>
+    ```
+
+    Three consequences worth internalising before writing a client:
+
+    1. **The path never varies per resource.** `RevokeSession` names the session
+       in its body, not in its URL. Nothing needs URL-encoding, and no identifier
+       ever appears in a log line that records the path.
+    2. **`POST` is the default for every method**, including reads. Methods
+       declared free of side effects additionally accept `GET`, which is what
+       makes them cacheable — see below.
+    3. **HTTP status alone is not the outcome.** See *Errors*.
+
+    ### Headers on a request
+
+    | Header | Required | Value |
+    | --- | --- | --- |
+    | `Content-Type` | on `POST` | `application/json` |
+    | `Connect-Protocol-Version` | **yes** | `1` |
+    | `Connect-Timeout-Ms` | no | Milliseconds; the server cancels the call when it elapses. |
+    | `Authorization` | on authenticated methods | `Bearer <token>` — see *Authentication* |
+    | `Idempotency-Key` | on authenticated mutations | See *Idempotency* |
+
+    ### Content type
+
+    Requests and responses are `application/json`. The encoding is protobuf-JSON,
+    with one deliberate deviation from its defaults: **default values are
+    emitted**. `false`, `0` and `""` appear in responses rather than being
+    omitted, so a field is never `undefined` when a client expected `false` — a
+    distinction that otherwise misbehaves only in the failure case, which is
+    exactly when it matters. Field names are `camelCase`.
+
+    Unknown fields in a REQUEST are discarded rather than rejected, so a client
+    built against a newer schema keeps working against an older server.
+
+    ### Reads over GET
+
+    Methods declared `NO_SIDE_EFFECTS` are additionally exposed as `GET`, so a
+    browser or CDN can cache them. The request message travels in the query
+    string:
+
+    ```
+    GET /chronos.system.v1.SystemService/GetStatus?encoding=json&message=%7B%7D&connect=v1
+    ```
+
+    | Query parameter | Meaning |
+    | --- | --- |
+    | `message` | The request message, JSON-encoded |
+    | `encoding` | `json` (or `proto`) |
+    | `base64` | `true` if `message` is base64-encoded, which binary data may require |
+    | `compression` | Optional content encoding of `message` |
+    | `connect` | Protocol version, `v1` |
+
+    The `POST` form of the same method is always available and is simpler to
+    hand-craft. Use `GET` when you want caching.
+
+    ## Authentication
+
+    Authenticated methods take a session bearer token:
+
+    ```
+    Authorization: Bearer <token>
+    ```
+
+    The token comes from `IdentityService/CreateSession`, which returns it
+    **once**. Only its digest is stored, so no endpoint can re-display it; a
+    client that loses it starts a new session. Keep it out of URLs, logs and
+    analytics.
+
+    Five `IdentityService` methods are public and are shown in this document with
+    an empty security requirement — `Register`, `VerifyEmail`,
+    `ResendEmailVerification`, `Authenticate` and `CreateSession` — plus
+    `SystemService/GetStatus`. They must work before a session exists, and
+    `GetStatus` must additionally answer while the system is degraded, including
+    when authentication itself is unavailable.
+
+    The list above is not maintained here: each of those methods declares
+    `(chronos.options.v1.public) = true` in the `.proto`, which is what the
+    authentication interceptor reads, and `scripts/check_openapi.py` fails the
+    build if the published document and that option disagree.
+
+    A session carries an **assurance level**. Every session this system mints is
+    at least AAL2 — two factors — and the methods that change a credential or end
+    a session require it explicitly. A session below the level a method requires
+    is refused with `STEP_UP_REQUIRED`, which means *re-authenticate*, not *you
+    may not*.
+
+    ## Idempotency
+
+    Every **authenticated mutating** call requires an `Idempotency-Key` header —
+    a client-generated ULID or UUID.
+
+    ```
+    Idempotency-Key: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+    ```
+
+    | Situation | Result |
+    | --- | --- |
+    | First call | Executes, and the response is stored |
+    | Replay, same key, **same** body | The stored response, not a re-execution |
+    | Replay, same key, **different** body | `CONFLICT` — this catches a client bug rather than returning someone else's answer |
+    | Replay while the first is still running | `CONFLICT`; retry with the same key |
+    | No key on a call that needs one | `VALIDATION_FAILED` |
+
+    The key is scoped to `(principal, method, key)`, so it cannot be replayed
+    across accounts or reused on a different method. Records are retained for 24
+    hours.
+
+    The **public** methods take no key, because the gate that claims one runs
+    after authentication and there is no principal to scope it to. That is why
+    `Register` is instead designed to be safe to repeat: its response is identical
+    whether or not the address was free.
+
+    Generate a key per logical operation, not per HTTP attempt — a retry of the
+    same operation must reuse the same key, which is the entire point.
+
+    Distinct from event-level idempotency, where consumers deduplicate on an event
+    id. Both exist; they solve different problems.
 
     ## Errors
 
-    Clients branch on the machine-readable `reason` field, **never** on the HTTP
-    status or the human-readable message. The status exists for transport
-    handling only.
+    A failed call returns a Connect error:
 
-    Two refusals that look alike and must never be collapsed:
+    ```json
+    {
+      "code": "permission_denied",
+      "message": "human-readable, and NOT a contract",
+      "details": [
+        {
+          "type": "chronos.errors.v1.ErrorDetail",
+          "value": { "reason": "PLAN_UPGRADE_REQUIRED", "metadata": {}, "traceId": "4bf9…" }
+        }
+      ]
+    }
+    ```
 
-    | reason | means | client should |
+    **Branch on `reason`. Never on the HTTP status, and never on `message`.** The
+    status exists for transport handling — retry, redirect, cache — and one status
+    covers several reasons that lead to completely different user journeys:
+
+    | reason | means | the client should |
     | --- | --- | --- |
     | `ACCESS_DENIED` | authenticated, but lacks the relation | ask an admin |
     | `PLAN_UPGRADE_REQUIRED` | the plan does not include this | offer an upgrade |
 
-    `NOT_FOUND` is deliberately ambiguous: it covers "absent", "invisible to
-    you", and "refused" so identifiers cannot be probed for existence across a
-    tenant boundary. Inside a tenant, errors are specific.
+    A client that cannot tell those two apart sends people down the wrong path,
+    which is why the reason is a typed field rather than a substring of a message.
 
-    The full catalogue is published separately — see External Documentation.
+    `NOT_FOUND` is deliberately ambiguous: it covers "absent", "invisible to you"
+    and "refused", so an identifier cannot be probed for existence across a tenant
+    boundary. Inside a tenant, where the caller has already proven membership,
+    errors are specific.
 
-    ## Idempotency
+    The complete set of reasons is the `reason` enum on the `ErrorDetail` schema
+    below — generated from the server's own table, so it cannot fall behind. The
+    same table is published as a catalogue; see *External Documentation*.
 
-    Every mutating call **requires** an `Idempotency-Key` header (a ULID or
-    UUID). Replaying a key with the same body returns the stored response
-    rather than re-executing. Replaying it with a *different* body returns
-    `CONFLICT` — that catches client bugs instead of silently returning
-    someone else's result.
+    Detail is deliberately withheld: no SQL, no driver text, no stack traces.
+    `traceId` is the handle — an operator finds the full server-side cause by
+    searching traces for it, so a user can paste it into a support ticket and lose
+    nothing.
 
-    ## Tenancy
+    ### Validation
 
-    Every request resolves to exactly one organization. Resource identifiers are
-    prefixed and self-describing (`org_01H8…`, `ws_01H8…`); passing an
-    identifier of the wrong type is rejected as `VALIDATION_FAILED` at the
-    boundary rather than surfacing as a confusing `NOT_FOUND`.
+    Constraints are declared in the schema and enforced by an interceptor before
+    any handler runs, so what this document publishes and what the server refuses
+    are the same rules. A violation is `invalid_argument` / `VALIDATION_FAILED`,
+    and the response names the offending field.
+
+    Each field's constraints appear on the field itself in this document —
+    `minLength`, `maximum`, `pattern`, `required` — and rules protobuf cannot
+    express as keywords are appended to the field's description as
+    `<rule id> // <message>`.
+
+    One asymmetry is worth understanding rather than treating as an omission: the
+    credential fields on `Authenticate` and `CreateSession` carry **no** rules. A
+    request refused as malformed would tell the caller their guess was
+    structurally wrong, which is information a wrong password does not give. The
+    same fields on `Register` carry the full policy, because there the rules are
+    public and printed beside the form.
+
+    ## Pagination
+
+    Cursor-based everywhere. Never offsets: they break under concurrent writes.
+
+    - Send `pageSize` and `pageToken`.
+    - Read `nextPageToken`. **Empty means done** — it is the only termination
+      signal.
+    - Do NOT infer the end from a short page. The server clamps an oversized
+      `pageSize`, so short pages are ordinary.
+    - `pageSize: 0` means the server's default (50). The maximum is 200, and
+      anything larger is clamped rather than refused.
+    - A `pageToken` is opaque and bound to the query that produced it. Presenting
+      one against a different query is an error, not a silent restart.
+
+    ## Identifiers
+
+    Every public identifier is a prefixed ULID and is self-describing:
+    `sess_01ARZ3NDEKTSV4RRFFQ69G5FAV`, `usr_…`, `cred_…`, `org_…`, `ws_…`.
+    Passing an identifier of the wrong type is rejected as `VALIDATION_FAILED` at
+    the boundary rather than surfacing later as a confusing `NOT_FOUND`.
+
+    Accounts are named on the wire by a `subjectId` pseudonym, never by an email
+    address. No response in this document returns an address.
 
     ## Timestamps
 
-    All timestamps are RFC 3339 in **UTC**. The server's presentation timezone
-    is reported by `SystemService/GetStatus` and never affects stored values.
+    RFC 3339, always **UTC**. An unset timestamp means the event never happened —
+    not "unknown". The server's presentation timezone is reported by
+    `SystemService/GetStatus` and never affects a stored value.
   contact:
     name: Chronos Platform
     url: https://github.com/chronos/chronos-go
   license:
     name: Proprietary
 externalDocs:
-  description: Error catalogue, architecture and domain specifications
+  description: The error catalogue — every reason code, its transport mapping, and what a client should do
   url: https://github.com/chronos/chronos-go/blob/main/docs/api/errors.md
 servers:
   - url: http://localhost:8090
@@ -65,42 +258,1189 @@ security:
   - bearerAuth: []
 components:
   securitySchemes:
-    apiKeyAuth:
-      type: http
-      scheme: bearer
-      description: |
-        Machine credential, format `chr_<env>_<keyid>_<secret>`. A key is bound
-        to exactly one organization at creation and cannot be moved. Its
-        effective permission is the intersection of its scopes and its owning
-        principal's access, so it can never exceed its creator.
     bearerAuth:
       type: http
       scheme: bearer
-      bearerFormat: JWT
       description: |
-        Short-lived access token (10 minutes) obtained from the session
-        endpoints. Revocation takes effect immediately on the refresh path and
-        within the token's lifetime otherwise.
-  parameters:
-    IdempotencyKey:
-      name: Idempotency-Key
-      in: header
-      required: true
-      description: ULID or UUID. Required on every mutating call.
-      schema:
-        type: string
-  headers:
-    Chronos-Consistency-Token:
-      description: |
-        Commit position of the write. Pass it back on a subsequent read to get
-        read-your-writes; the server waits briefly if projections lag.
-      schema:
-        type: string
+        The session token returned by `IdentityService/CreateSession`, sent as
+        `Authorization: Bearer <token>`.
+
+        Returned by that call and by no other, ever: only its digest is stored,
+        so there is no endpoint that can re-display it. It is opaque — do not
+        parse it.
+
+        Two deadlines bound it, and both are returned with it. The IDLE deadline
+        moves forward on each authenticated request; the ABSOLUTE one does not,
+        and it is what bounds a stolen token held by an attacker who keeps it
+        warm, which an idle deadline alone cannot do. Revocation through
+        `RevokeSession` or `RevokeAllSessions` is immediate.
   schemas:
     base64:
       type: boolean
       title: base64
       description: Specifies if the message query param is base64 encoded, which may be required for binary data
+    chronos.errors.v1.ErrorDetail:
+      type: object
+      title: Error detail
+      description: |
+        The machine-readable part of a failed response. It travels inside the
+        Connect error's `details` array, alongside the transport `code`.
+
+        Branch on `reason`. NEVER on the HTTP status and never on `message`:
+        one status covers several reasons that lead to completely different
+        user journeys, and messages are prose that changes without notice.
+
+        | Reason | Connect code | HTTP | Retryable | The client should |
+        | --- | --- | --- | --- | --- |
+        | `UNAUTHENTICATED` | `unauthenticated` | 401 | **yes** | Refresh the token; if that fails, sign in again. |
+        | `STEP_UP_REQUIRED` | `permission_denied` | 403 | **yes** | Prompt for step-up (MFA or passkey), then retry. |
+        | `ACCESS_DENIED` | `permission_denied` | 403 | no | Ask a workspace or organization admin for access. Do NOT offer an upgrade. |
+        | `PLAN_UPGRADE_REQUIRED` | `failed_precondition` | 412 | no | Offer an upgrade. Do NOT tell the user to ask an admin. |
+        | `QUOTA_EXCEEDED` | `failed_precondition` | 412 | no | Show what is exhausted and offer to reduce usage or upgrade. |
+        | `ORG_SUSPENDED` | `failed_precondition` | 412 | no | Direct the owner to billing. Reads, billing and export remain available. |
+        | `NOT_FOUND` | `not_found` | 404 | no | Treat as absent. This response is deliberately indistinguishable from a cross-tenant denial. |
+        | `CONFLICT` | `aborted` | 409 | **yes** | Re-read and retry. Expected under concurrency, not an error condition. |
+        | `VALIDATION_FAILED` | `invalid_argument` | 400 | no | Fix the input; the metadata names the offending field. |
+        | `RATE_LIMITED` | `resource_exhausted` | 429 | **yes** | Back off and retry with jitter. |
+        | `INTERNAL` | `internal` | 500 | **yes** | Retry with backoff; report the trace id if it persists. |
+      properties:
+        reason:
+          type: string
+          description: |
+            The stable reason. This enum is the complete set the server can
+            return; it is generated from the server's own table, so a value
+            outside it means the client is older than the server.
+          enum:
+            - UNAUTHENTICATED
+            - STEP_UP_REQUIRED
+            - ACCESS_DENIED
+            - PLAN_UPGRADE_REQUIRED
+            - QUOTA_EXCEEDED
+            - ORG_SUSPENDED
+            - NOT_FOUND
+            - CONFLICT
+            - VALIDATION_FAILED
+            - RATE_LIMITED
+            - INTERNAL
+          examples:
+            - ACCESS_DENIED
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Client-safe structured detail: the limit that was exceeded, the
+            field that failed validation, the plan that would satisfy the
+            request. Never personal data, never SQL, never driver text.
+          examples:
+            - {field: email}
+        traceId:
+          type: string
+          description: |
+            Correlation id for this request. The server-side cause is NOT in
+            this message; an operator finds it by searching traces for this
+            id, so a user can paste it into a support ticket and lose nothing.
+          examples:
+            - 4bf92f3577b34da6a3ce929d0e0e4736
+      required:
+        - reason
+    chronos.identity.v1.AccountState:
+      type: string
+      title: AccountState
+      enum:
+        - ACCOUNT_STATE_UNSPECIFIED
+        - ACCOUNT_STATE_PENDING
+        - ACCOUNT_STATE_ACTIVE
+        - ACCOUNT_STATE_DEACTIVATED
+        - ACCOUNT_STATE_SUSPENDED
+      description: |-
+        AccountState is where an account sits in its lifecycle (identity.md §1).
+
+         Deactivated and Suspended look identical from outside and are kept apart
+         because they behave differently: the holder may reverse the first and may
+         never reverse the second. Collapsing them would make suspension decorative.
+    chronos.identity.v1.AuthMethod:
+      type: object
+      properties:
+        credentialId:
+          type: string
+          title: credential_id
+          description: The credential's identifier, a prefixed ULID (ADR-030).
+        kind:
+          title: kind
+          description: What kind of factor this is.
+          $ref: '#/components/schemas/chronos.identity.v1.MethodKind'
+        usable:
+          type: boolean
+          title: usable
+          description: |-
+            Whether it can be used right now: enabled, and not locked out. This is
+             computed from the account's own events rather than re-derived by the client,
+             so a screen cannot come to show a factor the login refuses or hide one it
+             accepts.
+        addedAt:
+          title: added_at
+          description: |-
+            When the method was first provisioned, UTC. This is NOT enabled_at: a TOTP
+             secret is scanned before it is proven, and the gap between the two is
+             exactly the enrolment the user may have abandoned.
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+        enabledAt:
+          title: enabled_at
+          description: |-
+            When possession was first proven, UTC. Unset while the method is
+             provisioned but unproven, which is also when it is not usable.
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+        lastUsedAt:
+          title: last_used_at
+          description: |-
+            When the method last took part in an authentication, UTC. UNSET IS THE
+             INTERESTING VALUE: this screen is really asked "is there something enrolled
+             here that I did not enrol", and the answer is only credible if a method that
+             has never been used says so.
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: AuthMethod
+      additionalProperties: false
+      description: |-
+        AuthMethod is one enrolled authentication method.
+
+         Nothing that verifies anything is here. There is no verifier, no sealed TOTP
+         secret, no recovery-code digest and no pepper version — and no field this
+         message could grow that would hold one. The consecutive-failure count is
+         absent on its own merits: it is a lockout counter, and publishing it tells
+         whoever reaches this screen how many attempts remain before a factor locks.
+    chronos.identity.v1.AuthenticateRequest:
+      type: object
+      properties:
+        identifier:
+          type: string
+          examples:
+            - ada@example.com
+          title: identifier
+          description: |
+            The address as typed. Reduced to a blind index server-side; neither the raw
+             nor the normalized form reaches an event, a log line or an error message.
+
+             Bounded, and NOT format-checked — unlike RegisterRequest.email, which
+             carries the full address grammar. The ceiling is the same 254 bytes the
+             normalizer enforces, so it refuses only input no account could ever have
+             been registered with; that is a denial-of-service bound and discloses
+             nothing. A SHAPE rule would disclose something: it would split ADR-036's one
+             undifferentiated refusal into "that is not an address" and "that is an
+             address, and the answer is still no", and the second is the answer an
+             enumerating attacker is trying to buy.
+            identity.identifier.length // an identifier may not exceed 254 bytes
+        password:
+          type: string
+          examples:
+            - PLACEHOLDER-not-a-real-password
+          title: password
+          description: |-
+            The secret as typed.
+
+             NO RULES, and their absence is the decision. Not `required`, not a minimum,
+             not a maximum: every one of them answers a guess with "your guess was
+             structurally wrong", which is strictly more than a wrong password tells the
+             caller and is exactly the oracle ADR-036 exists to close. The floor and the
+             ceiling are stated on RegisterRequest.password, where they are public.
+
+             Length is still bounded — by `domain.MaxPasswordBytes` inside the handler
+             and by Connect's message size cap in front of it — so declaring nothing here
+             costs no denial-of-service protection.
+        code:
+          type: string
+          examples:
+            - "000000"
+          title: code
+          description: |-
+            The second factor, and OPTIONAL. Sent empty on a first leg, which is
+             answered with the kinds the account can complete with rather than with a
+             session.
+
+             There is no challenge token, and that is a decision rather than an omission
+             (ADR-050): every place to put one — a token row, an in-process map, a signed
+             stateless artifact — makes a partial authentication into a bearer credential
+             an attacker can steal and replay. The cost of not having one is a second
+             Argon2id evaluation on the completing call, paid by legitimate users only.
+
+             Should that cost ever become the binding constraint, the challenge arrives
+             as an OPTIONAL field on this message and an optional one on the response,
+             which `buf breaking` permits. Nothing here has to be designed for it now.
+
+             NO RULES, for the reason given on `password` and one more that is specific
+             to this field: it carries EITHER a TOTP code or a recovery code, and those
+             have different shapes. A rule admitting one shape and refusing the other
+             would report which second factors the account holds — the inventory
+             AuthenticateResponse.offered is deliberately trimmed to kinds in order not
+             to publish.
+        deviceId:
+          type: string
+          examples:
+            - dev_9f2c1b7e
+          title: device_id
+          maxLength: 128
+          description: |-
+            An opaque pseudonym for the client. It is NOT a device name, a platform
+             string, a user agent or an address — all of those are personal data and
+             belong in the vault under this handle, because this value enters events.
+
+             Optional, and bounded only. This is not a credential — nothing is proven by
+             presenting it — so a bound on it is not an oracle. The bound is here because
+             the value ENTERS EVENTS, and an event is append-only: an unbounded field
+             that reaches the log is unbounded there forever.
+      title: AuthenticateRequest
+      additionalProperties: false
+      description: |-
+        AuthenticateRequest is one login attempt, presenting whichever factors the
+         caller has (ADR-050).
+    chronos.identity.v1.AuthenticateResponse:
+      type: object
+      properties:
+        secondFactorRequired:
+          type: boolean
+          title: second_factor_required
+          description: True when the password was correct and the authentication is not finished.
+        offered:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.identity.v1.MethodKind'
+          title: offered
+          description: |-
+            The second-factor KINDS this account can complete with, so a client can show
+             the right prompt.
+
+             Kinds only. Credential ids are deliberately absent: a list of them would let
+             anyone holding a correct password enumerate the account's authenticators,
+             which is the inventory an attacker choosing an attack wants. Empty when no
+             second factor is owed.
+      title: AuthenticateResponse
+      additionalProperties: false
+      description: |-
+        AuthenticateResponse reports what an attempt established, and never why one
+         failed.
+
+         A refusal does not arrive here at all: it is an error, and it is the same
+         error for every cause (ADR-036). What this distinguishes is only the two
+         SUCCESSFUL shapes — the first factor passed and a second is owed, or every
+         factor passed.
+    chronos.identity.v1.ConfirmTotpRequest:
+      type: object
+      properties:
+        code:
+          type: string
+          examples:
+            - "000000"
+          title: code
+          maxLength: 32
+          description: |-
+            The digits from the authenticator app. Never logged, stored, or placed in an
+             event.
+
+             `required` matches the handler, which refuses an empty or whitespace-only
+             code. It is declared here and NOT on AuthenticateRequest.code, and the
+             difference is who is asking: this call runs on an AAL2 session, against the
+             caller's OWN account, confirming a secret the same caller was handed
+             moments ago. There is no account to enumerate and no factor inventory to
+             disclose, so a refusal for malformed input reveals nothing a login refusal
+             would have hidden.
+
+             Still no digit-count or character-class rule: the code's length is the
+             verifier's business, and pinning it in the schema would refuse a longer code
+             if the verifier is ever configured to issue one.
+      title: ConfirmTotpRequest
+      required:
+        - code
+      additionalProperties: false
+      description: ConfirmTotpRequest presents a live code against a provisioned secret.
+    chronos.identity.v1.ConfirmTotpResponse:
+      type: object
+      properties:
+        credentialId:
+          type: string
+          title: credential_id
+          description: The credential that was proven.
+        activated:
+          type: boolean
+          title: activated
+          description: |-
+            True when this confirmation was the event that completed the account: a
+             verified address plus a REAL second factor. Only a TOTP confirmation can set
+             it — generating recovery codes must never be what activates an account.
+        changed:
+          type: boolean
+          title: changed
+          description: |-
+            False when the authenticator was already proven — a retried confirmation.
+             Nothing was appended, and it is not an error.
+      title: ConfirmTotpResponse
+      additionalProperties: false
+      description: ConfirmTotpResponse reports what the confirmation produced.
+    chronos.identity.v1.CreateSessionRequest:
+      type: object
+      properties:
+        identifier:
+          type: string
+          examples:
+            - ada@example.com
+          title: identifier
+          description: |
+            The address as typed, as in AuthenticateRequest — bounded, not
+             format-checked, for the same reason.
+            identity.identifier.length // an identifier may not exceed 254 bytes
+        password:
+          type: string
+          examples:
+            - PLACEHOLDER-not-a-real-password
+          title: password
+          description: The secret as typed. NO RULES, as on AuthenticateRequest.password.
+        code:
+          type: string
+          examples:
+            - "000000"
+          title: code
+          description: |-
+            The second factor. Required in practice for every account on this system,
+             because a session is never minted below AAL2.
+
+             NOT declared `required`, despite that sentence. The message's own contract
+             is that a caller arriving here without a code "gets the same undifferentiated
+             refusal as any other failure", and a `required` rule would replace that
+             refusal with a distinct VALIDATION_FAILED — turning the absence of a second
+             factor into a separately observable outcome. Shape rules are absent for the
+             reason given on AuthenticateRequest.code.
+        deviceId:
+          type: string
+          examples:
+            - dev_9f2c1b7e
+          title: device_id
+          maxLength: 128
+          description: An opaque pseudonym for the client, as in AuthenticateRequest.
+      title: CreateSessionRequest
+      additionalProperties: false
+      description: |-
+        CreateSessionRequest completes a login and asks for a bearer token.
+
+         It re-presents the credentials rather than redeeming something Authenticate
+         handed back, because the evidence of a completed authentication is
+         deliberately not serializable (ADR-050): it exists only inside the process
+         that performed the ceremony, so there is no artifact for this message to
+         carry. A caller that does not yet know whether a second factor is owed asks
+         Authenticate first; one that arrives here without a required code gets the
+         same undifferentiated refusal as any other failure.
+    chronos.identity.v1.CreateSessionResponse:
+      type: object
+      properties:
+        sessionId:
+          type: string
+          title: session_id
+          description: |-
+            The session's public identifier, a prefixed ULID (ADR-030). It is not a
+             secret: it appears in the device list of every screen that renders one.
+        subjectId:
+          type: string
+          title: subject_id
+          description: The authenticated account's pseudonym.
+        token:
+          type: string
+          title: token
+          description: |-
+            The plaintext bearer token. Only its digest is stored, so this is the only
+             moment it exists anywhere this system can reach: it is returned here and by
+             no other call, ever. Clients must keep it out of URLs, logs and analytics.
+        assuranceLevel:
+          title: assurance_level
+          description: |-
+            The assurance level this session was established at. Always at least AAL2 —
+             a lower one is refused rather than downgraded, because a session recording
+             AAL1 would honestly satisfy every `min_aal` that asks for AAL1, which is
+             precisely the half-authenticated session identity.md §3 names as a complete
+             authentication bypass.
+          $ref: '#/components/schemas/chronos.options.v1.AssuranceLevel'
+        idleExpiresAt:
+          title: idle_expires_at
+          description: |-
+            The deadline that MOVES: every authenticated request pushes it forward,
+             clamped to the absolute one. UTC (ADR-008).
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+        absoluteExpiresAt:
+          title: absolute_expires_at
+          description: |-
+            The deadline that does NOT move. It is what bounds a stolen token held by an
+             attacker who keeps it warm, which an idle deadline alone cannot do because a
+             thief can refresh it indefinitely. UTC.
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+        requiresCredentialRotation:
+          type: boolean
+          title: requires_credential_rotation
+          description: |-
+            True when the password that established this session was found in a breach
+             corpus. The session is restricted to profile and credential endpoints: the
+             login is not blocked, because blocking locks a person out of the only place
+             they can fix the problem (identity.md §4).
+      title: CreateSessionResponse
+      additionalProperties: false
+      description: CreateSessionResponse carries the bearer token back to the caller ONCE.
+    chronos.identity.v1.EnrollTotpRequest:
+      type: object
+      properties:
+        accountName:
+          type: string
+          examples:
+            - ada@example.com
+          title: account_name
+          description: |
+            What the user sees under the issuer in their authenticator app, normally
+             their own address.
+
+             It is PERSONAL DATA, and it is supplied by the caller rather than read
+             server-side because the vault port is write-only by design — a port that
+             could read is a port through which an address reaches a log. It is placed in
+             the provisioning URI returned below, rendered to the enrolling user's own
+             screen, and reaches no event, no log line and no error message.
+
+             An empty value is refused. The authenticator app would show an unlabelled
+             entry, which is how people delete the wrong credential.
+
+             `required` matches the handler, which refuses a value that is empty or
+             whitespace-only; this rule catches the first case and the handler still
+             catches the second, so the two do not disagree. The ceiling is the ONE rule
+             in this file stricter than the code behind it — the handler imposes no
+             maximum — and it is here because this value is embedded verbatim in the
+             otpauth:// URI rendered into a QR code. It is sized at RFC 5321's 320-byte
+             path, comfortably above the address this normally holds.
+            string.max_bytes = 320
+      title: EnrollTotpRequest
+      required:
+        - accountName
+      additionalProperties: false
+      description: EnrollTotpRequest asks for a new authenticator secret.
+    chronos.identity.v1.EnrollTotpResponse:
+      type: object
+      properties:
+        credentialId:
+          type: string
+          title: credential_id
+          description: The credential this enrolment provisioned, a prefixed ULID (ADR-030).
+        secret:
+          type: string
+          title: secret
+          description: |-
+            The base32 shared secret, for manual entry when a camera is unavailable.
+             Returned ONLY here. Never log it, never persist it client-side.
+        provisioningUri:
+          type: string
+          title: provisioning_uri
+          description: |-
+            The otpauth:// value behind the QR code. It CONTAINS the secret and the
+             account label. Returned ONLY here. Never log it.
+        expiresAt:
+          title: expires_at
+          description: |-
+            When this unproven secret stops being confirmable, UTC.
+
+             Short by design: the window is the time in which a secret exists that nobody
+             has demonstrated possession of, so a secret captured from a screen — a
+             screenshot, a shoulder-surf, a shared screen — stops being usable quickly. A
+             user who takes longer starts again at no cost.
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: EnrollTotpResponse
+      additionalProperties: false
+      description: |-
+        EnrollTotpResponse carries the provisioning material back to the caller ONCE.
+
+         Both secrets below are returned by this call and are then unrecoverable:
+         nothing stores them in the clear, and the sealed copy is opened only to check
+         a code. A caller that loses them starts the enrolment again, which is the
+         correct outcome — the alternative is an endpoint that re-displays a shared
+         secret to anyone holding a session, turning a stolen session into a permanent
+         second factor.
+    chronos.identity.v1.FailureReason:
+      type: string
+      title: FailureReason
+      enum:
+        - FAILURE_REASON_UNSPECIFIED
+        - FAILURE_REASON_NO_SUCH_IDENTIFIER
+        - FAILURE_REASON_WRONG_PASSWORD
+        - FAILURE_REASON_WRONG_SECOND_FACTOR
+        - FAILURE_REASON_REPLAYED_CODE
+        - FAILURE_REASON_UNVERIFIED_EMAIL
+        - FAILURE_REASON_INCOMPLETE_ENROLLMENT
+        - FAILURE_REASON_DEACTIVATED
+        - FAILURE_REASON_SUSPENDED
+        - FAILURE_REASON_RATE_LIMITED
+      description: |-
+        FailureReason classifies a failed authentication attempt in the account
+         holder's own history.
+
+         It is NOT what a failing caller is told — every refusal is one
+         undifferentiated error (ADR-036), because naming which factor was wrong hands
+         an attacker a working oracle for the other. Showing the same fact to the
+         account holder, after the fact, about their own account, is the opposite
+         situation: it is the difference between "somebody guessed at my password" and
+         "somebody already has my password and is stuck on my authenticator", and only
+         the second is worth waking up for.
+    chronos.identity.v1.GenerateRecoveryCodesRequest:
+      type: object
+      properties:
+        count:
+          type: integer
+          title: count
+          maximum: 20
+          minimum: 0
+          format: int32
+          description: |-
+            How many codes to mint. Zero means the server's default (10). The server
+             bounds it at 20: every code is a row plus a hash, so an unbounded count is a
+             request that asks for a million of them inside one transaction.
+
+             Both ends are refused rather than clamped, and that is `app.MaxRecoveryCodeCount`
+             exactly — unlike a page size, an over-large count is not a request the server
+             can satisfy with less, because the caller would then be shown a set smaller
+             than the one they asked to write down.
+      title: GenerateRecoveryCodesRequest
+      additionalProperties: false
+      description: GenerateRecoveryCodesRequest asks for a fresh set, replacing any existing one.
+    chronos.identity.v1.GenerateRecoveryCodesResponse:
+      type: object
+      properties:
+        credentialId:
+          type: string
+          title: credential_id
+          description: The credential holding this set, a prefixed ULID (ADR-030).
+        codes:
+          type: array
+          items:
+            type: string
+          title: codes
+          description: |-
+            The plaintext codes, in the order they should be presented. Returned ONLY
+             here. Never log them; show them once and tell the user to store them.
+      title: GenerateRecoveryCodesResponse
+      additionalProperties: false
+      description: |-
+        GenerateRecoveryCodesResponse carries the plaintext codes back ONCE.
+
+         Only digests are stored, so this is the only moment the codes exist anywhere
+         this system can reach. A caller that loses them generates a new set, which
+         invalidates the old one — that is the correct outcome, and an endpoint that
+         could re-display them would turn a stolen session into a permanent bypass of
+         every factor on the account.
+    chronos.identity.v1.GetUserRequest:
+      type: object
+      title: GetUserRequest
+      additionalProperties: false
+      description: |-
+        GetUserRequest is empty: the account it describes is the caller's own,
+         resolved from the session rather than named in the request.
+
+         A subject id field would make this an existence probe for any pseudonym a
+         caller can obtain, which is the shape identity.md §11 warns about.
+    chronos.identity.v1.GetUserResponse:
+      type: object
+      properties:
+        subjectId:
+          type: string
+          title: subject_id
+          description: |-
+            The account's pseudonym. Whatever renders a human-readable identity resolves
+             this against the vault.
+        userId:
+          type: string
+          title: user_id
+          description: The account's public identifier, a prefixed ULID (ADR-030).
+        state:
+          title: state
+          description: Where the account sits in its lifecycle.
+          $ref: '#/components/schemas/chronos.identity.v1.AccountState'
+        emailVerified:
+          type: boolean
+          title: email_verified
+          description: |-
+            Whether the address was ever proven. This is a DIFFERENT question from the
+             state: an account can be verified and still Pending, because a second factor
+             is also required before it activates (identity.md §2).
+        registeredAt:
+          title: registered_at
+          description: When the account was registered, UTC. Always set.
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+        activatedAt:
+          title: activated_at
+          description: When the account activated, UTC. Unset means it never has — not "unknown".
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+        deactivatedAt:
+          title: deactivated_at
+          description: When the holder switched the account off, UTC. Unset means never.
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+        suspendedAt:
+          title: suspended_at
+          description: When the account was suspended administratively, UTC. Unset means never.
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: GetUserResponse
+      additionalProperties: false
+      description: |-
+        GetUserResponse is the account, its lifecycle position, and whether the
+         address on it has been proven.
+
+         No address comes back, by construction rather than by omission. The caller
+         holds a subject id and resolves it against the vault, which is what keeps
+         erasure a key destruction rather than a sweep across every projection that
+         ever copied an address (ADR-002).
+    chronos.identity.v1.ListLoginHistoryRequest:
+      type: object
+      properties:
+        pageSize:
+          type: integer
+          title: page_size
+          minimum: 0
+          format: int32
+          description: |-
+            How many entries to return. Zero means the server's default (50), and the
+             server clamps at its maximum (200). Only a negative size is refused, as on
+             ListSessionsRequest.page_size.
+        pageToken:
+          type: string
+          examples:
+            - PLACEHOLDER-opaque-cursor-from-a-previous-response
+          title: page_token
+          maxLength: 1024
+          description: |-
+            An opaque cursor from a previous response, with the same rules as
+             ListSessionsRequest.page_token. Empty starts at the beginning.
+      title: ListLoginHistoryRequest
+      additionalProperties: false
+      description: ListLoginHistoryRequest asks for a page of the caller's recent activity.
+    chronos.identity.v1.ListLoginHistoryResponse:
+      type: object
+      properties:
+        attempts:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.identity.v1.LoginAttempt'
+          title: attempts
+          description: The page, newest first.
+        nextPageToken:
+          type: string
+          title: next_page_token
+          description: The cursor for the next page. Empty means done.
+      title: ListLoginHistoryResponse
+      additionalProperties: false
+      description: ListLoginHistoryResponse is one page of recent activity, newest first.
+    chronos.identity.v1.ListMethodsRequest:
+      type: object
+      title: ListMethodsRequest
+      additionalProperties: false
+      description: 'ListMethodsRequest is empty: it lists the caller''s own methods.'
+    chronos.identity.v1.ListMethodsResponse:
+      type: object
+      properties:
+        methods:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.identity.v1.AuthMethod'
+          title: methods
+          description: The methods, in no guaranteed order.
+      title: ListMethodsResponse
+      additionalProperties: false
+      description: |-
+        ListMethodsResponse is every authentication method on the caller's account.
+
+         Unpaginated, and that is a bounded claim rather than an oversight: an account
+         holds at most one usable credential per kind, and there are five kinds.
+    chronos.identity.v1.ListSessionsRequest:
+      type: object
+      properties:
+        pageSize:
+          type: integer
+          title: page_size
+          minimum: 0
+          format: int32
+          description: |-
+            How many entries to return. Zero means the server's default (50), and the
+             server CLAMPS anything above its maximum (200) rather than refusing it — so
+             a client must read the returned page's length rather than assume it got what
+             it asked for.
+
+             Only the negative half is refused, and that mirrors `page.Clamp` exactly: it
+             treats a negative size as a caller bug and an oversized one as a request to
+             satisfy with less. Declaring `lte: 200` here would REFUSE what the server
+             deliberately clamps, which is the contradiction this file avoids.
+        pageToken:
+          type: string
+          examples:
+            - PLACEHOLDER-opaque-cursor-from-a-previous-response
+          title: page_token
+          maxLength: 1024
+          description: |-
+            An opaque cursor from a previous response's next_page_token. Empty starts at
+             the beginning.
+
+             Opaque means opaque: it is bound to the query that produced it, and a token
+             presented against a different query, sort or filter is an ERROR rather than
+             a silent restart. A client that treated an unreadable token as "begin again"
+             would loop forever with nothing in the loop looking like a failure.
+
+             Optional — empty is the first page. Bounded because it is echoed back into a
+             query, and the server mints it, so no legitimate client produces a long one.
+      title: ListSessionsRequest
+      additionalProperties: false
+      description: ListSessionsRequest asks for a page of the caller's device list.
+    chronos.identity.v1.ListSessionsResponse:
+      type: object
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.identity.v1.Session'
+          title: sessions
+          description: The page, newest first.
+        nextPageToken:
+          type: string
+          title: next_page_token
+          description: |-
+            The cursor for the next page. EMPTY MEANS DONE — it is the only termination
+             signal, and a client must not infer the end from a short page, because a
+             clamped page size makes short pages ordinary.
+      title: ListSessionsResponse
+      additionalProperties: false
+      description: ListSessionsResponse is one page of the device list, newest first.
+    chronos.identity.v1.LoginAttempt:
+      type: object
+      properties:
+        succeeded:
+          type: boolean
+          title: succeeded
+          description: |-
+            Whether the attempt succeeded. FAILURES ARE THE POINT of this list: the
+             screen exists to answer "was that me?", and a history of successes shows a
+             compromised account as a quiet, ordinary list.
+        reason:
+          title: reason
+          description: |-
+            Why a failure failed. Unspecified on success. See FailureReason for why the
+             account holder may be told this when the failing caller may not.
+          $ref: '#/components/schemas/chronos.identity.v1.FailureReason'
+        methods:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.identity.v1.MethodKind'
+          title: methods
+          description: |-
+            The factors presented. Empty for an attempt refused before any credential
+             was examined.
+        assuranceLevel:
+          title: assurance_level
+          description: |-
+            The level the attempt established. Unspecified for a failure — nothing was
+             established.
+          $ref: '#/components/schemas/chronos.options.v1.AssuranceLevel'
+        deviceId:
+          type: string
+          title: device_id
+          description: |-
+            The opaque client pseudonym the attempt came from, empty when none was sent.
+             Never a device name (see Session.device_id).
+        occurredAt:
+          title: occurred_at
+          description: When the attempt happened, UTC.
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: LoginAttempt
+      additionalProperties: false
+      description: |-
+        LoginAttempt is one entry in "recent activity".
+
+         The row's server-side sequence number is deliberately not exposed. It is
+         global across every account, so its gaps would leak how much authentication
+         traffic the whole system carries; it exists to make the page boundary correct
+         and is folded into the opaque cursor instead.
+    chronos.identity.v1.MethodKind:
+      type: string
+      title: MethodKind
+      enum:
+        - METHOD_KIND_UNSPECIFIED
+        - METHOD_KIND_PASSWORD
+        - METHOD_KIND_TOTP
+        - METHOD_KIND_RECOVERY_CODE
+        - METHOD_KIND_PASSKEY
+        - METHOD_KIND_FEDERATED
+      description: |-
+        MethodKind labels an authentication method.
+
+         The wire enum mirrors the module's stored labels, which are strings that live
+         in events forever. New kinds are added here as they become implementable, so a
+         client must treat an unrecognised value as "some factor this build does not
+         render" rather than as an error.
+    chronos.identity.v1.RegisterRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          examples:
+            - ada@example.com
+          title: email
+          description: |
+            The address as typed. It is normalized server-side, and the normalized form
+             is the only one that reaches the vault or the blind indexer. It appears in
+             no event, no log line and no error message.
+
+             The rules mirror `domain.NormalizeEmail` rather than approximating it, which
+             is why they are CEL rather than the built-in `email` rule: that rule is
+             ASCII-only, and this system accepts internationalized domains and converts
+             them to punycode. A rule stricter than the handler would refuse an address
+             the handler would have accepted, which is worse than no rule.
+
+             Every bound is measured on the TRIMMED value, because the handler trims
+             first. Bounds are BYTES, not characters — RFC 5321 counts octets, and so
+             does the normalizer.
+            identity.email.length // an email address may not exceed 254 bytes
+            identity.email.local_part // the local part of an email address may not exceed 64 bytes
+            identity.email.shape // an email address must contain a local part and a fully qualified domain
+      title: RegisterRequest
+      required:
+        - email
+      additionalProperties: false
+      description: |-
+        RegisterRequest claims an address and creates the account that claims it.
+
+         It creates NO CREDENTIAL. The account it produces is Pending, passwordless
+         and cannot be signed into by anybody, including whoever sent this request —
+         the password is supplied to `VerifyEmail`, by whoever holds the link that was
+         mailed to the address. Field 2 is reserved to keep it that way: it carried a
+         password, and a password here is the premise of the pre-hijacking attack
+         rather than a step in it.
+    chronos.identity.v1.RegisterResponse:
+      type: object
+      title: RegisterResponse
+      additionalProperties: false
+      description: |-
+        RegisterResponse is deliberately empty, and its emptiness is the feature.
+
+         The handler reports whether the address was free; this message does not, and
+         must not gain a field that does. Registration is one of the four flows
+         identity.md §11 names as leaking account existence when written naively, and
+         the fix is not a vague message — it is that the two outcomes are
+         indistinguishable in content.
+
+         The client renders one sentence for both: "if that address can be registered,
+         we have sent it a link".
+    chronos.identity.v1.ResendEmailVerificationRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          examples:
+            - ada@example.com
+          title: email
+          description: |
+            The address as typed. Reduced to a blind index server-side; neither the raw
+             nor the normalized form reaches an event, a log line or an error message.
+
+             The rules are RegisterRequest.email's, character for character, and the
+             duplication is deliberate rather than lazy. This call fronts the same
+             normalizer, so a rule that differed in either direction would be visible on
+             the wire: stricter and it refuses an address that was successfully
+             registered, looser and "that is not an address" becomes a cheaper answer
+             than "that address has no pending account", which is the first half of an
+             enumeration oracle.
+            identity.email.length // an email address may not exceed 254 bytes
+            identity.email.local_part // the local part of an email address may not exceed 64 bytes
+            identity.email.shape // an email address must contain a local part and a fully qualified domain
+      title: ResendEmailVerificationRequest
+      required:
+        - email
+      additionalProperties: false
+      description: |-
+        ResendEmailVerificationRequest asks for a fresh verification link.
+
+         It names an ADDRESS rather than an account, and it has to: the population that
+         needs this call is exactly the population that cannot sign in. A Pending
+         account holds no session (identity.md §1), so there is no principal to read
+         from the context and no identifier available to the caller other than the
+         address they typed into the registration form.
+    chronos.identity.v1.ResendEmailVerificationResponse:
+      type: object
+      title: ResendEmailVerificationResponse
+      additionalProperties: false
+      description: |-
+        ResendEmailVerificationResponse is deliberately empty, for RegisterResponse's
+         reason and one more.
+
+         RegisterResponse hides whether an address was free. This message hides four
+         outcomes rather than two: no account claims the address, an account claims it
+         and is still Pending, an account claims it and is already verified, and an
+         account claims it and is deactivated or suspended. Exactly one of those four
+         appends an event and sends mail; all four answer with these zero bytes.
+
+         A field here — `sent`, `already_verified`, anything — would turn an
+         unauthenticated endpoint into a precise account-existence and account-state
+         oracle for any address a prober can type. The client renders one sentence for
+         all four: "if that address has an account waiting to be verified, we have sent
+         it a new link".
+    chronos.identity.v1.RevokeAllSessionsRequest:
+      type: object
+      properties:
+        exceptSessionId:
+          type: string
+          examples:
+            - sess_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: except_session_id
+          pattern: ^$|^sess_[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}$
+          description: |-
+            The session to SPARE — "sign out everywhere else", so the caller is not
+             signed out of the device they are asking from.
+
+             Empty spares nothing, which is what a compromise response needs: identity.md
+             §7 requires a password reset to void every session including the one that
+             asked, because the party asking may be the attacker.
+
+             OPTIONAL, so the pattern admits the empty string explicitly. Declaring
+             `required` here would make "sign out everywhere, including me" — the
+             compromise response — unexpressible.
+        reason:
+          type: string
+          examples:
+            - user_signed_out
+          title: reason
+          maxLength: 64
+          pattern: ^$|^[a-z][a-z0-9_]*$
+          description: |-
+            A short machine-readable label recorded with each revocation, as in
+             RevokeSessionRequest.
+      title: RevokeAllSessionsRequest
+      additionalProperties: false
+      description: RevokeAllSessionsRequest ends every live session on the caller's account.
+    chronos.identity.v1.RevokeAllSessionsResponse:
+      type: object
+      properties:
+        revoked:
+          type: integer
+          title: revoked
+          format: int32
+          description: |-
+            How many sessions this call ended. Sessions already revoked or expired are
+             not counted — nothing was appended for them.
+        scanned:
+          type: integer
+          title: scanned
+          format: int32
+          description: |-
+            How many live sessions the work list returned, the spared one included.
+             Reported so a client can tell "nothing to do" apart from "the list came back
+             empty because it is broken".
+      title: RevokeAllSessionsResponse
+      additionalProperties: false
+      description: |-
+        RevokeAllSessionsResponse reports what the fan-out did.
+
+         The whole operation is one atomic append: "sign out everywhere" that half
+         happened is worse than one that failed, because the user is told every device
+         is signed out, one is not, and nothing in the system disagrees with them.
+    chronos.identity.v1.RevokeSessionRequest:
+      type: object
+      properties:
+        sessionId:
+          type: string
+          examples:
+            - sess_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: session_id
+          pattern: ^sess_[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}$
+          description: |-
+            The session to end. It must belong to the caller: a request naming somebody
+             else's session gets the same answer as one naming a session that does not
+             exist, because telling the two apart would turn the device list into a probe
+             for which session ids exist.
+
+             A prefixed ULID, `sess_` followed by 26 Crockford base32 characters
+             (ADR-030). Rejecting the wrong TYPE of identifier at the boundary is
+             CONVENTIONS §4, and it is not the probe the paragraph above forbids: it
+             separates "that is not a session id at all" from "no such session of yours",
+             and the first is a fact the caller already had. Which session ids EXIST
+             stays indistinguishable.
+        reason:
+          type: string
+          examples:
+            - user_signed_out
+          title: reason
+          maxLength: 64
+          pattern: ^$|^[a-z][a-z0-9_]*$
+          description: |-
+            A short machine-readable label recorded with the revocation, for example
+             "user_signed_out". It enters an event, so it carries no personal data and no
+             free text a user typed.
+
+             Optional. The pattern is what makes "machine-readable" and "no free text"
+             true rather than merely stated: lower-case snake, so a sentence a user typed
+             — which is where personal data arrives in a field like this — cannot reach
+             an append-only log (ADR-002).
+      title: RevokeSessionRequest
+      required:
+        - sessionId
+      additionalProperties: false
+      description: RevokeSessionRequest ends one of the caller's sessions.
+    chronos.identity.v1.RevokeSessionResponse:
+      type: object
+      properties:
+        changed:
+          type: boolean
+          title: changed
+          description: |-
+            False when the session was already revoked or already expired. Nothing was
+             appended, and it is NOT an error: the caller wanted the session unusable and
+             it is.
+      title: RevokeSessionResponse
+      additionalProperties: false
+      description: RevokeSessionResponse reports what the revocation did.
+    chronos.identity.v1.Session:
+      type: object
+      properties:
+        sessionId:
+          type: string
+          title: session_id
+          description: The session's public identifier, and what RevokeSession names.
+        deviceId:
+          type: string
+          title: device_id
+          description: |-
+            The opaque client-supplied handle, empty when the client sent none. It is
+             NOT a device name: a name is personal data the user typed, and personal data
+             may not enter a projection.
+        assuranceLevel:
+          title: assurance_level
+          description: |-
+            The level this session was established at, so a screen can mark one that has
+             only ever presented a single factor.
+          $ref: '#/components/schemas/chronos.options.v1.AssuranceLevel'
+        idleExpiresAt:
+          title: idle_expires_at
+          description: When this device is signed out for inactivity, UTC.
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+        absoluteExpiresAt:
+          title: absolute_expires_at
+          description: |-
+            When this device is signed out regardless, UTC. Both deadlines are shown
+             because they answer different questions.
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+        createdAt:
+          title: created_at
+          description: |-
+            When the session was established, UTC. It is here because the list is
+             ordered by it — a caller cannot page this list without the server having
+             sorted on something stable.
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+        lastSeenAt:
+          title: last_seen_at
+          description: |-
+            The last request this session made, UTC. Unset for a session that has made
+             none since it was issued.
+          $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: Session
+      additionalProperties: false
+      description: |-
+        Session is one entry in the device list.
+
+         No token and no digest. The digest lives in a table this list joins for the
+         idle deadline and last-seen time and never selects the secret from — a device
+         list that returned anything derived from the bearer token would put a
+         credential on the one screen whose entire purpose is to let a user revoke one.
+    chronos.identity.v1.VerifyEmailRequest:
+      type: object
+      properties:
+        token:
+          type: string
+          examples:
+            - PLACEHOLDER-not-a-real-verification-token
+          title: token
+          maxLength: 512
+          description: |-
+            The plaintext from the link. It is hashed and spent server-side and is never
+             stored, logged or placed in an event: a token in a log line is a live
+             credential in a system whose logs outlive it by months.
+
+             `required` matches the handler, which refuses an empty token. The ceiling is
+             a DENIAL-OF-SERVICE bound rather than a format rule, and it is deliberately
+             far above any token this system mints: it must not become a probe for the
+             token's real length. A wrong token and a spent one remain one refusal.
+        password:
+          type: string
+          examples:
+            - PLACEHOLDER-not-a-real-password
+          title: password
+          minLength: 8
+          description: |
+            The secret as typed. Normalized under RFC 8265's OpaqueString profile before
+             it is screened against the breach corpus and hashed.
+
+             Stated in full, and only here. This is the ENROLMENT side, where the
+             password policy is PUBLIC — it is printed beside the field the user is
+             typing into — so enforcing it declaratively costs nothing and tells an
+             attacker nothing they could not read off the form. The same two numbers are
+             deliberately NOT repeated on AuthenticateRequest or CreateSessionRequest;
+             see the package comment.
+
+             Declaring it here is not an oracle, and the reason is the order the handler
+             runs in: this rule is evaluated by the interceptor BEFORE the handler, and
+             the handler screens the password before it spends the token. Both refusals
+             are therefore functions of the caller's own input alone — they say nothing
+             about whether the token was real, and they leave it unspent, so a person who
+             chose a breached password still has their link.
+
+             `min_len` counts CHARACTERS and `max_bytes` counts BYTES, matching
+             `domain.MinPasswordRunes` (8) and `domain.MaxPasswordBytes` (4096). The
+             minimum is checked here against the raw input and by the handler against the
+             NFC-normalized one, which can only be shorter — so this rule is never
+             stricter than the handler it fronts.
+            string.max_bytes = 4096
+      title: VerifyEmailRequest
+      required:
+        - token
+      additionalProperties: false
+      description: |-
+        VerifyEmailRequest presents the token from a verification link, and the
+         password the account will be signed into with.
+
+         The two travel together because that pairing IS the security property. The
+         token proves control of the mailbox; the password is the credential that
+         control authorises. Splitting them — a credential set earlier, activated by a
+         later proof — is the shape the pre-hijacking attack needs, because the party
+         that sets the credential and the party that proves the mailbox are then
+         allowed to be different people.
+    chronos.identity.v1.VerifyEmailResponse:
+      type: object
+      properties:
+        subjectId:
+          type: string
+          title: subject_id
+          description: The account's pseudonym. Every other call names the account by this.
+        userId:
+          type: string
+          title: user_id
+          description: The account's public identifier, a prefixed ULID (ADR-030).
+        changed:
+          type: boolean
+          title: changed
+          description: |-
+            False when the token was valid but everything it asserts was already
+             recorded — a link clicked twice, or prefetched by a mail client. Nothing was
+             appended, and it is not an error.
+      title: VerifyEmailResponse
+      additionalProperties: false
+      description: |-
+        VerifyEmailResponse reports what the verification established.
+
+         Unlike registration, this call is not an existence oracle: presenting a valid
+         single-use token IS proof of control over the address, so the caller is
+         entitled to learn whose account it belongs to. An invalid, spent or expired
+         token is one undifferentiated refusal.
+    chronos.options.v1.AssuranceLevel:
+      type: string
+      title: AssuranceLevel
+      enum:
+        - ASSURANCE_LEVEL_UNSPECIFIED
+        - ASSURANCE_LEVEL_1
+        - ASSURANCE_LEVEL_2
+        - ASSURANCE_LEVEL_3
+      description: |-
+        AssuranceLevel is the authentication strength a method requires
+         (identity.md §2). Step-up raises a session for a time-boxed window.
     chronos.system.v1.Criticality:
       type: string
       title: Criticality
@@ -552,6 +1892,1296 @@ components:
       title: RetryInfo
       description: Describes when the clients can retry a failed request.
 paths:
+  /chronos.identity.v1.IdentityService/Authenticate:
+    post:
+      tags:
+        - IdentityService
+      summary: |-
+        Authenticate verifies the factors presented and reports what remains
+         (ADR-050).
+      description: |-
+        Public: this is where a session comes from, so requiring one is circular.
+
+         A WRITE, and not a read despite minting nothing: every attempt appends to
+         the authentication journal, and classing it as a read would let it through
+         gates whose whole purpose is to stop writes. There is no `min_aal` for the
+         same reason there is no authz — the caller has no session to have a level.
+      operationId: IdentityService_Authenticate
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.AuthenticateRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            The factors presented were correct. A refusal does not arrive here at
+            all — it is an error, and it is the SAME error for every cause — so
+            this response distinguishes only the two successful shapes.
+
+            The example is the first leg: the password was correct and a second
+            factor is owed. `offered` lists KINDS only; credential identifiers are
+            deliberately absent, so a correct password does not enumerate the
+            account's authenticators. When nothing further is owed,
+            `secondFactorRequired` is `false` and `offered` is empty.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.AuthenticateResponse'
+              example:
+                secondFactorRequired: true
+                offered:
+                  - METHOD_KIND_TOTP
+                  - METHOD_KIND_RECOVERY_CODE
+      security:
+        - {}
+  /chronos.identity.v1.IdentityService/ConfirmTotp:
+    post:
+      tags:
+        - IdentityService
+      summary: |-
+        ConfirmTotp proves possession of a provisioned secret, and may be what
+         activates the account.
+      description: |-
+        AAL2, matching EnrollTotp: a confirmation is the half of an enrolment that
+         makes a factor real, and letting it run at a lower level than the enrolment
+         itself would leave the pair only as strong as its weaker call.
+
+         The bootstrap floor matches EnrollTotp for the same reason. The two calls
+         are one operation split in half, and exempting only the first would leave
+         an account able to provision a secret it could never prove — the deadlock
+         moved one call to the right rather than removed.
+
+         This is the call that CLOSES the window: the account it activates has a
+         proven second factor from that moment, so the next call to either method
+         faces AAL2. The exemption is therefore self-limiting, and it is limited by
+         the very thing it was granted to produce.
+      operationId: IdentityService_ConfirmTotp
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+        - name: Idempotency-Key
+          in: header
+          description: |
+            A client-generated ULID or UUID, required on every authenticated mutating
+            call. Replaying it with the SAME body returns the stored response instead
+            of re-executing; replaying it with a DIFFERENT body returns `CONFLICT`.
+            Scoped to `(principal, method, key)` and retained 24 hours — see
+            *Idempotency* in the introduction.
+          required: true
+          explode: false
+          schema:
+            type: string
+            examples:
+              - 01ARZ3NDEKTSV4RRFFQ69G5FAV
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.ConfirmTotpRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            Possession of the provisioned secret has been proven.
+
+            `activated: true` means this confirmation was the event that completed
+            the account — a verified address plus a REAL second factor. Only a TOTP
+            confirmation can set it; generating recovery codes never activates an
+            account. `changed: false` means the authenticator was already proven,
+            so nothing was appended and it is not an error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.ConfirmTotpResponse'
+              example:
+                credentialId: cred_01ARZ3NDEKTSV4RRFFQ69G5FB2
+                activated: true
+                changed: true
+  /chronos.identity.v1.IdentityService/CreateSession:
+    post:
+      tags:
+        - IdentityService
+      summary: CreateSession completes a login and mints the bearer token.
+      description: |-
+        Public, for the same reason as Authenticate: it is the call that creates the
+         session everything else requires.
+      operationId: IdentityService_CreateSession
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.CreateSessionRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            The session, and the ONLY delivery of its token. Store the token
+            immediately; no endpoint returns it again.
+
+            `requiresCredentialRotation` is `true` when the password that
+            established this session was found in a breach corpus. The session is
+            then restricted to profile and credential endpoints — the login is not
+            blocked, because blocking locks a person out of the only place they
+            can fix the problem.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.CreateSessionResponse'
+              example:
+                sessionId: sess_01ARZ3NDEKTSV4RRFFQ69G5FAV
+                subjectId: subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+                token: PLACEHOLDER-not-a-real-token-the-real-one-is-opaque
+                assuranceLevel: ASSURANCE_LEVEL_2
+                idleExpiresAt: '2026-08-14T12:04:55Z'
+                absoluteExpiresAt: '2026-08-21T11:04:55Z'
+                requiresCredentialRotation: false
+      security:
+        - {}
+  /chronos.identity.v1.IdentityService/EnrollTotp:
+    post:
+      tags:
+        - IdentityService
+      summary: EnrollTotp provisions a new authenticator secret and returns it once.
+      description: |-
+        AAL2. Enrolling a second factor is how an attacker holding one factor makes
+         their access durable, so it must not be reachable from a session that only
+         ever presented one. It replaces any unproven enrolment on the account, so
+         the abandoned secret stops existing at the moment the new one is written
+         rather than lingering as a second confirmable factor.
+
+         AAL1 while the account has never held a proven second factor, and only
+         then. Read the two levels together and they say: presenting the existing
+         factor is what buys the right to add another, and an account with no
+         existing factor is exempt from a demand nothing could satisfy. Without the
+         exemption an account registered through this API could never activate — the
+         factor it must have to reach AAL2 is the factor this call exists to give it
+         (identity.md §2).
+
+         The exemption is not a weaker version of the same permission. It applies to
+         a strictly poorer target: an account with no second factor, whose password
+         is therefore already the only thing standing between an attacker and it. An
+         attacker who enrols there has gained nothing they did not already have. On
+         an account that HAS a factor the floor is AAL2, so the same attacker must
+         present that factor — and it does not re-open when a factor is removed,
+         because the window closes on first proof and never re-opens.
+      operationId: IdentityService_EnrollTotp
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+        - name: Idempotency-Key
+          in: header
+          description: |
+            A client-generated ULID or UUID, required on every authenticated mutating
+            call. Replaying it with the SAME body returns the stored response instead
+            of re-executing; replaying it with a DIFFERENT body returns `CONFLICT`.
+            Scoped to `(principal, method, key)` and retained 24 hours — see
+            *Idempotency* in the introduction.
+          required: true
+          explode: false
+          schema:
+            type: string
+            examples:
+              - 01ARZ3NDEKTSV4RRFFQ69G5FAV
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.EnrollTotpRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            The provisioning material, delivered ONCE. Both `secret` and
+            `provisioningUri` are returned here and are then unrecoverable —
+            nothing stores them in the clear, and the sealed copy is opened only to
+            check a code. `provisioningUri` CONTAINS the secret. Never log either;
+            render the URI as a QR code and the secret for manual entry.
+
+            `expiresAt` is short by design: it bounds the window in which a secret
+            exists that nobody has demonstrated possession of, so a secret captured
+            from a screen stops being usable quickly. A user who takes longer
+            starts again at no cost.
+
+            This call replaces any unproven enrolment on the account, so an
+            abandoned secret stops existing rather than lingering as a second
+            confirmable factor.
+
+            The secret below is a placeholder and is not valid anywhere.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.EnrollTotpResponse'
+              example:
+                credentialId: cred_01ARZ3NDEKTSV4RRFFQ69G5FB2
+                secret: PLACEHOLDERSECRETNOTREAL234567AB
+                provisioningUri: otpauth://totp/Chronos:ada@example.com?secret=PLACEHOLDERSECRETNOTREAL234567AB&issuer=Chronos&algorithm=SHA1&digits=6&period=30
+                expiresAt: '2026-08-14T11:19:55Z'
+  /chronos.identity.v1.IdentityService/GenerateRecoveryCodes:
+    post:
+      tags:
+        - IdentityService
+      summary: |-
+        GenerateRecoveryCodes replaces the whole recovery-code set and returns the
+         new plaintext codes once.
+      description: |-
+        AAL2. A recovery code is a standing bypass of every other factor, so minting
+         a fresh set from a single-factor session would hand an attacker a permanent
+         credential that survives the password change the victim makes in response.
+         Generating codes never activates an account — only a real second factor
+         does.
+
+         NO bootstrap exemption, deliberately, and this is the method where the
+         decision is load-bearing. The exemption exists to break a deadlock, and
+         there is no deadlock here: recovery codes cannot activate an account, so
+         nothing about the path from registered to Active runs through this call. An
+         account reaches its first AAL2 session by confirming a TOTP secret, and only
+         then asks for codes — by which time the strict floor is satisfiable. Granting
+         the exemption anyway would mean a single-factor session could mint the one
+         credential that outlives every remedy the account holder has, on an account
+         that has no second factor to lose. That is the exact hole the floor is
+         shaped to keep shut, and it would be opened for no gain.
+      operationId: IdentityService_GenerateRecoveryCodes
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+        - name: Idempotency-Key
+          in: header
+          description: |
+            A client-generated ULID or UUID, required on every authenticated mutating
+            call. Replaying it with the SAME body returns the stored response instead
+            of re-executing; replaying it with a DIFFERENT body returns `CONFLICT`.
+            Scoped to `(principal, method, key)` and retained 24 hours — see
+            *Idempotency* in the introduction.
+          required: true
+          explode: false
+          schema:
+            type: string
+            examples:
+              - 01ARZ3NDEKTSV4RRFFQ69G5FAV
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.GenerateRecoveryCodesRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            The plaintext codes, delivered ONCE, in the order they should be
+            presented. Only digests are stored, so this is the only moment they
+            exist anywhere this system can reach.
+
+            This REPLACES the whole existing set — any previous codes stop working.
+            Show them once, tell the user to store them offline, and never log
+            them. A caller who loses them generates a new set, which is the correct
+            outcome: an endpoint that could re-display them would turn a stolen
+            session into a permanent bypass of every factor on the account.
+
+            The codes below are placeholders and are not valid anywhere.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.GenerateRecoveryCodesResponse'
+              example:
+                credentialId: cred_01ARZ3NDEKTSV4RRFFQ69G5FC7
+                codes:
+                  - PLACEHOLDER-code-01
+                  - PLACEHOLDER-code-02
+                  - PLACEHOLDER-code-03
+                  - PLACEHOLDER-code-04
+                  - PLACEHOLDER-code-05
+                  - PLACEHOLDER-code-06
+                  - PLACEHOLDER-code-07
+                  - PLACEHOLDER-code-08
+                  - PLACEHOLDER-code-09
+                  - PLACEHOLDER-code-10
+  /chronos.identity.v1.IdentityService/GetUser:
+    get:
+      tags:
+        - IdentityService
+      summary: |-
+        GetUser returns the caller's own account: what it is, where it is in its
+         lifecycle, and whether its address has been proven.
+      description: |-
+        AAL1 — no `min_aal` declared, so the default applies. This discloses nothing
+         an attacker holding a session does not already have, and demanding step-up
+         to render the account screen would make step-up routine, which is how people
+         learn to approve it without reading it.
+      operationId: IdentityService_GetUser.get
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+        - name: message
+          in: query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.GetUserRequest'
+        - name: encoding
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/encoding'
+        - name: base64
+          in: query
+          schema:
+            $ref: '#/components/schemas/base64'
+        - name: compression
+          in: query
+          schema:
+            $ref: '#/components/schemas/compression'
+        - name: connect
+          in: query
+          schema:
+            $ref: '#/components/schemas/connect'
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            The caller's own account. No address comes back, by construction: the
+            caller holds a `subjectId` and resolves it against the vault, which is
+            what keeps erasure a key destruction rather than a sweep across every
+            projection that ever copied an address.
+
+            `state` and `emailVerified` answer DIFFERENT questions. An account can
+            be verified and still `PENDING`, because a proven second factor is also
+            required before it activates. An unset timestamp means never — not
+            unknown.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.GetUserResponse'
+              example:
+                subjectId: subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+                userId: usr_01ARZ3NDEKTSV4RRFFQ69G5FAV
+                state: ACCOUNT_STATE_ACTIVE
+                emailVerified: true
+                registeredAt: '2026-07-02T08:15:00Z'
+                activatedAt: '2026-07-02T08:19:41Z'
+    post:
+      tags:
+        - IdentityService
+      summary: |-
+        GetUser returns the caller's own account: what it is, where it is in its
+         lifecycle, and whether its address has been proven.
+      description: |-
+        AAL1 — no `min_aal` declared, so the default applies. This discloses nothing
+         an attacker holding a session does not already have, and demanding step-up
+         to render the account screen would make step-up routine, which is how people
+         learn to approve it without reading it.
+      operationId: IdentityService_GetUser
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.GetUserRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            The caller's own account. No address comes back, by construction: the
+            caller holds a `subjectId` and resolves it against the vault, which is
+            what keeps erasure a key destruction rather than a sweep across every
+            projection that ever copied an address.
+
+            `state` and `emailVerified` answer DIFFERENT questions. An account can
+            be verified and still `PENDING`, because a proven second factor is also
+            required before it activates. An unset timestamp means never — not
+            unknown.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.GetUserResponse'
+              example:
+                subjectId: subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+                userId: usr_01ARZ3NDEKTSV4RRFFQ69G5FAV
+                state: ACCOUNT_STATE_ACTIVE
+                emailVerified: true
+                registeredAt: '2026-07-02T08:15:00Z'
+                activatedAt: '2026-07-02T08:19:41Z'
+  /chronos.identity.v1.IdentityService/ListLoginHistory:
+    get:
+      tags:
+        - IdentityService
+      summary: |-
+        ListLoginHistory returns recent authentication attempts against the caller's
+         account, successes and failures alike, newest first.
+      description: |-
+        AAL1, and deliberately so even though this is the most sensitive read here.
+         It is the account holder's own security log, and it is only useful if they
+         actually look at it.
+      operationId: IdentityService_ListLoginHistory.get
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+        - name: message
+          in: query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.ListLoginHistoryRequest'
+        - name: encoding
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/encoding'
+        - name: base64
+          in: query
+          schema:
+            $ref: '#/components/schemas/base64'
+        - name: compression
+          in: query
+          schema:
+            $ref: '#/components/schemas/compression'
+        - name: connect
+          in: query
+          schema:
+            $ref: '#/components/schemas/connect'
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            Recent authentication attempts against the caller's account, successes
+            and failures alike, newest first.
+
+            FAILURES ARE THE POINT of this list: it exists to answer "was that
+            me?", and a history of successes shows a compromised account as a
+            quiet, ordinary list. `reason` is what the account HOLDER may be told
+            about their own account after the fact — it is never what a failing
+            caller is told, because naming which factor was wrong hands an attacker
+            a working oracle for the other.
+
+            `FAILURE_REASON_REPLAYED_CODE` is worth alerting on: a wrong code is a
+            typo, a replayed one means somebody OBSERVED a real code.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.ListLoginHistoryResponse'
+              example:
+                attempts:
+                  - succeeded: true
+                    reason: FAILURE_REASON_UNSPECIFIED
+                    methods:
+                      - METHOD_KIND_PASSWORD
+                      - METHOD_KIND_TOTP
+                    assuranceLevel: ASSURANCE_LEVEL_2
+                    deviceId: dev_9f2c1b7e
+                    occurredAt: '2026-08-14T11:04:55Z'
+                  - succeeded: false
+                    reason: FAILURE_REASON_WRONG_SECOND_FACTOR
+                    methods:
+                      - METHOD_KIND_PASSWORD
+                      - METHOD_KIND_TOTP
+                    assuranceLevel: ASSURANCE_LEVEL_UNSPECIFIED
+                    deviceId: ''
+                    occurredAt: '2026-08-14T03:41:02Z'
+                  - succeeded: false
+                    reason: FAILURE_REASON_RATE_LIMITED
+                    methods: []
+                    assuranceLevel: ASSURANCE_LEVEL_UNSPECIFIED
+                    deviceId: ''
+                    occurredAt: '2026-08-14T03:40:58Z'
+                nextPageToken: PLACEHOLDER-opaque-cursor-pass-this-back-verbatim
+    post:
+      tags:
+        - IdentityService
+      summary: |-
+        ListLoginHistory returns recent authentication attempts against the caller's
+         account, successes and failures alike, newest first.
+      description: |-
+        AAL1, and deliberately so even though this is the most sensitive read here.
+         It is the account holder's own security log, and it is only useful if they
+         actually look at it.
+      operationId: IdentityService_ListLoginHistory
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.ListLoginHistoryRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            Recent authentication attempts against the caller's account, successes
+            and failures alike, newest first.
+
+            FAILURES ARE THE POINT of this list: it exists to answer "was that
+            me?", and a history of successes shows a compromised account as a
+            quiet, ordinary list. `reason` is what the account HOLDER may be told
+            about their own account after the fact — it is never what a failing
+            caller is told, because naming which factor was wrong hands an attacker
+            a working oracle for the other.
+
+            `FAILURE_REASON_REPLAYED_CODE` is worth alerting on: a wrong code is a
+            typo, a replayed one means somebody OBSERVED a real code.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.ListLoginHistoryResponse'
+              example:
+                attempts:
+                  - succeeded: true
+                    reason: FAILURE_REASON_UNSPECIFIED
+                    methods:
+                      - METHOD_KIND_PASSWORD
+                      - METHOD_KIND_TOTP
+                    assuranceLevel: ASSURANCE_LEVEL_2
+                    deviceId: dev_9f2c1b7e
+                    occurredAt: '2026-08-14T11:04:55Z'
+                  - succeeded: false
+                    reason: FAILURE_REASON_WRONG_SECOND_FACTOR
+                    methods:
+                      - METHOD_KIND_PASSWORD
+                      - METHOD_KIND_TOTP
+                    assuranceLevel: ASSURANCE_LEVEL_UNSPECIFIED
+                    deviceId: ''
+                    occurredAt: '2026-08-14T03:41:02Z'
+                  - succeeded: false
+                    reason: FAILURE_REASON_RATE_LIMITED
+                    methods: []
+                    assuranceLevel: ASSURANCE_LEVEL_UNSPECIFIED
+                    deviceId: ''
+                    occurredAt: '2026-08-14T03:40:58Z'
+                nextPageToken: PLACEHOLDER-opaque-cursor-pass-this-back-verbatim
+  /chronos.identity.v1.IdentityService/ListMethods:
+    get:
+      tags:
+        - IdentityService
+      summary: |-
+        ListMethods returns the authentication methods on the caller's account:
+         which exist, what kind each is, whether it can be used now, and when it last
+         was.
+      description: |-
+        AAL1, on the same argument as ListSessions: this is the screen on which
+         somebody discovers an authenticator they did not enrol.
+      operationId: IdentityService_ListMethods.get
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+        - name: message
+          in: query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.ListMethodsRequest'
+        - name: encoding
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/encoding'
+        - name: base64
+          in: query
+          schema:
+            $ref: '#/components/schemas/base64'
+        - name: compression
+          in: query
+          schema:
+            $ref: '#/components/schemas/compression'
+        - name: connect
+          in: query
+          schema:
+            $ref: '#/components/schemas/connect'
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            Every authentication method on the caller's account. Unpaginated, and
+            that is a bounded claim rather than an oversight: an account holds at
+            most one usable credential per kind, and there are five kinds.
+
+            Nothing that verifies anything is here — no verifier, no sealed TOTP
+            secret, no recovery-code digest. The consecutive-failure count is
+            absent on its own merits: publishing it would tell whoever reaches this
+            screen how many attempts remain before a factor locks.
+
+            `usable` is computed server-side from the account's own events, so a
+            screen cannot come to show a factor the login refuses. An unset
+            `lastUsedAt` is the INTERESTING value: this screen is really asked "is
+            there something enrolled here that I did not enrol", and the answer is
+            only credible if a method that has never been used says so.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.ListMethodsResponse'
+              example:
+                methods:
+                  - credentialId: cred_01ARZ3NDEKTSV4RRFFQ69G5FAV
+                    kind: METHOD_KIND_PASSWORD
+                    usable: true
+                    addedAt: '2026-07-02T08:15:00Z'
+                    enabledAt: '2026-07-02T08:15:00Z'
+                    lastUsedAt: '2026-08-14T11:04:55Z'
+                  - credentialId: cred_01ARZ3NDEKTSV4RRFFQ69G5FB2
+                    kind: METHOD_KIND_TOTP
+                    usable: true
+                    addedAt: '2026-07-02T08:18:20Z'
+                    enabledAt: '2026-07-02T08:19:41Z'
+                    lastUsedAt: '2026-08-14T11:04:55Z'
+                  - credentialId: cred_01ARZ3NDEKTSV4RRFFQ69G5FC7
+                    kind: METHOD_KIND_RECOVERY_CODE
+                    usable: true
+                    addedAt: '2026-07-02T08:20:05Z'
+                    enabledAt: '2026-07-02T08:20:05Z'
+    post:
+      tags:
+        - IdentityService
+      summary: |-
+        ListMethods returns the authentication methods on the caller's account:
+         which exist, what kind each is, whether it can be used now, and when it last
+         was.
+      description: |-
+        AAL1, on the same argument as ListSessions: this is the screen on which
+         somebody discovers an authenticator they did not enrol.
+      operationId: IdentityService_ListMethods
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.ListMethodsRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            Every authentication method on the caller's account. Unpaginated, and
+            that is a bounded claim rather than an oversight: an account holds at
+            most one usable credential per kind, and there are five kinds.
+
+            Nothing that verifies anything is here — no verifier, no sealed TOTP
+            secret, no recovery-code digest. The consecutive-failure count is
+            absent on its own merits: publishing it would tell whoever reaches this
+            screen how many attempts remain before a factor locks.
+
+            `usable` is computed server-side from the account's own events, so a
+            screen cannot come to show a factor the login refuses. An unset
+            `lastUsedAt` is the INTERESTING value: this screen is really asked "is
+            there something enrolled here that I did not enrol", and the answer is
+            only credible if a method that has never been used says so.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.ListMethodsResponse'
+              example:
+                methods:
+                  - credentialId: cred_01ARZ3NDEKTSV4RRFFQ69G5FAV
+                    kind: METHOD_KIND_PASSWORD
+                    usable: true
+                    addedAt: '2026-07-02T08:15:00Z'
+                    enabledAt: '2026-07-02T08:15:00Z'
+                    lastUsedAt: '2026-08-14T11:04:55Z'
+                  - credentialId: cred_01ARZ3NDEKTSV4RRFFQ69G5FB2
+                    kind: METHOD_KIND_TOTP
+                    usable: true
+                    addedAt: '2026-07-02T08:18:20Z'
+                    enabledAt: '2026-07-02T08:19:41Z'
+                    lastUsedAt: '2026-08-14T11:04:55Z'
+                  - credentialId: cred_01ARZ3NDEKTSV4RRFFQ69G5FC7
+                    kind: METHOD_KIND_RECOVERY_CODE
+                    usable: true
+                    addedAt: '2026-07-02T08:20:05Z'
+                    enabledAt: '2026-07-02T08:20:05Z'
+  /chronos.identity.v1.IdentityService/ListSessions:
+    get:
+      tags:
+        - IdentityService
+      summary: |-
+        ListSessions returns the caller's device list, newest first, one page at a
+         time.
+      description: |-
+        AAL1. It is a read of a list the holder needs in order to NOTICE a
+         compromise, and putting step-up in front of noticing is backwards — the
+         revocation that follows is what carries the AAL2 requirement.
+      operationId: IdentityService_ListSessions.get
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+        - name: message
+          in: query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.ListSessionsRequest'
+        - name: encoding
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/encoding'
+        - name: base64
+          in: query
+          schema:
+            $ref: '#/components/schemas/base64'
+        - name: compression
+          in: query
+          schema:
+            $ref: '#/components/schemas/compression'
+        - name: connect
+          in: query
+          schema:
+            $ref: '#/components/schemas/connect'
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            One page of the device list, newest first. No token and no digest
+            appears here: a device list that returned anything derived from the
+            bearer token would put a credential on the one screen whose purpose is
+            to let a user revoke one.
+
+            `nextPageToken` empty means done. Do not infer the end from a short
+            page — the server clamps an oversized `pageSize`, so short pages are
+            ordinary. `lastSeenAt` is unset for a session that has made no request
+            since it was issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.ListSessionsResponse'
+              example:
+                sessions:
+                  - sessionId: sess_01ARZ3NDEKTSV4RRFFQ69G5FAV
+                    deviceId: dev_9f2c1b7e
+                    assuranceLevel: ASSURANCE_LEVEL_2
+                    idleExpiresAt: '2026-08-14T12:04:55Z'
+                    absoluteExpiresAt: '2026-08-21T11:04:55Z'
+                    createdAt: '2026-08-14T11:04:55Z'
+                    lastSeenAt: '2026-08-14T11:39:12Z'
+                  - sessionId: sess_01ARZ3NDEKTSV4RRFFQ69G5FB2
+                    deviceId: ''
+                    assuranceLevel: ASSURANCE_LEVEL_2
+                    idleExpiresAt: '2026-08-14T10:22:00Z'
+                    absoluteExpiresAt: '2026-08-20T09:22:00Z'
+                    createdAt: '2026-08-13T09:22:00Z'
+                nextPageToken: ''
+    post:
+      tags:
+        - IdentityService
+      summary: |-
+        ListSessions returns the caller's device list, newest first, one page at a
+         time.
+      description: |-
+        AAL1. It is a read of a list the holder needs in order to NOTICE a
+         compromise, and putting step-up in front of noticing is backwards — the
+         revocation that follows is what carries the AAL2 requirement.
+      operationId: IdentityService_ListSessions
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.ListSessionsRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            One page of the device list, newest first. No token and no digest
+            appears here: a device list that returned anything derived from the
+            bearer token would put a credential on the one screen whose purpose is
+            to let a user revoke one.
+
+            `nextPageToken` empty means done. Do not infer the end from a short
+            page — the server clamps an oversized `pageSize`, so short pages are
+            ordinary. `lastSeenAt` is unset for a session that has made no request
+            since it was issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.ListSessionsResponse'
+              example:
+                sessions:
+                  - sessionId: sess_01ARZ3NDEKTSV4RRFFQ69G5FAV
+                    deviceId: dev_9f2c1b7e
+                    assuranceLevel: ASSURANCE_LEVEL_2
+                    idleExpiresAt: '2026-08-14T12:04:55Z'
+                    absoluteExpiresAt: '2026-08-21T11:04:55Z'
+                    createdAt: '2026-08-14T11:04:55Z'
+                    lastSeenAt: '2026-08-14T11:39:12Z'
+                  - sessionId: sess_01ARZ3NDEKTSV4RRFFQ69G5FB2
+                    deviceId: ''
+                    assuranceLevel: ASSURANCE_LEVEL_2
+                    idleExpiresAt: '2026-08-14T10:22:00Z'
+                    absoluteExpiresAt: '2026-08-20T09:22:00Z'
+                    createdAt: '2026-08-13T09:22:00Z'
+                nextPageToken: ''
+  /chronos.identity.v1.IdentityService/Register:
+    post:
+      tags:
+        - IdentityService
+      summary: Register claims an address and creates the account that claims it.
+      description: |-
+        Public: the caller has no session and, by definition, no account. It is a
+         WRITE rather than a GROW — a person is not a seat, and seats are consumed
+         when an organization adds a member, not when a human being signs up.
+
+         It sets NO PASSWORD and creates no credential of any kind. The account is
+         unusable by everybody until the link mailed to the address is followed and
+         VerifyEmail supplies one.
+
+         The response is identical whether or not the address was free. See
+         RegisterResponse.
+      operationId: IdentityService_Register
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.RegisterRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            Accepted. The body is empty, and its emptiness is the feature: this
+            response is identical whether or not the address was free, and the
+            server pays the same cost either way, so neither content nor timing
+            reveals whether an account exists. Render one sentence for both — "if
+            that address can be registered, we have sent it a link".
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.RegisterResponse'
+              example: {}
+      security:
+        - {}
+  /chronos.identity.v1.IdentityService/ResendEmailVerification:
+    post:
+      tags:
+        - IdentityService
+      summary: |-
+        ResendEmailVerification issues a new verification link for an address whose
+         account has not proven it yet.
+      description: |-
+        Public, and the choice is forced rather than preferred. A Pending account
+         can hold no session, so requiring one would make this call unavailable to
+         every account that needs it — the endpoint would exist and serve nobody.
+
+         The cost of being public is that it is an unauthenticated mail trigger
+         pointed at a third party's mailbox, so it is rate limited on TWO axes before
+         anything is looked up: per address, which bounds mail-bombing one victim, and
+         per caller, which bounds an enumeration sweep. Both counters are consumed
+         whether or not an account exists, so the ceiling itself is not an oracle.
+
+         A WRITE: the successful path appends EmailVerificationRequested to the
+         account's stream, and the verification reactor does the rest.
+      operationId: IdentityService_ResendEmailVerification
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.ResendEmailVerificationRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.ResendEmailVerificationResponse'
+      security:
+        - {}
+  /chronos.identity.v1.IdentityService/RevokeAllSessions:
+    post:
+      tags:
+        - IdentityService
+      summary: |-
+        RevokeAllSessions ends every live session on the caller's account, in one
+         atomic append.
+      description: |-
+        AAL2, on the same argument as RevokeSession and more so: this is the
+         account-wide version, so the denial of service an attacker could inflict
+         with it is total.
+      operationId: IdentityService_RevokeAllSessions
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+        - name: Idempotency-Key
+          in: header
+          description: |
+            A client-generated ULID or UUID, required on every authenticated mutating
+            call. Replaying it with the SAME body returns the stored response instead
+            of re-executing; replaying it with a DIFFERENT body returns `CONFLICT`.
+            Scoped to `(principal, method, key)` and retained 24 hours — see
+            *Idempotency* in the introduction.
+          required: true
+          explode: false
+          schema:
+            type: string
+            examples:
+              - 01ARZ3NDEKTSV4RRFFQ69G5FAV
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.RevokeAllSessionsRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            Every live session on the account has ended, in one atomic append —
+            "sign out everywhere" that half happened is worse than one that failed,
+            because the user is told every device is signed out, one is not, and
+            nothing in the system disagrees with them.
+
+            `revoked` counts what this call ended; sessions already revoked or
+            expired are not counted, because nothing was appended for them.
+            `scanned` is how many live sessions the work list returned, the spared
+            one included — reported so a client can tell "nothing to do" apart from
+            "the list came back empty because it is broken".
+
+            Send an empty `exceptSessionId` to spare nothing, which is what a
+            compromise response needs: the party asking may be the attacker.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.RevokeAllSessionsResponse'
+              example:
+                revoked: 3
+                scanned: 4
+  /chronos.identity.v1.IdentityService/RevokeSession:
+    post:
+      tags:
+        - IdentityService
+      summary: RevokeSession ends one of the caller's sessions.
+      description: |-
+        AAL2. Revocation is the control a person reaches for when they believe they
+         are compromised, and it must not be usable BY the compromise: a
+         single-factor session that could end sessions could sign the legitimate
+         holder out of the device they are using to investigate.
+      operationId: IdentityService_RevokeSession
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+        - name: Idempotency-Key
+          in: header
+          description: |
+            A client-generated ULID or UUID, required on every authenticated mutating
+            call. Replaying it with the SAME body returns the stored response instead
+            of re-executing; replaying it with a DIFFERENT body returns `CONFLICT`.
+            Scoped to `(principal, method, key)` and retained 24 hours — see
+            *Idempotency* in the introduction.
+          required: true
+          explode: false
+          schema:
+            type: string
+            examples:
+              - 01ARZ3NDEKTSV4RRFFQ69G5FAV
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.RevokeSessionRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            The session is no longer usable.
+
+            `changed: false` means it was already revoked or already expired.
+            Nothing was appended, and it is NOT an error: the caller wanted the
+            session unusable, and it is.
+
+            A request naming a session that is not the caller's own gets the same
+            answer as one naming a session that does not exist — telling the two
+            apart would turn the device list into a probe for which session ids
+            exist.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.RevokeSessionResponse'
+              example:
+                changed: true
+  /chronos.identity.v1.IdentityService/VerifyEmail:
+    post:
+      tags:
+        - IdentityService
+      summary: |-
+        VerifyEmail proves control of an address, sets the account's first
+         password, and makes the claim on the address permanent.
+      description: |-
+        Public: it is reached from a link in a mailbox, by a browser that has never
+         authenticated. The token IS the authentication, and it is single-use.
+
+         It is the ONLY call that can give a brand-new account a password, and that
+         is the pre-hijacking defence: the credential is created by the party that
+         has just proven the mailbox, in the same request as the proof.
+      operationId: IdentityService_VerifyEmail
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.VerifyEmailRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            The token was valid and has been spent. Unlike registration this is
+            not an existence oracle — presenting a valid single-use token IS proof
+            of control over the address — so the caller is told whose account it
+            belongs to. `changed: false` means a link clicked twice, or prefetched
+            by a mail client; nothing was appended and it is not an error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.VerifyEmailResponse'
+              example:
+                subjectId: subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+                userId: usr_01ARZ3NDEKTSV4RRFFQ69G5FAV
+                changed: true
+      security:
+        - {}
   /chronos.system.v1.SystemService/GetStatus:
     get:
       tags:
@@ -604,11 +3234,47 @@ paths:
               schema:
                 $ref: '#/components/schemas/connect.error'
         "200":
-          description: Success
+          description: |
+            Server and dependency state.
+
+            The example is the interesting case rather than the happy one: `ready` is
+            true because every CRITICAL dependency is up, and `fullyOperational` is
+            false because a DEGRADABLE one is not. A client greys out the affected
+            feature and leaves the rest alone.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.system.v1.GetStatusResponse'
+              example:
+                ready: true
+                fullyOperational: false
+                version: 1.4.0
+                startedAt: '2026-08-14T09:12:03Z'
+                timezone: UTC
+                dependencies:
+                  - name: postgres
+                    health: HEALTH_UP
+                    criticality: CRITICALITY_CRITICAL
+                    detail: ''
+                    impact: Nothing can be read or written.
+                    lastCheckedAt: '2026-08-14T11:04:55Z'
+                    latencyMs: '3'
+                  - name: openfga
+                    health: HEALTH_UP
+                    criticality: CRITICALITY_FAIL_CLOSED
+                    detail: ''
+                    impact: Every authorization check is denied while this is down.
+                    lastCheckedAt: '2026-08-14T11:04:55Z'
+                    latencyMs: '7'
+                  - name: centrifugo
+                    health: HEALTH_DEGRADED
+                    criticality: CRITICALITY_DEGRADABLE
+                    detail: 'connect: connection refused'
+                    impact: Live updates stop; reloading a page still shows current data.
+                    lastCheckedAt: '2026-08-14T11:04:55Z'
+                    latencyMs: '1004'
+      security:
+        - {}
     post:
       tags:
         - SystemService
@@ -643,11 +3309,95 @@ paths:
               schema:
                 $ref: '#/components/schemas/connect.error'
         "200":
-          description: Success
+          description: |
+            Server and dependency state.
+
+            The example is the interesting case rather than the happy one: `ready` is
+            true because every CRITICAL dependency is up, and `fullyOperational` is
+            false because a DEGRADABLE one is not. A client greys out the affected
+            feature and leaves the rest alone.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.system.v1.GetStatusResponse'
+              example:
+                ready: true
+                fullyOperational: false
+                version: 1.4.0
+                startedAt: '2026-08-14T09:12:03Z'
+                timezone: UTC
+                dependencies:
+                  - name: postgres
+                    health: HEALTH_UP
+                    criticality: CRITICALITY_CRITICAL
+                    detail: ''
+                    impact: Nothing can be read or written.
+                    lastCheckedAt: '2026-08-14T11:04:55Z'
+                    latencyMs: '3'
+                  - name: openfga
+                    health: HEALTH_UP
+                    criticality: CRITICALITY_FAIL_CLOSED
+                    detail: ''
+                    impact: Every authorization check is denied while this is down.
+                    lastCheckedAt: '2026-08-14T11:04:55Z'
+                    latencyMs: '7'
+                  - name: centrifugo
+                    health: HEALTH_DEGRADED
+                    criticality: CRITICALITY_DEGRADABLE
+                    detail: 'connect: connection refused'
+                    impact: Live updates stop; reloading a page still shows current data.
+                    lastCheckedAt: '2026-08-14T11:04:55Z'
+                    latencyMs: '1004'
+      security:
+        - {}
 tags:
+  - name: IdentityService
+    description: |-
+      IdentityService is the account, its credentials and its sessions.
+
+       # The gates, and the one that is not honest yet
+
+       Every RPC declares its enforcement policy or the server refuses to boot
+       (ADR-021). Four of these are public because they run before any session
+       exists; the other nine act on the CALLER'S OWN account, which identity has no
+       established annotation for.
+
+       Identity is not organization-scoped — a person exists before any organization
+       does, so there is no org for the org-context gate to resolve and no
+       `workspace_id` for row-level security to scope by. The authz gate's two
+       shapes both assume otherwise: an empty `resource_id_field` means "the org
+       already resolved for this request", and a named one means "read the id from
+       this request field", which no message here carries because the account is
+       resolved from the session rather than named by the caller.
+
+       So `{relation: "self", resource_type: "user"}` below names a self-scoped
+       convention that the authz gate now implements: `selfCheck` answers gate 2
+       from the principal alone, substituting `principal.Subject.ID` as the resource
+       and skipping gates 1 and 3, which are both questions ABOUT an organization
+       that a self-scoped method has none of. The resource is read from the session
+       and from nowhere else — not from the request, not from a header — so a caller
+       cannot aim the check at somebody else's account.
+
+       The convention is keyed on the STRING "self", which is the weak part of it.
+       A method that declares a relation this gate does not recognise falls through
+       to the org-scoped shape and fails closed for want of an active organization,
+       so the failure direction is safe; a method that MISSPELLS "self" gets the same
+       treatment and is simply unreachable. Both are safe and neither is obvious.
+       Replacing the string with a declared marker is tracked separately.
+
+       # Assurance levels
+
+       A session is normally AAL2, but AAL1 SESSIONS EXIST: an account with a
+       verified address and no second factor may mint exactly one, for the sole
+       purpose of enrolling its first factor (the bootstrap carve-out). So an
+       unannotated method is NOT automatically two-factor any more — its floor is
+       AAL1 by declaration, and the four read methods here that declare no `min_aal`
+       are reachable from a bootstrap session.
+
+       That makes the explicit declarations on the credential- and session-changing
+       methods load-bearing rather than documentary: they are what stops a
+       password-only session from touching credentials or sessions. A method added
+       here without a `min_aal` is single-factor by default, and the enrolment
+       carve-out is what makes that reachable in practice.
   - name: SystemService
     description: SystemService reports server and dependency state.

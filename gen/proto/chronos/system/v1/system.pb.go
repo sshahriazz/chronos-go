@@ -12,6 +12,7 @@ package systemv1
 
 import (
 	_ "github.com/chronos/chronos-go/gen/proto/chronos/options/v1"
+	_ "github.com/google/gnostic/openapiv3"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -379,7 +380,7 @@ var File_chronos_system_v1_system_proto protoreflect.FileDescriptor
 
 const file_chronos_system_v1_system_proto_rawDesc = "" +
 	"\n" +
-	"\x1echronos/system/v1/system.proto\x12\x11chronos.system.v1\x1a chronos/options/v1/options.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xa8\x02\n" +
+	"\x1echronos/system/v1/system.proto\x12\x11chronos.system.v1\x1a chronos/options/v1/options.proto\x1a$gnostic/openapi/v3/annotations.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xa8\x02\n" +
 	"\n" +
 	"Dependency\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x121\n" +
@@ -408,9 +409,51 @@ const file_chronos_system_v1_system_proto_rawDesc = "" +
 	"\x17CRITICALITY_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14CRITICALITY_CRITICAL\x10\x01\x12\x1a\n" +
 	"\x16CRITICALITY_DEGRADABLE\x10\x02\x12\x1b\n" +
-	"\x17CRITICALITY_FAIL_CLOSED\x10\x032t\n" +
-	"\rSystemService\x12c\n" +
-	"\tGetStatus\x12#.chronos.system.v1.GetStatusRequest\x1a$.chronos.system.v1.GetStatusResponse\"\v\xd0\xf3\x18\x01\xe8\xf3\x18\x01\x90\x02\x01B\xce\x01\n" +
+	"\x17CRITICALITY_FAIL_CLOSED\x10\x032\xaf\n" +
+	"\n" +
+	"\rSystemService\x12\x9d\n" +
+	"\n" +
+	"\tGetStatus\x12#.chronos.system.v1.GetStatusRequest\x1a$.chronos.system.v1.GetStatusResponse\"\xc4\t\xbaG\xb5\tB\xb0\t\x12\xad\t\n" +
+	"\x03200\x12\xa5\t\n" +
+	"\xa2\t\n" +
+	"\x9a\x02Server and dependency state.\n" +
+	"\n" +
+	"The example is the interesting case rather than the happy one: `ready` is\n" +
+	"true because every CRITICAL dependency is up, and `fullyOperational` is\n" +
+	"false because a DEGRADABLE one is not. A client greys out the affected\n" +
+	"feature and leaves the rest alone.\n" +
+	"\x1a\x82\a\n" +
+	"\xff\x06\n" +
+	"\x10application/json\x12\xea\x06\n" +
+	"<\x12:\n" +
+	"8#/components/schemas/chronos.system.v1.GetStatusResponse\x12\xa9\x06\x12\xa6\x06ready: true\n" +
+	"fullyOperational: false\n" +
+	"version: 1.4.0\n" +
+	"startedAt: '2026-08-14T09:12:03Z'\n" +
+	"timezone: UTC\n" +
+	"dependencies:\n" +
+	"  - name: postgres\n" +
+	"    health: HEALTH_UP\n" +
+	"    criticality: CRITICALITY_CRITICAL\n" +
+	"    detail: ''\n" +
+	"    impact: Nothing can be read or written.\n" +
+	"    lastCheckedAt: '2026-08-14T11:04:55Z'\n" +
+	"    latencyMs: '3'\n" +
+	"  - name: openfga\n" +
+	"    health: HEALTH_UP\n" +
+	"    criticality: CRITICALITY_FAIL_CLOSED\n" +
+	"    detail: ''\n" +
+	"    impact: Every authorization check is denied while this is down.\n" +
+	"    lastCheckedAt: '2026-08-14T11:04:55Z'\n" +
+	"    latencyMs: '7'\n" +
+	"  - name: centrifugo\n" +
+	"    health: HEALTH_DEGRADED\n" +
+	"    criticality: CRITICALITY_DEGRADABLE\n" +
+	"    detail: 'connect: connection refused'\n" +
+	"    impact: Live updates stop; reloading a page still shows current data.\n" +
+	"    lastCheckedAt: '2026-08-14T11:04:55Z'\n" +
+	"    latencyMs: '1004'\n" +
+	"Z\x00\xd0\xf3\x18\x01\xe8\xf3\x18\x01\x90\x02\x01B\xce\x01\n" +
 	"\x15com.chronos.system.v1B\vSystemProtoP\x01ZBgithub.com/chronos/chronos-go/gen/proto/chronos/system/v1;systemv1\xa2\x02\x03CSX\xaa\x02\x11Chronos.System.V1\xca\x02\x11Chronos\\System\\V1\xe2\x02\x1dChronos\\System\\V1\\GPBMetadata\xea\x02\x13Chronos::System::V1b\x06proto3"
 
 var (

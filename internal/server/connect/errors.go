@@ -27,8 +27,12 @@ func Error(err error) error {
 	if !errors.As(err, &e) {
 		// An error that never passed through errs has not been through the
 		// disclosure ladder, so nothing is known about what it is safe to say.
-		// Internal, with no message.
-		return connect.NewError(connect.CodeInternal, errors.New("internal error"))
+		// Internal, with no message — and the cause pinned to it, because this
+		// is the line at which it would otherwise cease to exist.
+		return &wireError{
+			wire:  connect.NewError(connect.CodeInternal, errors.New("internal error")),
+			cause: err,
+		}
 	}
 
 	wire := connect.NewError(codeFor(e.Reason), errors.New(e.Message))
@@ -43,7 +47,70 @@ func Error(err error) error {
 	}); derr == nil {
 		wire.AddDetail(detail)
 	}
+
+	// INTERNAL is the one code that tells the caller nothing, so it is the one
+	// code whose cause has no other way out of this function. Carry it. Every
+	// other code names its own failure, and a caller who can read the reason off
+	// the wire does not need an operator to read it out of a log.
+	if wire.Code() == connect.CodeInternal {
+		return &wireError{wire: wire, cause: err}
+	}
 	return wire
+}
+
+// wireError couples the response a caller receives with the cause that produced
+// it.
+//
+// It exists because of a real outage. A handler returned
+// `fmt.Errorf("loading the account…: %w", err)`, Error mapped it — correctly —
+// to a bare INTERNAL with no message and no detail, and the cause reached
+// NOBODY: not the caller, by design, and not the operator, by accident. The
+// total evidence for a completely broken slice was `internal: internal error` on
+// the wire and silence in the log.
+//
+// Fixing that means the cause has to survive one more hop, from here to the
+// boundary interceptor that has the procedure name and the request's trace. This
+// type is that hop, and it is deliberately inert in every other respect:
+//
+//   - Error returns the WIRE text verbatim, so a code path that formats this
+//     error instead of extracting the *connect.Error still discloses nothing.
+//   - Unwrap exposes only the *connect.Error, which is what connect's own
+//     asError walk needs. The cause is deliberately NOT on that chain: putting
+//     it there would make every sentinel inside a handler's failure newly
+//     visible to errors.Is at layers above, and the idempotency gate already
+//     branches on sentinels it expects to come from its own store.
+//
+// The cause is read back through Cause, and only there.
+type wireError struct {
+	wire  *connect.Error
+	cause error
+}
+
+func (e *wireError) Error() string { return e.wire.Error() }
+
+// Unwrap yields the transport error, never the cause. See the type comment.
+func (e *wireError) Unwrap() error { return e.wire }
+
+// serverCause is how the cause is retrieved, and the method is unexported so
+// that only this package can produce a value satisfying it. An exported
+// `Cause() error` would be satisfied by half the error types in the ecosystem —
+// github.com/pkg/errors named it that — and Cause below would then hand back
+// something this package never classified.
+func (e *wireError) serverCause() error { return e.cause }
+
+// Cause returns the server-side cause of an error this package mapped to the
+// wire, or nil when none was carried.
+//
+// Only errors mapped to INTERNAL carry one. A nil return means either that the
+// error was mapped to a code that speaks for itself, or that it never came
+// through Error at all — the second is worth recording on its own, and the
+// caller of this function is the one that does it.
+func Cause(err error) error {
+	var c interface{ serverCause() error }
+	if !errors.As(err, &c) {
+		return nil
+	}
+	return c.serverCause()
 }
 
 // codeFor maps a reason to a transport code.

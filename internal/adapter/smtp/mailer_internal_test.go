@@ -58,7 +58,7 @@ func TestHeaderInjectionIsRefused(t *testing.T) {
 			// occurs anywhere, which it legitimately does inside an RFC 2047
 			// encoded-word where the CRLF has become "=0D=0A".
 			head, _, _ := strings.Cut(string(doc), "\r\n\r\n")
-			for _, line := range strings.Split(head, "\r\n") {
+			for line := range strings.SplitSeq(head, "\r\n") {
 				name, _, isHeader := strings.Cut(line, ":")
 				if !isHeader {
 					continue

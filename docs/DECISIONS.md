@@ -2810,6 +2810,83 @@ behaviour for events already stored. Neither would be a refactor; both would be 
 correctness incident, which is why the read path is verified against the live log
 rather than against freshly-marshalled bytes.
 
+## ADR-048 — A reservation stream is named by a keyed HMAC, and its key is never rotated
+
+**Date:** 2026-08-13 · **Status:** Accepted
+
+Uniqueness of an email address is enforced by appending to a stream named after
+the address, with `NoStream` as the precondition: two concurrent registrations
+contend on one stream and exactly one wins (ADR-044). That makes the address part
+of a **stream name**, and a stream name is not a payload — which is why ADR-002's
+rule about personal data in events does not directly cover it, and why it needs
+its own decision.
+
+The name is `reservation_email-<hex(HMAC-SHA256(k_res, normalized_email))>`, full
+width, 64 hex characters. Never the address, and never a plain hash.
+
+### Why not the address in the clear
+
+Because erasure could not reach it. Crypto-shredding works by destroying a key so
+ciphertext becomes unreadable (ADR-002); a stream name has no ciphertext to
+shred. It persists in the `$streams` index and in the `$ce-reservation_email`
+category stream, surfaces in metrics labels and client logs, and KurrentDB's
+deletion is a soft delete. An erasure would release the reservation while the
+address stayed readable forever, in the one place nothing can rewrite.
+
+### Why not a plain hash
+
+The space of real email addresses is small enough to enumerate. `SHA-256(address)`
+is reversible in practice for anyone holding the log, so an unkeyed digest is a
+dictionary with extra steps. A keyed hash is not, because the key is not in the
+log or the database.
+
+### Why the key is never rotated, and never destroyed
+
+`k_res` is dedicated to this derivation, and it is the one key in the system that
+erasure does not revoke. Stream names are immutable: rotating the key produces
+new names while the old streams still hold the claims, so uniqueness would
+silently stop being enforced for every address registered before the rotation —
+no error, no event, and two accounts able to claim one address.
+
+Renaming the existing streams instead is not available. There is no in-place
+rename, and copying every reservation stream under a new name would rewrite
+history that other things reference by position.
+
+So the exception is accepted deliberately and its blast radius is stated rather
+than hoped about. An attacker holding **both** `k_res` and the log can confirm
+whether a **guessed** address has an account. They cannot enumerate addresses,
+recover one they have not guessed, or learn anything else about the person. That
+is the entire cost, and it buys atomic uniqueness with no lookup table.
+
+### No version column, deliberately
+
+IDENTITY-REVIEW C7 asked for one. It is absent, and the absence is the honest
+position: a version column advertises a rotation capability that cannot exist
+here, and the next reader would build a rotation job against it. C7's other half
+— truncation — was real and is fixed: the index is the full 32 bytes. A truncated
+index collides, and under the constraint that enforces uniqueness a collision
+means one person's registration fails because a stranger's address shares a
+prefix. That is unreproducible, unexplainable, and tells a determined attacker
+that some other address collides with theirs.
+
+### Consequences
+
+The same derivation names the stream and fills the `email_index` column, so the
+uniqueness mechanism and the lookup cannot disagree — two derivations would let
+them, and the disagreement would look exactly like projection lag.
+
+Comparisons against a derived index are constant-time (`hmac.Equal`). The
+comparison happens during verification against a caller-supplied address, and a
+byte-wise compare there leaks a prefix of the index the key exists to protect.
+
+The category is `reservation_email`, with an underscore. KurrentDB derives a
+category from everything before the FIRST dash, so a dash would file every
+reservation under `reservation` and break the prefix-filtered subscription.
+
+`k_res` must be backed up wherever it lives. Losing it is not recoverable by
+re-deriving: every existing reservation stream becomes unreachable, and
+uniqueness stops being enforced for every address already registered.
+
 ## ADR-049 — TOTP replay state is authoritative, in PostgreSQL, and fails closed
 
 **Date:** 2026-08-13 · **Status:** Accepted
@@ -2965,3 +3042,154 @@ The skew widens. Every extra step lengthens the window in which an observed code
 is replayable, which is the window this guard has to cover; the row count and the
 claim's expiry follow from `Skew` and would need to be re-derived, not just
 re-tuned.
+
+## ADR-050 — A login presents both factors in one call, and there is no half-authentication ticket
+
+**Date:** 2026-08-13 · **Status:** Accepted
+
+`Authenticate` takes the password and, optionally, the TOTP code. With no code it
+records `SecondFactorChallenged`, reports which kinds the account can complete
+with, and returns nothing else. The client then calls again with the password AND
+the code. Nothing is stored between the two calls.
+
+The consequence is explicit: a completed login pays **two** Argon2id evaluations,
+one per call, at 32 MiB and ~51 ms each.
+
+### What the alternative would cost
+
+The obvious fix is a ticket: after the password verifies, hand the client
+something that says "the first factor is done", so the second call skips the
+hash. Every place to put it is worse than the hash it saves.
+
+A row in `identity_token` gives a half-authentication the same storage, lifetime
+and revocation surface as a password reset — a thing an attacker can steal and
+replay, holding one factor's worth of proof. An in-process map is per-pod, so it
+breaks the moment a second replica exists and produces a login that works only
+when the load balancer happens to be sticky. A signed stateless challenge is the
+serious option — an HMAC over `(subject, AAL1, expiry, nonce)` with the nonce
+spent once in Valkey — and it is still a **bearer artifact for a partial
+authentication**, which is precisely what `app.Proof` was designed to make
+impossible: unexported fields, no constructor, not serializable, so evidence of
+an authentication cannot leave the process that performed it.
+
+### Why the cost is acceptable now
+
+The hasher is bounded at `GOMAXPROCS` concurrent evaluations, which is the
+measured saturation point — beyond it, throughput falls while memory keeps
+climbing. On the 11-core development machine that is roughly 100 completed
+logins per second sustained, with the doubling already counted. This system is
+not near that, and the first thing to hit it would be a burst of registrations
+rather than steady login traffic.
+
+Adding a bearer token to a system that has none, to solve a capacity problem it
+does not have, is the trade this ADR refuses.
+
+### When to revisit
+
+Two triggers, and both are measurable rather than a matter of taste:
+
+- Sustained completed logins approach the concurrency bound — watch the queue
+  wait, not the CPU: the hasher sheds with `RATE_LIMITED` after two seconds, so
+  the symptom is refusals during normal traffic.
+- Password-only authentication becomes reachable for any account. The second
+  hash exists because a second factor is mandatory; if that stops being true,
+  this whole shape changes and so does ADR-036's disclosure argument.
+
+Adding the challenge later is **not** a breaking API change: the request gains an
+optional field and the response an optional one, which `buf breaking` permits.
+That is why the decision could be taken now rather than deferred into the proto.
+
+### Consequences
+
+The client holds the password for the duration of the ceremony, which is what a
+browser's form already does and what a native client must be told not to persist.
+The RPC surface says so, in the field's own documentation, rather than leaving it
+to be inferred.
+
+`contract.SecondFactorChallenged` is appended on the first call. It is the record
+that a password was accepted for an account, which is a real security signal on
+its own — someone knows the password and does not have the device.
+
+---
+
+## ADR-051 — A username is a public handle, is not in the vault, and its tombstone outlives the account
+
+**Date:** 2026-08-16 · **Status:** Accepted
+
+Every account has a **username**: a public, human-chosen handle used for
+mentions, profile URLs and anywhere the product needs to name a person to other
+people. It is mandatory, not an optional profile field.
+
+It is stored **in the clear, in a projection column**, and it is the first
+deliberate exception to "no projection may contain a personal-data column"
+(compliance.md §1). That exception needs stating rather than assuming, because
+the rule it breaks is the one that makes erasure a key deletion instead of a
+migration.
+
+### Why it is not in the PII vault
+
+The vault exists so that personal data can be destroyed by destroying a key
+(ADR-002). That mechanism requires the data to be *secret* — crypto-shredding
+makes ciphertext unreadable, and it does nothing to a value that was published.
+
+A username is published by design. Its entire purpose is that other people see
+it: `@alice` in a comment, `/u/alice` in a URL, "alice invited you" in an email
+somebody else received. Putting it in the vault would give the appearance of
+protection while every copy that matters lives in somebody else's inbox and
+somebody else's screenshot. Worse, it would make the read model resolve a vault
+key on every page render that names a person, which is the cost the vault exists
+to avoid paying on non-secret data.
+
+So the handle goes in `user_view` as an ordinary column, and it is the one piece
+of user-supplied text this system deliberately publishes.
+
+### The erasure consequence, which is the hard part
+
+Because it is cleartext, **erasure must DELETE it** — key destruction does
+nothing. That is a second exception: erasure elsewhere in this system never needs
+to touch a projection, and here it does.
+
+**And the handle must never be reissued.** If `@alice` is erased and somebody
+else may claim it, every old mention, link and cached reference silently
+re-points at a stranger. An erasure request — a privacy action taken to protect
+someone — would create an impersonation vector aimed at that same person. So
+erasure leaves a **tombstone**: the handle is marked taken, permanently, and no
+future registration may claim it.
+
+The tombstone outlives the account, which means it is data retained after an
+erasure request, and that has to be justified rather than waved through. It is
+justifiable on two grounds: it protects **third parties** (readers of old
+content, who would otherwise be deceived) rather than the controller, and it
+retains **no personal data** — the tombstone is the handle string and the fact
+"never reissue", with no subject id, no timestamp tied to a person, and nothing
+that links it back to who held it. It is a reservation with no owner.
+
+### Why it is a reservation aggregate, not a column with a unique index
+
+Same reasoning as ADR-044/ADR-048 for email: uniqueness under concurrency is a
+write-path invariant, and a unique index in a projection cannot enforce it
+because projections are derived and eventually consistent. Two simultaneous
+claims must contend on one stream, with exactly one winner, before either becomes
+a fact.
+
+`UsernameReservation` therefore mirrors `EmailReservation` — with one difference
+that follows directly from the decision above: **the stream is named by the
+handle itself, not by a keyed HMAC.** ADR-048 hides the email because the email
+is secret; hiding a public handle would buy nothing and cost the ability to read
+the log while debugging.
+
+### Why it is NOT a login identifier
+
+`Authenticate` and `CreateSession` continue to accept the email address only.
+
+A public handle is half of a credential pair that is published on purpose. Making
+it a login identifier hands an attacker an enumerable, harvestable target list —
+every visible `@handle` becomes a login to spray — and turns the account-lockout
+ceiling into a denial-of-service tool aimed at anyone whose handle can be read.
+The email identifier is private today, and that privacy is doing real work
+alongside ADR-036's undifferentiated refusal.
+
+Systems that permit both (GitHub, most social products) pay for it with
+substantial secondary defence. That is a reasonable trade for a product whose
+users expect it; it is not a trade to make by accident because the field happened
+to exist.

@@ -35,16 +35,16 @@ func registerSynthetic(
 	empty := "google.protobuf.Empty"
 	svcName := "SyntheticService"
 	fd := &descriptorpb.FileDescriptorProto{
-		Name:       proto.String(file),
-		Package:    proto.String(pkg),
-		Syntax:     proto.String("proto3"),
+		Name:       new(file),
+		Package:    new(pkg),
+		Syntax:     new("proto3"),
 		Dependency: []string{"google/protobuf/empty.proto"},
 		Service: []*descriptorpb.ServiceDescriptorProto{{
-			Name: proto.String(svcName),
+			Name: new(svcName),
 			Method: []*descriptorpb.MethodDescriptorProto{{
-				Name:       proto.String(method),
-				InputType:  proto.String("." + empty),
-				OutputType: proto.String("." + empty),
+				Name:       new(method),
+				InputType:  new("." + empty),
+				OutputType: new("." + empty),
 				Options:    opts,
 			}},
 		}},

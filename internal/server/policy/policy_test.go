@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	identityv1 "github.com/chronos/chronos-go/gen/proto/chronos/identity/v1"
 	optionsv1 "github.com/chronos/chronos-go/gen/proto/chronos/options/v1"
 	systemv1 "github.com/chronos/chronos-go/gen/proto/chronos/system/v1"
 	"github.com/chronos/chronos-go/internal/server/policy"
@@ -18,6 +19,7 @@ import (
 // and TestEveryServedServiceIsListed is what makes forgetting to grow it fail.
 var services = []protoreflect.FullName{
 	systemv1.File_chronos_system_v1_system_proto.Services().Get(0).FullName(),
+	identityv1.File_chronos_identity_v1_identity_proto.Services().Get(0).FullName(),
 }
 
 // Every RPC the server serves declares its gates.
@@ -253,3 +255,404 @@ func TestAWellFormedPolicyLoads(t *testing.T) {
 }
 
 func itoa(i int) string { return strconv.Itoa(i) }
+
+// ---- the self-scoped shape ----
+
+// SelfScoped recognises exactly one declaration and nothing adjacent to it.
+//
+// Each false case below is a way the predicate could be made to fire for a
+// question it does not answer, and each would turn three gates off for a method
+// that needs them.
+func TestSelfScopedRecognisesOnlyTheSelfDeclaration(t *testing.T) {
+	cases := map[string]struct {
+		policy policy.Policy
+		want   bool
+	}{
+		"the identity shape": {
+			policy: policy.Policy{Relation: "self", ResourceType: "user"},
+			want:   true,
+		},
+		"an ordinary org-scoped method": {
+			policy: policy.Policy{Relation: "admin", ResourceType: "organization"},
+		},
+		"another relation on the user type": {
+			policy: policy.Policy{Relation: "owner", ResourceType: "user"},
+		},
+		"self on another resource type": {
+			policy: policy.Policy{Relation: "self", ResourceType: "organization"},
+		},
+		"self whose resource the caller names": {
+			policy: policy.Policy{
+				Relation: "self", ResourceType: "user", ResourceIDField: "user_id",
+			},
+		},
+		"a public method": {
+			policy: policy.Policy{Public: true, Relation: "self", ResourceType: "user"},
+		},
+		"an empty policy": {},
+	}
+	for name, tc := range cases {
+		if got := tc.policy.SelfScoped(); got != tc.want {
+			t.Errorf("%s: SelfScoped() = %v, want %v", name, got, tc.want)
+		}
+	}
+}
+
+// Incoherent self declarations are refused at STARTUP, not resolved at request
+// time.
+func TestIncoherentSelfPoliciesAreRefused(t *testing.T) {
+	cases := map[string]struct {
+		authz *optionsv1.Authz
+		ent   string
+		wants string
+	}{
+		"self whose resource the caller names": {
+			authz: &optionsv1.Authz{
+				Relation: "self", ResourceType: "user", ResourceIdField: "user_id",
+			},
+			wants: "not a self check",
+		},
+		"self on another resource type": {
+			authz: &optionsv1.Authz{Relation: "self", ResourceType: "organization"},
+			wants: "the only coherent type",
+		},
+		"self with an entitlement": {
+			authz: &optionsv1.Authz{Relation: "self", ResourceType: "user"},
+			ent:   "seats.member",
+			wants: "entitlements are purchased by an organization",
+		},
+	}
+	i := 0
+	for name, tc := range cases {
+		i++
+		o := annotated()
+		proto.SetExtension(o, optionsv1.E_Authz, tc.authz)
+		if tc.ent != "" {
+			proto.SetExtension(o, optionsv1.E_Entitlement, tc.ent)
+		}
+		svc := registerSynthetic(t, "chronos.test.selfincoherent"+itoa(i)+".v1", "Method", o)
+
+		_, err := policy.Load(svc)
+		if err == nil {
+			t.Errorf("%s: was accepted", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.wants) {
+			t.Errorf("%s: error does not mention %q: %v", name, tc.wants, err)
+		}
+	}
+}
+
+// ---- the bootstrap assurance floor (a first enrolment has nothing to step up
+// with) ----
+
+// selfAnnotated builds a valid self-scoped AAL2 policy — the baseline the
+// bootstrap cases mutate.
+func selfAnnotated() *descriptorpb.MethodOptions {
+	o := &descriptorpb.MethodOptions{}
+	proto.SetExtension(o, optionsv1.E_Authz, &optionsv1.Authz{
+		Relation: "self", ResourceType: "user",
+	})
+	proto.SetExtension(o, optionsv1.E_Operation, optionsv1.OperationClass_OPERATION_CLASS_WRITE)
+	proto.SetExtension(o, optionsv1.E_MinAal, optionsv1.AssuranceLevel_ASSURANCE_LEVEL_2)
+	return o
+}
+
+// The floor is relaxed on ONE combination and on nothing adjacent to it.
+//
+// Every other row here is a way the exemption could leak into a state it was not
+// granted for, and each of them is the hole the design exists to keep shut: an
+// account that already has a second factor must present it before another can be
+// added, or a stolen password is enough to enrol one.
+func TestABootstrapFloorRelaxesOnlyAFirstEnrolment(t *testing.T) {
+	const (
+		aal1 = optionsv1.AssuranceLevel_ASSURANCE_LEVEL_1
+		aal2 = optionsv1.AssuranceLevel_ASSURANCE_LEVEL_2
+	)
+	exempt := policy.Policy{
+		Relation: "self", ResourceType: "user",
+		MinAAL: aal2, BootstrapMinAAL: aal1,
+	}
+	strict := policy.Policy{Relation: "self", ResourceType: "user", MinAAL: aal2}
+
+	cases := map[string]struct {
+		policy    policy.Policy
+		enrolment policy.Enrolment
+		want      optionsv1.AssuranceLevel
+	}{
+		"a first enrolment on a method that declared the exemption": {
+			policy: exempt, enrolment: policy.EnrolmentBootstrap, want: aal1,
+		},
+		"an account that already has a second factor": {
+			policy: exempt, enrolment: policy.EnrolmentEstablished, want: aal2,
+		},
+		"an authenticator that did not answer": {
+			policy: exempt, enrolment: policy.EnrolmentUnknown, want: aal2,
+		},
+		"the zero enrolment value": {
+			policy: exempt, want: aal2,
+		},
+		"a first enrolment on a method that declared no exemption": {
+			policy: strict, enrolment: policy.EnrolmentBootstrap, want: aal2,
+		},
+		"an established account on a method that declared no exemption": {
+			policy: strict, enrolment: policy.EnrolmentEstablished, want: aal2,
+		},
+	}
+	for name, tc := range cases {
+		if got := tc.policy.AALFloor(tc.enrolment); got != tc.want {
+			t.Errorf("%s: AALFloor = %v, want %v", name, got, tc.want)
+		}
+	}
+
+	// A method with no assurance declaration at all still floors at AAL1, in
+	// every enrolment state. Without this the bootstrap branch could return
+	// UNSPECIFIED, which a session carrying no level satisfies.
+	for _, e := range []policy.Enrolment{
+		policy.EnrolmentUnknown, policy.EnrolmentEstablished, policy.EnrolmentBootstrap,
+	} {
+		if got := (policy.Policy{}).AALFloor(e); got != aal1 {
+			t.Errorf("an undeclared policy floors at %v for enrolment %v, want AAL1", got, e)
+		}
+	}
+}
+
+// Incoherent bootstrap declarations are refused at STARTUP.
+//
+// A gate that can be misdeclared silently is worse than the deadlock it removes:
+// the deadlock is loud, because nobody activates, and a misdeclared exemption is
+// a permanently lowered floor that nothing reports.
+func TestIncoherentBootstrapPoliciesAreRefused(t *testing.T) {
+	cases := map[string]struct {
+		mutate func(*descriptorpb.MethodOptions)
+		wants  string
+	}{
+		"declared as the unspecified zero value": {
+			mutate: func(o *descriptorpb.MethodOptions) {
+				proto.SetExtension(o, optionsv1.E_BootstrapMinAal,
+					optionsv1.AssuranceLevel_ASSURANCE_LEVEL_UNSPECIFIED)
+			},
+			wants: "which every session satisfies",
+		},
+		"equal to the required level": {
+			mutate: func(o *descriptorpb.MethodOptions) {
+				proto.SetExtension(o, optionsv1.E_BootstrapMinAal,
+					optionsv1.AssuranceLevel_ASSURANCE_LEVEL_2)
+			},
+			wants: "not strictly below",
+		},
+		"above the required level": {
+			mutate: func(o *descriptorpb.MethodOptions) {
+				proto.SetExtension(o, optionsv1.E_MinAal,
+					optionsv1.AssuranceLevel_ASSURANCE_LEVEL_2)
+				proto.SetExtension(o, optionsv1.E_BootstrapMinAal,
+					optionsv1.AssuranceLevel_ASSURANCE_LEVEL_3)
+			},
+			wants: "not strictly below",
+		},
+		"with no required level to be an exemption from": {
+			mutate: func(o *descriptorpb.MethodOptions) {
+				proto.ClearExtension(o, optionsv1.E_MinAal)
+				proto.SetExtension(o, optionsv1.E_BootstrapMinAal,
+					optionsv1.AssuranceLevel_ASSURANCE_LEVEL_1)
+			},
+			wants: "not strictly below",
+		},
+		"on an org-scoped method": {
+			mutate: func(o *descriptorpb.MethodOptions) {
+				proto.SetExtension(o, optionsv1.E_Authz, &optionsv1.Authz{
+					Relation: "admin", ResourceType: "organization",
+				})
+				proto.SetExtension(o, optionsv1.E_BootstrapMinAal,
+					optionsv1.AssuranceLevel_ASSURANCE_LEVEL_1)
+			},
+			wants: "not scoped to the caller's own account",
+		},
+		"on a public method": {
+			mutate: func(o *descriptorpb.MethodOptions) {
+				proto.ClearExtension(o, optionsv1.E_Authz)
+				proto.ClearExtension(o, optionsv1.E_MinAal)
+				proto.SetExtension(o, optionsv1.E_Public, true)
+				proto.SetExtension(o, optionsv1.E_BootstrapMinAal,
+					optionsv1.AssuranceLevel_ASSURANCE_LEVEL_1)
+			},
+			wants: "no enrolment state to relax for",
+		},
+	}
+
+	i := 0
+	for name, tc := range cases {
+		i++
+		opts := selfAnnotated()
+		tc.mutate(opts)
+		svc := registerSynthetic(t, "chronos.test.bootstrap"+itoa(i)+".v1", "Method", opts)
+
+		_, err := policy.Load(svc)
+		if err == nil {
+			t.Errorf("%s: was accepted, so a method is served below its declared assurance "+
+				"level with nothing saying so", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.wants) {
+			t.Errorf("%s: error does not mention %q: %v", name, tc.wants, err)
+		}
+	}
+}
+
+// A coherent bootstrap declaration loads, so the refusals above discriminate
+// rather than reject everything with the option set.
+func TestACoherentBootstrapFloorLoads(t *testing.T) {
+	opts := selfAnnotated()
+	proto.SetExtension(opts, optionsv1.E_BootstrapMinAal,
+		optionsv1.AssuranceLevel_ASSURANCE_LEVEL_1)
+	svc := registerSynthetic(t, "chronos.test.bootstrapok.v1", "Method", opts)
+
+	set, err := policy.Load(svc)
+	if err != nil {
+		t.Fatalf("a coherent bootstrap floor was refused: %v", err)
+	}
+	const method = "/chronos.test.bootstrapok.v1.SyntheticService/Method"
+	p, ok := set.Lookup(method)
+	if !ok {
+		t.Fatalf("the method is not in the set; loaded: %v", set.Methods())
+	}
+	if !p.BootstrapExempt() {
+		t.Fatal("the declared exemption did not survive Load")
+	}
+	if got := p.AALFloor(policy.EnrolmentBootstrap); got !=
+		optionsv1.AssuranceLevel_ASSURANCE_LEVEL_1 {
+		t.Errorf("a first enrolment floors at %v, want AAL1 — the deadlock is not broken", got)
+	}
+	if got := p.AALFloor(policy.EnrolmentEstablished); got !=
+		optionsv1.AssuranceLevel_ASSURANCE_LEVEL_2 {
+		t.Errorf("an established account floors at %v, want AAL2", got)
+	}
+	if want := []string{method}; len(set.BootstrapExempt()) != 1 ||
+		set.BootstrapExempt()[0] != want[0] {
+		t.Errorf("Set.BootstrapExempt() = %v, want %v; an operator reading the startup log "+
+			"would not see which methods are relaxed", set.BootstrapExempt(), want)
+	}
+}
+
+// EXACTLY the two halves of a first enrolment carry the exemption, across every
+// service this server serves.
+//
+// A pinned list, unlike almost every other test here, and deliberately so. The
+// argument against pinning — the person who forgets the annotation also forgets
+// the list — does not apply in this direction: this list is what a method must
+// be ADDED to, and the failure mode being guarded is a new RPC quietly acquiring
+// a lowered assurance floor. A method that removes one factor to get back to the
+// no-factor state, or that mints recovery codes, would be exactly such an RPC,
+// and copying the annotation from EnrollTotp is how it would acquire it.
+func TestOnlyAFirstEnrolmentCarriesTheBootstrapExemption(t *testing.T) {
+	set, err := policy.Load(services...)
+	if err != nil {
+		t.Fatalf("policy.Load: %v", err)
+	}
+	want := []string{
+		"/chronos.identity.v1.IdentityService/ConfirmTotp",
+		"/chronos.identity.v1.IdentityService/EnrollTotp",
+	}
+	got := set.BootstrapExempt()
+	if len(got) != len(want) {
+		t.Fatalf("methods carrying a bootstrap exemption = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("methods carrying a bootstrap exemption = %v, want %v", got, want)
+		}
+	}
+}
+
+// The deadlock is broken on the real schema, and only for a first enrolment.
+//
+// Read the three methods together and they are the whole decision: the two calls
+// that produce a first factor are reachable without one, the call that mints a
+// standing bypass of every factor is not, and none of them is reachable below
+// AAL2 once the account has a factor to present.
+func TestTheRealEnrolmentPathIsReachableExactlyOnceAndNoWider(t *testing.T) {
+	set, err := policy.Load(services...)
+	if err != nil {
+		t.Fatalf("policy.Load: %v", err)
+	}
+	const (
+		aal1 = optionsv1.AssuranceLevel_ASSURANCE_LEVEL_1
+		aal2 = optionsv1.AssuranceLevel_ASSURANCE_LEVEL_2
+	)
+	cases := []struct {
+		method                 string
+		bootstrap, established optionsv1.AssuranceLevel
+		why                    string
+	}{
+		{"EnrollTotp", aal1, aal2,
+			"an account with no second factor cannot present one, so AAL2 here means it can " +
+				"never obtain the factor it must have to activate"},
+		{"ConfirmTotp", aal1, aal2,
+			"the confirmation is the other half of the same enrolment; exempting only the " +
+				"first half moves the deadlock rather than removing it"},
+		{"GenerateRecoveryCodes", aal2, aal2,
+			"a recovery code is a standing bypass of every factor, and it activates nothing — " +
+				"so there is no deadlock to break and nothing to gain by relaxing it"},
+	}
+	for _, tc := range cases {
+		p, ok := set.Lookup("/chronos.identity.v1.IdentityService/" + tc.method)
+		if !ok {
+			t.Fatalf("%s is not in the policy set", tc.method)
+		}
+		if got := p.AALFloor(policy.EnrolmentBootstrap); got != tc.bootstrap {
+			t.Errorf("%s floors a first enrolment at %v, want %v: %s",
+				tc.method, got, tc.bootstrap, tc.why)
+		}
+		if got := p.AALFloor(policy.EnrolmentEstablished); got != tc.established {
+			t.Errorf("%s floors an account that already has a second factor at %v, want %v — "+
+				"a stolen password would be enough to enrol another",
+				tc.method, got, tc.established)
+		}
+		if got := p.AALFloor(policy.EnrolmentUnknown); got != tc.established {
+			t.Errorf("%s floors an unknown enrolment state at %v, want %v: an authenticator "+
+				"that does not answer must get the strict floor", tc.method, got, tc.established)
+		}
+	}
+}
+
+// The real identity service is self-scoped on every method that is not public.
+//
+// This is the annotation the gate depends on. If a method ever declares an
+// org-scoped policy instead, it becomes unreachable — identity has no
+// organization to resolve — and the failure is an INTERNAL error at request
+// time rather than anything visible at build time.
+func TestEveryNonPublicIdentityMethodIsSelfScoped(t *testing.T) {
+	set, err := policy.Load(services...)
+	if err != nil {
+		t.Fatalf("policy.Load: %v", err)
+	}
+	svc := identityv1.File_chronos_identity_v1_identity_proto.Services().Get(0)
+	methods := svc.Methods()
+
+	selfScoped := 0
+	for i := range methods.Len() {
+		name := "/" + string(svc.FullName()) + "/" + string(methods.Get(i).Name())
+		p, ok := set.Lookup(name)
+		if !ok {
+			t.Fatalf("%s is not in the policy set", name)
+		}
+		if p.Public {
+			continue
+		}
+		if !p.SelfScoped() {
+			t.Errorf("%s is neither public nor self-scoped (relation %q, type %q, field %q), "+
+				"so it is org-scoped — and identity has no organization to resolve, which "+
+				"makes it unreachable", name, p.Relation, p.ResourceType, p.ResourceIDField)
+			continue
+		}
+		selfScoped++
+	}
+	if selfScoped == 0 {
+		t.Fatal("no identity method is self-scoped; this test would pass against an empty " +
+			"service and is asserting nothing")
+	}
+	if got := len(set.SelfScoped()); got != selfScoped {
+		t.Errorf("Set.SelfScoped() lists %d methods, but %d are self-scoped; an operator "+
+			"reading the startup log would not see them all", got, selfScoped)
+	}
+}

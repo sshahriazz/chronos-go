@@ -31,9 +31,61 @@ func registered(t *testing.T) *domain.User {
 	return u
 }
 
+// legacyPassword puts a password on an account whose address is UNPROVEN.
+//
+// It applies the event directly rather than taking the decision, because the
+// decision is refused: SetPassword requires a verified address (IDENTITY-REVIEW
+// C8). The STATE is still reachable — every account registered before that rule
+// existed has exactly this shape in its stream, and Apply must never reject a
+// recorded fact — so tests about how such an account behaves need a way to build
+// one. Using it anywhere the rule itself is under test would defeat the rule.
+func legacyPassword(u *domain.User, cred ids.CredentialID) *domain.User {
+	u.Apply(&contract.PasswordSet{
+		SubjectID:    u.SubjectID(),
+		CredentialID: cred.String(),
+		SetAt:        at,
+	})
+	return u
+}
+
 // ---------------------------------------------------------------------------
 // Activation
 // ---------------------------------------------------------------------------
+
+// A password may not be set before the address it belongs to is proven.
+//
+// This is the aggregate's half of the pre-hijacking defence (IDENTITY-REVIEW
+// C8). Without it, a stranger registers somebody else's address with a password
+// of their own, the mailbox owner follows the verification link believing they
+// are finishing their own signup, and that click — which proves control of the
+// MAILBOX and nothing more — switches the stranger's credential on.
+//
+// The rule is stated as a refusal in the aggregate rather than as an ordering in
+// the use case, so a second path to a first password inherits it instead of
+// having to remember it.
+func TestAPasswordCannotBeSetBeforeTheAddressIsProven(t *testing.T) {
+	u := registered(t)
+	before := len(u.Uncommitted())
+
+	err := u.SetPassword(newID[ids.Credential](t), at)
+	if err == nil {
+		t.Fatal("an unverified account accepted a password: whoever registered the address " +
+			"can now set the credential that the real mailbox owner's click will activate, " +
+			"which is the pre-hijacking attack in full")
+	}
+	if got := errs.ReasonOf(err); got != errs.Conflict {
+		t.Errorf("reason is %s, want %s", got, errs.Conflict)
+	}
+	if got := len(u.Uncommitted()); got != before {
+		t.Errorf("the refusal still recorded %d event(s)", got-before)
+	}
+
+	// And it is accepted the moment the address IS proven, so the rule is an
+	// ordering rather than a prohibition — without this half the test would also
+	// pass against a SetPassword that refused unconditionally.
+	mustNil(t, u.VerifyEmail("idx_1", at))
+	mustNil(t, u.SetPassword(newID[ids.Credential](t), at))
+}
 
 // A registered account is Pending and can do nothing.
 //
@@ -88,8 +140,10 @@ func TestActivationRequiresEveryPrecondition(t *testing.T) {
 	})
 
 	t.Run("password and TOTP, but unverified", func(t *testing.T) {
-		u := registered(t)
-		mustNil(t, u.SetPassword(cred, at))
+		// The password is APPLIED rather than decided: an unverified account
+		// cannot be given one any more. The state is still reachable by replay,
+		// and this subtest is about what activation does with it.
+		u := legacyPassword(registered(t), cred)
 		mustNil(t, u.StartTotpEnrollment(totp, at.Add(time.Hour), at))
 		mustNil(t, u.EnableTotp(totp, at))
 
@@ -110,8 +164,13 @@ func TestActivationHappensWhicheverStepIsLast(t *testing.T) {
 		name string
 		run  func(t *testing.T, u *domain.User, pw, totp ids.CredentialID)
 	}{
+		// Verification last is now reachable only from a stream written before
+		// SetPassword required a proven address, so the password is applied as a
+		// recorded fact. The path still has to activate: a rebuild of such an
+		// account must reach Active exactly as it did, or every pre-existing
+		// account silently stops being usable.
 		{"verification last", func(t *testing.T, u *domain.User, pw, totp ids.CredentialID) {
-			mustNil(t, u.SetPassword(pw, at))
+			legacyPassword(u, pw)
 			mustNil(t, u.StartTotpEnrollment(totp, at.Add(time.Hour), at))
 			mustNil(t, u.EnableTotp(totp, at))
 			mustNil(t, u.VerifyEmail("idx_1", at))
@@ -287,8 +346,19 @@ func TestASuspendedAccountAcceptsNoChanges(t *testing.T) {
 func TestEveryUnusableStateHasItsOwnRefusalReason(t *testing.T) {
 	unverified := registered(t)
 
+	// Pending, verified, and NOT the bootstrap case: this account has already
+	// proven a second factor and is unfinished for a different reason — it has no
+	// primary method, so there is nothing for a login to start with. It is the
+	// case ReasonIncomplete continues to describe now that a Pending account
+	// which has never held a factor is admitted (NeedsFirstSecondFactor).
 	incomplete := registered(t)
 	mustNil(t, incomplete.VerifyEmail("idx_1", at))
+	incompleteTotp := newID[ids.Credential](t)
+	mustNil(t, incomplete.StartTotpEnrollment(incompleteTotp, at.Add(time.Hour), at))
+	mustNil(t, incomplete.EnableTotp(incompleteTotp, at))
+	if incomplete.State() != domain.StatePending {
+		t.Fatalf("the incomplete fixture is %s, not pending", incomplete.State())
+	}
 
 	deactivated := active(t)
 	mustNil(t, deactivated.Deactivate("subj_1", at))
@@ -316,6 +386,222 @@ func TestEveryUnusableStateHasItsOwnRefusalReason(t *testing.T) {
 				t.Errorf("reason is %q, want %q", reason, tc.want)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The first enrolment
+// ---------------------------------------------------------------------------
+
+// A verified account with no second factor may authenticate, and that is the
+// only way it can ever get one.
+//
+// Without this the account is deadlocked: enrolling a factor needs a session, a
+// session needs AAL2, and AAL2 needs the factor. The refusal that used to sit
+// here made every account registered through the public API permanently Pending.
+func TestAVerifiedAccountWithNoFactorMayAuthenticateToEnrolItsFirst(t *testing.T) {
+	u := registered(t)
+	mustNil(t, u.VerifyEmail("idx_1", at))
+	mustNil(t, u.SetPassword(newID[ids.Credential](t), at))
+
+	if u.State() != domain.StatePending {
+		t.Fatalf("the fixture is %s, not pending", u.State())
+	}
+	if !u.NeedsFirstSecondFactor() {
+		t.Fatal("an account that has never held a second factor does not report that it " +
+			"needs its first")
+	}
+	reason, ok := u.CanAuthenticate()
+	if !ok {
+		t.Fatalf("a verified account with no second factor was refused (%q), so it can never "+
+			"enrol one and can never leave pending", reason)
+	}
+	if reason != "" {
+		t.Errorf("an allowed authentication carries the refusal reason %q", reason)
+	}
+}
+
+// Nothing but that one state reports it.
+//
+// The table is the security statement: NeedsFirstSecondFactor is what admits a
+// password-only login and what the AAL1 session is justified by, so any state
+// reaching it that should not is a route to a session without a second factor.
+func TestOnlyANeverEnrolledVerifiedAccountNeedsAFirstFactor(t *testing.T) {
+	// Pending, verified, and already holding a proven factor — it has no primary
+	// method, which is why it has not activated.
+	pendingWithFactor := registered(t)
+	mustNil(t, pendingWithFactor.VerifyEmail("idx_1", at))
+	pwfTotp := newID[ids.Credential](t)
+	mustNil(t, pendingWithFactor.StartTotpEnrollment(pwfTotp, at.Add(time.Hour), at))
+	mustNil(t, pendingWithFactor.EnableTotp(pwfTotp, at))
+
+	// Pending, verified, mid-enrolment: the secret is provisioned and no code has
+	// proven it. A provisioned-but-unproven factor must NOT end the exemption, or
+	// the account is locked out one step further along than before — it can start
+	// an enrolment and never confirm it.
+	midEnrolment := registered(t)
+	mustNil(t, midEnrolment.VerifyEmail("idx_1", at))
+	mustNil(t, midEnrolment.SetPassword(newID[ids.Credential](t), at))
+	mustNil(t, midEnrolment.StartTotpEnrollment(newID[ids.Credential](t), at.Add(time.Hour), at))
+
+	unverified := legacyPassword(registered(t), newID[ids.Credential](t))
+
+	deactivated := active(t)
+	mustNil(t, deactivated.Deactivate("subj_1", at))
+
+	suspended := active(t)
+	mustNil(t, suspended.Suspend("op_1", "abuse", at))
+
+	for _, tc := range []struct {
+		name string
+		user *domain.User
+		want bool
+	}{
+		{"nonexistent", eventsourcing.NewAggregate(domain.New), false},
+		{"registered but unverified", unverified, false},
+		{"verified, never enrolled", midEnrolment, true},
+		{"verified, already proven a factor", pendingWithFactor, false},
+		{"active", active(t), false},
+		{"deactivated", deactivated, false},
+		{"suspended", suspended, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.user.NeedsFirstSecondFactor(); got != tc.want {
+				t.Fatalf("NeedsFirstSecondFactor is %v, want %v", got, tc.want)
+			}
+			if !tc.want {
+				return
+			}
+			if _, ok := tc.user.CanAuthenticate(); !ok {
+				t.Fatal("an account that needs its first factor may not authenticate, so it " +
+					"cannot get one")
+			}
+		})
+	}
+}
+
+// An unverified address never earns a session, whatever else is enrolled.
+//
+// The exemption is what makes a password-only session possible, so the address
+// check is the whole thing standing between "somebody registered your address"
+// and "somebody holds a session on your account". It is asserted separately from
+// the table above because it is the conjunct an optimisation is most likely to
+// drop.
+func TestAnUnverifiedAccountIsRefusedHoweverFarItsEnrolmentGot(t *testing.T) {
+	u := legacyPassword(registered(t), newID[ids.Credential](t))
+
+	if u.NeedsFirstSecondFactor() {
+		t.Error("an account whose address nobody proved reports that it may enrol a factor")
+	}
+	reason, ok := u.CanAuthenticate()
+	if ok {
+		t.Fatal("an account whose address nobody proved was allowed to authenticate; " +
+			"registering somebody else's address would hand over a session on it")
+	}
+	if reason != contract.ReasonUnverifiedEmail {
+		t.Errorf("refusal reason is %q, want %q", reason, contract.ReasonUnverifiedEmail)
+	}
+}
+
+// Having held a second factor is PERMANENT, and no route walks it back.
+//
+// This is the stolen-password attack, stated as a property. An attacker who
+// knows the password of an account that already has a factor cannot enrol their
+// own — the exemption is keyed on "has ever had", so the only way back to it
+// would be an event that clears the fact. Each subtest is one candidate for such
+// an event.
+func TestHavingHeldASecondFactorIsPermanent(t *testing.T) {
+	t.Run("the factor is removed", func(t *testing.T) {
+		// Removal is possible here because the account never activated (no primary
+		// method), which is exactly the account an attacker would want to walk back:
+		// an active one cannot remove its last factor at all.
+		u := registered(t)
+		mustNil(t, u.VerifyEmail("idx_1", at))
+		totp := newID[ids.Credential](t)
+		mustNil(t, u.StartTotpEnrollment(totp, at.Add(time.Hour), at))
+		mustNil(t, u.EnableTotp(totp, at))
+		mustNil(t, u.DisableTotp(totp, "subj_1", at))
+
+		if len(u.UsableMethods()) != 0 {
+			t.Fatalf("the fixture still holds %d usable methods", len(u.UsableMethods()))
+		}
+		assertEstablished(t, u)
+	})
+
+	t.Run("the factor is locked out", func(t *testing.T) {
+		u := active(t)
+		totp := totpCredential(t, u)
+		locked, err := u.RecordAuthenticatorFailure(totp, domain.LockoutThreshold, at)
+		mustNil(t, err)
+		if !locked {
+			t.Fatal("the fixture did not lock the authenticator out")
+		}
+		assertEstablished(t, u)
+	})
+
+	t.Run("the account is deactivated and reactivated", func(t *testing.T) {
+		u := active(t)
+		mustNil(t, u.Deactivate("subj_1", at))
+		assertEstablished(t, u)
+		mustNil(t, u.Reactivate("subj_1", at))
+		assertEstablished(t, u)
+	})
+
+	t.Run("the account is suspended", func(t *testing.T) {
+		u := active(t)
+		mustNil(t, u.Suspend("op_1", "abuse", at))
+		assertEstablished(t, u)
+	})
+
+	t.Run("the account is rebuilt from its log", func(t *testing.T) {
+		// Locked out rather than removed: an active account may not remove its last
+		// factor at all, and a lockout is the way its only factor really does stop
+		// being usable — so the rebuilt aggregate holds no usable second factor and
+		// must still report that it once did.
+		live := active(t)
+		if _, err := live.RecordAuthenticatorFailure(
+			totpCredential(t, live), domain.LockoutThreshold, at,
+		); err != nil {
+			t.Fatalf("locking the authenticator out: %v", err)
+		}
+
+		rebuilt := eventsourcing.NewAggregate(domain.New)
+		for _, e := range live.Uncommitted() {
+			rebuilt.Apply(e)
+		}
+		if !rebuilt.HasEverHadSecondFactor() {
+			t.Fatal("an account rebuilt from a log containing TotpEnabled reports that it has " +
+				"never held a second factor; a projection rebuild would hand the first-enrolment " +
+				"exemption to every account in the system")
+		}
+		assertEstablished(t, rebuilt)
+	})
+
+	t.Run("activation alone is enough to establish it", func(t *testing.T) {
+		// A stream whose factor was proven by an event this build does not
+		// recognise still reaches Active, so activation is read as evidence in its
+		// own right rather than depending on the list of enabling events being
+		// exhaustive.
+		u := eventsourcing.NewAggregate(domain.New)
+		u.Apply(&contract.UserRegistered{
+			UserID: newID[ids.User](t).String(), SubjectID: "subj_1",
+			EmailIndex: "idx_1", RegisteredAt: at,
+		})
+		u.Apply(&contract.EmailVerified{SubjectID: "subj_1", Index: "idx_1", VerifiedAt: at})
+		u.Apply(&contract.UserActivated{SubjectID: "subj_1", ActivatedAt: at})
+		assertEstablished(t, u)
+	})
+}
+
+// assertEstablished states the two halves of "this account may not bootstrap".
+func assertEstablished(t *testing.T, u *domain.User) {
+	t.Helper()
+	if !u.HasEverHadSecondFactor() {
+		t.Error("the account reports that it has never held a second factor")
+	}
+	if u.NeedsFirstSecondFactor() {
+		t.Error("an account that has held a second factor reports that it needs its first; " +
+			"anyone holding its password could enrol one of their own")
 	}
 }
 
@@ -460,8 +746,389 @@ func TestVerifyingTwiceRecordsNothingTheSecondTime(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Authenticator lockout
+// ---------------------------------------------------------------------------
+
+// Consecutive failures against a second factor disable it, and only at the
+// threshold.
+//
+// The subtest one short of the threshold is the one that matters. A rule that
+// disabled on the first failure would pass any test that only checked "ten
+// failures lock it out", and would lock out every user who mistyped a code once.
+func TestAnAuthenticatorLocksOutOnlyAtTheThreshold(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		failures int
+		want     bool
+	}{
+		{"first failure", 1, false},
+		{"one short", domain.LockoutThreshold - 1, false},
+		{"at the threshold", domain.LockoutThreshold, true},
+		{"beyond it", domain.LockoutThreshold + 4, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u := active(t)
+			totp := totpCredential(t, u)
+			u.ClearUncommitted()
+
+			locked, err := u.RecordAuthenticatorFailure(totp, tc.failures, at)
+			mustNil(t, err)
+			if locked != tc.want {
+				t.Fatalf("%d failures reported locked=%v, want %v", tc.failures, locked, tc.want)
+			}
+			if got := countEvents[*contract.AuthenticatorDisabled](u); got != boolToInt(tc.want) {
+				t.Errorf("recorded %d AuthenticatorDisabled events, want %d",
+					got, boolToInt(tc.want))
+			}
+			m, ok := u.Method(totp)
+			if !ok {
+				t.Fatal("the authenticator vanished from the account")
+			}
+			if m.Usable() == tc.want {
+				t.Errorf("the authenticator's usability is %v after %d failures",
+					m.Usable(), tc.failures)
+			}
+		})
+	}
+}
+
+// The event names the credential and the count, and carries nothing else.
+func TestALockoutRecordsTheCredentialAndTheCount(t *testing.T) {
+	u := active(t)
+	totp := totpCredential(t, u)
+	u.ClearUncommitted()
+
+	if _, err := u.RecordAuthenticatorFailure(totp, domain.LockoutThreshold, at); err != nil {
+		t.Fatalf("recording a lockout: %v", err)
+	}
+	pending := u.Uncommitted()
+	if len(pending) != 1 {
+		t.Fatalf("recorded %d events, want 1", len(pending))
+	}
+	disabled, ok := pending[0].(*contract.AuthenticatorDisabled)
+	if !ok {
+		t.Fatalf("recorded %T, want *contract.AuthenticatorDisabled", pending[0])
+	}
+	switch {
+	case disabled.CredentialID != totp.String():
+		t.Errorf("the event names credential %q, want %q", disabled.CredentialID, totp)
+	case disabled.SubjectID != "subj_1":
+		t.Errorf("the event names subject %q, want the account's pseudonym", disabled.SubjectID)
+	case disabled.Failures != domain.LockoutThreshold:
+		t.Errorf("the event records %d failures, want %d",
+			disabled.Failures, domain.LockoutThreshold)
+	case !disabled.DisabledAt.Equal(at.UTC()) || disabled.DisabledAt.Location() != time.UTC:
+		t.Errorf("the event is stamped %s, want %s in UTC", disabled.DisabledAt, at.UTC())
+	}
+}
+
+// A PRIMARY factor is never disabled by failures, however many there are.
+//
+// This is the denial-of-service refusal, and it is the property most likely to be
+// "simplified" into a uniform rule: anyone who knows an address can produce
+// failures against that account's password, so a password that could be locked out
+// is a password anybody can lock out. The assertion is not only that no event is
+// recorded — it is that the account can still authenticate afterwards, which is
+// what "a lockout cannot strand an account" means operationally.
+func TestAPrimaryFactorIsNeverLockedOutByFailures(t *testing.T) {
+	u := active(t)
+	password := passwordCredential(t, u)
+	u.ClearUncommitted()
+
+	for i := 1; i <= domain.LockoutThreshold*5; i++ {
+		locked, err := u.RecordAuthenticatorFailure(password, i, at)
+		mustNil(t, err)
+		if locked {
+			t.Fatalf("the password credential was disabled after %d failures; an attacker who "+
+				"knows an address can produce those at will, so this locks out any account "+
+				"they can name", i)
+		}
+	}
+	if got := countEvents[*contract.AuthenticatorDisabled](u); got != 0 {
+		t.Errorf("recorded %d lockouts against a primary factor, want 0", got)
+	}
+	m, ok := u.Method(password)
+	if !ok || !m.Usable() {
+		t.Fatal("the password credential is no longer usable")
+	}
+	if reason, ok := u.CanAuthenticate(); !ok {
+		t.Errorf("the account can no longer authenticate (%q); repeated failures must not be "+
+			"able to strand it with no usable primary method", reason)
+	}
+}
+
+// A locked-out authenticator stops satisfying every rule that reads usability.
+func TestALockedOutAuthenticatorCountsForNothing(t *testing.T) {
+	u := active(t)
+	totp := totpCredential(t, u)
+	u.ClearUncommitted()
+
+	if _, err := u.RecordAuthenticatorFailure(totp, domain.LockoutThreshold, at); err != nil {
+		t.Fatalf("recording a lockout: %v", err)
+	}
+	for _, m := range u.UsableMethods() {
+		if m.ID == totp {
+			t.Fatal("a locked-out authenticator is still listed as usable")
+		}
+	}
+	// The account keeps a usable primary, so it still passes the state gate — the
+	// login then finds no second factor to offer. That asymmetry is deliberate:
+	// removing the way IN would be the denial of service; removing a second factor
+	// that is being ground is the whole point.
+	if _, ok := u.CanAuthenticate(); !ok {
+		t.Error("locking out a second factor also closed the account's primary door")
+	}
+	if len(secondFactorsOf(u)) != 0 {
+		t.Error("a locked-out authenticator is still offered as a second factor")
+	}
+}
+
+// Failing again after a lockout records nothing more.
+//
+// Without this the account stream grows one AuthenticatorDisabled per subsequent
+// attempt against a credential that is already disabled — an unbounded write
+// driven by whoever is still guessing.
+func TestFailingAgainstADisabledAuthenticatorRecordsNothing(t *testing.T) {
+	u := active(t)
+	totp := totpCredential(t, u)
+	u.ClearUncommitted()
+
+	if _, err := u.RecordAuthenticatorFailure(totp, domain.LockoutThreshold, at); err != nil {
+		t.Fatalf("recording a lockout: %v", err)
+	}
+	locked, err := u.RecordAuthenticatorFailure(totp, domain.LockoutThreshold+1, at)
+	mustNil(t, err)
+	if locked {
+		t.Error("an already-disabled authenticator reported a second lockout")
+	}
+	if got := countEvents[*contract.AuthenticatorDisabled](u); got != 1 {
+		t.Errorf("recorded %d lockouts for one lockout, want 1", got)
+	}
+}
+
+// An unproven enrolment cannot be locked out, because it was never usable.
+func TestAnUnprovenAuthenticatorIsNotLockedOut(t *testing.T) {
+	u := registered(t)
+	mustNil(t, u.VerifyEmail("idx_1", at))
+	pending := newID[ids.Credential](t)
+	mustNil(t, u.StartTotpEnrollment(pending, at.Add(time.Hour), at))
+	u.ClearUncommitted()
+
+	locked, err := u.RecordAuthenticatorFailure(pending, domain.LockoutThreshold, at)
+	mustNil(t, err)
+	if locked || countEvents[*contract.AuthenticatorDisabled](u) != 0 {
+		t.Error("a provisioned but unproven enrolment was locked out")
+	}
+}
+
+// A suspended account can still lock out an authenticator.
+//
+// mutable() refuses a suspended account every change, and a lockout deliberately
+// does not go through it: a lockout only ever REMOVES a capability, so refusing it
+// here would leave a grindable authenticator alive on the account most likely to
+// be under attack.
+func TestALockoutIsNotBlockedByAccountState(t *testing.T) {
+	u := active(t)
+	totp := totpCredential(t, u)
+	mustNil(t, u.Suspend("op_1", "abuse", at))
+	u.ClearUncommitted()
+
+	locked, err := u.RecordAuthenticatorFailure(totp, domain.LockoutThreshold, at)
+	mustNil(t, err)
+	if !locked {
+		t.Fatal("a suspended account refused to lock out an authenticator being ground")
+	}
+}
+
+// A credential the account's own log does not have is refused, not invented.
+func TestALockoutRefusesAnUnknownCredential(t *testing.T) {
+	u := active(t)
+	u.ClearUncommitted()
+
+	for _, tc := range []struct {
+		name string
+		cred ids.CredentialID
+		want errs.Reason
+	}{
+		{"a credential from another account", newID[ids.Credential](t), errs.NotFound},
+		{"no credential at all", ids.CredentialID{}, errs.ValidationFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			locked, err := u.RecordAuthenticatorFailure(tc.cred, domain.LockoutThreshold, at)
+			if err == nil {
+				t.Fatal("the failure was accepted against a credential this account does not have")
+			}
+			if errs.ReasonOf(err) != tc.want {
+				t.Errorf("reason is %s, want %s", errs.ReasonOf(err), tc.want)
+			}
+			if locked {
+				t.Error("an unknown credential reported a lockout")
+			}
+		})
+	}
+	if got := countEvents[*contract.AuthenticatorDisabled](u); got != 0 {
+		t.Errorf("recorded %d lockouts, want 0", got)
+	}
+}
+
+// A nonexistent account records nothing.
+func TestALockoutAgainstNoAccountIsRefused(t *testing.T) {
+	u := eventsourcing.NewAggregate(domain.New)
+
+	_, err := u.RecordAuthenticatorFailure(newID[ids.Credential](t), domain.LockoutThreshold, at)
+	if err == nil || errs.ReasonOf(err) != errs.NotFound {
+		t.Fatalf("a lockout against no account returned %v, want a not-found", err)
+	}
+	if len(u.Uncommitted()) != 0 {
+		t.Error("a lockout against no account recorded an event")
+	}
+}
+
+// A lockout survives a rebuild: it is applied from the event, not held in memory.
+func TestALockoutIsRebuiltFromItsEvent(t *testing.T) {
+	u := active(t)
+	totp := totpCredential(t, u)
+	if _, err := u.RecordAuthenticatorFailure(totp, domain.LockoutThreshold, at); err != nil {
+		t.Fatalf("recording a lockout: %v", err)
+	}
+
+	rebuilt := eventsourcing.NewAggregate(domain.New)
+	for _, e := range u.Uncommitted() {
+		rebuilt.Apply(e)
+	}
+	m, ok := rebuilt.Method(totp)
+	if !ok {
+		t.Fatal("the rebuilt account has no such method")
+	}
+	if m.Usable() {
+		t.Error("a rebuilt account considers a locked-out authenticator usable; the lockout " +
+			"would then last only until the next process restart")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Password rehash
+// ---------------------------------------------------------------------------
+
+// A rehash is recorded against the password credential and nothing else changes.
+func TestARehashIsRecordedAndChangesNoState(t *testing.T) {
+	u := active(t)
+	password := passwordCredential(t, u)
+	u.ClearUncommitted()
+
+	mustNil(t, u.RecordPasswordRehash(password, at))
+	pending := u.Uncommitted()
+	if len(pending) != 1 {
+		t.Fatalf("recorded %d events, want 1", len(pending))
+	}
+	rehashed, ok := pending[0].(*contract.PasswordRehashed)
+	if !ok {
+		t.Fatalf("recorded %T, want *contract.PasswordRehashed", pending[0])
+	}
+	if rehashed.CredentialID != password.String() || rehashed.SubjectID != "subj_1" {
+		t.Errorf("the event is %+v", rehashed)
+	}
+	if !rehashed.RehashedAt.Equal(at.UTC()) || rehashed.RehashedAt.Location() != time.UTC {
+		t.Errorf("the event is stamped %s, want %s in UTC", rehashed.RehashedAt, at.UTC())
+	}
+
+	// Applying it must leave the credential exactly as it was. A rehashed verifier
+	// is the same credential under a new encoding, so any state change here would
+	// be a rebuild diverging from the live aggregate.
+	u.Apply(rehashed)
+	m, ok := u.Method(password)
+	if !ok || !m.Usable() {
+		t.Error("applying a rehash changed the credential's usability")
+	}
+	if reason, ok := u.CanAuthenticate(); !ok {
+		t.Errorf("applying a rehash made the account unauthenticable (%q)", reason)
+	}
+}
+
+// A rehash may only name a usable password on THIS account.
+func TestARehashRefusesACredentialThatIsNotAUsablePasswordHere(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		arrange func(*testing.T, *domain.User) ids.CredentialID
+		want    errs.Reason
+	}{
+		{
+			name: "a credential from another account",
+			arrange: func(t *testing.T, _ *domain.User) ids.CredentialID {
+				return newID[ids.Credential](t)
+			},
+			want: errs.NotFound,
+		},
+		{
+			name: "the account's own second factor",
+			arrange: func(t *testing.T, u *domain.User) ids.CredentialID {
+				return totpCredential(t, u)
+			},
+			want: errs.NotFound,
+		},
+		{
+			name: "a suspended account",
+			arrange: func(t *testing.T, u *domain.User) ids.CredentialID {
+				cred := passwordCredential(t, u)
+				mustNil(t, u.Suspend("op_1", "abuse", at))
+				u.ClearUncommitted()
+				return cred
+			},
+			want: errs.AccessDenied,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u := active(t)
+			u.ClearUncommitted()
+			cred := tc.arrange(t, u)
+
+			err := u.RecordPasswordRehash(cred, at)
+			if err == nil {
+				t.Fatal("the rehash was recorded")
+			}
+			if errs.ReasonOf(err) != tc.want {
+				t.Errorf("reason is %s, want %s", errs.ReasonOf(err), tc.want)
+			}
+			if got := countEvents[*contract.PasswordRehashed](u); got != 0 {
+				t.Errorf("recorded %d rehash events, want 0", got)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// secondFactorsOf lists the usable second factors, recovery codes included.
+func secondFactorsOf(u *domain.User) []domain.Method {
+	var out []domain.Method
+	for _, m := range u.UsableMethods() {
+		if domain.RoleOf(m.Kind) == domain.RoleSecondFactor {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// passwordCredential finds the account's usable password credential id.
+func passwordCredential(t *testing.T, u *domain.User) ids.CredentialID {
+	t.Helper()
+	for _, m := range u.UsableMethods() {
+		if m.Kind == contract.MethodPassword {
+			return m.ID
+		}
+	}
+	t.Fatal("the account has no usable password method")
+	return ids.CredentialID{}
+}
 
 // active returns a fully enrolled, active account: verified, password, TOTP.
 func active(t *testing.T) *domain.User {

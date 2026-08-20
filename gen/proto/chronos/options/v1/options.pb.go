@@ -260,6 +260,14 @@ var file_chronos_options_v1_options_proto_extTypes = []protoimpl.ExtensionInfo{
 	},
 	{
 		ExtendedType:  (*descriptorpb.MethodOptions)(nil),
+		ExtensionType: (*AssuranceLevel)(nil),
+		Field:         51006,
+		Name:          "chronos.options.v1.bootstrap_min_aal",
+		Tag:           "varint,51006,opt,name=bootstrap_min_aal,enum=chronos.options.v1.AssuranceLevel",
+		Filename:      "chronos/options/v1/options.proto",
+	},
+	{
+		ExtendedType:  (*descriptorpb.MethodOptions)(nil),
 		ExtensionType: (*bool)(nil),
 		Field:         51005,
 		Name:          "chronos.options.v1.public",
@@ -287,11 +295,49 @@ var (
 	//
 	// optional chronos.options.v1.AssuranceLevel min_aal = 51004;
 	E_MinAal = &file_chronos_options_v1_options_proto_extTypes[3]
+	// The assurance floor that applies while — and only while — the caller's
+	// account has never held a proven second factor.
+	//
+	// It exists because `min_aal = ASSURANCE_LEVEL_2` on second-factor management
+	// is otherwise a deadlock, not a policy. A second factor is mandatory before
+	// an account activates (identity.md §2), and AAL2 means a second factor was
+	// presented, so an account that has none can never obtain the one it must
+	// have: the only calls that could give it one are the calls it cannot reach.
+	//
+	// The distinction the floor draws is between FIRST enrolment, where there is
+	// no factor to present and nothing yet to protect, and adding or replacing a
+	// factor, where the existing one must be presented — which is exactly the
+	// step that stops an attacker holding a stolen password from making their
+	// access durable. Only the first is exempted, and the exemption ends the
+	// moment the first factor is proven.
+	//
+	// Three properties make it safe, and all three are enforced rather than
+	// documented:
+	//
+	//   - The condition is a fact about the caller's own account, read
+	//     server-side from the session. No request field, no header and no claim
+	//     the caller controls takes part in it, so it cannot be asserted.
+	//   - It is one-way. The account leaves the bootstrap window when its first
+	//     factor is proven, and nothing returns it — removing or losing a factor
+	//     later does NOT re-open the exemption, which is what stops "delete the
+	//     factor, then enrol my own".
+	//   - The policy loader refuses every incoherent declaration at startup: on a
+	//     public method, on a method that is not scoped to the caller's own
+	//     account, with no `min_aal` to be an exemption from, or at a level that
+	//     is not strictly below it. A floor that could be misdeclared silently
+	//     would be worse than the deadlock it removes.
+	//
+	// Unset means no exemption: `min_aal` applies in every state. That is the
+	// right default — a method that says nothing about bootstrap gets the strict
+	// answer.
+	//
+	// optional chronos.options.v1.AssuranceLevel bootstrap_min_aal = 51006;
+	E_BootstrapMinAal = &file_chronos_options_v1_options_proto_extTypes[4]
 	// Marks a method as public — no authentication, no gates. Used only by
 	// health and discovery endpoints. Mutually exclusive with authz.
 	//
 	// optional bool public = 51005;
-	E_Public = &file_chronos_options_v1_options_proto_extTypes[4]
+	E_Public = &file_chronos_options_v1_options_proto_extTypes[5]
 )
 
 var File_chronos_options_v1_options_proto protoreflect.FileDescriptor
@@ -319,7 +365,8 @@ const file_chronos_options_v1_options_proto_rawDesc = "" +
 	"\x05authz\x12\x1e.google.protobuf.MethodOptions\x18\xb9\x8e\x03 \x01(\v2\x19.chronos.options.v1.AuthzR\x05authz:b\n" +
 	"\toperation\x12\x1e.google.protobuf.MethodOptions\x18\xba\x8e\x03 \x01(\x0e2\".chronos.options.v1.OperationClassR\toperation:B\n" +
 	"\ventitlement\x12\x1e.google.protobuf.MethodOptions\x18\xbb\x8e\x03 \x01(\tR\ventitlement:]\n" +
-	"\amin_aal\x12\x1e.google.protobuf.MethodOptions\x18\xbc\x8e\x03 \x01(\x0e2\".chronos.options.v1.AssuranceLevelR\x06minAal:8\n" +
+	"\amin_aal\x12\x1e.google.protobuf.MethodOptions\x18\xbc\x8e\x03 \x01(\x0e2\".chronos.options.v1.AssuranceLevelR\x06minAal:p\n" +
+	"\x11bootstrap_min_aal\x12\x1e.google.protobuf.MethodOptions\x18\xbe\x8e\x03 \x01(\x0e2\".chronos.options.v1.AssuranceLevelR\x0fbootstrapMinAal:8\n" +
 	"\x06public\x12\x1e.google.protobuf.MethodOptions\x18\xbd\x8e\x03 \x01(\bR\x06publicB\xd6\x01\n" +
 	"\x16com.chronos.options.v1B\fOptionsProtoP\x01ZDgithub.com/chronos/chronos-go/gen/proto/chronos/options/v1;optionsv1\xa2\x02\x03COX\xaa\x02\x12Chronos.Options.V1\xca\x02\x12Chronos\\Options\\V1\xe2\x02\x1eChronos\\Options\\V1\\GPBMetadata\xea\x02\x14Chronos::Options::V1b\x06proto3"
 
@@ -344,19 +391,21 @@ var file_chronos_options_v1_options_proto_goTypes = []any{
 	(*descriptorpb.MethodOptions)(nil), // 3: google.protobuf.MethodOptions
 }
 var file_chronos_options_v1_options_proto_depIdxs = []int32{
-	3, // 0: chronos.options.v1.authz:extendee -> google.protobuf.MethodOptions
-	3, // 1: chronos.options.v1.operation:extendee -> google.protobuf.MethodOptions
-	3, // 2: chronos.options.v1.entitlement:extendee -> google.protobuf.MethodOptions
-	3, // 3: chronos.options.v1.min_aal:extendee -> google.protobuf.MethodOptions
-	3, // 4: chronos.options.v1.public:extendee -> google.protobuf.MethodOptions
-	2, // 5: chronos.options.v1.authz:type_name -> chronos.options.v1.Authz
-	0, // 6: chronos.options.v1.operation:type_name -> chronos.options.v1.OperationClass
-	1, // 7: chronos.options.v1.min_aal:type_name -> chronos.options.v1.AssuranceLevel
-	8, // [8:8] is the sub-list for method output_type
-	8, // [8:8] is the sub-list for method input_type
-	5, // [5:8] is the sub-list for extension type_name
-	0, // [0:5] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	3,  // 0: chronos.options.v1.authz:extendee -> google.protobuf.MethodOptions
+	3,  // 1: chronos.options.v1.operation:extendee -> google.protobuf.MethodOptions
+	3,  // 2: chronos.options.v1.entitlement:extendee -> google.protobuf.MethodOptions
+	3,  // 3: chronos.options.v1.min_aal:extendee -> google.protobuf.MethodOptions
+	3,  // 4: chronos.options.v1.bootstrap_min_aal:extendee -> google.protobuf.MethodOptions
+	3,  // 5: chronos.options.v1.public:extendee -> google.protobuf.MethodOptions
+	2,  // 6: chronos.options.v1.authz:type_name -> chronos.options.v1.Authz
+	0,  // 7: chronos.options.v1.operation:type_name -> chronos.options.v1.OperationClass
+	1,  // 8: chronos.options.v1.min_aal:type_name -> chronos.options.v1.AssuranceLevel
+	1,  // 9: chronos.options.v1.bootstrap_min_aal:type_name -> chronos.options.v1.AssuranceLevel
+	10, // [10:10] is the sub-list for method output_type
+	10, // [10:10] is the sub-list for method input_type
+	6,  // [6:10] is the sub-list for extension type_name
+	0,  // [0:6] is the sub-list for extension extendee
+	0,  // [0:0] is the sub-list for field type_name
 }
 
 func init() { file_chronos_options_v1_options_proto_init() }
@@ -371,7 +420,7 @@ func file_chronos_options_v1_options_proto_init() {
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chronos_options_v1_options_proto_rawDesc), len(file_chronos_options_v1_options_proto_rawDesc)),
 			NumEnums:      2,
 			NumMessages:   1,
-			NumExtensions: 5,
+			NumExtensions: 6,
 			NumServices:   0,
 		},
 		GoTypes:           file_chronos_options_v1_options_proto_goTypes,

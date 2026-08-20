@@ -17,16 +17,18 @@ import (
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 )
 
-// newReservationCodec builds the codec and upcaster registry the reservation
-// REPOSITORY reads with.
+// newIdentityCodec builds the codec and upcaster registry identity's own events
+// are read with — by the reservation REPOSITORY, and by the verification-mail
+// reactor.
 //
 // A second codec in one binary needs justifying, and the justification is that
-// the two answer different questions. newCodec is the REACTOR's codec: every
-// event it can decode must have a notification decision recorded against it, and
-// events_test.go fails the build otherwise. This one is the write side's — it
-// exists to rebuild one aggregate from one stream — and holding identity's whole
-// event set to a notification decision it does not yet have would couple the
-// sweep to work that has not landed.
+// the two answer different questions. newCodec is the CATALOGUE-DRIVEN reactor's
+// codec: every event it can decode must have a notification decision recorded
+// against it, and events_test.go fails the build otherwise. This one is
+// identity's — it exists to rebuild one aggregate from one stream, and to decode
+// the one event the verification reactor acts on — and holding identity's whole
+// event set to a notification decision it does not yet have would couple both to
+// work that has not landed.
 //
 // It is built from the module's own declarations rather than from a list of the
 // three reservation events, so it cannot drift from what identity writes: a
@@ -36,7 +38,7 @@ import (
 // SAME one: the codec applies it on the way in and the repository applies it on
 // the way out, and two registries would let those two disagree about which
 // schema version a stored event is (ADR-029).
-func newReservationCodec() (*eventcodec.JSON, *eventsourcing.UpcasterRegistry) {
+func newIdentityCodec() (*eventcodec.JSON, *eventsourcing.UpcasterRegistry) {
 	upcasters := eventsourcing.NewUpcasterRegistry()
 	identity.RegisterSchemas(upcasters)
 
@@ -86,7 +88,7 @@ func newReservationSweep(d *dependencies, log *slog.Logger) (*app.ReservationSwe
 			"stream, so it cannot be recorded")
 	}
 
-	codec, upcasters := newReservationCodec()
+	codec, upcasters := newIdentityCodec()
 	repo := eventsourcing.NewRepository(
 		d.store, codec, upcasters, blindindex.Category, domain.NewReservation,
 	)

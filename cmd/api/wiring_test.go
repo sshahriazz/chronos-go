@@ -1,13 +1,25 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	connectrpc "connectrpc.com/connect"
+	systemv1 "github.com/chronos/chronos-go/gen/proto/chronos/system/v1"
+	"github.com/chronos/chronos-go/gen/proto/chronos/system/v1/systemv1connect"
 	"github.com/chronos/chronos-go/internal/platform/authz"
+	"github.com/chronos/chronos-go/internal/platform/clientip"
 	"github.com/chronos/chronos-go/internal/platform/config"
+	"github.com/chronos/chronos-go/internal/platform/obs"
+	"github.com/chronos/chronos-go/internal/server/connect"
 )
 
 // Authorization must be wired, and must DENY when it cannot work.
@@ -79,12 +91,29 @@ func TestOpenFGAProbeIsFailClosed(t *testing.T) {
 	}
 }
 
+// testConfig is the environment every untagged test in this package builds
+// dependencies from.
+//
+// It carries REAL identity key material, because the composition-root tests
+// below assert on a fully-constructed identity service and a config without keys
+// would make every one of them assert that nothing was built. The keys are
+// syntactically valid and cryptographically worthless, which is the correct
+// combination for a test fixture.
 func testConfig(t *testing.T) *config.Config {
 	t.Helper()
 	for k, v := range map[string]string{
 		"POSTGRES_DB": "chronos", "POSTGRES_USER": "chronos",
 		"POSTGRES_PASSWORD": "x", "POSTGRES_APP_PASSWORD": "y",
 		"OPENFGA_PRESHARED_KEY": "k",
+
+		// 32 bytes each, hex. Distinct from one another so a wiring bug that
+		// swapped two of them would not still pass every length check.
+		"IDENTITY_EMAIL_INDEX_KEY": "" +
+			"1111111111111111111111111111111111111111111111111111111111111111",
+		"IDENTITY_PASSWORD_PEPPER_KEY": "" +
+			"2222222222222222222222222222222222222222222222222222222222222222",
+		"IDENTITY_TOTP_SEAL_KEY": "" +
+			"3333333333333333333333333333333333333333333333333333333333333333",
 	} {
 		t.Setenv(k, v)
 	}
@@ -188,6 +217,70 @@ func TestAnExcessiveIdempotencyTTLStopsStartup(t *testing.T) {
 	}
 }
 
+// The caller-scope trust boundary, asserted at the composition root because
+// that is the only place the environment variable and the resolver meet.
+//
+// Every value of API_TRUSTED_PROXY_HOPS produces a server that starts, serves,
+// and passes every other test in this repository. The difference between "trusts
+// one proxy" and "trusts whatever the caller wrote" shows up in no log line, no
+// metric and no failed request — only as an abuse incident — so the boot is the
+// last place it can be caught.
+func TestAnOutOfRangeTrustedProxyHopCountStopsStartup(t *testing.T) {
+	for name, value := range map[string]string{
+		"negative":      "-1",
+		"above the cap": "64",
+	} {
+		t.Run(name, func(t *testing.T) {
+			for k, v := range map[string]string{
+				"POSTGRES_DB": "chronos", "POSTGRES_USER": "chronos",
+				"POSTGRES_PASSWORD": "x", "POSTGRES_APP_PASSWORD": "y",
+				"OPENFGA_PRESHARED_KEY":  "k",
+				"API_TRUSTED_PROXY_HOPS": value,
+			} {
+				t.Setenv(k, v)
+			}
+			if _, err := config.Load(); err == nil {
+				t.Fatalf("API_TRUSTED_PROXY_HOPS=%s was accepted; a hop count above the "+
+					"number of proxies that append to X-Forwarded-For makes every "+
+					"per-caller rate-limit bucket attacker-chosen", value)
+			}
+		})
+	}
+}
+
+// The default boundary trusts nothing, end to end from the environment to the
+// resolver cmd/api actually builds.
+//
+// buildIdentity needs a pool, a store and a vault, so the whole graph cannot be
+// constructed here — but the one line that turns configuration into a trust
+// boundary can be, and it is the line whose wrong answer has no symptom.
+func TestTheDefaultTrustBoundaryReadsNoHeader(t *testing.T) {
+	for k, v := range map[string]string{
+		"POSTGRES_DB": "chronos", "POSTGRES_USER": "chronos",
+		"POSTGRES_PASSWORD": "x", "POSTGRES_APP_PASSWORD": "y",
+		"OPENFGA_PRESHARED_KEY": "k",
+	} {
+		t.Setenv(k, v)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	resolver, err := clientip.NewResolver(cfg.API.TrustedProxyHops)
+	if err != nil {
+		t.Fatalf("building the caller-scope resolver from the default config: %v", err)
+	}
+	if resolver.TrustedHops() != 0 {
+		t.Fatalf("the default trust boundary is %d hops, want 0", resolver.TrustedHops())
+	}
+	got := resolver.Scope("203.0.113.9:44321", []string{"192.0.2.111, 198.51.100.222"})
+	if got != "203.0.113.9" {
+		t.Fatalf("with no configuration the scope is %q; it must be the connection's "+
+			"peer address 203.0.113.9, because X-Forwarded-For is written by the caller",
+			got)
+	}
+}
+
 // The typed-nil guards return a genuinely nil interface.
 //
 // This is the infra-free half of the revocation wiring, and it is the half that
@@ -207,4 +300,71 @@ func TestTypedNilGuardsReturnNilInterfaces(t *testing.T) {
 	if dec := decisionsOrNil(nil); dec != nil {
 		t.Errorf("decisionsOrNil(nil) returned a non-nil interface (%T)", dec)
 	}
+}
+
+// The error gate must be wired into the handler options, not merely written.
+//
+// This is the composition-root half of the outage that produced it. The gate can
+// be complete, unit-tested and correct, and if `registerServices` does not put it
+// in front of every service then an unclassified failure still reaches the wire
+// as `internal: internal error` with nothing in the log — which is exactly the
+// state this repository was in, and exactly the shape of the three adapters that
+// were fully built and constructed by no binary.
+//
+// So the assertion drives a real request through the handler `registerServices`
+// actually mounts, over a real server, and reads the log the binary would have
+// written. GetStatus is public, so the gate pipeline passes it through to the
+// handler that fails.
+func TestTheErrorGateIsWiredIntoEveryService(t *testing.T) {
+	cfg := testConfig(t)
+	d, closeAll := newDependencies(cfg, slog.New(slog.DiscardHandler))
+	defer closeAll()
+
+	if d.gates == nil {
+		t.Fatal("no gate pipeline was constructed, so registerServices mounts nothing")
+	}
+
+	var captured bytes.Buffer
+	log := slog.New(obs.NewTraceHandler(
+		slog.NewJSONHandler(&captured, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+	mux := http.NewServeMux()
+	registerServices(mux, d, failingStatus{}, log)
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client := systemv1connect.NewSystemServiceClient(srv.Client(), srv.URL)
+	_, err := client.GetStatus(t.Context(), connectrpc.NewRequest(&systemv1.GetStatusRequest{}))
+	if err == nil {
+		t.Fatal("GetStatus succeeded; the stub was supposed to fail")
+	}
+	if got := connectrpc.CodeOf(err); got != connectrpc.CodeInternal {
+		t.Fatalf("code = %v, want internal", got)
+	}
+	if strings.Contains(err.Error(), "the status projection") {
+		t.Errorf("the response carries the cause: %q", err.Error())
+	}
+
+	logged := captured.String()
+	if !strings.Contains(logged, "rpc failed with a cause the caller was not told") {
+		t.Fatalf("the cause of an INTERNAL reached nobody. Log was:\n%s", logged)
+	}
+	if !strings.Contains(logged, systemv1connect.SystemServiceGetStatusProcedure) {
+		t.Errorf("the log line does not name the procedure. Log was:\n%s", logged)
+	}
+	if !strings.Contains(logged, "the status projection") {
+		t.Errorf("the log line does not carry the cause. Log was:\n%s", logged)
+	}
+}
+
+// failingStatus is a SystemService whose one RPC fails the way the identity slice
+// did: an error that never passed through errs.
+type failingStatus struct{}
+
+func (failingStatus) GetStatus(
+	context.Context, *connectrpc.Request[systemv1.GetStatusRequest],
+) (*connectrpc.Response[systemv1.GetStatusResponse], error) {
+	return nil, connect.Error(fmt.Errorf("reading the status projection: %w",
+		errors.New("dial tcp 127.0.0.1:5432: connection refused")))
 }
