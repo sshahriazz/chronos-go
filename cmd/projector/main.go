@@ -30,6 +30,7 @@ import (
 	"github.com/chronos/chronos-go/internal/modules/notification"
 	notificationprojection "github.com/chronos/chronos-go/internal/modules/notification/projection"
 	"github.com/chronos/chronos-go/internal/modules/organization"
+	organizationprojection "github.com/chronos/chronos-go/internal/modules/organization/projection"
 	"github.com/chronos/chronos-go/internal/modules/profile"
 	profileprojection "github.com/chronos/chronos-go/internal/modules/profile/projection"
 	"github.com/chronos/chronos-go/internal/platform/clock"
@@ -252,6 +253,8 @@ func projections(codec *eventcodec.JSON) []projection.Projection {
 		notificationprojection.NewPreferences(codec),
 
 		profileprojection.NewProfile(codec),
+
+		organizationprojection.NewStatus(codec),
 
 		identityprojection.NewUser(codec),
 		identityprojection.NewSession(codec),

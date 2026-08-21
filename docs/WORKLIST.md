@@ -70,9 +70,10 @@ infrastructure and every later piece depends on its shape.
 - [x] **Subscription gate (the decision)** — all 42 cells of the operation-class
       × status matrix asserted. Pure, so it needed no projection; fails CLOSED
       when the status cannot be read.
-- [>] **`org_status_view`** — hot path, gate 3 reads it on every request.
-      *Next:* the migration, the projector, and the `StatusReader` port the gate
-      already depends on.
+- [x] **`org_status_view`** — migration 00018 with RLS, sqlc queries, the
+      projection, and the `StatusReader` gate 3 depends on. Proved against a real
+      database: one org cannot read another's status, and an unprojected org is
+      refused rather than waved through.
 - [ ] **`CreateOrganization` use case + RPC** — added to the list: without it
       nothing can create an org, so the projection has no rows and the gate
       cannot be exercised end to end.

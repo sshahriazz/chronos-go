@@ -87,6 +87,16 @@ type NotificationPreference struct {
 	UpdatedAt pgtype.Timestamptz
 }
 
+// Subscription status per organization. Read by gate 3 on every request; keep it small.
+type OrgStatusView struct {
+	OrgID                string
+	Status               string
+	TrialEndsAt          pgtype.Timestamptz
+	StripeSubscriptionID string
+	UpdatedAt            pgtype.Timestamptz
+	CreatedAt            pgtype.Timestamptz
+}
+
 // Per-subject data keys, wrapped by the OpenBao KEK. Erasure nulls the key.
 type PiiKey struct {
 	SubjectID  string
