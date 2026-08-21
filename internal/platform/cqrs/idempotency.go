@@ -32,8 +32,45 @@ var (
 // can contain personal data — well past any use.
 const KeyTTL = 24 * time.Hour
 
+// MaxKeyLen bounds the `Idempotency-Key` header.
+//
+// The contract asks for a ULID (26 characters) or a UUID (36), and the server
+// accepts any non-empty value that carries no '|' — which, before this constant
+// existed, meant a header of any size at all became a row in the idempotency
+// store and a key in Valkey. Bounding it here rather than at the transport is
+// what makes the number the same one the OpenAPI document publishes on the
+// parameter: both come from this contract, not from two independent guesses.
+const MaxKeyLen = 128
+
 // Key is the client-generated `Idempotency-Key` header.
 type Key string
+
+// Validate rejects a key that must never reach the store OR the event log.
+//
+// Separate from Scope.Validate because the two are needed in different places. A
+// PUBLIC mutation has no principal, so it builds no Scope and gets no stored
+// response — but it still requires a key, because the key becomes the command's
+// causation id (interceptor.withCausation) and an event is append-only. Every
+// rule below therefore has to hold for a request that never touches the store.
+func (k Key) Validate() error {
+	switch {
+	case k == "":
+		return fmt.Errorf("%w: no idempotency key; every mutating RPC requires one", ErrInvalid)
+	case len(k) > MaxKeyLen:
+		// The key becomes part of a stored record's primary key, a cache key, and
+		// a causation id in an append-only log. Any of those unbounded is an
+		// unbounded write from a header — and the log one cannot be undone.
+		return fmt.Errorf("%w: an idempotency key of %d bytes exceeds the %d-byte maximum",
+			ErrInvalid, len(k), MaxKeyLen)
+	case strings.ContainsAny(string(k), "|"):
+		// '|' separates the parts of the stored key. A value carrying one could
+		// address a different scope than the caller named — the same class of bug
+		// as a reserved character in an authorization reference.
+		return fmt.Errorf("%w: an idempotency key contains the reserved separator '|'",
+			ErrInvalid)
+	}
+	return nil
+}
 
 // Scope is what a key is unique WITHIN: (principal, operation, key).
 //
@@ -52,6 +89,11 @@ func (s Scope) String() string {
 }
 
 // Validate rejects a scope that must never reach the store.
+//
+// The KEY's own rules live on Key.Validate and are delegated to, so the public
+// path — which requires a key but builds no scope — refuses exactly what this
+// one does. Two copies of "what is a usable key" is how the two paths come to
+// disagree about a 200-character header.
 func (s Scope) Validate() error {
 	switch {
 	case s.Principal == "":
@@ -59,14 +101,15 @@ func (s Scope) Validate() error {
 			"replay another's response", ErrInvalid)
 	case s.Operation == "":
 		return fmt.Errorf("%w: an idempotency scope has no operation", ErrInvalid)
-	case s.Key == "":
-		return fmt.Errorf("%w: no idempotency key; every mutating RPC requires one", ErrInvalid)
+	}
+	if err := s.Key.Validate(); err != nil {
+		return err
 	}
 	// '|' separates the parts of the stored key. A value carrying one could
 	// address a different scope than the caller named — the same class of bug as
-	// a reserved character in an authorization reference.
-	if strings.ContainsAny(s.Principal, "|") || strings.ContainsAny(s.Operation, "|") ||
-		strings.ContainsAny(string(s.Key), "|") {
+	// a reserved character in an authorization reference. Key.Validate has already
+	// refused one in the key itself; these two are scope-only.
+	if strings.ContainsAny(s.Principal, "|") || strings.ContainsAny(s.Operation, "|") {
 		return fmt.Errorf("%w: an idempotency scope contains the reserved separator '|'",
 			ErrInvalid)
 	}

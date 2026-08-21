@@ -3,6 +3,7 @@ package cqrs_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -522,5 +523,70 @@ func TestTheInFlightWaitIsBounded(t *testing.T) {
 	}
 	if polls == 0 {
 		t.Fatal("the executor never waited at all, so the bound is untested")
+	}
+}
+
+// Key.Validate is the rule BOTH paths use, and the public path is the one with
+// no other protection.
+//
+// An authenticated mutation reaches this rule through Scope.Validate, with a
+// store claim behind it. A PUBLIC mutation has no principal, builds no scope and
+// claims nothing — `Gates.WrapUnary` calls Key.Validate directly and then uses
+// the key as the command's causation id. So for public writes this function is
+// the entire bound on a client-supplied header that ends up in an append-only
+// log, which is why it is tested apart from the scope that usually carries it.
+func TestKeyValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		key  cqrs.Key
+		ok   bool
+	}{
+		{name: "a ULID", key: "01ARZ3NDEKTSV4RRFFQ69G5FAV", ok: true},
+		{name: "a UUID", key: "6ba7b810-9dad-11d1-80b4-00c04fd430c8", ok: true},
+		{name: "any other bounded text", key: "idem_evt_01ARZ3NDEKTSV4RRFFQ69G5FAV", ok: true},
+		{name: "exactly the maximum", key: cqrs.Key(strings.Repeat("A", cqrs.MaxKeyLen)), ok: true},
+		{name: "empty"},
+		{name: "one past the maximum", key: cqrs.Key(strings.Repeat("A", cqrs.MaxKeyLen+1))},
+		{name: "carrying the scope separator", key: "01ARZ3NDEKTSV4RRFFQ69G5FAV|other"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.key.Validate()
+			if tt.ok && err != nil {
+				t.Errorf("Validate(%q) = %v, want nil", tt.key, err)
+			}
+			if !tt.ok {
+				if err == nil {
+					t.Errorf("Validate(%q) = nil; the key reaches the event log unbounded", tt.key)
+				} else if !errors.Is(err, cqrs.ErrInvalid) {
+					t.Errorf("Validate(%q) = %v, which does not wrap ErrInvalid — callers "+
+						"branch on that to answer VALIDATION_FAILED", tt.key, err)
+				}
+			}
+		})
+	}
+}
+
+// The published ceiling and the enforced one are the same number.
+//
+// internal/tools/checkopenapi asserts the OpenAPI document says MaxKeyLen; this
+// asserts the value itself is one a documented key can actually reach, so the two
+// documented forms are not silently refused by the bound that is supposed to
+// admit them.
+func TestMaxKeyLenAdmitsBothDocumentedForms(t *testing.T) {
+	t.Parallel()
+
+	for _, k := range []cqrs.Key{
+		"01ARZ3NDEKTSV4RRFFQ69G5FAV",           // ULID, 26
+		"6ba7b810-9dad-11d1-80b4-00c04fd430c8", // UUID, 36
+	} {
+		if len(k) > cqrs.MaxKeyLen {
+			t.Errorf("MaxKeyLen (%d) refuses %q (%d), which the contract recommends",
+				cqrs.MaxKeyLen, k, len(k))
+		}
 	}
 }

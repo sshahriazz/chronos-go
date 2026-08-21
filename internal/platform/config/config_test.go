@@ -560,3 +560,112 @@ func TestValidate_AcceptsAGuardedProfiler(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The movable clock (ADR-054)
+// ---------------------------------------------------------------------------
+
+// The refusal that keeps the movable clock out of every deployment.
+//
+// It is not a warning and not a degraded mode: Load returns an error, and
+// cmd/api's run() returns it before it constructs anything, so the process
+// exits non-zero. A production server that sets the variable does not start.
+func TestValidate_RefusesTheMovableClockOutsideLocal(t *testing.T) {
+	for _, env := range []string{"staging", "production"} {
+		t.Run(env, func(t *testing.T) {
+			withEnv(t, base())
+			t.Setenv("APP_ENV", env)
+			t.Setenv("CLOCK_CONTROL_ENABLED", "true")
+
+			_, err := config.Load()
+			if err == nil {
+				t.Fatalf("APP_ENV=%s with CLOCK_CONTROL_ENABLED=true booted. Anyone who "+
+					"can reach that port can expire a session, elapse an account lockout "+
+					"and roll a TOTP step, and nothing in the request path can tell the "+
+					"difference from time passing", env)
+			}
+			if !strings.Contains(err.Error(), "CLOCK_CONTROL_ENABLED") {
+				t.Errorf("the refusal must name the variable that caused it:\n%s", err)
+			}
+		})
+	}
+}
+
+func TestValidate_AllowsTheMovableClockInLocal(t *testing.T) {
+	withEnv(t, base())
+	t.Setenv("APP_ENV", "local")
+	t.Setenv("CLOCK_CONTROL_ENABLED", "true")
+
+	c, err := config.Load()
+	if err != nil {
+		t.Fatalf("local must be able to run the movable clock: %v", err)
+	}
+	if !c.ClockControl.Enabled {
+		t.Error("CLOCK_CONTROL_ENABLED=true did not reach the config")
+	}
+	if c.ClockControl.Addr != "127.0.0.1:0" {
+		t.Errorf("default CLOCK_CONTROL_ADDR is %q, want a loopback bind on an "+
+			"ephemeral port", c.ClockControl.Addr)
+	}
+}
+
+func TestValidate_DefaultsTheMovableClockOff(t *testing.T) {
+	withEnv(t, base())
+	c, err := config.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.ClockControl.Enabled {
+		t.Fatal("the movable clock is ON by default; it must be opt-in, because a " +
+			"default-on control is one nobody remembers is there")
+	}
+}
+
+// Loopback in EVERY environment, local included. A clock a stranger on the
+// network can move is not made acceptable by the machine being a laptop.
+func TestValidate_RefusesAMovableClockOnARoutableAddress(t *testing.T) {
+	for _, addr := range []string{"0.0.0.0:9999", "192.168.1.10:9999", "[::]:9999"} {
+		t.Run(addr, func(t *testing.T) {
+			withEnv(t, base())
+			t.Setenv("APP_ENV", "local")
+			t.Setenv("CLOCK_CONTROL_ENABLED", "true")
+			t.Setenv("CLOCK_CONTROL_ADDR", addr)
+
+			_, err := config.Load()
+			if err == nil {
+				t.Fatalf("CLOCK_CONTROL_ADDR=%s was accepted; the movable clock is never "+
+					"offered on a routable interface", addr)
+			}
+			if !strings.Contains(err.Error(), "CLOCK_CONTROL_ADDR") {
+				t.Errorf("the refusal must name the variable:\n%s", err)
+			}
+		})
+	}
+}
+
+// A malformed address is refused rather than defaulted. Falling back to the
+// default would bind a control the operator did not describe.
+func TestValidate_RefusesAMalformedClockControlAddress(t *testing.T) {
+	withEnv(t, base())
+	t.Setenv("APP_ENV", "local")
+	t.Setenv("CLOCK_CONTROL_ENABLED", "true")
+	t.Setenv("CLOCK_CONTROL_ADDR", "127.0.0.1")
+
+	if _, err := config.Load(); err == nil {
+		t.Fatal("CLOCK_CONTROL_ADDR without a port was accepted")
+	}
+}
+
+// The address is NOT validated when the control is off, because nothing binds
+// it. A rule that refused a boot over an unused variable would turn a leftover
+// line in someone's .env into a dead server.
+func TestValidate_IgnoresTheClockAddressWhenTheControlIsOff(t *testing.T) {
+	withEnv(t, base())
+	t.Setenv("APP_ENV", "local")
+	t.Setenv("CLOCK_CONTROL_ENABLED", "false")
+	t.Setenv("CLOCK_CONTROL_ADDR", "0.0.0.0:9999")
+
+	if _, err := config.Load(); err != nil {
+		t.Fatalf("a disabled control must not validate its address: %v", err)
+	}
+}

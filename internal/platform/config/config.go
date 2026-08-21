@@ -73,6 +73,10 @@ type Config struct {
 	API       APIConfig
 	Identity  IdentityConfig
 
+	// ClockControl is the movable clock. Local only, and the validation below
+	// is what makes that true rather than aspirational.
+	ClockControl ClockControlConfig
+
 	location *time.Location
 }
 
@@ -548,6 +552,66 @@ type ProfilingConfig struct {
 	Token Secret `env:"PPROF_TOKEN"`
 }
 
+// ClockControlConfig is the movable clock: a LOCAL-ONLY surface that lets a
+// test push this process's clock forward instead of sleeping through a
+// time-derived rule (ADR-054).
+//
+// # What it is for
+//
+// Almost everything identity enforces is derived from a clock — TOTP steps,
+// session idle and absolute deadlines, verification and reset token expiry,
+// attempt ceilings, lockouts. A test that needs to cross one of those
+// boundaries has exactly two options: wait, or move the server's clock. The
+// identity integration suite took the first option and spent most of four
+// minutes asleep waiting for RFC 6238's thirty-second step to roll over.
+//
+// # What stops it in production — three independent locks
+//
+//  1. Enabled defaults to false, so the listener is never bound and the routes
+//     exist on no mux. Nothing is reachable in a default build.
+//  2. validate() REFUSES TO BOOT when Enabled is true and APP_ENV is anything
+//     but local. Not a warning, not a degraded mode: config.Load returns an
+//     error and cmd/api exits non-zero. A production deployment that sets the
+//     variable gets a dead server, which is the loudest possible signal and the
+//     only one nobody can miss.
+//  3. Addr must be loopback, in every environment including local. A clock an
+//     attacker can move is a clock that expires anybody's lockout on demand, so
+//     it does not go on a routable interface even on a laptop.
+//
+// A fourth lock is in the type rather than the configuration: clock.Offset only
+// moves FORWARD. See that type for why a rewind would be a hole rather than a
+// feature.
+//
+// # Why not a build tag
+//
+// A build tag would remove the code from the production binary entirely, which
+// is stronger — and it would do it by making the binary the tests exercise a
+// DIFFERENT binary from the one that ships. internal/adapter/identityit exists
+// precisely because this repository keeps finding code that was built, tested
+// and wired into nothing; it compiles and runs cmd/api itself so that every
+// interceptor, gate and adapter under test is the production one. A tag would
+// reintroduce the gap that package was written to close, and it would make lock
+// 2 — the refusal to boot, which is the property most worth testing — untestable
+// because the refusing code would not be in the binary.
+type ClockControlConfig struct {
+	// Enabled binds the control listener. False means net.Listen is never
+	// called, no route is registered, and this process's clock is
+	// clock.System{} with nothing able to move it.
+	Enabled bool `env:"CLOCK_CONTROL_ENABLED" envDefault:"false"`
+
+	// Addr is the control listener's own host:port, and never the API's.
+	//
+	// Its own listener for the same reason /debug/pprof has one: the ADR-021
+	// enforcement gates are Connect interceptors that run inside a Connect
+	// handler, so a plain HTTP route on the tenant mux is an UNAUTHENTICATED
+	// route no matter what it is called.
+	//
+	// Port 0 by default, so a harness that did not pick a port gets an
+	// ephemeral one rather than colliding with a second server on the same
+	// machine. The resolved address is logged at startup.
+	Addr string `env:"CLOCK_CONTROL_ADDR" envDefault:"127.0.0.1:0"`
+}
+
 // MinProfilingTokenLength is the floor for PPROF_TOKEN.
 //
 // Thirty-two characters is 128 bits at four bits per hex character, which is the
@@ -839,6 +903,36 @@ func (c *Config) validate() error {
 			add("PPROF_TOKEN is %d characters; the floor is %d. There is no lockout on a "+
 				"debug listener, and what it guards is a heap dump",
 				n, MinProfilingTokenLength)
+		}
+	}
+
+	// The movable clock (ADR-054). Both rules below refuse a configuration that
+	// WORKS, which is the whole point — a process whose clock a caller can push
+	// forward is a process where every lockout, every token expiry and every
+	// TOTP step is negotiable, and none of that produces an error, a metric or a
+	// log line at the moment it is abused. Startup is the only place it is
+	// detectable, so this is where it is detected.
+	if c.ClockControl.Enabled {
+		if !c.Env.IsLocal() {
+			add("CLOCK_CONTROL_ENABLED is true and APP_ENV=%s: the movable clock is a "+
+				"LOCAL-ONLY test control. Outside local it would let anyone who can reach "+
+				"its port expire a session, elapse an account lockout and roll a TOTP "+
+				"step on demand, with nothing in the request path able to tell the "+
+				"difference from time actually passing (ADR-054)", c.Env)
+		}
+		host, port, err := net.SplitHostPort(c.ClockControl.Addr)
+		switch {
+		case err != nil:
+			add("CLOCK_CONTROL_ADDR %q is not a host:port: %v", c.ClockControl.Addr, err)
+		case port == "":
+			add("CLOCK_CONTROL_ADDR %q names no port", c.ClockControl.Addr)
+		case !isLoopbackHost(host):
+			// No token option here, unlike PPROF_TOKEN. A credential would make a
+			// routable bind *survivable*; it would not make it a good idea, and
+			// there is no diagnostic this surface offers that a port-forward or a
+			// loopback bind does not.
+			add("CLOCK_CONTROL_ADDR %q is not loopback: the movable clock is never "+
+				"offered on a routable interface, in any environment", c.ClockControl.Addr)
 		}
 	}
 

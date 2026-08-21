@@ -27,8 +27,10 @@ import (
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
 	"github.com/chronos/chronos-go/internal/modules/identity"
 	identityprojection "github.com/chronos/chronos-go/internal/modules/identity/projection"
-	"github.com/chronos/chronos-go/internal/modules/notification/contract"
+	"github.com/chronos/chronos-go/internal/modules/notification"
 	notificationprojection "github.com/chronos/chronos-go/internal/modules/notification/projection"
+	profile "github.com/chronos/chronos-go/internal/modules/profile"
+	profileprojection "github.com/chronos/chronos-go/internal/modules/profile/projection"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/config"
 	"github.com/chronos/chronos-go/internal/platform/obs"
@@ -246,6 +248,9 @@ func projections(codec *eventcodec.JSON) []projection.Projection {
 		// order undefined (CONVENTIONS §8).
 		notificationprojection.NewFeed(codec),
 		notificationprojection.NewPushSubscriptions(codec),
+		notificationprojection.NewPreferences(codec),
+
+		profileprojection.NewProfile(codec),
 
 		identityprojection.NewUser(codec),
 		identityprojection.NewSession(codec),
@@ -263,11 +268,13 @@ func registerEvents(codec *eventcodec.JSON) {
 	// A type missing here is a hard read error rather than a silent skip:
 	// skipping would let a projector quietly ignore facts it does not
 	// understand and build a read model that is wrong in a way nothing detects.
-	eventcodec.Register[contract.NotificationCreated](codec)
-	eventcodec.Register[contract.NotificationRead](codec)
-	eventcodec.Register[contract.PushSubscribed](codec)
-	eventcodec.Register[contract.PushSubscriptionExpired](codec)
-	eventcodec.Register[contract.PushSent](codec)
+	//
+	// Registered from the module's own composition surface rather than listed
+	// here, for the reason identity already is: three binaries register these,
+	// and a type registered in two of them is a projector that stops on an event
+	// the API can happily write.
+	notification.RegisterEvents(codec)
+	profile.RegisterEvents(codec)
 
 	// Identity registers its own types, from the module's composition surface.
 	// Listing them here as well would be a second place to forget one, and the
