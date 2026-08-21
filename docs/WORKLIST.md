@@ -67,8 +67,15 @@ infrastructure and every later piece depends on its shape.
       fixture. `billing_manager` resolves to the owner alone (ADR-027).
 - [x] **Events registered in all three binaries** + a notification decision for
       each. The existing gates caught both omissions.
-- [ ] **`org_status_view`** — hot path, gate 3 reads it on every request
-- [ ] **Subscription gate** — the operation-class × status table
+- [x] **Subscription gate (the decision)** — all 42 cells of the operation-class
+      × status matrix asserted. Pure, so it needed no projection; fails CLOSED
+      when the status cannot be read.
+- [>] **`org_status_view`** — hot path, gate 3 reads it on every request.
+      *Next:* the migration, the projector, and the `StatusReader` port the gate
+      already depends on.
+- [ ] **`CreateOrganization` use case + RPC** — added to the list: without it
+      nothing can create an org, so the projection has no rows and the gate
+      cannot be exercised end to end.
 - [ ] **Then 1b**: access projector consuming `OrganizationCreated`, tombstones,
       `OrgResolver`
 
