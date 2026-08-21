@@ -143,6 +143,15 @@ What remains is the cost of a single trial org per verified address, bounded by
 3 workspaces and 5 seats for 14 days. That is a bounded, monitorable number
 rather than an open-ended one, and it needs no new mechanism.
 
+### The billing mechanics are planned separately
+
+[BILLING-PLAN.md](BILLING-PLAN.md) settles how this is implemented against
+Stripe: the cardless trial uses `trial_settings.end_behavior.missing_payment_method
+= pause`, which produces Stripe status `paused` — the status billing.md §3
+already maps to `Suspended`, and the behaviour §3 above settled on. It also
+records why `billing_viewer` and `billing_manager` have to be in the
+organization fragment of the authorization model, which is a slice 1 output.
+
 ### What this unblocks
 
 Everything through invitations, with no Stripe. Billing becomes the thing that
