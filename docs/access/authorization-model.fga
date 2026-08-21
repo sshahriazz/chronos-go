@@ -12,4 +12,11 @@
 model
   schema 1.1
 
+type organization
+  relations
+    define admin: [user] or owner
+    define billing_manager: owner
+    define billing_viewer: admin
+    define owner: [user]
+
 type user

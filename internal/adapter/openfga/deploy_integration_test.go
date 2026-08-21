@@ -10,6 +10,7 @@ import (
 	fgav1 "github.com/chronos/chronos-go/gen/thirdparty/openfga/v1"
 	fgaadapter "github.com/chronos/chronos-go/internal/adapter/openfga"
 	"github.com/chronos/chronos-go/internal/authzmodel"
+	orgdomain "github.com/chronos/chronos-go/internal/modules/organization/domain"
 	"github.com/chronos/chronos-go/internal/platform/authz"
 	"github.com/chronos/chronos-go/internal/platform/authz/model"
 )
@@ -63,10 +64,10 @@ func TestTheAssembledModelDeploys(t *testing.T) {
 // OpenFGA's Usersets, to a live Check. A mistake anywhere in that chain shows up
 // here as a denial.
 //
-// The fragments are declared IN THIS TEST rather than imported, because
-// organization and workspace do not exist yet. They are copied from
-// organization.md §5.1 and workspace.md §3, and when those modules land their
-// real fragments replace these.
+// Organization's fragment is the REAL one now that the module exists, so this
+// test exercises what ships rather than a copy of it. Workspace is still a local
+// fixture — that module does not exist yet — and is replaced the same way when
+// it lands.
 func TestAnOrgAdminInheritsAdminOnAWorkspaceCreatedAfterwards(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -79,13 +80,7 @@ func TestAnOrgAdminInheritsAdminOnAWorkspaceCreatedAfterwards(t *testing.T) {
 
 	m, err := model.Assemble([]model.Fragment{
 		{Module: "identity", Types: []model.Type{{Name: "user"}}},
-		{Module: "organization", Types: []model.Type{{
-			Name: "organization",
-			Relations: []model.Relation{
-				{Name: "owner", Direct: []model.TypeRef{{Type: "user"}}},
-				{Name: "admin", Direct: []model.TypeRef{{Type: "user"}}, Implies: []string{"owner"}},
-			},
-		}}},
+		orgdomain.AccessFragment(),
 		{Module: "workspace", Types: []model.Type{{
 			Name: "workspace",
 			Relations: []model.Relation{

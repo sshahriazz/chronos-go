@@ -29,7 +29,8 @@ import (
 	identityprojection "github.com/chronos/chronos-go/internal/modules/identity/projection"
 	"github.com/chronos/chronos-go/internal/modules/notification"
 	notificationprojection "github.com/chronos/chronos-go/internal/modules/notification/projection"
-	profile "github.com/chronos/chronos-go/internal/modules/profile"
+	"github.com/chronos/chronos-go/internal/modules/organization"
+	"github.com/chronos/chronos-go/internal/modules/profile"
 	profileprojection "github.com/chronos/chronos-go/internal/modules/profile/projection"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/config"
@@ -275,6 +276,7 @@ func registerEvents(codec *eventcodec.JSON) {
 	// the API can happily write.
 	notification.RegisterEvents(codec)
 	profile.RegisterEvents(codec)
+	organization.RegisterEvents(codec)
 
 	// Identity registers its own types, from the module's composition surface.
 	// Listing them here as well would be a second place to forget one, and the

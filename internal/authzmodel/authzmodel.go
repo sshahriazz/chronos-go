@@ -17,6 +17,7 @@ import (
 	"fmt"
 
 	identitydomain "github.com/chronos/chronos-go/internal/modules/identity/domain"
+	orgdomain "github.com/chronos/chronos-go/internal/modules/organization/domain"
 	"github.com/chronos/chronos-go/internal/platform/authz/model"
 )
 
@@ -28,6 +29,7 @@ import (
 func Fragments() []model.Fragment {
 	return []model.Fragment{
 		identitydomain.AccessFragment(),
+		orgdomain.AccessFragment(),
 	}
 }
 

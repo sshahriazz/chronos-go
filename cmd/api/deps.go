@@ -19,6 +19,7 @@ import (
 	"github.com/chronos/chronos-go/internal/modules/identity/app"
 	"github.com/chronos/chronos-go/internal/modules/notification"
 	notificationapi "github.com/chronos/chronos-go/internal/modules/notification/api"
+	"github.com/chronos/chronos-go/internal/modules/organization"
 	"github.com/chronos/chronos-go/internal/modules/profile"
 	profileapi "github.com/chronos/chronos-go/internal/modules/profile/api"
 	"github.com/chronos/chronos-go/internal/platform/authz"
@@ -301,10 +302,12 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 	identity.RegisterSchemas(d.upcasters)
 	notification.RegisterSchemas(d.upcasters)
 	profile.RegisterSchemas(d.upcasters)
+	organization.RegisterSchemas(d.upcasters)
 	d.codec = eventcodec.NewJSON(d.upcasters)
 	identity.RegisterEvents(d.codec)
 	notification.RegisterEvents(d.codec)
 	profile.RegisterEvents(d.codec)
+	organization.RegisterEvents(d.codec)
 
 	// ---- PostgreSQL: lazy pool, no connection attempted here -------------
 	if pool, err := pgadapter.NewPool(context.Background(), cfg.Postgres.AppDSN(), cfg.Postgres.MaxConns); err != nil {

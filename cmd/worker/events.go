@@ -7,6 +7,8 @@ import (
 	"github.com/chronos/chronos-go/internal/modules/identity"
 	identityevents "github.com/chronos/chronos-go/internal/modules/identity/contract"
 	"github.com/chronos/chronos-go/internal/modules/notification/contract"
+	"github.com/chronos/chronos-go/internal/modules/organization"
+	orgevents "github.com/chronos/chronos-go/internal/modules/organization/contract"
 	"github.com/chronos/chronos-go/internal/modules/profile"
 	profilecontract "github.com/chronos/chronos-go/internal/modules/profile/contract"
 	"github.com/chronos/chronos-go/internal/platform/notify"
@@ -48,6 +50,7 @@ func registerEvents(codec *eventcodec.JSON) {
 	// raised and no metric moves.
 	identity.RegisterEvents(codec)
 	profile.RegisterEvents(codec)
+	organization.RegisterEvents(codec)
 }
 
 // notifications declares what each event sends, and to whom.
@@ -452,6 +455,53 @@ func identityNotifications(cat *notify.Catalogue) {
 			"causes that carry real risk already notify from their own event: a reset " +
 			"through PasswordChanged, a compromise through CredentialCompromiseDetected. " +
 			"Closing this properly needs an aggregate event identity does not yet emit")
+	// ── organization ───────────────────────────────────────────────────────
+	//
+	// Every organization event is SILENT for now, and that is a deliberate
+	// staging decision rather than a claim that none of them is worth a message.
+	// Several plainly are — a suspension and a closure both end somebody's
+	// access — but the audience for an organization event is the OWNER and the
+	// ADMIN SET, and notify has AudienceSubject only. Sending to a set is
+	// resolving a membership, which is `workspace`'s job and does not exist yet.
+	//
+	// Declaring them silent with the reason recorded is what keeps this
+	// catalogue honest: the gate demands a decision per event, so the choice is
+	// visible in review instead of being an event nobody considered. Each of
+	// these becomes an `On` when there is a set to address.
+
+	cat.Silent[orgevents.OrganizationCreated](
+		"the creator is looking at the screen that created it, and the org is not usable " +
+			"until the trial starts. The message worth sending is the welcome, and that " +
+			"belongs to TrialStarted, which is the point the tenant actually works")
+	cat.Silent[orgevents.OrganizationTrialStarted](
+		"the welcome and the trial-end date belong here, and this becomes an On the moment " +
+			"there is an owner address to resolve. It is silent today because the audience " +
+			"is the owner and notify addresses a SUBJECT — which is the same thing here, " +
+			"and will stop being so as soon as admins exist")
+	cat.Silent[orgevents.OrganizationActivated](
+		"Stripe already emails a receipt for the payment that caused it. A second message " +
+			"saying the same thing is the duplicate-dunning mistake billing.md §5 case 5 " +
+			"refuses for retries, applied to conversions")
+	cat.Silent[orgevents.OrganizationPastDue](
+		"Stripe Smart Retries owns the dunning schedule and sends the mail. Adding ours " +
+			"double-messages a customer who is already anxious about a failed card " +
+			"(billing.md §5 case 5)")
+	cat.Silent[orgevents.OrganizationSuspended](
+		"the one most likely to become an On, and it needs an audience first: suspension " +
+			"ends access for every member, not just the owner. Sending it to the owner " +
+			"alone would tell the one person who can fix it and nobody who is affected")
+	cat.Silent[orgevents.OrganizationClosed](
+		"closure is the owner's own deliberate act, and the export window it opens is what " +
+			"needs communicating. That message has a deadline in it, so it belongs to the " +
+			"closure saga's timer rather than to the instant of the event")
+	cat.Silent[orgevents.OrgAdminAdded](
+		"an authority change worth telling the RECIPIENT about — being made an admin is a " +
+			"fact about them. It is silent only until the audience exists; the pattern to " +
+			"copy is identity's, where a change to someone's own authority is Security class")
+	cat.Silent[orgevents.OrgAdminRemoved](
+		"the same, and the more important half: losing administration silently is how " +
+			"somebody discovers it by being refused. Security class when it lands")
+
 	cat.Silent[identityevents.SessionExpired](
 		"a deadline being reached. The contract's own comment says it: expiry is not a " +
 			"security signal and revocation usually is, and collapsing the two would bury " +

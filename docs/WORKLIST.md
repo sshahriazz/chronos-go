@@ -35,30 +35,42 @@ graph. See [ORG-WORKSPACE-SCOPE.md](ORG-WORKSPACE-SCOPE.md) §2.
       **The server now boots with zero ERROR lines** (it had two).
 - [x] **`make authz-model` / `authz-check` / `authz-deploy`**
 
-### 1b — the access module
+### 1b — the access module  ⏸ deferred until organization exists
+
+**Reordered, deliberately.** Every item here needs events to react to, and there
+are none: all 22 authz rules are `self`, which writes no tuples, and
+organization and workspace do not exist. Building them now would mean adapters
+wired to nothing — which this repo has already done once, with `inapp`,
+`webpush` and `seaweedfs` fully built, fully tested and constructed by no
+binary. So 1b now FOLLOWS the organization aggregate.
 
 - [ ] **Access projector** — writes tuples from module events
-      *Why:* tuples are a projection; the event log is truth. `TupleWriter` is
-      reachable from a projector only.
+      *Blocked on:* `OrganizationCreated`, whose owner grant is its first job.
 - [ ] **Revocation tombstones (ADR-045)** — deny before the projection catches up
-      *Why:* otherwise a removed member keeps access for as long as the
-      projector lags.
-- [x] **Gate 2 (`Guard`) now functional** — it was wired in code but dead
-      without a store id. `authz` has dropped off the unwired list.
-- [ ] **Gate 1 (`OrgResolver`)** — still an interface with no implementation.
-      *Why:* it answers "which organization is this request in", so nothing
-      org-scoped can be enforced until it exists.
+      *Blocked on:* a revocation event to react to.
+- [ ] **Gate 1 (`OrgResolver`)** — "which organization is this request in"
+      *Blocked on:* organizations existing.
 
----
+## Now: Slice 2 — organization core
 
-## Next: Slice 2 — organization core
+Pulled forward ahead of 1b, because 1b has nothing to react to until this
+exists. Built inside-out: the pure domain first, since it needs no
+infrastructure and every later piece depends on its shape.
 
-- [ ] `Organization` aggregate, lifecycle state machine
-- [ ] Owner + admin set, last-owner invariant
-- [ ] `org_status_view` (hot path — gate 3 reads it every request)
-- [ ] Subscription gate: the operation-class × status table
-- [ ] Organization access fragment (`owner`, `admin`, `billing_viewer`,
-      `billing_manager`) — replaces the fixtures in the 1a test
+- [x] **`Organization` aggregate + lifecycle state machine**
+      30 transitions asserted, legal and illegal. `PendingActivation` and
+      `Expired` are gone — both were about a card at signup.
+- [x] **Owner + admin set, last-owner invariant**
+      The owner cannot be removed as an admin, and adding the owner as an admin
+      records nothing (it would put them in a set they can be removed from).
+- [x] **Organization access fragment** — now used by the 1a proof instead of its
+      fixture. `billing_manager` resolves to the owner alone (ADR-027).
+- [x] **Events registered in all three binaries** + a notification decision for
+      each. The existing gates caught both omissions.
+- [ ] **`org_status_view`** — hot path, gate 3 reads it on every request
+- [ ] **Subscription gate** — the operation-class × status table
+- [ ] **Then 1b**: access projector consuming `OrganizationCreated`, tombstones,
+      `OrgResolver`
 
 Deliberately excluded: domain verification, ownership transfer. Neither blocks
 workspace.

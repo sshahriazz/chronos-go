@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/chronos/chronos-go/internal/modules/notification"
+	"github.com/chronos/chronos-go/internal/modules/organization"
 	"github.com/chronos/chronos-go/internal/modules/profile"
 )
 
@@ -63,6 +64,7 @@ func TestTheCodecRegistersEveryModuleThisBinaryWrites(t *testing.T) {
 	}{
 		{"notification", notification.EventTypes()},
 		{"profile", profile.EventTypes()},
+		{"organization", organization.EventTypes()},
 	} {
 		if len(module.types) == 0 {
 			t.Fatalf("%s declares no event types; this test would assert nothing", module.name)
