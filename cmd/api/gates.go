@@ -122,12 +122,25 @@ func (d *dependencies) startGates(log *slog.Logger) {
 	}
 	d.gates = gates
 
-	if missing := gates.Missing(); len(missing) > 0 {
-		// Not a warning about a possibility — a statement of fact about this
-		// process. Every method whose policy names one of these is refused for as
-		// long as this binary runs.
-		log.Error("gates are declared by some methods and implemented by none; those "+
-			"methods will be refused for the lifetime of this process", "gates", missing)
+	// Two different facts, at two different levels, because they have two
+	// different consequences.
+	//
+	// Blocking is an OUTAGE: some method reaches a gate that has no
+	// implementation, so it is refused for as long as this binary runs.
+	//
+	// Missing without Blocking is just an unbuilt module. It used to be reported
+	// at ERROR, and on this build it was reported at ERROR on every boot while
+	// refusing nothing at all — every authorization declaration in the tree is
+	// `self` on `user`, and enforce returns before the org-context gate for
+	// those. An ERROR that names no consequence is the line an operator learns to
+	// scroll past, which is a bad habit to teach with the real ones coming later.
+	if blocking := gates.Blocking(); len(blocking) > 0 {
+		log.Error("gates are reached by some method and implemented by none; those methods "+
+			"are refused for the lifetime of this process", "gates", blocking)
+	} else if missing := gates.Missing(); len(missing) > 0 {
+		log.Info("gates are unimplemented but unreachable: no method's policy reaches them, "+
+			"so nothing is refused. They become an outage the moment a method declares one",
+			"gates", missing)
 	}
 	log.Info("enforcement pipeline built",
 		"services", gatedServices(), "methods", len(policies.Methods()))

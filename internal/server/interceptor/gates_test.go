@@ -1618,3 +1618,104 @@ func TestASessionAwaitingCredentialRotationIsConfinedToItsOwnAccount(t *testing.
 		}
 	})
 }
+
+// Blocking names only the gates a method actually REACHES.
+//
+// # The defect this exists to prevent, which shipped
+//
+// cmd/api logged Missing() at ERROR with "gates are declared by some methods and
+// implemented by none; those methods will be refused for the lifetime of this
+// process". On this build both halves were false. Every authorization
+// declaration in the tree is `self` on `user`, and enforce returns at
+// `if p.SelfScoped()` before the org-context gate — so org-context, authz and
+// subscription are unreachable, and no method declares an entitlement at all.
+// The server reported an ERROR on every boot and refused nothing.
+//
+// The cost is not cosmetic. A permanent ERROR that names no consequence is the
+// line an operator learns to scroll past, and the same line will one day be
+// real: the moment any method drops `self`, three unimplemented gates become an
+// actual outage. Missing cannot distinguish the two states. Blocking can, and
+// this pins the difference.
+func TestBlockingNamesOnlyGatesAMethodReaches(t *testing.T) {
+	selfSvc, _ := selfScopedService(t, "blocking.self.v1",
+		optionsv1.OperationClass_OPERATION_CLASS_READ,
+		optionsv1.AssuranceLevel_ASSURANCE_LEVEL_1)
+	pubSvc, _ := publicMutatingService(t, "blocking.public.v1")
+
+	// Nothing wired at all, so Missing() is the full set and any difference
+	// Blocking() shows comes from reachability rather than from wiring.
+	g, err := interceptor.NewGates(interceptor.Deps{
+		Policies: policies(t, selfSvc, pubSvc, systemService()),
+	})
+	if err != nil {
+		t.Fatalf("NewGates: %v", err)
+	}
+
+	if got := len(g.Missing()); got != 6 {
+		t.Fatalf("with no dependencies wired, Missing() named %d gates, want all 6; this "+
+			"test's premise is that Blocking() is a strict subset of it", got)
+	}
+
+	blocking := map[interceptor.Gate]bool{}
+	for _, gate := range g.Blocking() {
+		blocking[gate] = true
+	}
+
+	// A self-scoped READ reaches authn and stops. The public mutation reaches
+	// nothing at all — WrapUnary returns before authn for a public method — so
+	// idempotency is not expected here either.
+	if !blocking[interceptor.GateAuthn] {
+		t.Errorf("a self-scoped method is authenticated, so an unwired authn gate DOES refuse "+
+			"it; Blocking() does not name it: %v", g.Blocking())
+	}
+	for _, unreached := range []interceptor.Gate{
+		interceptor.GateOrgContext, interceptor.GateAuthz,
+		interceptor.GateSubscription, interceptor.GateEntitlement,
+	} {
+		if blocking[unreached] {
+			t.Errorf("Blocking() names %s, but no method in this set reaches it — the "+
+				"self-scoped one returns before it and the public one is not gated at all. "+
+				"Reporting it as blocking is the false ERROR this test exists to prevent.",
+				unreached)
+		}
+	}
+}
+
+// requiredGates agrees with the pipeline about what a self-scoped method needs.
+//
+// Blocking() derives its answer from requiredGates, which MIRRORS the early
+// returns in enforce — and two descriptions of one control flow drift. A stale
+// mirror here would under-report an outage, which is a worse failure than the
+// over-reporting it replaced.
+//
+// So this asserts the claim directly against the real pipeline rather than
+// against the mirror: with org-context, authz, subscription and entitlement ALL
+// nil, a self-scoped method must still be served. If any of those gates were in
+// fact reached, the request would come back INTERNAL naming the gate.
+func TestASelfScopedMethodIsServedWithTheOrgGatesUnwired(t *testing.T) {
+	selfSvc, procedure := selfScopedService(t, "blocking.drift.v1",
+		optionsv1.OperationClass_OPERATION_CLASS_READ,
+		optionsv1.AssuranceLevel_ASSURANCE_LEVEL_1)
+
+	g, err := interceptor.NewGates(interceptor.Deps{
+		Policies: policies(t, selfSvc),
+		Authn:    allowAuthn{},
+		// Org, Authz, Subscriptions and Entitlements deliberately nil.
+	})
+	if err != nil {
+		t.Fatalf("NewGates: %v", err)
+	}
+
+	calls := 0
+	_, err = g.WrapUnary(okHandler(&calls))(t.Context(),
+		request(t, procedure, statusMethod(t), nil))
+	if err != nil {
+		t.Fatalf("a self-scoped method was refused with the organization gates unwired: %v.\n"+
+			"Either enforce now reaches one of them for a self-scoped policy, or it never "+
+			"did and requiredGates is wrong. Blocking() is derived from requiredGates, so "+
+			"whichever it is, the startup report is now lying about what is down.", err)
+	}
+	if calls != 1 {
+		t.Errorf("the handler ran %d times, want 1", calls)
+	}
+}

@@ -211,6 +211,95 @@ func (g *Gates) Missing() []Gate {
 	return out
 }
 
+// Blocking is the subset of Missing that actually refuses traffic.
+//
+// # Why this is not the same question as Missing
+//
+// Missing answers "which gates have no implementation", which is a fact about
+// WIRING. Blocking answers "which of those does some method actually reach",
+// which is a fact about this POLICY SET, and only the second one describes an
+// outage.
+//
+// The distinction had teeth. cmd/api logged Missing() at ERROR with the text
+// "gates are declared by some methods and implemented by none; those methods
+// will be refused for the lifetime of this process" — and on this build that was
+// false in both halves. Every authorization declaration in the tree is `self` on
+// `user`, and enforce returns at `if p.SelfScoped()` BEFORE it reaches the
+// org-context gate, so org-context, authz and subscription are unreachable. No
+// method declares an entitlement at all, so gate 4 is unreachable twice over.
+// Nothing was refused, and the server nonetheless reported an ERROR on every
+// boot for the lifetime of the process.
+//
+// A permanent ERROR that names no real consequence is worse than silence: it is
+// the line an operator learns to scroll past, and the next one will be real.
+//
+// Absent modules are still worth saying out loud — that is what Missing is for,
+// at a level that matches "a module is unbuilt" rather than "the API is down".
+func (g *Gates) Blocking() []Gate {
+	unwired := map[Gate]bool{}
+	for _, gate := range g.Missing() {
+		unwired[gate] = true
+	}
+	if len(unwired) == 0 || g.deps.Policies == nil {
+		return nil
+	}
+
+	reached := map[Gate]bool{}
+	for _, method := range g.deps.Policies.Methods() {
+		p, ok := g.deps.Policies.Lookup(method)
+		if !ok {
+			continue
+		}
+		for _, gate := range requiredGates(p) {
+			if unwired[gate] {
+				reached[gate] = true
+			}
+		}
+	}
+
+	// Returned in pipeline order rather than map order, so the first name in the
+	// list is the first gate a request would hit.
+	var out []Gate
+	for _, gate := range []Gate{
+		GateAuthn, GateOrgContext, GateAuthz,
+		GateSubscription, GateEntitlement, GateIdempotency,
+	} {
+		if reached[gate] {
+			out = append(out, gate)
+		}
+	}
+	return out
+}
+
+// requiredGates is which gates a single method reaches.
+//
+// It MIRRORS the early returns in enforce and WrapUnary, and the mirroring is
+// the risk: two descriptions of one control flow can drift, and a stale copy
+// here would under-report an outage. TestRequiredGatesAgreesWithEnforce drives
+// every shape through the real pipeline with exactly one gate nil and requires
+// the two to agree, so the copy cannot rot silently.
+func requiredGates(p policy.Policy) []Gate {
+	// A public method returns at the top of WrapUnary: no authn, no gates.
+	if p.Public {
+		return nil
+	}
+
+	out := []Gate{GateAuthn}
+	if p.Mutating() {
+		out = append(out, GateIdempotency)
+	}
+	// Self-scoped stops at selfCheck, which is answered locally from the
+	// principal. It never reaches the organization, the graph or the plan.
+	if p.SelfScoped() {
+		return out
+	}
+	out = append(out, GateOrgContext, GateAuthz, GateSubscription)
+	if p.Entitlement != "" {
+		out = append(out, GateEntitlement)
+	}
+	return out
+}
+
 // WrapUnary returns the ConnectRPC interceptor.
 func (g *Gates) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
 	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
