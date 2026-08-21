@@ -2739,6 +2739,88 @@ components:
       description: |-
         AssuranceLevel is the authentication strength a method requires
          (identity.md §2). Step-up raises a session for a time-boxed window.
+    chronos.organization.v1.CreateOrganizationRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          examples:
+            - Acme Corporation
+          title: name
+          maxLength: 80
+          minLength: 1
+          pattern: ^\S(.*\S)?$
+          description: The display name people read. Free text within a bound.
+        slug:
+          type: string
+          examples:
+            - acme
+          title: slug
+          maxLength: 48
+          minLength: 3
+          pattern: ^[a-z0-9]+(-[a-z0-9]+)*$
+          description: |-
+            The URL name, which must be unique across every organization.
+
+             Lowercase letters, digits and single hyphens, starting and ending
+             alphanumeric. It is NEVER normalised on the caller's behalf: rewriting
+             "Acme Corp!" into "acme-corp" hands somebody a URL they did not choose, and
+             the ambiguity that creates is how one organization ends up able to claim
+             another's name. A slug that does not match is refused so the caller can
+             choose again.
+
+             The bounds are domain.MinSlugLen and domain.MaxSlugLen, so the published
+             number and the refused request are the same number.
+      title: CreateOrganizationRequest
+      additionalProperties: false
+      description: CreateOrganizationRequest opens a new organization owned by the caller.
+    chronos.organization.v1.CreateOrganizationResponse:
+      type: object
+      properties:
+        orgId:
+          type: string
+          examples:
+            - org_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: org_id
+          maxLength: 30
+          pattern: ^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: The organization's public id, a prefixed ULID (ADR-030).
+        slug:
+          type: string
+          examples:
+            - acme
+          title: slug
+          maxLength: 48
+          pattern: ^[a-z0-9]+(-[a-z0-9]+)*$
+          description: |-
+            The slug as stored, which is the lowercased and trimmed form of what was
+             sent. Returned so a client never has to guess what it now holds.
+        status:
+          type: string
+          examples:
+            - provisioning
+          title: status
+          maxLength: 16
+          enum:
+            - provisioning
+            - trialing
+            - active
+            - past_due
+            - suspended
+            - closed
+          description: |-
+            The lifecycle status the organization starts in.
+
+             Always `provisioning`, and briefly: the Stripe customer and trialing
+             subscription are created by a reactor rather than in this request, because
+             that is network I/O and it does not belong in a request path. The
+             organization becomes usable when the trial starts, seconds later.
+
+             A client should poll or subscribe rather than assuming it can immediately
+             create anything — `provisioning` permits reading and billing only.
+      title: CreateOrganizationResponse
+      additionalProperties: false
+      description: CreateOrganizationResponse names what was created.
     chronos.profile.v1.Avatar:
       type: object
       properties:
@@ -5848,6 +5930,70 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.notification.v1.SetNotificationPreferencesResponse'
+  /chronos.organization.v1.OrganizationService/CreateOrganization:
+    post:
+      tags:
+        - OrganizationService
+      summary: CreateOrganization opens an organization owned by the caller.
+      description: |-
+        # What makes this safe to retry
+
+         The organization, the owner reservation and the slug reservation are written
+         in ONE atomic append, each with a `NoStream` precondition. A retry with the
+         same `Idempotency-Key` derives byte-identical event ids and is refused as a
+         duplicate; a genuine second attempt loses the precondition and is refused as
+         a `CONFLICT`. Neither leaves a half-created organization behind, because a
+         failed multi-append writes nothing at all.
+
+         # Why it is self-scoped
+
+         There is no organization to check a permission against — this call is what
+         brings one into existence. The only authorization question is "is there an
+         authenticated person here", which the `self` relation answers locally
+         without consulting the graph.
+
+         A person may own ONE organization. A second attempt returns `CONFLICT`.
+      operationId: OrganizationService_CreateOrganization
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.organization.v1.CreateOrganizationRequest'
+            example:
+              name: Acme Corporation
+              slug: acme
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.organization.v1.CreateOrganizationResponse'
   /chronos.profile.v1.ProfileService/CreateAvatarUpload:
     post:
       tags:
@@ -6296,6 +6442,8 @@ tags:
        administrative method in this service and there must not be — a person's
        notification settings are theirs, and an endpoint that let an administrator
        change them would be an endpoint that lets an administrator silence someone.
+  - name: OrganizationService
+    description: OrganizationService is the tenant-facing surface of the commercial boundary.
   - name: ProfileService
     description: |-
       ProfileService is a person's own presentation surface.

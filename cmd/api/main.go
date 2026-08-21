@@ -21,6 +21,7 @@ import (
 	"connectrpc.com/validate"
 	"github.com/chronos/chronos-go/gen/proto/chronos/identity/v1/identityv1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/notification/v1/notificationv1connect"
+	"github.com/chronos/chronos-go/gen/proto/chronos/organization/v1/organizationv1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/profile/v1/profilev1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/system/v1/systemv1connect"
 	"github.com/chronos/chronos-go/internal/platform/clock"
@@ -308,6 +309,14 @@ func registerServices(
 	} else {
 		mux.Handle(profilev1connect.NewProfileServiceHandler(d.profile, opts...))
 		served = append(served, profilev1connect.ProfileServiceName)
+	}
+
+	if d.organization == nil {
+		log.Error("OrganizationService is NOT registered; no tenant can be created and every " +
+			"organization RPC answers 'unimplemented'")
+	} else {
+		mux.Handle(organizationv1connect.NewOrganizationServiceHandler(d.organization, opts...))
+		served = append(served, organizationv1connect.OrganizationServiceName)
 	}
 
 	log.Info("connect services registered", "services", served)

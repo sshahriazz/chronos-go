@@ -5,6 +5,7 @@ import (
 
 	"github.com/chronos/chronos-go/gen/proto/chronos/identity/v1/identityv1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/notification/v1/notificationv1connect"
+	"github.com/chronos/chronos-go/gen/proto/chronos/organization/v1/organizationv1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/profile/v1/profilev1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/system/v1/systemv1connect"
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
@@ -26,6 +27,7 @@ func gatedServices() []protoreflect.FullName {
 		identityv1connect.IdentityServiceName,
 		notificationv1connect.NotificationServiceName,
 		profilev1connect.ProfileServiceName,
+		organizationv1connect.OrganizationServiceName,
 	}
 }
 

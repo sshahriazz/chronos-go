@@ -29,6 +29,10 @@ func RegisterEvents(codec *eventcodec.JSON) {
 	eventcodec.Register[contract.OrganizationClosed](codec)
 	eventcodec.Register[contract.OrgAdminAdded](codec)
 	eventcodec.Register[contract.OrgAdminRemoved](codec)
+	eventcodec.Register[contract.OwnerReservationHeld](codec)
+	eventcodec.Register[contract.OwnerReservationReleased](codec)
+	eventcodec.Register[contract.SlugReservationHeld](codec)
+	eventcodec.Register[contract.SlugReservationReleased](codec)
 }
 
 // RegisterSchemas declares the current schema version of every organization
@@ -58,5 +62,9 @@ func eventTypes() []string {
 		(&contract.OrganizationClosed{}).EventType(),
 		(&contract.OrgAdminAdded{}).EventType(),
 		(&contract.OrgAdminRemoved{}).EventType(),
+		(&contract.OwnerReservationHeld{}).EventType(),
+		(&contract.OwnerReservationReleased{}).EventType(),
+		(&contract.SlugReservationHeld{}).EventType(),
+		(&contract.SlugReservationReleased{}).EventType(),
 	}
 }

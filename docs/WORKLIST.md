@@ -51,7 +51,7 @@ binary. So 1b now FOLLOWS the organization aggregate.
 - [ ] **Gate 1 (`OrgResolver`)** — "which organization is this request in"
       *Blocked on:* organizations existing.
 
-## Now: Slice 2 — organization core
+## Now: Slice 2 — organization core  (nearly done)
 
 Pulled forward ahead of 1b, because 1b has nothing to react to until this
 exists. Built inside-out: the pure domain first, since it needs no
@@ -74,9 +74,13 @@ infrastructure and every later piece depends on its shape.
       projection, and the `StatusReader` gate 3 depends on. Proved against a real
       database: one org cannot read another's status, and an unprojected org is
       refused rather than waved through.
-- [ ] **`CreateOrganization` use case + RPC** — added to the list: without it
-      nothing can create an org, so the projection has no rows and the gate
-      cannot be exercised end to end.
+- [x] **`CreateOrganization` use case + RPC** — proto, use case, handler, wired
+      into cmd/api. Both uniqueness rules hold at the WRITE: one atomic append
+      to three streams, each with `NoStream`. Two concurrent creations by one
+      person produce exactly one organization, proved against real KurrentDB.
+- [ ] **The Stripe provisioning reactor** — next. Organizations currently stay
+      in `provisioning` forever, because nothing creates the subscription that
+      moves them to `trialing`.
 - [ ] **Then 1b**: access projector consuming `OrganizationCreated`, tombstones,
       `OrgResolver`
 

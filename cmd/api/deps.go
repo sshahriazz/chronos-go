@@ -20,6 +20,7 @@ import (
 	"github.com/chronos/chronos-go/internal/modules/notification"
 	notificationapi "github.com/chronos/chronos-go/internal/modules/notification/api"
 	"github.com/chronos/chronos-go/internal/modules/organization"
+	orgapi "github.com/chronos/chronos-go/internal/modules/organization/api"
 	"github.com/chronos/chronos-go/internal/modules/profile"
 	profileapi "github.com/chronos/chronos-go/internal/modules/profile/api"
 	"github.com/chronos/chronos-go/internal/platform/authz"
@@ -154,7 +155,8 @@ type dependencies struct {
 	// profile is display name, locale, timezone and avatar — its own module,
 	// because identity answers "who is this" and every attribute added there
 	// widens the aggregate that guards authentication (ADR-020's reasoning).
-	profile *profileapi.Service
+	profile      *profileapi.Service
+	organization *orgapi.Service
 
 	// counter backs the authentication attempt ceiling. Nil when Valkey is
 	// unreachable — and identity is then refused outright, because a login path
@@ -567,6 +569,13 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 			"error", err)
 	} else {
 		d.profile = svc
+	}
+
+	if svc, err := d.buildOrganization(log); err != nil {
+		log.Error("the organization service is NOT constructed; no tenant can be created "+
+			"for the lifetime of this process", "error", err)
+	} else {
+		d.organization = svc
 	}
 
 	return d, func() {

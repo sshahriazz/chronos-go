@@ -86,6 +86,9 @@ func mutatingProcedures() []struct {
 
 		{"ProfileService/UpdateProfile", "/chronos.profile.v1.ProfileService/UpdateProfile",
 			`{"locale":"en-GB"}`, false},
+		{"OrganizationService/CreateOrganization", "/chronos.organization.v1.OrganizationService/CreateOrganization",
+			`{"name":"Acme","slug":"acme-idem"}`, false},
+
 		{"ProfileService/CreateAvatarUpload", "/chronos.profile.v1.ProfileService/CreateAvatarUpload",
 			`{"contentType":"image/png","sizeBytes":"1024"}`, false},
 	}

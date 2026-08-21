@@ -142,3 +142,68 @@ type OrgAdminRemoved struct {
 }
 
 func (*OrgAdminRemoved) EventType() string { return "organization.AdminRemoved.v1" }
+
+// OwnerReservationHeld is the one-organization-per-subject invariant, as an
+// event on a stream named after the subject.
+//
+// organization.md §1: a subject OWNS at most one organization. The mechanism is
+// the same one identity uses for a handle and an address (ADR-044, ADR-048) —
+// a stream per claimant, appended with a NoStream precondition, in the SAME
+// atomic append as the organization itself. Two concurrent creations by one
+// person contend on this stream, and KurrentDB rejects one of them.
+//
+// A UNIQUE index on a projection cannot do this and fails in the way hardest to
+// notice: a projection is behind the log by construction, so under concurrency
+// both creations read "free", both append, and one person owns two
+// organizations. ADR-052 records what happens when the read model is asked to be
+// the mechanism rather than the backstop — the projector stops, and the table
+// stops being rebuildable.
+type OwnerReservationHeld struct {
+	SubjectID string
+	OrgID     string
+	HeldAt    time.Time
+}
+
+func (*OwnerReservationHeld) EventType() string { return "organization.OwnerReservationHeld.v1" }
+
+// OwnerReservationReleased frees a subject to create another organization.
+//
+// Closing an organization leaves its owner owning none, so the reservation must
+// be releasable or "at most one" would silently mean "at most one, ever". The
+// release is appended by the closure saga; nothing releases it today, because
+// nothing closes an organization yet.
+type OwnerReservationReleased struct {
+	SubjectID  string
+	OrgID      string
+	ReleasedAt time.Time
+}
+
+func (*OwnerReservationReleased) EventType() string {
+	return "organization.OwnerReservationReleased.v1"
+}
+
+// SlugReservationHeld claims the organization's URL name.
+//
+// Same mechanism, different claimant. The slug is public and appears in URLs, so
+// the stream is named by the slug in the clear — hiding it would protect nothing
+// and cost the ability to read the log while debugging, which is the reasoning
+// ADR-051 applied to the username.
+type SlugReservationHeld struct {
+	Slug   string
+	OrgID  string
+	HeldAt time.Time
+}
+
+func (*SlugReservationHeld) EventType() string { return "organization.SlugReservationHeld.v1" }
+
+// SlugReservationReleased returns a slug to the pool when an organization
+// closes. Like the owner reservation, nothing releases it yet.
+type SlugReservationReleased struct {
+	Slug       string
+	OrgID      string
+	ReleasedAt time.Time
+}
+
+func (*SlugReservationReleased) EventType() string {
+	return "organization.SlugReservationReleased.v1"
+}

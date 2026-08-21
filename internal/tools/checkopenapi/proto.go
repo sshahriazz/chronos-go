@@ -21,6 +21,7 @@ import (
 	_ "github.com/chronos/chronos-go/gen/proto/chronos/identity/v1"
 	_ "github.com/chronos/chronos-go/gen/proto/chronos/notification/v1"
 	optionsv1 "github.com/chronos/chronos-go/gen/proto/chronos/options/v1"
+	_ "github.com/chronos/chronos-go/gen/proto/chronos/organization/v1"
 	_ "github.com/chronos/chronos-go/gen/proto/chronos/profile/v1"
 	_ "github.com/chronos/chronos-go/gen/proto/chronos/system/v1"
 )

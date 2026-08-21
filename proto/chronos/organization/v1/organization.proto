@@ -1,0 +1,169 @@
+syntax = "proto3";
+
+// Package organization is the wire contract for the commercial boundary: one
+// organization, one customer contract, one subscription.
+//
+// Three properties of this schema are load-bearing.
+//
+// **An organization is the tenant, and a person owns at most one.** That is
+// organization.md §1's invariant, and it is enforced by an atomic append to a
+// reservation stream named after the owner — not by a uniqueness check on a
+// projection, which is behind the log by construction and would let two
+// concurrent creations both succeed (ADR-052).
+//
+// **Creation does not require payment.** The trial is cardless: an organization
+// is created, provisioned with a Stripe subscription by a reactor, and starts
+// trialing. `provisional_owner` and `PendingActivation` — which organization.md
+// §4 introduces to let an unpaid creator reach checkout — do not exist here,
+// because a working trial removes the problem they solve.
+//
+// **The creator is the owner from the first event.** There is no field naming an
+// owner: it is the authenticated caller, and nothing else. A request that could
+// name its own owner is a request that can create an organization belonging to
+// somebody else.
+package chronos.organization.v1;
+
+import "buf/validate/validate.proto";
+import "chronos/options/v1/options.proto";
+import "gnostic/openapi/v3/annotations.proto";
+
+// CreateOrganizationRequest opens a new organization owned by the caller.
+message CreateOrganizationRequest {
+  // The display name people read. Free text within a bound.
+  string name = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "Acme Corporation"}
+      max_length: 80
+      pattern: "^\\S(.*\\S)?$"
+    },
+    (buf.validate.field).string = {
+      min_len: 1
+      max_len: 80
+      pattern: "^\\S(.*\\S)?$"
+    }
+  ];
+
+  // The URL name, which must be unique across every organization.
+  //
+  // Lowercase letters, digits and single hyphens, starting and ending
+  // alphanumeric. It is NEVER normalised on the caller's behalf: rewriting
+  // "Acme Corp!" into "acme-corp" hands somebody a URL they did not choose, and
+  // the ambiguity that creates is how one organization ends up able to claim
+  // another's name. A slug that does not match is refused so the caller can
+  // choose again.
+  //
+  // The bounds are domain.MinSlugLen and domain.MaxSlugLen, so the published
+  // number and the refused request are the same number.
+  string slug = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "acme"}
+      max_length: 48
+    },
+    (buf.validate.field).string = {
+      min_len: 3
+      max_len: 48
+      pattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+    }
+  ];
+}
+
+// CreateOrganizationResponse names what was created.
+message CreateOrganizationResponse {
+  // The organization's public id, a prefixed ULID (ADR-030).
+  string org_id = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "org_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 30
+    },
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // The slug as stored, which is the lowercased and trimmed form of what was
+  // sent. Returned so a client never has to guess what it now holds.
+  string slug = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "acme"}
+      max_length: 48
+    },
+    (buf.validate.field).string = {
+      max_len: 48
+      pattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+    }
+  ];
+
+  // The lifecycle status the organization starts in.
+  //
+  // Always `provisioning`, and briefly: the Stripe customer and trialing
+  // subscription are created by a reactor rather than in this request, because
+  // that is network I/O and it does not belong in a request path. The
+  // organization becomes usable when the trial starts, seconds later.
+  //
+  // A client should poll or subscribe rather than assuming it can immediately
+  // create anything — `provisioning` permits reading and billing only.
+  string status = 3 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "provisioning"}
+      max_length: 16
+    },
+    (buf.validate.field).string = {
+      max_len: 16
+      in: [
+        "provisioning",
+        "trialing",
+        "active",
+        "past_due",
+        "suspended",
+        "closed"
+      ]
+    }
+  ];
+}
+
+// OrganizationService is the tenant-facing surface of the commercial boundary.
+service OrganizationService {
+  // CreateOrganization opens an organization owned by the caller.
+  //
+  // # What makes this safe to retry
+  //
+  // The organization, the owner reservation and the slug reservation are written
+  // in ONE atomic append, each with a `NoStream` precondition. A retry with the
+  // same `Idempotency-Key` derives byte-identical event ids and is refused as a
+  // duplicate; a genuine second attempt loses the precondition and is refused as
+  // a `CONFLICT`. Neither leaves a half-created organization behind, because a
+  // failed multi-append writes nothing at all.
+  //
+  // # Why it is self-scoped
+  //
+  // There is no organization to check a permission against — this call is what
+  // brings one into existence. The only authorization question is "is there an
+  // authenticated person here", which the `self` relation answers locally
+  // without consulting the graph.
+  //
+  // A person may own ONE organization. A second attempt returns `CONFLICT`.
+  rpc CreateOrganization(CreateOrganizationRequest) returns (CreateOrganizationResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    // A MUTATION, so it carries an Idempotency-Key. The header is described
+    // once, in proto/openapi.base.yaml's components, and every operation that
+    // requires it references that one description.
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+}

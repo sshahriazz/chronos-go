@@ -128,6 +128,7 @@ import (
 	identityv1 "github.com/chronos/chronos-go/gen/proto/chronos/identity/v1"
 	"github.com/chronos/chronos-go/gen/proto/chronos/identity/v1/identityv1connect"
 	optionsv1 "github.com/chronos/chronos-go/gen/proto/chronos/options/v1"
+	"github.com/chronos/chronos-go/gen/proto/chronos/organization/v1/organizationv1connect"
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
 	kurrentadapter "github.com/chronos/chronos-go/internal/adapter/kurrentdb"
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
@@ -178,6 +179,9 @@ type harness struct {
 	// identity is the default-protocol client, used for the fixtures rather than
 	// for assertions: the assertions build their own client per protocol.
 	identity identityv1connect.IdentityServiceClient
+
+	// organization is the same, for the tenant-creation fixtures.
+	organization organizationv1connect.OrganizationServiceClient
 
 	pool  *pgxpool.Pool
 	pg    *pgadapter.DB
@@ -321,6 +325,7 @@ func newHarness() (*harness, error) {
 		serverLog: &strings.Builder{},
 	}
 	hh.identity = identityv1connect.NewIdentityServiceClient(hh.http, hh.baseURL)
+	hh.organization = organizationv1connect.NewOrganizationServiceClient(hh.http, hh.baseURL)
 
 	if err := hh.dialInfra(env); err != nil {
 		return nil, err
@@ -1288,6 +1293,12 @@ func (hh *harness) freshEmail(tag string) string {
 
 // freshUsername stays inside the 30-character ceiling identity.proto declares,
 // which the tag plus the run suffix plus a per-call tag does not.
+// freshSlug is unique per run AND per call, so no two organizations in the
+// package contend for one URL name unless a test means them to.
+func (hh *harness) freshSlug() string {
+	return "org-" + strings.ToLower(hh.suffix) + "-" + strings.ToLower(randomTag())
+}
+
 func (hh *harness) freshUsername() string {
 	return fmt.Sprintf("pt_%s_%s", hh.suffix, randomTag())
 }

@@ -498,6 +498,22 @@ func identityNotifications(cat *notify.Catalogue) {
 		"an authority change worth telling the RECIPIENT about — being made an admin is a " +
 			"fact about them. It is silent only until the audience exists; the pattern to " +
 			"copy is identity's, where a change to someone's own authority is Security class")
+	// The four reservation events are the uniqueness MECHANISM, not facts a
+	// person acts on — the same call identity's EmailReserved and
+	// UsernameReserved trio gets, for the same reason. What a person hears about
+	// is the organization, and that is OrganizationCreated's business.
+	cat.Silent[orgevents.OwnerReservationHeld](
+		"the one-organization-per-subject invariant, held on a stream named after the " +
+			"subject. Telling somebody they now own the organization they just created is " +
+			"circular")
+	cat.Silent[orgevents.OwnerReservationReleased](
+		"the same claim being freed when an organization closes. The closure is the fact, " +
+			"and it has its own message")
+	cat.Silent[orgevents.SlugReservationHeld](
+		"slug uniqueness, claimed in the same atomic append as the organization itself")
+	cat.Silent[orgevents.SlugReservationReleased](
+		"a slug returning to the pool on closure")
+
 	cat.Silent[orgevents.OrgAdminRemoved](
 		"the same, and the more important half: losing administration silently is how " +
 			"somebody discovers it by being refused. Security class when it lands")
