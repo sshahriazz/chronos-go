@@ -24,6 +24,7 @@ require (
 	github.com/pquerna/otp v1.5.0
 	github.com/pressly/goose/v3 v3.27.3
 	github.com/prometheus/client_golang v1.24.1
+	github.com/stripe/stripe-go/v86 v86.3.0
 	github.com/valkey-io/valkey-go v1.0.77
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.70.0
 	go.opentelemetry.io/otel v1.45.0

@@ -391,6 +391,17 @@ func reactors(codec *eventcodec.JSON, d *dependencies) []reactor.Reactor {
 	} else {
 		rs = append(rs, r)
 	}
+
+	// Provisioning: the reactor that turns a created organization into a usable
+	// one. Its own group, so a Stripe outage parks on its own queue rather than
+	// sharing retries with every notification in the system.
+	if r, err := newProvisionReactor(codec, d, slog.Default()); err != nil {
+		slog.Default().Error("the organization provisioning reactor is NOT registered; every "+
+			"organization created will stay in `provisioning` forever, which means no "+
+			"workspace, no invitations, and a signup that never completes", "error", err)
+	} else {
+		rs = append(rs, r)
+	}
 	return rs
 }
 

@@ -78,9 +78,31 @@ infrastructure and every later piece depends on its shape.
       into cmd/api. Both uniqueness rules hold at the WRITE: one atomic append
       to three streams, each with `NoStream`. Two concurrent creations by one
       person produce exactly one organization, proved against real KurrentDB.
-- [ ] **The Stripe provisioning reactor** — next. Organizations currently stay
-      in `provisioning` forever, because nothing creates the subscription that
-      moves them to `trialing`.
+- [>] **Billing: provisioning only** — a THIN slice of billing, pulled forward.
+
+      *Why the plan changed:* it said "billing is additive after" the other
+      slices. That was wrong. An organization is unusable in `provisioning`, and
+      BILLING-PLAN §2 Option A — chosen to avoid two code paths — makes Stripe
+      the only thing that can start a trial. So slices 3–5 all sit behind this.
+
+      In scope: the Stripe customer, a cardless trialing subscription, and the
+      reactor that appends `OrganizationTrialStarted`.
+      OUT of scope, still slice 6: invoicing, the customer portal, webhook
+      ingestion, the plan catalogue. The trial Price comes from config, not a
+      catalogue.
+
+      - [x] Config: `STRIPE_SECRET_KEY`, `STRIPE_TRIAL_PRICE_ID`,
+            `STRIPE_TRIAL_DAYS`. A LIVE key outside production fails startup.
+      - [x] `app.Provisioning` + `app.Trials` — Stripe first, event second, and
+            a test proving a failed provisioner appends nothing.
+      - [x] `internal/adapter/stripe` — the only package that imports the SDK.
+            Cardless, `missing_payment_method: pause`, idempotent on our org id
+            in Stripe metadata.
+      - [x] The reactor, wired into cmd/worker.
+      - [ ] **BLOCKED ON YOU:** a Stripe test key and a $0 recurring Price. See
+            the commands in `.env.example`. Until then the worker logs that the
+            reactor is not registered, and organizations stay in
+            `provisioning`.
 - [ ] **Then 1b**: access projector consuming `OrganizationCreated`, tombstones,
       `OrgResolver`
 

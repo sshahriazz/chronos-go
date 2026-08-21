@@ -60,6 +60,7 @@ type Config struct {
 	Postgres  PostgresConfig
 	OpenFGA   OpenFGAConfig
 	OpenBao   OpenBaoConfig
+	Stripe    StripeConfig
 	Mail      MailConfig
 	Storage   StorageConfig
 	Realtime  RealtimeConfig
@@ -730,6 +731,60 @@ type OpenFGAConfig struct {
 	ModelID string `env:"OPENFGA_MODEL_ID"`
 }
 
+// StripeConfig is what the billing integration needs to provision a tenant.
+//
+// Only the provisioning half is here. Invoicing, the customer portal and
+// webhook ingestion arrive with the rest of billing and bring their own
+// settings; adding them now would be configuration nothing reads.
+type StripeConfig struct {
+	// SecretKey is a RESTRICTED key (`rk_`), never a secret key (`sk_`).
+	//
+	// A restricted key is scoped to the resources this integration touches, so a
+	// leak cannot be used to read every charge the account has ever taken. The
+	// value belongs in OpenBao (ADR-028); it is read from the environment here
+	// because that is where every other secret in this build still lives, and
+	// moving them all is one change rather than six.
+	SecretKey Secret `env:"STRIPE_SECRET_KEY"`
+
+	// TrialPriceID is the Price a cardless trial subscribes to.
+	//
+	// From configuration rather than a plan catalogue, deliberately: the
+	// catalogue is part of billing proper and this slice is provisioning only.
+	// When the catalogue lands, this becomes the id it publishes for the trial
+	// plan and the variable goes away.
+	TrialPriceID string `env:"STRIPE_TRIAL_PRICE_ID"`
+
+	// TrialDays is how long a cardless trial runs.
+	//
+	// Stripe caps a trial at 730 days. Fourteen is the decision recorded in
+	// ORG-WORKSPACE-SCOPE.md §3.
+	TrialDays int `env:"STRIPE_TRIAL_DAYS" envDefault:"14"`
+}
+
+// Configured reports whether provisioning can run at all.
+//
+// Both values are required together: a key with no Price subscribes to nothing,
+// and a Price with no key cannot be reached. Neither is a partial state worth
+// starting in, so the reactor refuses to construct rather than failing per
+// organization.
+func (s StripeConfig) Configured() bool {
+	return !s.SecretKey.IsZero() && s.TrialPriceID != ""
+}
+
+// Live reports whether the key addresses real money.
+//
+// Stripe distinguishes test and live by key PREFIX, and nothing else — the same
+// code path, the same API, real charges. billing.md §5 case 20 requires a live
+// key outside production to fail startup, and this is what that check reads.
+// Expose is the right call here and the awkward name is doing its job: this is
+// one of the few places that must read the value rather than log it, because the
+// PREFIX is the whole signal. Secret.String() returns "[REDACTED]", so reading
+// it here would report every key as a test key — including a live one.
+func (s StripeConfig) Live() bool {
+	key := s.SecretKey.Expose()
+	return strings.HasPrefix(key, "sk_live_") || strings.HasPrefix(key, "rk_live_")
+}
+
 type OpenBaoConfig struct {
 	Address string `env:"OPENBAO_ADDR" envDefault:"http://localhost:8200"`
 	Token   Secret `env:"OPENBAO_DEV_TOKEN"`
@@ -772,6 +827,28 @@ func (c *Config) validate() error {
 		add("APP_TIMEZONE %q is not a valid IANA timezone", c.Timezone)
 	} else {
 		c.location = loc
+	}
+
+	// A LIVE Stripe key outside production is a startup failure (ADR-008,
+	// billing.md §5 case 20).
+	//
+	// Stripe distinguishes test from live by key prefix and nothing else: same
+	// code path, same API, real money. So a live key in a developer's .env, or
+	// in staging, does not misbehave — it works, and charges real cards against
+	// real customers while every test passes. There is no runtime signal for
+	// this and no way to undo it afterwards, which is why it is refused here
+	// rather than warned about.
+	if c.Env != Production && c.Stripe.Live() {
+		add("STRIPE_SECRET_KEY is a LIVE key and APP_ENV is %q; a live key outside production "+
+			"charges real cards while everything appears to work. Use a test key (sk_test_ "+
+			"or rk_test_)", c.Env)
+	}
+
+	// A trial length Stripe cannot honour. Its maximum is 730 days, and a
+	// non-positive trial is not a cardless trial at all — it is an immediate
+	// charge against a customer who has given no payment method, which fails.
+	if c.Stripe.Configured() && (c.Stripe.TrialDays < 1 || c.Stripe.TrialDays > 730) {
+		add("STRIPE_TRIAL_DAYS is %d; Stripe allows 1 to 730", c.Stripe.TrialDays)
 	}
 
 	// ADR-014: an unauthenticated event store outside local is a startup

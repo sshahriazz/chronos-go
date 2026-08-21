@@ -669,3 +669,84 @@ func TestValidate_IgnoresTheClockAddressWhenTheControlIsOff(t *testing.T) {
 		t.Fatalf("a disabled control must not validate its address: %v", err)
 	}
 }
+
+// A LIVE Stripe key outside production must fail startup.
+//
+// # Why this is a config test and not a billing one
+//
+// Stripe distinguishes test from live by key PREFIX and nothing else: the same
+// code path, the same API, real money. A live key in a developer's .env does not
+// misbehave — it works. Cards are charged, customers are created, and every test
+// in the tree still passes, because from the code's point of view nothing is
+// different.
+//
+// There is no runtime signal for this, no metric that moves, and no way to undo
+// a real charge afterwards. So it is refused at the only moment it can be:
+// before the process starts (ADR-008, billing.md §5 case 20).
+func TestALiveStripeKeyOutsideProductionFailsStartup(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		env     config.Environment
+		key     string
+		refused bool
+	}{
+		{"live key in local", config.Local, "rk_live_abc123", true},
+		{"live key in staging", config.Staging, "sk_live_abc123", true},
+		{"live key in production", config.Production, "rk_live_abc123", false},
+		{"test key in local", config.Local, "rk_test_abc123", false},
+		{"test key in production", config.Production, "sk_test_abc123", false},
+		{"no key at all", config.Local, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			stripe := config.StripeConfig{
+				SecretKey:    config.Secret(tc.key),
+				TrialPriceID: "price_trial",
+				TrialDays:    14,
+			}
+			if got := stripe.Live(); got != strings.Contains(tc.key, "_live_") {
+				t.Fatalf("Live() reported %t for key %q", got, tc.key)
+			}
+
+			// The guard as validate() applies it.
+			refused := tc.env != config.Production && stripe.Live()
+			if refused != tc.refused {
+				t.Errorf("%s in %s: refused=%t, want %t", tc.key, tc.env, refused, tc.refused)
+			}
+		})
+	}
+}
+
+// Provisioning needs BOTH the key and the Price, or neither.
+//
+// A key with no Price subscribes to nothing; a Price with no key cannot be
+// reached. Half-configured is not a state worth starting in, because the failure
+// arrives per organization — every creation stalls in `provisioning` — rather
+// than once, at boot, where somebody is looking.
+func TestStripeIsConfiguredOnlyWhenBothHalvesArePresent(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		key, price string
+		want       bool
+	}{
+		{"both", "rk_test_abc", "price_1", true},
+		{"key only", "rk_test_abc", "", false},
+		{"price only", "", "price_1", false},
+		{"neither", "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := config.StripeConfig{
+				SecretKey: config.Secret(tc.key), TrialPriceID: tc.price,
+			}.Configured()
+			if got != tc.want {
+				t.Errorf("Configured()=%t, want %t", got, tc.want)
+			}
+		})
+	}
+}

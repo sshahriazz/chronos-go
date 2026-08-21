@@ -36,7 +36,8 @@ import (
 
 // newCodec builds the event codec with every stored type this binary reads.
 func newCodec() *eventcodec.JSON {
-	codec := eventcodec.NewJSON(eventsourcing.NewUpcasterRegistry())
+	upcasters := eventsourcing.NewUpcasterRegistry()
+	codec := eventcodec.NewJSON(upcasters)
 	registerEvents(codec)
 	return codec
 }
@@ -50,6 +51,10 @@ func newCodec() *eventcodec.JSON {
 // reactor does not write read models, and giving it the tools to would invite
 // exactly the mixing ADR-019 exists to prevent.
 type dependencies struct {
+	// cfg is the resolved configuration, held so a reactor built later can read
+	// the settings it needs without a second parse.
+	cfg *config.Config
+
 	pool    *pgxpool.Pool
 	store   *kurrentadapter.Store
 	codec   *eventcodec.JSON
@@ -147,6 +152,7 @@ type dependencies struct {
 
 func newDependencies(cfg *config.Config, log *slog.Logger, codec *eventcodec.JSON) (*dependencies, func()) {
 	d := &dependencies{
+		cfg:    cfg,
 		status: newStatuses(), codec: codec, metrics: obs.New(),
 		dedupDays: cfg.Reactor.DedupRetentionDays, dedupEvery: cfg.Reactor.DedupSweepEvery,
 	}
