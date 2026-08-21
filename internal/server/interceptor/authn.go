@@ -377,8 +377,12 @@ func (a *SessionAuthenticator) touch(
 		// the join. Computing the clamp here instead would need the absolute
 		// deadline read on this request to still be current, and would put a
 		// second copy of the rule where the first one cannot see it.
+		// Both timestamps come from `now`, which is this server's injected clock.
+		// The statement used to stamp last_seen_at with the DATABASE's now(), so
+		// one row carried two clocks and a session could report a lastSeenAt
+		// before its own createdAt.
 		_, err := q.Exec(ctx, identitydb.TouchSession,
-			row.SessionID, now.Add(a.idleWindow).UTC())
+			row.SessionID, now.Add(a.idleWindow).UTC(), now.UTC())
 		return err
 	})
 	if err != nil {

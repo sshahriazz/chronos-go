@@ -25,11 +25,11 @@ components:
         | `UNAUTHENTICATED` | `unauthenticated` | 401 | **yes** | Refresh the token; if that fails, sign in again. |
         | `STEP_UP_REQUIRED` | `permission_denied` | 403 | **yes** | Prompt for step-up (MFA or passkey), then retry. |
         | `ACCESS_DENIED` | `permission_denied` | 403 | no | Ask a workspace or organization admin for access. Do NOT offer an upgrade. |
-        | `PLAN_UPGRADE_REQUIRED` | `failed_precondition` | 412 | no | Offer an upgrade. Do NOT tell the user to ask an admin. |
-        | `QUOTA_EXCEEDED` | `failed_precondition` | 412 | no | Show what is exhausted and offer to reduce usage or upgrade. |
-        | `ORG_SUSPENDED` | `failed_precondition` | 412 | no | Direct the owner to billing. Reads, billing and export remain available. |
+        | `PLAN_UPGRADE_REQUIRED` | `permission_denied` | 403 | no | Offer an upgrade. Do NOT tell the user to ask an admin. |
+        | `QUOTA_EXCEEDED` | `resource_exhausted` | 429 | no | Show what is exhausted and offer to reduce usage or upgrade. |
+        | `ORG_SUSPENDED` | `permission_denied` | 403 | no | Direct the owner to billing. Reads, billing and export remain available. |
         | `NOT_FOUND` | `not_found` | 404 | no | Treat as absent. This response is deliberately indistinguishable from a cross-tenant denial. |
-        | `CONFLICT` | `aborted` | 409 | **yes** | Re-read and retry. Expected under concurrency, not an error condition. |
+        | `CONFLICT` | `already_exists` | 409 | **yes** | Re-read and retry. Expected under concurrency, not an error condition. |
         | `VALIDATION_FAILED` | `invalid_argument` | 400 | no | Fix the input; the metadata names the offending field. |
         | `RATE_LIMITED` | `resource_exhausted` | 429 | **yes** | Back off and retry with jitter. |
         | `INTERNAL` | `internal` | 500 | **yes** | Retry with backoff; report the trace id if it persists. |
@@ -58,6 +58,9 @@ components:
           type: object
           additionalProperties:
             type: string
+            maxLength: 1024
+            pattern: '^[^\r\n]*$'
+          maxProperties: 32
           description: |
             Client-safe structured detail: the limit that was exceeded, the
             field that failed validation, the plan that would satisfy the
@@ -66,6 +69,8 @@ components:
             - {field: email}
         traceId:
           type: string
+          maxLength: 32
+          pattern: '^$|^[0-9a-f]{32}$'
           description: |
             Correlation id for this request. The server-side cause is NOT in
             this message; an operator finds it by searching traces for this
@@ -74,3 +79,38 @@ components:
             - 4bf92f3577b34da6a3ce929d0e0e4736
       required:
         - reason
+    connect.error_details.Any:
+      type: object
+      title: Error detail envelope
+      description: |
+        One entry of a Connect error's `details` array.
+
+        This server attaches exactly one detail type — the `ErrorDetail` below —
+        and attaches it to every error it raises, so `debug` is the decoded form
+        of `value` rather than an arbitrary message. Read `debug.reason`.
+      properties:
+        type:
+          type: string
+          maxLength: 512
+          pattern: '^[A-Za-z0-9.-]+/[A-Za-z0-9_.]+$'
+          examples:
+            - type.googleapis.com/chronos.errors.v1.ErrorDetail
+          description: |
+            The detail's type URL. Today it is always
+            `type.googleapis.com/chronos.errors.v1.ErrorDetail`; it is published as
+            a pattern rather than a constant so that adding a second detail type
+            is not a breaking change to this document.
+        value:
+          type: string
+          contentEncoding: base64
+          maxLength: 65536
+          pattern: '^[A-Za-z0-9+/]*={0,2}$'
+          description: |
+            The detail, protobuf-serialized and base64-encoded. A client that reads
+            `debug` never needs this.
+        debug:
+          allOf:
+            - $ref: '#/components/schemas/chronos.errors.v1.ErrorDetail'
+          title: Debug
+          description: |
+            The decoded detail. Branch on its `reason`.

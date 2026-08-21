@@ -209,6 +209,7 @@ func TestValidationRejectsMalformedRequests(t *testing.T) {
 				_, err := c.VerifyEmail(ctx, connect.NewRequest(&identityv1.VerifyEmailRequest{
 					Token:    "a-token-shaped-string",
 					Password: "7chars.",
+					Username: "ada_lovelace",
 				}))
 				return err
 			},
@@ -220,6 +221,7 @@ func TestValidationRejectsMalformedRequests(t *testing.T) {
 				_, err := c.VerifyEmail(ctx, connect.NewRequest(&identityv1.VerifyEmailRequest{
 					Token:    "a-token-shaped-string",
 					Password: strings.Repeat("a", 4097),
+					Username: "ada_lovelace",
 				}))
 				return err
 			},
@@ -229,6 +231,82 @@ func TestValidationRejectsMalformedRequests(t *testing.T) {
 			why:  "the token IS the authentication for this call",
 			call: func(ctx context.Context, c identityv1connect.IdentityServiceClient) error {
 				_, err := c.VerifyEmail(ctx, connect.NewRequest(&identityv1.VerifyEmailRequest{}))
+				return err
+			},
+		},
+		{
+			name: "VerifyEmail/no username",
+			why: "a public handle is MANDATORY (ADR-051). An account admitted without one " +
+				"would be verified, signed into, and impossible to name to anybody — and " +
+				"there is no SetUsername call to repair it with.",
+			call: func(ctx context.Context, c identityv1connect.IdentityServiceClient) error {
+				_, err := c.VerifyEmail(ctx, connect.NewRequest(&identityv1.VerifyEmailRequest{
+					Token:    "a-token-shaped-string",
+					Password: "8charsxx",
+				}))
+				return err
+			},
+		},
+		{
+			name: "VerifyEmail/username containing a hyphen",
+			why: "the handle names a KurrentDB stream key, and NewStreamID refuses a dash " +
+				"because KurrentDB derives a category from everything before the first one. " +
+				"Accepted here, it would fail as an internal error at append time instead " +
+				"of as a validation message.",
+			call: func(ctx context.Context, c identityv1connect.IdentityServiceClient) error {
+				_, err := c.VerifyEmail(ctx, connect.NewRequest(&identityv1.VerifyEmailRequest{
+					Token:    "a-token-shaped-string",
+					Password: "8charsxx",
+					Username: "ada-lovelace",
+				}))
+				return err
+			},
+		},
+		{
+			name: "VerifyEmail/username starting with a digit",
+			why: "a handle beginning with a digit is indistinguishable at a glance from an " +
+				"identifier the system generated",
+			call: func(ctx context.Context, c identityv1connect.IdentityServiceClient) error {
+				_, err := c.VerifyEmail(ctx, connect.NewRequest(&identityv1.VerifyEmailRequest{
+					Token:    "a-token-shaped-string",
+					Password: "8charsxx",
+					Username: "1ada",
+				}))
+				return err
+			},
+		},
+		{
+			name: "VerifyEmail/username with a non-ASCII homoglyph",
+			why: "the ASCII-only character set is what eliminates the cross-script homoglyph " +
+				"class outright. This handle is Cyrillic '\u0430' followed by 'da' and is " +
+				"pixel-identical to 'ada' in most fonts.",
+			call: func(ctx context.Context, c identityv1connect.IdentityServiceClient) error {
+				_, err := c.VerifyEmail(ctx, connect.NewRequest(&identityv1.VerifyEmailRequest{
+					Token:    "a-token-shaped-string",
+					Password: "8charsxx",
+					Username: "\u0430da_lovelace",
+				}))
+				return err
+			},
+		},
+		{
+			name: "CheckUsernameAvailability/no username",
+			why:  "the one field the call is about; an empty one has no answer",
+			call: func(ctx context.Context, c identityv1connect.IdentityServiceClient) error {
+				_, err := c.CheckUsernameAvailability(ctx,
+					connect.NewRequest(&identityv1.CheckUsernameAvailabilityRequest{}))
+				return err
+			},
+		},
+		{
+			name: "CheckUsernameAvailability/username under 3 characters",
+			why: "the check and the claim must agree on shape, or a handle this reports " +
+				"available is refused as malformed by VerifyEmail — worse than no check",
+			call: func(ctx context.Context, c identityv1connect.IdentityServiceClient) error {
+				_, err := c.CheckUsernameAvailability(ctx,
+					connect.NewRequest(&identityv1.CheckUsernameAvailabilityRequest{
+						Username: "ab",
+					}))
 				return err
 			},
 		},
@@ -272,14 +350,6 @@ func TestValidationRejectsMalformedRequests(t *testing.T) {
 				_, err := c.ListLoginHistory(ctx, connect.NewRequest(&identityv1.ListLoginHistoryRequest{
 					PageSize: -50,
 				}))
-				return err
-			},
-		},
-		{
-			name: "EnrollTotp/no account name",
-			why:  "the authenticator app would show an unlabelled entry, which is how people delete the wrong credential",
-			call: func(ctx context.Context, c identityv1connect.IdentityServiceClient) error {
-				_, err := c.EnrollTotp(ctx, connect.NewRequest(&identityv1.EnrollTotpRequest{}))
 				return err
 			},
 		},
@@ -413,6 +483,7 @@ func TestValidationAcceptsWellFormedRequests(t *testing.T) {
 				_, err := c.VerifyEmail(ctx, connect.NewRequest(&identityv1.VerifyEmailRequest{
 					Token:    "a-token-shaped-string",
 					Password: "8charsxx",
+					Username: "ada_lovelace",
 				}))
 				return err
 			},

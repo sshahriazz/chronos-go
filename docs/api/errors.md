@@ -11,11 +11,11 @@ The status and Connect code are shown for transport handling only.
 | `UNAUTHENTICATED` | `unauthenticated` | 401 | **yes** | No session, or the access token is invalid or expired. | Refresh the token; if that fails, sign in again. |
 | `STEP_UP_REQUIRED` | `permission_denied` | 403 | **yes** | The session is authenticated but below the assurance level this operation requires. | Prompt for step-up (MFA or passkey), then retry. |
 | `ACCESS_DENIED` | `permission_denied` | 403 | no | Authenticated and visible, but this principal lacks the required relation. | Ask a workspace or organization admin for access. Do NOT offer an upgrade. |
-| `PLAN_UPGRADE_REQUIRED` | `failed_precondition` | 412 | no | The capability is not included in the organization's current plan. | Offer an upgrade. Do NOT tell the user to ask an admin. |
-| `QUOTA_EXCEEDED` | `failed_precondition` | 412 | no | A plan limit has been reached — seats, workspaces, or a metered dimension. | Show what is exhausted and offer to reduce usage or upgrade. |
-| `ORG_SUSPENDED` | `failed_precondition` | 412 | no | The organization's subscription is suspended, so writes are blocked. | Direct the owner to billing. Reads, billing and export remain available. |
+| `PLAN_UPGRADE_REQUIRED` | `permission_denied` | 403 | no | The capability is not included in the organization's current plan. | Offer an upgrade. Do NOT tell the user to ask an admin. |
+| `QUOTA_EXCEEDED` | `resource_exhausted` | 429 | no | A plan limit has been reached — seats, workspaces, or a metered dimension. | Show what is exhausted and offer to reduce usage or upgrade. |
+| `ORG_SUSPENDED` | `permission_denied` | 403 | no | The organization's subscription is suspended, so writes are blocked. | Direct the owner to billing. Reads, billing and export remain available. |
 | `NOT_FOUND` | `not_found` | 404 | no | The resource does not exist, or the caller may not learn that it does. | Treat as absent. This response is deliberately indistinguishable from a cross-tenant denial. |
-| `CONFLICT` | `aborted` | 409 | **yes** | Optimistic concurrency: the resource changed between read and write. | Re-read and retry. Expected under concurrency, not an error condition. |
+| `CONFLICT` | `already_exists` | 409 | **yes** | The write could not be applied: the resource changed between read and write, or the thing being claimed is already taken. | Re-read and retry. Expected under concurrency, not an error condition. |
 | `VALIDATION_FAILED` | `invalid_argument` | 400 | no | The request failed schema or domain validation. | Fix the input; the metadata names the offending field. |
 | `RATE_LIMITED` | `resource_exhausted` | 429 | **yes** | Too many requests. | Back off and retry with jitter. |
 | `INTERNAL` | `internal` | 500 | **yes** | An unclassified server failure. Detail is deliberately withheld. | Retry with backoff; report the trace id if it persists. |

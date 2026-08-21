@@ -71,6 +71,47 @@ func mutatingService(t *testing.T, pkg string) (protoreflect.FullName, string) {
 		"/" + pkg + ".SyntheticService/Mutate"
 }
 
+// publicMutatingService registers a synthetic method that is PUBLIC and WRITES.
+//
+// The real ones — Register, VerifyEmail, ResetPassword, Authenticate,
+// CreateSession — live in the identity module, which this package does not
+// import. Without this fixture the public branch of the pipeline is only ever
+// exercised by `GetStatus`, a public READ, so the rule that a public MUTATION
+// must carry an Idempotency-Key would have no test at all: deleting it would
+// leave every test here green.
+func publicMutatingService(t *testing.T, pkg string) (protoreflect.FullName, string) {
+	t.Helper()
+	opts := &descriptorpb.MethodOptions{}
+	proto.SetExtension(opts, optionsv1.E_Public, true)
+	proto.SetExtension(opts, optionsv1.E_Operation,
+		optionsv1.OperationClass_OPERATION_CLASS_WRITE)
+
+	fd := &descriptorpb.FileDescriptorProto{
+		Name:       new(pkg + "/svc.proto"),
+		Package:    new(pkg),
+		Syntax:     new("proto3"),
+		Dependency: []string{"chronos/system/v1/system.proto"},
+		Service: []*descriptorpb.ServiceDescriptorProto{{
+			Name: new("SyntheticPublicService"),
+			Method: []*descriptorpb.MethodDescriptorProto{{
+				Name:       new("Open"),
+				InputType:  new(".chronos.system.v1.GetStatusRequest"),
+				OutputType: new(".chronos.system.v1.GetStatusResponse"),
+				Options:    opts,
+			}},
+		}},
+	}
+	f, err := protodesc.NewFile(fd, protoregistry.GlobalFiles)
+	if err != nil {
+		t.Fatalf("descriptor: %v", err)
+	}
+	if err := protoregistry.GlobalFiles.RegisterFile(f); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	return protoreflect.FullName(pkg + ".SyntheticPublicService"),
+		"/" + pkg + ".SyntheticPublicService/Open"
+}
+
 func policies(t *testing.T, names ...protoreflect.FullName) *policy.Set {
 	t.Helper()
 	set, err := policy.Load(names...)
@@ -126,6 +167,115 @@ func TestAPublicMethodNeedsNoGates(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("the handler ran %d times", calls)
+	}
+}
+
+// A PUBLIC MUTATION requires an Idempotency-Key, and gate 5 is never reached to
+// require it.
+//
+// This is the one requirement on a public method, and it is enforced in the
+// public branch because the pipeline returns from there: authentication, and
+// therefore idempotency, never run. The key is not claimed in any store — there
+// is no principal to scope it to — it is required and used as the command's
+// causation id, which is what the published document promises.
+//
+// Without this test the branch is dead code that no test distinguishes from its
+// absence: every other public case here is `GetStatus`, a READ.
+func TestAPublicMutationRequiresAnIdempotencyKey(t *testing.T) {
+	svc, procedure := publicMutatingService(t, "chronos.publicmutation.v1")
+	g, err := interceptor.NewGates(interceptor.Deps{Policies: policies(t, svc)})
+	if err != nil {
+		t.Fatalf("NewGates: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		header  map[string]string
+		wantRun bool
+	}{
+		{name: "no key at all", header: nil},
+		{name: "an empty key", header: map[string]string{interceptor.IdempotencyHeader: ""}},
+		{
+			name: "a key past the maximum",
+			header: map[string]string{
+				interceptor.IdempotencyHeader: strings.Repeat("A", cqrs.MaxKeyLen+1),
+			},
+		},
+		{
+			name: "a key carrying the reserved separator",
+			header: map[string]string{
+				interceptor.IdempotencyHeader: "01ARZ3NDEKTSV4RRFFQ69G5FAV|other",
+			},
+		},
+		{
+			name:    "a well-formed key",
+			header:  map[string]string{interceptor.IdempotencyHeader: "01ARZ3NDEKTSV4RRFFQ69G5FAV"},
+			wantRun: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			_, err := g.WrapUnary(okHandler(&calls))(context.Background(),
+				request(t, procedure, statusMethod(t), tt.header))
+
+			if tt.wantRun {
+				if err != nil {
+					t.Fatalf("a public mutation with a valid key was refused: %v", err)
+				}
+				if calls != 1 {
+					t.Fatalf("the handler ran %d times", calls)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("a public mutation was served without a usable Idempotency-Key")
+			}
+			if calls != 0 {
+				t.Fatal("the handler ran before the key was checked")
+			}
+			if got := connect.CodeOf(err); got != connect.CodeInvalidArgument {
+				t.Errorf("code = %v, want InvalidArgument — a missing key is a client bug", got)
+			}
+		})
+	}
+}
+
+// The key a public mutation carries becomes the causation id of every event the
+// command writes.
+//
+// That is the half of the requirement a "was it refused?" test cannot see. These
+// commands are ROOTS — nothing above them in the log — so if the key does not
+// reach the context, their events are appended with an empty causation and, when
+// tracing is off, an empty correlation too. A log is append-only: an id not
+// written at append time can never be added.
+func TestAPublicMutationCarriesItsKeyAsCausation(t *testing.T) {
+	svc, procedure := publicMutatingService(t, "chronos.publicmutationtrace.v1")
+	g, err := interceptor.NewGates(interceptor.Deps{Policies: policies(t, svc)})
+	if err != nil {
+		t.Fatalf("NewGates: %v", err)
+	}
+
+	const key = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	var seen eventsourcing.Trace
+	handler := func(ctx context.Context, _ connect.AnyRequest) (connect.AnyResponse, error) {
+		seen = eventsourcing.TraceFrom(ctx)
+		return connect.NewResponse(&systemv1.GetStatusResponse{}), nil
+	}
+
+	if _, err := g.WrapUnary(handler)(context.Background(),
+		request(t, procedure, statusMethod(t),
+			map[string]string{interceptor.IdempotencyHeader: key})); err != nil {
+		t.Fatalf("a public mutation with a valid key was refused: %v", err)
+	}
+
+	if seen.CausationID != key {
+		t.Errorf("causation id = %q, want %q — the command has no stable identity across "+
+			"retries, and its root events are appended with none", seen.CausationID, key)
+	}
+	if seen.CorrelationID == "" {
+		t.Error("correlation id is empty; with no span it must fall back to the key")
 	}
 }
 

@@ -26,6 +26,7 @@ import (
 	"connectrpc.com/connect"
 	optionsv1 "github.com/chronos/chronos-go/gen/proto/chronos/options/v1"
 	"github.com/chronos/chronos-go/internal/platform/authz"
+	"github.com/chronos/chronos-go/internal/platform/cqrs"
 	"github.com/chronos/chronos-go/internal/platform/errs"
 	srvconnect "github.com/chronos/chronos-go/internal/server/connect"
 	"github.com/chronos/chronos-go/internal/server/policy"
@@ -228,6 +229,52 @@ func (g *Gates) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
 			// No authn, no gates. The policy loader has already refused any
 			// public method that also declares authz, an entitlement or an
 			// assurance level, so "public" here means exactly one thing.
+			//
+			// A public MUTATION still requires an Idempotency-Key, and this is the
+			// only place that can require it: gate 5 runs after authentication and
+			// is never reached from here. Two reasons, and the second is the one
+			// that made this a defect rather than a nicety.
+			//
+			// Register, VerifyEmail, ResetPassword, Authenticate and CreateSession
+			// are the calls a person retries on a flaky connection, and without a
+			// key a retry is a fresh command rather than a repeat of one.
+			//
+			// And the key is the CAUSATION id of every event the command writes
+			// (see withCausation). These commands are roots — nothing above them
+			// in the log — so without a key their events are appended with an
+			// empty causation and, when tracing is off, an empty correlation too.
+			// A log is append-only: an id not written at append time can never be
+			// added, so "the public writes have no chain" would have been
+			// permanent for every event already stored.
+			//
+			// What it does NOT do is claim the key in the store. There is no
+			// principal, so there is no scope to claim under — and an anonymous
+			// shared scope would hand one caller another's stored response, which
+			// is the cross-caller read cqrs.Scope.Validate refuses an empty
+			// principal to prevent. So: required, bounded, used as identity, never
+			// stored. proto/openapi.base.yaml publishes exactly that.
+			// identity/api/service.go's idempotencyKey() also refuses an empty
+			// header, and it is left in place as a backstop for a caller that
+			// reaches a handler another way. It is not sufficient on its own: it
+			// lives in ONE module, so a public mutation added anywhere else would
+			// be unguarded until somebody remembered; it refuses only the EMPTY
+			// case, so a 4KB key reached the log; and it cannot attach causation,
+			// because by then the context is already the handler's.
+			//
+			// The two messages below are the ones Idempotency.Do produces on the
+			// authenticated path, deliberately word for word: a client that omits
+			// the header should not be able to tell which branch refused it.
+			if p.Mutating() {
+				key := req.Header().Get(IdempotencyHeader)
+				if key == "" {
+					return nil, srvconnect.Error(errs.ValidationFailedf(
+						"%s is required on every mutating request", IdempotencyHeader))
+				}
+				if err := cqrs.Key(key).Validate(); err != nil {
+					return nil, srvconnect.Error(errs.ValidationFailedf("%s", err))
+				}
+				ctx = withCausation(ctx, key)
+			}
 			return next(ctx, req)
 		}
 

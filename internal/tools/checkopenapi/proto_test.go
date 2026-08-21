@@ -21,20 +21,54 @@ func TestRoutesReadsTheDeclaredOption(t *testing.T) {
 		t.Fatal("routes() found no RPCs at all; the generated packages are not imported")
 	}
 
-	public, ok := got[publicRoute]
+	publicMeta, ok := got[publicRoute]
 	if !ok {
 		t.Fatalf("%s is not in the registry", publicRoute)
 	}
-	if !public {
+	if !publicMeta.public {
 		t.Errorf("%s is not public; the security fixtures in spec_test.go are testing nothing", publicRoute)
 	}
 
-	protectedPublic, ok := got[protectedRoute]
+	protectedMeta, ok := got[protectedRoute]
 	if !ok {
 		t.Fatalf("%s is not in the registry", protectedRoute)
 	}
-	if protectedPublic {
+	if protectedMeta.public {
 		t.Errorf("%s is public; the security fixtures in spec_test.go are testing nothing", protectedRoute)
+	}
+}
+
+// TestTheIdempotencyFixturesStillHoldTheirProperties keeps the two routes the
+// idempotency cases in spec_test.go depend on honest.
+//
+// Both cases would pass vacuously if the fixtures drifted: removing a parameter
+// from a route that is not mutating proves nothing, and adding one to a route
+// that is not public proves nothing either. Asserted against the same descriptors
+// the interceptors read, so a change to either RPC's options fails HERE with a
+// clear reason rather than quietly hollowing out two tests.
+func TestTheIdempotencyFixturesStillHoldTheirProperties(t *testing.T) {
+	t.Parallel()
+
+	got := routes()
+
+	mutating, ok := got[mutatingRoute]
+	if !ok {
+		t.Fatalf("%s is not in the registry", mutatingRoute)
+	}
+	if !mutating.mutating || mutating.public {
+		t.Errorf("%s is mutating=%v public=%v; it must be an AUTHENTICATED MUTATION for the "+
+			"idempotency fixtures in spec_test.go to test anything",
+			mutatingRoute, mutating.mutating, mutating.public)
+	}
+
+	publicMutating, ok := got[publicMutatingRoute]
+	if !ok {
+		t.Fatalf("%s is not in the registry", publicMutatingRoute)
+	}
+	if !publicMutating.mutating || !publicMutating.public {
+		t.Errorf("%s is mutating=%v public=%v; it must be a PUBLIC MUTATION for the idempotency "+
+			"fixtures in spec_test.go to test anything",
+			publicMutatingRoute, publicMutating.mutating, publicMutating.public)
 	}
 }
 

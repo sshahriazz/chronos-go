@@ -4,6 +4,8 @@ import (
 	"log/slog"
 
 	"github.com/chronos/chronos-go/gen/proto/chronos/identity/v1/identityv1connect"
+	"github.com/chronos/chronos-go/gen/proto/chronos/notification/v1/notificationv1connect"
+	"github.com/chronos/chronos-go/gen/proto/chronos/profile/v1/profilev1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/system/v1/systemv1connect"
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
 	"github.com/chronos/chronos-go/internal/server/interceptor"
@@ -22,6 +24,8 @@ func gatedServices() []protoreflect.FullName {
 	return []protoreflect.FullName{
 		systemv1connect.SystemServiceName,
 		identityv1connect.IdentityServiceName,
+		notificationv1connect.NotificationServiceName,
+		profilev1connect.ProfileServiceName,
 	}
 }
 
@@ -45,9 +49,20 @@ func (d *dependencies) startGates(log *slog.Logger) {
 		log.Error("no session authenticator: postgres is unreachable, so no bearer token " +
 			"can be resolved and EVERY authenticated RPC will be refused")
 	} else {
+		// Now comes from the SAME clock identity writes its deadlines with.
+		//
+		// Left unset, SessionAuthenticatorDeps defaults it to time.Now — and this
+		// process then ran two clocks: every idle and absolute deadline written by
+		// identity came from d.clock, while the check that enforces them read the
+		// wall clock. In production the two agree, so expiry works; the costs were
+		// that session expiry could not be TESTED at all through ADR-054's movable
+		// clock, that the two halves of a session's lifetime were kept on different
+		// clocks, and that a session could report lastSeenAt earlier than its own
+		// createdAt. Found by internal/adapter/protocolit.
 		authn, err := interceptor.NewSessionAuthenticator(interceptor.SessionAuthenticatorDeps{
 			TX:  pgadapter.New(d.pool),
 			Log: log,
+			Now: d.clock.Now,
 		})
 		if err != nil {
 			// NewSessionAuthenticator refuses only relationships between durations

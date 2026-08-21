@@ -20,6 +20,8 @@ import (
 	"connectrpc.com/grpcreflect"
 	"connectrpc.com/validate"
 	"github.com/chronos/chronos-go/gen/proto/chronos/identity/v1/identityv1connect"
+	"github.com/chronos/chronos-go/gen/proto/chronos/notification/v1/notificationv1connect"
+	"github.com/chronos/chronos-go/gen/proto/chronos/profile/v1/profilev1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/system/v1/systemv1connect"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/config"
@@ -77,9 +79,6 @@ func run(addr string, log *slog.Logger) error {
 	}
 	defer stopTracing(context.Background())
 
-	clk := clock.System{}
-	startedAt := clk.Now()
-
 	// The composition root. Hand-written while the graph is small: it is
 	// ordinary Go, so the compiler checks it, which is the property ADR-009
 	// actually requires. Generated wiring earns its keep once this grows past
@@ -87,7 +86,30 @@ func run(addr string, log *slog.Logger) error {
 	deps, closeDeps := newDependencies(cfg, log)
 	defer closeDeps()
 
-	registry := newHealthRegistry(clk, deps)
+	startedAt := deps.clock.Now()
+
+	// The movable clock (ADR-054). Disabled everywhere but local, and config
+	// validation has already refused the boot if that is not where we are — this
+	// is the second of the two checks, and it is here so that deleting either
+	// one still leaves a server that refuses.
+	//
+	// A failure here FAILS THE BOOT, unlike every other optional surface. See
+	// startClockControl: a harness that asked for a movable clock and silently
+	// got a fixed one does not fail, it passes while advancing nothing.
+	clockCtl, err := startClockControl(
+		context.Background(), cfg.Env, cfg.ClockControl, deps.movableClock, log)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := clockCtl.Shutdown(shutdownCtx); err != nil {
+			log.Warn("clock control listener did not drain", "error", err)
+		}
+	}()
+
+	registry := newHealthRegistry(deps.clock, deps)
 
 	mux := http.NewServeMux()
 
@@ -205,6 +227,14 @@ func handlerOptions(gates ...connectrpc.Interceptor) []connectrpc.HandlerOption 
 	// identity.proto is a comment: the schema documents a constraint, the
 	// generated OpenAPI publishes it, and nothing refuses input that breaks
 	// it. Handlers do not re-check.
+	// OUTSIDE the validation interceptor, so it sees the error on the way out.
+	//
+	// connectrpc.com/validate builds its own connect.Error and never passes
+	// through errs, so a schema refusal used to arrive with buf.validate
+	// violations and NO reason — leaving a client unable to tell a broken field
+	// rule from a missing Idempotency-Key. This re-raises it as VALIDATION_FAILED
+	// and carries the violations across.
+	interceptors = append(interceptors, interceptor.NewValidationReason())
 	interceptors = append(interceptors, validate.NewInterceptor())
 
 	opts := []connectrpc.HandlerOption{connectrpc.WithInterceptors(interceptors...)}
@@ -259,6 +289,25 @@ func registerServices(
 	} else {
 		mux.Handle(identityv1connect.NewIdentityServiceHandler(d.identity, opts...))
 		served = append(served, identityv1connect.IdentityServiceName)
+	}
+
+	if d.notification == nil {
+		// Already logged in full by buildNotification. Repeated at the moment of
+		// non-registration because this is the line a log search for the service
+		// name lands on when somebody asks why their inbox is empty.
+		log.Error("NotificationService is NOT registered; the feed, push registration " +
+			"and every channel preference answer 'unimplemented'")
+	} else {
+		mux.Handle(notificationv1connect.NewNotificationServiceHandler(d.notification, opts...))
+		served = append(served, notificationv1connect.NotificationServiceName)
+	}
+
+	if d.profile == nil {
+		log.Error("ProfileService is NOT registered; the display name, locale, timezone " +
+			"and avatar all answer 'unimplemented'")
+	} else {
+		mux.Handle(profilev1connect.NewProfileServiceHandler(d.profile, opts...))
+		served = append(served, profilev1connect.ProfileServiceName)
 	}
 
 	log.Info("connect services registered", "services", served)

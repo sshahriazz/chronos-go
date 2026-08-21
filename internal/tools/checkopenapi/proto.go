@@ -19,7 +19,9 @@ import (
 	// .proto sources on disk describe an RPC the registry does not carry.
 	_ "github.com/chronos/chronos-go/gen/proto/chronos/errors/v1"
 	_ "github.com/chronos/chronos-go/gen/proto/chronos/identity/v1"
+	_ "github.com/chronos/chronos-go/gen/proto/chronos/notification/v1"
 	optionsv1 "github.com/chronos/chronos-go/gen/proto/chronos/options/v1"
+	_ "github.com/chronos/chronos-go/gen/proto/chronos/profile/v1"
 	_ "github.com/chronos/chronos-go/gen/proto/chronos/system/v1"
 )
 
@@ -28,11 +30,30 @@ import (
 // which this document publishes.
 const protoPackagePrefix = "chronos."
 
+// rpc is what the compiled descriptor says about one method, for the two rules
+// that compare the published document against the schema the server enforces.
+//
+// Both fields are read from the descriptor rather than from the .proto text or
+// from the document, so each is the value the interceptors themselves act on:
+// internal/server/interceptor/authn reads `public`, and
+// internal/server/interceptor/idempotency requires its header of exactly the
+// methods `policy.Policy.Mutating` returns true for.
+type rpc struct {
+	// public is (chronos.options.v1.public).
+	public bool
+
+	// mutating mirrors policy.Policy.Mutating: the operation classes that write.
+	// A mutating method requires an `Idempotency-Key` header at runtime, so a
+	// published operation that does not document one describes a call every
+	// client will get a VALIDATION_FAILED from on its first attempt.
+	mutating bool
+}
+
 // routes is every RPC this repository declares, keyed by the path a Connect
 // client calls: /<package>.<Service>/<Method>.
 //
-// The value is the RPC's `(chronos.options.v1.public)` option, read from the
-// COMPILED descriptor rather than matched out of the .proto text. That matters:
+// The value is what the COMPILED descriptor says about the method, read from the
+// descriptor rather than matched out of the .proto text. That matters:
 // the option's value is what the authentication interceptor enforces at runtime
 // (internal/server/policy reads the same extension off the same descriptor), so
 // this check compares the published document against the enforced fact rather
@@ -40,8 +61,8 @@ const protoPackagePrefix = "chronos."
 // any syntax it did not anticipate — a block comment, an option set on the
 // service, a line break in the wrong place — and would report "not public",
 // which is the SAFE-looking answer and therefore the dangerous one.
-func routes() map[string]bool {
-	out := map[string]bool{}
+func routes() map[string]rpc {
+	out := map[string]rpc{}
 	protoregistry.GlobalFiles.RangeFiles(func(fd protoreflect.FileDescriptor) bool {
 		if !strings.HasPrefix(string(fd.Package()), protoPackagePrefix) {
 			return true
@@ -53,12 +74,36 @@ func routes() map[string]bool {
 			for j := range methods.Len() {
 				m := methods.Get(j)
 				public, _ := proto.GetExtension(m.Options(), optionsv1.E_Public).(bool)
-				out["/"+string(svc.FullName())+"/"+string(m.Name())] = public
+				class, _ := proto.GetExtension(m.Options(), optionsv1.E_Operation).(optionsv1.OperationClass)
+				out["/"+string(svc.FullName())+"/"+string(m.Name())] = rpc{
+					public:   public,
+					mutating: mutatingClass(class),
+				}
 			}
 		}
 		return true
 	})
 	return out
+}
+
+// mutatingClass is policy.Policy.Mutating, restated over the raw enum.
+//
+// Restated rather than imported: internal/server/policy builds a Policy from a
+// descriptor and carries the gates with it, and pulling the server's policy
+// package into a build-time documentation tool would make this gate depend on
+// the runtime it is meant to audit. The list is short, and the two must be
+// changed together — a new mutating operation class that is added there and not
+// here makes this check quietly weaker, which is why it is spelled out rather
+// than defaulted.
+func mutatingClass(c optionsv1.OperationClass) bool {
+	switch c {
+	case optionsv1.OperationClass_OPERATION_CLASS_WRITE,
+		optionsv1.OperationClass_OPERATION_CLASS_GROW,
+		optionsv1.OperationClass_OPERATION_CLASS_BILLING_MANAGE:
+		return true
+	default:
+		return false
+	}
 }
 
 var (
@@ -79,7 +124,7 @@ var (
 // exist. The text scan is deliberately crude: it never decides whether an RPC is
 // public, only that the RPC exists, and a crude scan that over-reports produces a
 // loud failure rather than a quiet pass.
-func crossCheckAgainstSources(dir string, known map[string]bool) (found int, problems []string) {
+func crossCheckAgainstSources(dir string, known map[string]rpc) (found int, problems []string) {
 	var files []string
 	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -110,9 +155,9 @@ func crossCheckAgainstSources(dir string, known map[string]bool) (found int, pro
 		for _, svc := range serviceRE.FindAllStringSubmatchIndex(text, -1) {
 			name := text[svc[2]:svc[3]]
 			body := serviceBody(text, svc[1])
-			for _, rpc := range rpcRE.FindAllStringSubmatch(body, -1) {
+			for _, match := range rpcRE.FindAllStringSubmatch(body, -1) {
 				found++
-				route := "/" + pkg[1] + "." + name + "/" + rpc[1]
+				route := "/" + pkg[1] + "." + name + "/" + match[1]
 				if _, ok := known[route]; !ok {
 					missing = append(missing, route)
 				}

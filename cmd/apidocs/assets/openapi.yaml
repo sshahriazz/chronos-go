@@ -2,8 +2,10 @@ openapi: 3.1.0
 info:
   title: Chronos API
   version: v1
-  summary: Multi-tenant workspace platform — identity, organizations, workspaces and access.
   description: |
+    Multi-tenant workspace platform — identity, organizations, workspaces and
+    access.
+
     ## What this document is
 
     Chronos serves **one schema over three protocols on one port** — gRPC,
@@ -50,7 +52,7 @@ info:
     | `Connect-Protocol-Version` | **yes** | `1` |
     | `Connect-Timeout-Ms` | no | Milliseconds; the server cancels the call when it elapses. |
     | `Authorization` | on authenticated methods | `Bearer <token>` — see *Authentication* |
-    | `Idempotency-Key` | on authenticated mutations | See *Idempotency* |
+    | `Idempotency-Key` | on every mutation | See *Idempotency* |
 
     ### Content type
 
@@ -78,7 +80,7 @@ info:
     | --- | --- |
     | `message` | The request message, JSON-encoded |
     | `encoding` | `json` (or `proto`) |
-    | `base64` | `true` if `message` is base64-encoded, which binary data may require |
+    | `base64` | `1` — and only `1` — if `message` is base64url-encoded. Omit it otherwise; the protocol has no other spelling, and `true` reads as OFF |
     | `compression` | Optional content encoding of `message` |
     | `connect` | Protocol version, `v1` |
 
@@ -118,7 +120,7 @@ info:
 
     ## Idempotency
 
-    Every **authenticated mutating** call requires an `Idempotency-Key` header —
+    Every **mutating** call requires an `Idempotency-Key` header —
     a client-generated ULID or UUID.
 
     ```
@@ -137,10 +139,20 @@ info:
     across accounts or reused on a different method. Records are retained for 24
     hours.
 
-    The **public** methods take no key, because the gate that claims one runs
-    after authentication and there is no principal to scope it to. That is why
-    `Register` is instead designed to be safe to repeat: its response is identical
-    whether or not the address was free.
+    The **public** methods need a key too, and they are the ones that need it
+    most: `Register`, `VerifyEmail`, `Authenticate` and `CreateSession` are the
+    calls a user retries on a flaky connection, and a retry without a key is a
+    fresh attempt rather than a replay.
+
+    One difference is worth knowing when reading responses. A public call has no
+    principal, so it is not scoped to `(principal, method, key)` and does not get
+    the stored-response replay described above; the key is required, and it is
+    what gives the resulting command a stable identity. Omitting it returns
+    `VALIDATION_FAILED` exactly as on an authenticated call.
+
+    `Register` is *additionally* designed to be safe to repeat: its response is
+    identical whether or not the address was free. That is an enumeration
+    defence, not a substitute for a key.
 
     Generate a key per logical operation, not per HTTP attempt — a retry of the
     same operation must reuse the same key, which is the entire point.
@@ -248,8 +260,6 @@ externalDocs:
   description: The error catalogue — every reason code, its transport mapping, and what a client should do
   url: https://github.com/chronos/chronos-go/blob/main/docs/api/errors.md
 servers:
-  - url: http://localhost:8090
-    description: Local development
   - url: https://api.staging.chronos.example
     description: Staging
   - url: https://api.chronos.example
@@ -257,28 +267,13 @@ servers:
 security:
   - bearerAuth: []
 components:
-  securitySchemes:
-    bearerAuth:
-      type: http
-      scheme: bearer
-      description: |
-        The session token returned by `IdentityService/CreateSession`, sent as
-        `Authorization: Bearer <token>`.
-
-        Returned by that call and by no other, ever: only its digest is stored,
-        so there is no endpoint that can re-display it. It is opaque — do not
-        parse it.
-
-        Two deadlines bound it, and both are returned with it. The IDLE deadline
-        moves forward on each authenticated request; the ABSOLUTE one does not,
-        and it is what bounds a stolen token held by an attacker who keeps it
-        warm, which an idle deadline alone cannot do. Revocation through
-        `RevokeSession` or `RevokeAllSessions` is immediate.
   schemas:
     base64:
-      type: boolean
+      type: string
       title: base64
-      description: Specifies if the message query param is base64 encoded, which may be required for binary data
+      description: 'Set to the string `1` when `message` is base64url-encoded; omit it otherwise. This is NOT a boolean: the protocol compares the value against `1` exactly, so `true` is treated as not-encoded and the still-encoded message reaches the parser as literal JSON.'
+      enum:
+        - "1"
     chronos.errors.v1.ErrorDetail:
       type: object
       title: Error detail
@@ -295,11 +290,11 @@ components:
         | `UNAUTHENTICATED` | `unauthenticated` | 401 | **yes** | Refresh the token; if that fails, sign in again. |
         | `STEP_UP_REQUIRED` | `permission_denied` | 403 | **yes** | Prompt for step-up (MFA or passkey), then retry. |
         | `ACCESS_DENIED` | `permission_denied` | 403 | no | Ask a workspace or organization admin for access. Do NOT offer an upgrade. |
-        | `PLAN_UPGRADE_REQUIRED` | `failed_precondition` | 412 | no | Offer an upgrade. Do NOT tell the user to ask an admin. |
-        | `QUOTA_EXCEEDED` | `failed_precondition` | 412 | no | Show what is exhausted and offer to reduce usage or upgrade. |
-        | `ORG_SUSPENDED` | `failed_precondition` | 412 | no | Direct the owner to billing. Reads, billing and export remain available. |
+        | `PLAN_UPGRADE_REQUIRED` | `permission_denied` | 403 | no | Offer an upgrade. Do NOT tell the user to ask an admin. |
+        | `QUOTA_EXCEEDED` | `resource_exhausted` | 429 | no | Show what is exhausted and offer to reduce usage or upgrade. |
+        | `ORG_SUSPENDED` | `permission_denied` | 403 | no | Direct the owner to billing. Reads, billing and export remain available. |
         | `NOT_FOUND` | `not_found` | 404 | no | Treat as absent. This response is deliberately indistinguishable from a cross-tenant denial. |
-        | `CONFLICT` | `aborted` | 409 | **yes** | Re-read and retry. Expected under concurrency, not an error condition. |
+        | `CONFLICT` | `already_exists` | 409 | **yes** | Re-read and retry. Expected under concurrency, not an error condition. |
         | `VALIDATION_FAILED` | `invalid_argument` | 400 | no | Fix the input; the metadata names the offending field. |
         | `RATE_LIMITED` | `resource_exhausted` | 429 | **yes** | Back off and retry with jitter. |
         | `INTERNAL` | `internal` | 500 | **yes** | Retry with backoff; report the trace id if it persists. |
@@ -328,6 +323,9 @@ components:
           type: object
           additionalProperties:
             type: string
+            maxLength: 1024
+            pattern: '^[^\r\n]*$'
+          maxProperties: 32
           description: |
             Client-safe structured detail: the limit that was exceeded, the
             field that failed validation, the plan that would satisfy the
@@ -336,6 +334,8 @@ components:
             - {field: email}
         traceId:
           type: string
+          maxLength: 32
+          pattern: '^$|^[0-9a-f]{32}$'
           description: |
             Correlation id for this request. The server-side cause is NOT in
             this message; an operator finds it by searching traces for this
@@ -344,6 +344,7 @@ components:
             - 4bf92f3577b34da6a3ce929d0e0e4736
       required:
         - reason
+      additionalProperties: false
     chronos.identity.v1.AccountState:
       type: string
       title: AccountState
@@ -364,12 +365,17 @@ components:
       properties:
         credentialId:
           type: string
+          examples:
+            - cred_01ARZ3NDEKTSV4RRFFQ69G5FAV
           title: credential_id
+          maxLength: 31
+          pattern: ^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$
           description: The credential's identifier, a prefixed ULID (ADR-030).
         kind:
           title: kind
           description: What kind of factor this is.
-          $ref: '#/components/schemas/chronos.identity.v1.MethodKind'
+          allOf:
+            - $ref: '#/components/schemas/chronos.identity.v1.MethodKind'
         usable:
           type: boolean
           title: usable
@@ -384,13 +390,15 @@ components:
             When the method was first provisioned, UTC. This is NOT enabled_at: a TOTP
              secret is scanned before it is proven, and the gap between the two is
              exactly the enrolment the user may have abandoned.
-          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
         enabledAt:
           title: enabled_at
           description: |-
             When possession was first proven, UTC. Unset while the method is
              provisioned but unproven, which is also when it is not usable.
-          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
         lastUsedAt:
           title: last_used_at
           description: |-
@@ -398,7 +406,8 @@ components:
              INTERESTING VALUE: this screen is really asked "is there something enrolled
              here that I did not enrol", and the answer is only credible if a method that
              has never been used says so.
-          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
       title: AuthMethod
       additionalProperties: false
       description: |-
@@ -417,6 +426,8 @@ components:
           examples:
             - ada@example.com
           title: identifier
+          maxLength: 254
+          pattern: ^[^\r\n]+$
           description: |
             The address as typed. Reduced to a blind index server-side; neither the raw
              nor the normalized form reaches an event, a log line or an error message.
@@ -435,6 +446,8 @@ components:
           examples:
             - PLACEHOLDER-not-a-real-password
           title: password
+          maxLength: 4096
+          pattern: ^[^\u0000-\u001F\u007F]*$
           description: |-
             The secret as typed.
 
@@ -447,11 +460,21 @@ components:
              Length is still bounded — by `domain.MaxPasswordBytes` inside the handler
              and by Connect's message size cap in front of it — so declaring nothing here
              costs no denial-of-service protection.
+
+             The published `maxLength` is an ANNOTATION, so it adds no interceptor rule and
+             no refusal: it restates `domain.MaxPasswordBytes`, which the handler already
+             enforces, for the benefit of a client and of a document that must not contain
+             an unbounded string. The paragraph above rules out a protovalidate maximum,
+             not a documented one — what makes a ceiling an oracle is the interceptor
+             answering "structurally wrong" before the handler runs, and nothing here does
+             that.
         code:
           type: string
           examples:
             - "000000"
           title: code
+          maxLength: 64
+          pattern: ^[^\r\n]*$
           description: |-
             The second factor, and OPTIONAL. Sent empty on a first leg, which is
              answered with the kinds the account can complete with rather than with a
@@ -473,12 +496,19 @@ components:
              would report which second factors the account holds — the inventory
              AuthenticateResponse.offered is deliberately trimmed to kinds in order not
              to publish.
+             The bounds are ANNOTATIONS — published, not enforced — so the paragraph above
+             still holds: no interceptor rule distinguishes a TOTP code from a recovery
+             code, and nothing refuses either shape before the handler runs. The pattern is
+             "one line" and nothing more, deliberately: `normalizeRecoveryCode` accepts
+             lowercase, spaces, hyphens and stray punctuation and reduces them, so any
+             tighter pattern would describe a rejection this system does not perform.
         deviceId:
           type: string
           examples:
             - dev_9f2c1b7e
           title: device_id
           maxLength: 128
+          pattern: ^[\x20-\x7E]*$
           description: |-
             An opaque pseudonym for the client. It is NOT a device name, a platform
              string, a user agent or an address — all of those are personal data and
@@ -505,6 +535,7 @@ components:
           items:
             $ref: '#/components/schemas/chronos.identity.v1.MethodKind'
           title: offered
+          maxItems: 8
           description: |-
             The second-factor KINDS this account can complete with, so a client can show
              the right prompt.
@@ -513,6 +544,10 @@ components:
              anyone holding a correct password enumerate the account's authenticators,
              which is the inventory an attacker choosing an attack wants. Empty when no
              second factor is owed.
+             The ceiling is the number of kinds `MethodKind` declares, so it cannot be
+             reached by anything but a new enum value — which is the point. An unbounded
+             array in a published response is a promise that a client's rendering loop has
+             no upper bound on work, and this one has a very small one.
       title: AuthenticateResponse
       additionalProperties: false
       description: |-
@@ -523,6 +558,65 @@ components:
          error for every cause (ADR-036). What this distinguishes is only the two
          SUCCESSFUL shapes — the first factor passed and a second is owed, or every
          factor passed.
+    chronos.identity.v1.CheckUsernameAvailabilityRequest:
+      type: object
+      properties:
+        username:
+          type: string
+          examples:
+            - ada_lovelace
+          title: username
+          maxLength: 30
+          minLength: 3
+          pattern: ^[A-Za-z][A-Za-z0-9]*(_[A-Za-z0-9]+)*$
+          description: |-
+            The handle to test, as typed. It is normalized server-side — case folded to
+             lower — and the normalized form comes back in the response so a client can
+             show what would actually be claimed.
+
+             The rules mirror VerifyEmailRequest.username exactly, and must: a handle
+             this call reports available and that call then refuses as malformed would be
+             worse than no check at all.
+      title: CheckUsernameAvailabilityRequest
+      required:
+        - username
+      additionalProperties: false
+      description: CheckUsernameAvailabilityRequest asks whether a public handle can be claimed.
+    chronos.identity.v1.CheckUsernameAvailabilityResponse:
+      type: object
+      properties:
+        available:
+          type: boolean
+          title: available
+          description: True only when the handle is free, well-formed and not reserved.
+        username:
+          type: string
+          examples:
+            - ada_lovelace
+          title: username
+          maxLength: 30
+          pattern: ^$|^[a-z][a-z0-9]*(_[a-z0-9]+)*$
+          description: |-
+            The NORMALIZED handle — what would actually be claimed. Case folded to
+             lower. Returned so a client can show the canonical form rather than echo
+             what was typed.
+
+             Case folded, so the published pattern is the lowercase half of the request's
+             — this field cannot carry a capital, and a client rendering it does not have
+             to allow for one.
+      title: CheckUsernameAvailabilityResponse
+      additionalProperties: false
+      description: |-
+        CheckUsernameAvailabilityResponse answers with one boolean.
+
+         # There is deliberately no reason field, and there must not be one
+
+         Taken, reserved and tombstoned are ONE answer. Merging the first two is only
+         tidiness — the action is the same, pick another handle — but merging the THIRD
+         is a privacy control. "This handle was tombstoned" means "the account that
+         held it was erased", which is a fact about a PERSON, and the tombstone exists
+         precisely to protect that person. A field that distinguished it would undo the
+         protection at the point of use.
     chronos.identity.v1.ConfirmTotpRequest:
       type: object
       properties:
@@ -532,6 +626,7 @@ components:
             - "000000"
           title: code
           maxLength: 32
+          pattern: ^[^\r\n]+$
           description: |-
             The digits from the authenticator app. Never logged, stored, or placed in an
              event.
@@ -557,7 +652,11 @@ components:
       properties:
         credentialId:
           type: string
+          examples:
+            - cred_01ARZ3NDEKTSV4RRFFQ69G5FAV
           title: credential_id
+          maxLength: 31
+          pattern: ^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$
           description: The credential that was proven.
         activated:
           type: boolean
@@ -583,6 +682,8 @@ components:
           examples:
             - ada@example.com
           title: identifier
+          maxLength: 254
+          pattern: ^[^\r\n]+$
           description: |
             The address as typed, as in AuthenticateRequest — bounded, not
              format-checked, for the same reason.
@@ -592,12 +693,19 @@ components:
           examples:
             - PLACEHOLDER-not-a-real-password
           title: password
-          description: The secret as typed. NO RULES, as on AuthenticateRequest.password.
+          maxLength: 4096
+          pattern: ^[^\u0000-\u001F\u007F]*$
+          description: |-
+            The secret as typed. NO RULES, as on AuthenticateRequest.password — the
+             bounds below are annotations, published and not enforced, for that field's
+             reason.
         code:
           type: string
           examples:
             - "000000"
           title: code
+          maxLength: 64
+          pattern: ^[^\r\n]*$
           description: |-
             The second factor. Required in practice for every account on this system,
              because a session is never minted below AAL2.
@@ -608,12 +716,20 @@ components:
              refusal with a distinct VALIDATION_FAILED — turning the absence of a second
              factor into a separately observable outcome. Shape rules are absent for the
              reason given on AuthenticateRequest.code.
+
+             The bounds are ANNOTATIONS — published, not enforced — so the paragraph above
+             still holds: no interceptor rule distinguishes a TOTP code from a recovery
+             code, and nothing refuses either shape before the handler runs. The pattern is
+             "one line" and nothing more, deliberately: `normalizeRecoveryCode` accepts
+             lowercase, spaces, hyphens and stray punctuation and reduces them, so any
+             tighter pattern would describe a rejection this system does not perform.
         deviceId:
           type: string
           examples:
             - dev_9f2c1b7e
           title: device_id
           maxLength: 128
+          pattern: ^[\x20-\x7E]*$
           description: An opaque pseudonym for the client, as in AuthenticateRequest.
       title: CreateSessionRequest
       additionalProperties: false
@@ -632,21 +748,40 @@ components:
       properties:
         sessionId:
           type: string
+          examples:
+            - sess_01ARZ3NDEKTSV4RRFFQ69G5FAV
           title: session_id
+          maxLength: 31
+          pattern: ^sess_[0-7][0-9A-HJKMNP-TV-Z]{25}$
           description: |-
             The session's public identifier, a prefixed ULID (ADR-030). It is not a
              secret: it appears in the device list of every screen that renders one.
         subjectId:
           type: string
+          examples:
+            - subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
           title: subject_id
+          maxLength: 31
+          pattern: ^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$
           description: The authenticated account's pseudonym.
         token:
           type: string
           title: token
+          maxLength: 43
+          minLength: 43
+          pattern: ^[A-Za-z0-9_-]{43}$
           description: |-
             The plaintext bearer token. Only its digest is stored, so this is the only
              moment it exists anywhere this system can reach: it is returned here and by
              no other call, ever. Clients must keep it out of URLs, logs and analytics.
+
+             The exact shape IS published here, unlike the emailed tokens on
+             VerifyEmailRequest and ResetPasswordRequest, and the asymmetry is which
+             direction the value travels. Those fields are REQUESTS: describing the
+             alphabet there tells a guesser which guesses are worth making. This one is a
+             RESPONSE, so the only party who learns the shape is the party the server just
+             handed the token to — who is holding it. 32 bytes of crypto/rand rendered as
+             unpadded base64url is exactly 43 characters.
         assuranceLevel:
           title: assurance_level
           description: |-
@@ -655,20 +790,23 @@ components:
              AAL1 would honestly satisfy every `min_aal` that asks for AAL1, which is
              precisely the half-authenticated session identity.md §3 names as a complete
              authentication bypass.
-          $ref: '#/components/schemas/chronos.options.v1.AssuranceLevel'
+          allOf:
+            - $ref: '#/components/schemas/chronos.options.v1.AssuranceLevel'
         idleExpiresAt:
           title: idle_expires_at
           description: |-
             The deadline that MOVES: every authenticated request pushes it forward,
              clamped to the absolute one. UTC (ADR-008).
-          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
         absoluteExpiresAt:
           title: absolute_expires_at
           description: |-
             The deadline that does NOT move. It is what bounds a stolen token held by an
              attacker who keeps it warm, which an idle deadline alone cannot do because a
              thief can refresh it indefinitely. UTC.
-          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
         requiresCredentialRotation:
           type: boolean
           title: requires_credential_rotation
@@ -680,38 +818,104 @@ components:
       title: CreateSessionResponse
       additionalProperties: false
       description: CreateSessionResponse carries the bearer token back to the caller ONCE.
+    chronos.identity.v1.DeactivateAccountRequest:
+      type: object
+      title: DeactivateAccountRequest
+      additionalProperties: false
+      description: |-
+        DeactivateAccountRequest switches the caller's own account off.
+
+         It carries NOTHING, and the emptiness is the security property rather than an
+         oversight. The account is named by the caller's session and by nothing else, so
+         there is no field a request could use to aim this at somebody else's account —
+         identity has no delegation convention, and a `subject_id` here would let any
+         authenticated caller switch off any account whose pseudonym they could obtain.
+
+         The same reasoning the account-screen reads are built on (see GetUserRequest).
+    chronos.identity.v1.DeactivateAccountResponse:
+      type: object
+      properties:
+        changed:
+          type: boolean
+          title: changed
+          description: |-
+            Whether this call is what switched the account off. False means it was
+             already deactivated; the sessions are still swept in that case, because a
+             login whose ceremony began before the first deactivation committed can have
+             minted a session that sweep never saw.
+        sessionsRevoked:
+          type: integer
+          examples:
+            - "3"
+          title: sessions_revoked
+          maximum: 2147483647
+          minimum: 0
+          format: int32
+          description: |-
+            How many live sessions this call ended, the caller's own included. A
+             deactivation spares nothing: an account switched off everywhere except on the
+             device that switched it off is not what was asked for.
+
+             Range as on RevokeAllSessionsResponse.revoked.
+        sessionsScanned:
+          type: integer
+          examples:
+            - "4"
+          title: sessions_scanned
+          maximum: 2147483647
+          minimum: 0
+          format: int32
+          description: |-
+            How many live sessions the work list returned. Reported so a client can tell
+             "nothing to do" apart from "the list came back empty because it is broken".
+      title: DeactivateAccountResponse
+      additionalProperties: false
+      description: |-
+        DeactivateAccountResponse reports what the deactivation did.
+
+         The whole operation is ONE atomic append: the account is switched off and every
+         session on it ends together, or neither happens. The two orderings a pair of
+         appends could take both fail badly — an account off in the log with a live
+         session keeps full API access, because nothing in the request pipeline reads an
+         account's state — so the write is indivisible instead of ordered.
     chronos.identity.v1.EnrollTotpRequest:
       type: object
       properties:
         accountName:
           type: string
-          examples:
-            - ada@example.com
           title: account_name
-          description: |
-            What the user sees under the issuer in their authenticator app, normally
-             their own address.
+          maxLength: 256
+          pattern: ^[^\r\n]*$
+          description: |-
+            IGNORED. The authenticator label is derived by the server.
 
-             It is PERSONAL DATA, and it is supplied by the caller rather than read
-             server-side because the vault port is write-only by design — a port that
-             could read is a port through which an address reaches a log. It is placed in
-             the provisioning URI returned below, rendered to the enrolling user's own
-             screen, and reaches no event, no log line and no error message.
+             It used to carry the account's email address, and that put personal data in
+             the otpauth:// URI — rendered to a QR code, then stored PERMANENTLY by the
+             authenticator app, synced to the holder's cloud backup and shown on their
+             lock screen. That is the one place ADR-002 can never reach to erase.
 
-             An empty value is refused. The authenticator app would show an unlabelled
-             entry, which is how people delete the wrong credential.
+             The server now uses the account's own public handle (ADR-051), which is
+             public by design and is what a public label should carry. Deriving it
+             server-side also removes a caller-controlled string from a QR code: a session
+             holder could otherwise enrol with the label "security@chronos.io" and produce
+             an entry indistinguishable from an official one.
 
-             `required` matches the handler, which refuses a value that is empty or
-             whitespace-only; this rule catches the first case and the handler still
-             catches the second, so the two do not disagree. The ceiling is the ONE rule
-             in this file stricter than the code behind it — the handler imposes no
-             maximum — and it is here because this value is embedded verbatim in the
-             otpauth:// URI rendered into a QR code. It is sized at RFC 5321's 320-byte
-             path, comfortably above the address this normally holds.
-            string.max_bytes = 320
+             DEPRECATED rather than deleted, and the distinction is not cosmetic. Removing
+             field 1 fails `buf breaking`'s FIELD_NO_DELETE, which the FILE ruleset in
+             buf.yaml includes; relaxing that ruleset to admit this deletion would be
+             widening a gate to fit a change, which is how gates stop meaning anything.
+             So the field stays, is documented as ignored, and is deleted at the first
+             release boundary — the standard protobuf deprecation path.
+
+             A value sent here is discarded. No validation rule applies, because a rule
+             on an ignored field only tells a client its input mattered.
+
+             The published bounds are ANNOTATIONS, which is the only form that keeps the
+             sentence above true: they describe the field for a document that may not
+             contain an unbounded string, and they add no rule, so a client still learns
+             nothing about whether its input mattered. It did not.
+          deprecated: true
       title: EnrollTotpRequest
-      required:
-        - accountName
       additionalProperties: false
       description: EnrollTotpRequest asks for a new authenticator secret.
     chronos.identity.v1.EnrollTotpResponse:
@@ -719,17 +923,31 @@ components:
       properties:
         credentialId:
           type: string
+          examples:
+            - cred_01ARZ3NDEKTSV4RRFFQ69G5FAV
           title: credential_id
+          maxLength: 31
+          pattern: ^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$
           description: The credential this enrolment provisioned, a prefixed ULID (ADR-030).
         secret:
           type: string
           title: secret
+          maxLength: 32
+          minLength: 32
+          pattern: ^[A-Z2-7]{32}$
           description: |-
             The base32 shared secret, for manual entry when a camera is unavailable.
              Returned ONLY here. Never log it, never persist it client-side.
+
+             `totp.SecretBytes` is 20 — RFC 4226 §4 R6 — and 20 bytes of unpadded base32
+             is exactly 32 characters from the alphabet A-Z2-7. Describing a RESPONSE
+             precisely costs nothing: the only reader is the caller the server just handed
+             it to.
         provisioningUri:
           type: string
           title: provisioning_uri
+          maxLength: 512
+          pattern: ^otpauth://totp/[^\s]*$
           description: |-
             The otpauth:// value behind the QR code. It CONTAINS the secret and the
              account label. Returned ONLY here. Never log it.
@@ -742,7 +960,8 @@ components:
              has demonstrated possession of, so a secret captured from a screen — a
              screenshot, a shoulder-surf, a shared screen — stops being usable quickly. A
              user who takes longer starts again at no cost.
-          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
       title: EnrollTotpResponse
       additionalProperties: false
       description: |-
@@ -805,16 +1024,30 @@ components:
       properties:
         credentialId:
           type: string
+          examples:
+            - cred_01ARZ3NDEKTSV4RRFFQ69G5FAV
           title: credential_id
+          maxLength: 31
+          pattern: ^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$
           description: The credential holding this set, a prefixed ULID (ADR-030).
         codes:
           type: array
           items:
             type: string
+            maxLength: 19
+            minLength: 19
+            pattern: ^[A-Z2-7]{4}(-[A-Z2-7]{4}){3}$
           title: codes
+          maxItems: 20
           description: |-
             The plaintext codes, in the order they should be presented. Returned ONLY
              here. Never log them; show them once and tell the user to store them.
+
+             The ceiling is `app.MaxRecoveryCodeCount`, which the request's `lte` already
+             refuses above — so the two ends of this call now state the same number, and a
+             client sizing a printable list gets it from the document. Each code is 10
+             bytes of entropy as unpadded base32, presented in groups of four: 16
+             characters from A-Z2-7 and three hyphens.
       title: GenerateRecoveryCodesResponse
       additionalProperties: false
       description: |-
@@ -840,18 +1073,27 @@ components:
       properties:
         subjectId:
           type: string
+          examples:
+            - subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
           title: subject_id
+          maxLength: 31
+          pattern: ^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$
           description: |-
             The account's pseudonym. Whatever renders a human-readable identity resolves
              this against the vault.
         userId:
           type: string
+          examples:
+            - usr_01ARZ3NDEKTSV4RRFFQ69G5FAV
           title: user_id
+          maxLength: 30
+          pattern: ^usr_[0-7][0-9A-HJKMNP-TV-Z]{25}$
           description: The account's public identifier, a prefixed ULID (ADR-030).
         state:
           title: state
           description: Where the account sits in its lifecycle.
-          $ref: '#/components/schemas/chronos.identity.v1.AccountState'
+          allOf:
+            - $ref: '#/components/schemas/chronos.identity.v1.AccountState'
         emailVerified:
           type: boolean
           title: email_verified
@@ -862,19 +1104,71 @@ components:
         registeredAt:
           title: registered_at
           description: When the account was registered, UTC. Always set.
-          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
         activatedAt:
           title: activated_at
           description: When the account activated, UTC. Unset means it never has — not "unknown".
-          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
         deactivatedAt:
           title: deactivated_at
           description: When the holder switched the account off, UTC. Unset means never.
-          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
         suspendedAt:
           title: suspended_at
           description: When the account was suspended administratively, UTC. Unset means never.
-          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+        deletionRequestedAt:
+          title: deletion_requested_at
+          description: |-
+            When the holder asked for the account to be erased, UTC. Unset means never.
+
+             This is NOT a lifecycle state and `state` does not move because of it. A
+             request changes nothing the account can do: it keeps its credentials, its
+             sessions and its position in the lifecycle until the compliance domain acts
+             on it. Rendering it as "deleted" would contradict every other endpoint,
+             which will keep serving this account normally.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+        deletionScheduledFor:
+          title: deletion_scheduled_for
+          description: |-
+            When erasure falls due, UTC. Unset means no request is outstanding.
+
+             The date carried by the request itself, never recomputed from today's grace
+             period — this is the date the holder was told, and a deadline that moved
+             after it was communicated would be worse than none.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+        username:
+          type: string
+          examples:
+            - ada_lovelace
+          title: username
+          maxLength: 30
+          pattern: ^$|^[A-Za-z][A-Za-z0-9]*(_[A-Za-z0-9]+)*$
+          description: |-
+            The account's public handle, in the clear (ADR-051).
+
+             It is the ONE field in this whole file that returns user-supplied text about
+             a person, and it is the ONE piece of personal data that leaves the read
+             model. Both are the same deliberate exception: a handle is PUBLISHED by
+             design — @alice in a mention, /u/alice in a URL — so the PII vault cannot
+             protect it (crypto-shredding does nothing to a value that was published) and
+             there is nothing for a pseudonym to stand in for.
+
+             Empty means the account has not claimed one, which is exactly the window
+             between registering and following the verification link — or means it was
+             erased, in which case it is empty forever and the handle is tombstoned so
+             nobody else can take it.
+
+             The published bounds are the same three CheckUsernameAvailabilityRequest
+             declares, and they have to be: a handle this response can carry but that
+             request would refuse is a value no client could ever round-trip. The `^$`
+             alternative is the empty case above — a handle not yet claimed, or erased.
       title: GetUserResponse
       additionalProperties: false
       description: |-
@@ -890,19 +1184,29 @@ components:
       properties:
         pageSize:
           type: integer
+          examples:
+            - "50"
           title: page_size
+          maximum: 200
           minimum: 0
           format: int32
           description: |-
             How many entries to return. Zero means the server's default (50), and the
              server clamps at its maximum (200). Only a negative size is refused, as on
              ListSessionsRequest.page_size.
+
+             The published `maximum` is an ANNOTATION for exactly that reason. 200 is a
+             true statement about this field — nothing above it has any effect — and a
+             document that leaves a numeric input unbounded describes an API that will
+             accept 2^31-1 and try. Stating it as an annotation publishes the ceiling
+             without converting the clamp into a refusal.
         pageToken:
           type: string
           examples:
             - PLACEHOLDER-opaque-cursor-from-a-previous-response
           title: page_token
           maxLength: 1024
+          pattern: ^[A-Za-z0-9_-]*$
           description: |-
             An opaque cursor from a previous response, with the same rules as
              ListSessionsRequest.page_token. Empty starts at the beginning.
@@ -917,10 +1221,17 @@ components:
           items:
             $ref: '#/components/schemas/chronos.identity.v1.LoginAttempt'
           title: attempts
-          description: The page, newest first.
+          maxItems: 200
+          description: |-
+            The page, newest first. Bounded by the clamped page size, as on
+             ListSessionsResponse.sessions.
         nextPageToken:
           type: string
+          examples:
+            - PLACEHOLDER-opaque-cursor-for-the-next-page
           title: next_page_token
+          maxLength: 1024
+          pattern: ^[A-Za-z0-9_-]*$
           description: The cursor for the next page. Empty means done.
       title: ListLoginHistoryResponse
       additionalProperties: false
@@ -938,7 +1249,14 @@ components:
           items:
             $ref: '#/components/schemas/chronos.identity.v1.AuthMethod'
           title: methods
-          description: The methods, in no guaranteed order.
+          maxItems: 16
+          description: |-
+            The methods, in no guaranteed order.
+
+             The ceiling is the sentence above stated as a rule: five kinds, at most one
+             usable credential per kind, and room for the enum to grow before anyone has
+             to think about this again. "Unpaginated" is only safe while something bounds
+             it, and until now nothing did.
       title: ListMethodsResponse
       additionalProperties: false
       description: |-
@@ -951,7 +1269,10 @@ components:
       properties:
         pageSize:
           type: integer
+          examples:
+            - "50"
           title: page_size
+          maximum: 200
           minimum: 0
           format: int32
           description: |-
@@ -964,12 +1285,19 @@ components:
              treats a negative size as a caller bug and an oversized one as a request to
              satisfy with less. Declaring `lte: 200` here would REFUSE what the server
              deliberately clamps, which is the contradiction this file avoids.
+
+             The published `maximum` is an ANNOTATION for exactly that reason. 200 is a
+             true statement about this field — nothing above it has any effect — and a
+             document that leaves a numeric input unbounded describes an API that will
+             accept 2^31-1 and try. Stating it as an annotation publishes the ceiling
+             without converting the clamp into a refusal.
         pageToken:
           type: string
           examples:
             - PLACEHOLDER-opaque-cursor-from-a-previous-response
           title: page_token
           maxLength: 1024
+          pattern: ^[A-Za-z0-9_-]*$
           description: |-
             An opaque cursor from a previous response's next_page_token. Empty starts at
              the beginning.
@@ -992,10 +1320,20 @@ components:
           items:
             $ref: '#/components/schemas/chronos.identity.v1.Session'
           title: sessions
-          description: The page, newest first.
+          maxItems: 200
+          description: |-
+            The page, newest first.
+
+             The ceiling is the page size the server clamps to (200). A client sizing a
+             buffer, a virtual list or a render budget from this document gets the real
+             number rather than "unbounded", and the two are very different to build for.
         nextPageToken:
           type: string
+          examples:
+            - PLACEHOLDER-opaque-cursor-for-the-next-page
           title: next_page_token
+          maxLength: 1024
+          pattern: ^[A-Za-z0-9_-]*$
           description: |-
             The cursor for the next page. EMPTY MEANS DONE — it is the only termination
              signal, and a client must not infer the end from a short page, because a
@@ -1018,12 +1356,14 @@ components:
           description: |-
             Why a failure failed. Unspecified on success. See FailureReason for why the
              account holder may be told this when the failing caller may not.
-          $ref: '#/components/schemas/chronos.identity.v1.FailureReason'
+          allOf:
+            - $ref: '#/components/schemas/chronos.identity.v1.FailureReason'
         methods:
           type: array
           items:
             $ref: '#/components/schemas/chronos.identity.v1.MethodKind'
           title: methods
+          maxItems: 8
           description: |-
             The factors presented. Empty for an attempt refused before any credential
              was examined.
@@ -1032,17 +1372,23 @@ components:
           description: |-
             The level the attempt established. Unspecified for a failure — nothing was
              established.
-          $ref: '#/components/schemas/chronos.options.v1.AssuranceLevel'
+          allOf:
+            - $ref: '#/components/schemas/chronos.options.v1.AssuranceLevel'
         deviceId:
           type: string
+          examples:
+            - dev_9f2c1b7e
           title: device_id
+          maxLength: 128
+          pattern: ^[\x20-\x7E]*$
           description: |-
             The opaque client pseudonym the attempt came from, empty when none was sent.
              Never a device name (see Session.device_id).
         occurredAt:
           title: occurred_at
           description: When the attempt happened, UTC.
-          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
       title: LoginAttempt
       additionalProperties: false
       description: |-
@@ -1077,6 +1423,8 @@ components:
           examples:
             - ada@example.com
           title: email
+          maxLength: 254
+          pattern: ^.+@.+\..+$
           description: |
             The address as typed. It is normalized server-side, and the normalized form
              is the only one that reaches the vault or the blind indexer. It appears in
@@ -1091,6 +1439,19 @@ components:
              Every bound is measured on the TRIMMED value, because the handler trims
              first. Bounds are BYTES, not characters — RFC 5321 counts octets, and so
              does the normalizer.
+
+             `max_length` and `pattern` are declared on the GNOSTIC annotation rather than
+             as protovalidate rules, and which of the two carries them is the whole point.
+             A protovalidate rule is enforced by the interceptor against the RAW value,
+             while every rule below is measured against the TRIMMED one — so `max_len: 254`
+             as a rule would refuse a 250-byte address sent with six bytes of leading
+             whitespace, an address the handler accepts. That is the "a rule stricter than
+             the handler" failure named four paragraphs up, and it is the one this file
+             must not commit while closing an audit finding. As annotations they publish
+             the bound to clients and to the auditor and add no refusal the server does not
+             make. The pattern is deliberately the LOOSEST reading of the shape rule: a
+             published pattern that refuses more than the handler does turns a valid
+             address into a client-side rejection nothing on this side can see.
             identity.email.length // an email address may not exceed 254 bytes
             identity.email.local_part // the local part of an email address may not exceed 64 bytes
             identity.email.shape // an email address must contain a local part and a fully qualified domain
@@ -1122,6 +1483,70 @@ components:
 
          The client renders one sentence for both: "if that address can be registered,
          we have sent it a link".
+    chronos.identity.v1.RequestAccountDeletionRequest:
+      type: object
+      properties:
+        confirmation:
+          type: string
+          examples:
+            - DELETE
+          title: confirmation
+          description: |-
+            The literal string `DELETE`, typed by the account holder.
+
+             Every other destructive call in this service is undone by doing it again the
+             other way: a revoked session is replaced by signing in, a deactivated account
+             is reactivated by signing in, a changed password is changed back. This one is
+             not — nothing in this module cancels a deletion request, and the module that
+             will act on it destroys a key. A step-up to AAL2 proves WHO is asking; it
+             does not prove they meant to ask, and a mis-wired client retrying a failed
+             request would satisfy it perfectly.
+
+             Constrained by protovalidate rather than checked in a handler, so the
+             requirement is part of the schema every client generates from and is rejected
+             by the validation interceptor before any account is loaded (ADR-007).
+
+             It is deliberately NOT localized and not derived from anything the account
+             holds. A confirmation that echoed the address would put personal data in a
+             request body for no gain, and one that varied by locale would be a
+             client-side string table standing between a person and their own account.
+          const: DELETE
+      title: RequestAccountDeletionRequest
+      additionalProperties: false
+      description: |-
+        RequestAccountDeletionRequest asks for the caller's own account to be erased.
+
+         It names no account, for DeactivateAccountRequest's reason. What it does carry
+         is a typed confirmation, and that is the one field on any request in this
+         service whose purpose is to be DIFFICULT to send by accident.
+    chronos.identity.v1.RequestAccountDeletionResponse:
+      type: object
+      properties:
+        changed:
+          type: boolean
+          title: changed
+          description: |-
+            Whether this call recorded the request. False means one was already
+             outstanding, and `scheduled_for` is then the ORIGINAL deadline: a second
+             request must not move a date the holder has already been given, or anyone
+             holding the session could push erasure out forever.
+        scheduledFor:
+          title: scheduled_for
+          description: When erasure falls due, UTC. Always set on a successful call.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: RequestAccountDeletionResponse
+      additionalProperties: false
+      description: |-
+        RequestAccountDeletionResponse reports the deadline the request now carries.
+
+         # Read this before building anything on it
+
+         The request is APPENDED and nothing consumes it. Erasure belongs to the
+         compliance domain (ADR-002: destroy the key), that module does not exist, and
+         neither does the workflow that would run the grace period, the mail that would
+         name the date, or a command to cancel. The account keeps working — indefinitely
+         — and this response says only that the intent is now in the log.
     chronos.identity.v1.RequestPasswordResetRequest:
       type: object
       properties:
@@ -1130,6 +1555,8 @@ components:
           examples:
             - ada@example.com
           title: email
+          maxLength: 254
+          pattern: ^.+@.+\..+$
           description: |
             The address as typed. Reduced to a blind index server-side; neither the raw
              nor the normalized form reaches an event, a log line or an error message.
@@ -1188,6 +1615,8 @@ components:
           examples:
             - ada@example.com
           title: email
+          maxLength: 254
+          pattern: ^.+@.+\..+$
           description: |
             The address as typed. Reduced to a blind index server-side; neither the raw
              nor the normalized form reaches an event, a log line or an error message.
@@ -1242,6 +1671,7 @@ components:
             - PLACEHOLDER-not-a-real-reset-token
           title: token
           maxLength: 512
+          pattern: ^\S+$
           description: |-
             The plaintext from the link. It is hashed and spent server-side and is never
              stored, logged or placed in an event.
@@ -1256,7 +1686,9 @@ components:
           examples:
             - PLACEHOLDER-not-a-real-password
           title: password
+          maxLength: 4096
           minLength: 8
+          pattern: ^[^\u0000-\u001F\u007F]+$
           description: |
             The new secret as typed. Normalized under RFC 8265's OpaqueString profile
              before it is screened against the breach corpus and hashed.
@@ -1316,7 +1748,8 @@ components:
           examples:
             - sess_01ARZ3NDEKTSV4RRFFQ69G5FAV
           title: except_session_id
-          pattern: ^$|^sess_[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}$
+          maxLength: 31
+          pattern: ^$|^sess_[0-7][0-9A-HJKMNP-TV-Z]{25}$
           description: |-
             The session to SPARE — "sign out everywhere else", so the caller is not
              signed out of the device they are asking from.
@@ -1346,14 +1779,28 @@ components:
       properties:
         revoked:
           type: integer
+          examples:
+            - "3"
           title: revoked
+          maximum: 2147483647
+          minimum: 0
           format: int32
           description: |-
             How many sessions this call ended. Sessions already revoked or expired are
              not counted — nothing was appended for them.
+
+             The published range is the honest one: a count of rows has no ceiling this
+             module imposes, so the ceiling is the wire type's. Stating it is not
+             ceremony — a client that reads "integer, no maximum" from a document has to
+             assume the value may not fit the number type it decodes into, and for a
+             32-bit count that assumption is wrong in a way that costs real work.
         scanned:
           type: integer
+          examples:
+            - "4"
           title: scanned
+          maximum: 2147483647
+          minimum: 0
           format: int32
           description: |-
             How many live sessions the work list returned, the spared one included.
@@ -1375,7 +1822,8 @@ components:
           examples:
             - sess_01ARZ3NDEKTSV4RRFFQ69G5FAV
           title: session_id
-          pattern: ^sess_[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}$
+          maxLength: 31
+          pattern: ^sess_[0-7][0-9A-HJKMNP-TV-Z]{25}$
           description: |-
             The session to end. It must belong to the caller: a request naming somebody
              else's session gets the same answer as one naming a session that does not
@@ -1427,44 +1875,61 @@ components:
       properties:
         sessionId:
           type: string
+          examples:
+            - sess_01ARZ3NDEKTSV4RRFFQ69G5FAV
           title: session_id
+          maxLength: 31
+          pattern: ^sess_[0-7][0-9A-HJKMNP-TV-Z]{25}$
           description: The session's public identifier, and what RevokeSession names.
         deviceId:
           type: string
+          examples:
+            - dev_9f2c1b7e
           title: device_id
+          maxLength: 128
+          pattern: ^[\x20-\x7E]*$
           description: |-
             The opaque client-supplied handle, empty when the client sent none. It is
              NOT a device name: a name is personal data the user typed, and personal data
              may not enter a projection.
+
+             The bounds are the ones AuthenticateRequest.device_id enforces on the way in.
+             They are restated on the way out because a client reading this list is
+             rendering the value, and what it may contain is a property of the render.
         assuranceLevel:
           title: assurance_level
           description: |-
             The level this session was established at, so a screen can mark one that has
              only ever presented a single factor.
-          $ref: '#/components/schemas/chronos.options.v1.AssuranceLevel'
+          allOf:
+            - $ref: '#/components/schemas/chronos.options.v1.AssuranceLevel'
         idleExpiresAt:
           title: idle_expires_at
           description: When this device is signed out for inactivity, UTC.
-          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
         absoluteExpiresAt:
           title: absolute_expires_at
           description: |-
             When this device is signed out regardless, UTC. Both deadlines are shown
              because they answer different questions.
-          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
         createdAt:
           title: created_at
           description: |-
             When the session was established, UTC. It is here because the list is
              ordered by it — a caller cannot page this list without the server having
              sorted on something stable.
-          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
         lastSeenAt:
           title: last_seen_at
           description: |-
             The last request this session made, UTC. Unset for a session that has made
              none since it was issued.
-          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
       title: Session
       additionalProperties: false
       description: |-
@@ -1483,6 +1948,7 @@ components:
             - PLACEHOLDER-not-a-real-verification-token
           title: token
           maxLength: 512
+          pattern: ^\S+$
           description: |-
             The plaintext from the link. It is hashed and spent server-side and is never
              stored, logged or placed in an event: a token in a log line is a live
@@ -1497,7 +1963,9 @@ components:
           examples:
             - PLACEHOLDER-not-a-real-password
           title: password
+          maxLength: 4096
           minLength: 8
+          pattern: ^[^\u0000-\u001F\u007F]+$
           description: |
             The secret as typed. Normalized under RFC 8265's OpaqueString profile before
              it is screened against the breach corpus and hashed.
@@ -1522,9 +1990,57 @@ components:
              NFC-normalized one, which can only be shorter — so this rule is never
              stricter than the handler it fronts.
             string.max_bytes = 4096
+        username:
+          type: string
+          examples:
+            - ada_lovelace
+          title: username
+          maxLength: 30
+          minLength: 3
+          pattern: ^[A-Za-z][A-Za-z0-9]*(_[A-Za-z0-9]+)*$
+          description: |-
+            The public handle the account will be known by. MANDATORY (ADR-051).
+
+             It arrives here, beside the password, and NOT on RegisterRequest. Two
+             reasons, and the second decides it.
+
+             A handle claimed at registration is claimed by whoever typed an address they
+             may not control. The address squat that leaves is bounded — an unverified
+             claim lapses after 48 hours — but a handle squat is not: a handle is claimed
+             permanently and, once tombstoned by an erasure, can never be reissued even in
+             principle. So the cheapest attack would be a script sweeping every desirable
+             handle with addresses it never proves. Claiming here prices each squatted
+             handle at one mailbox the attacker must actually control.
+
+             The decisive reason is that a handle on RegisterRequest would DESTROY
+             registration's indistinguishability. RegisterResponse is empty precisely so
+             "the address was free" and "the address was taken" are one answer. Pair the
+             address with a fresh random handle and they stop being one answer: register,
+             then ask CheckUsernameAvailability about the handle. Taken means the
+             registration went through, which means the address was free. One extra
+             unauthenticated call, and the account-existence oracle identity.md §11 closes
+             is open again — through a field rather than through a message.
+
+             The rules below mirror `domain.NormalizeUsername` rather than approximating
+             it. The character set is ASCII [A-Za-z0-9_] — the handler folds case, so the
+             rule must accept both — and it excludes the HYPHEN for a technical reason
+             rather than a stylistic one: the handle names a KurrentDB stream key, and a
+             dash in a key is refused because KurrentDB derives a category from everything
+             before the first one.
+
+             Reserved names (`admin`, `support`, `api`, …) are NOT expressible here and
+             are refused by the handler. A CEL rule listing them would be a second copy of
+             a list that must have one, and the two would disagree the first time either
+             changed.
+
+             Stating the rules in full is safe for RegisterRequest.email's reason: this is
+             the ENROLMENT side, the policy is public and printed beside the field, and
+             the handler screens the handle BEFORE it spends the token — so a refusal here
+             says nothing about the token and leaves the link live.
       title: VerifyEmailRequest
       required:
         - token
+        - username
       additionalProperties: false
       description: |-
         VerifyEmailRequest presents the token from a verification link, and the
@@ -1541,11 +2057,19 @@ components:
       properties:
         subjectId:
           type: string
+          examples:
+            - subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
           title: subject_id
+          maxLength: 31
+          pattern: ^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$
           description: The account's pseudonym. Every other call names the account by this.
         userId:
           type: string
+          examples:
+            - usr_01ARZ3NDEKTSV4RRFFQ69G5FAV
           title: user_id
+          maxLength: 30
+          pattern: ^usr_[0-7][0-9A-HJKMNP-TV-Z]{25}$
           description: The account's public identifier, a prefixed ULID (ADR-030).
         changed:
           type: boolean
@@ -1563,6 +2087,647 @@ components:
          single-use token IS proof of control over the address, so the caller is
          entitled to learn whose account it belongs to. An invalid, spent or expired
          token is one undifferentiated refusal.
+    chronos.notification.v1.Channel:
+      type: string
+      title: Channel
+      enum:
+        - CHANNEL_UNSPECIFIED
+        - CHANNEL_EMAIL
+        - CHANNEL_IN_APP
+        - CHANNEL_WEB_PUSH
+      description: |-
+        Channel is a way of reaching someone.
+
+         These three are the ones a person controls. The realtime stream is
+         deliberately absent: it carries transient signals rather than notifications,
+         and a browser that has subscribed to it has already said it wants them.
+    chronos.notification.v1.ChannelPreference:
+      type: object
+      properties:
+        channel:
+          not:
+            type: string
+            enum:
+              - CHANNEL_UNSPECIFIED
+          title: channel
+          description: |-
+            Which channel. `CHANNEL_UNSPECIFIED` is refused rather than defaulted: a
+             toggle that silently applied to a channel the caller did not name is a
+             notification silenced by accident.
+          allOf:
+            - $ref: '#/components/schemas/chronos.notification.v1.Channel'
+        enabled:
+          type: boolean
+          title: enabled
+          description: |-
+            Whether the caller wants this channel. Absence of a preference means
+             ENABLED, so a person who has never opened the settings screen still
+             receives their notifications.
+      title: ChannelPreference
+      additionalProperties: false
+      description: |-
+        ChannelPreference is one channel switched on or off.
+
+         The whole vocabulary of a preference, in one message. It cannot name a class
+         or a template, which is what makes "you may turn off product mail but not the
+         message telling you your second factor was removed" a property of the schema
+         rather than a promise in a document.
+    chronos.notification.v1.GetNotificationPreferencesRequest:
+      type: object
+      properties:
+        orgId:
+          type: string
+          examples:
+            - org_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: org_id
+          maxLength: 30
+          pattern: ^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            The organization whose toggles to read. See ListNotificationsRequest.org_id.
+
+             Preferences are per person PER ORGANIZATION: someone may want activity mail
+             from the organization they work in and nothing from the one they advise.
+      title: GetNotificationPreferencesRequest
+      additionalProperties: false
+      description: GetNotificationPreferencesRequest asks for the caller's own channel toggles.
+    chronos.notification.v1.GetNotificationPreferencesResponse:
+      type: object
+      properties:
+        channels:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.notification.v1.ChannelPreference'
+          title: channels
+          maxItems: 8
+          description: |-
+            Every channel the caller controls, with its current state. Always all three,
+             including the ones they have never touched, which report `enabled: true`.
+             Always all three, so the ceiling is `Channel` minus its UNSPECIFIED member,
+             with room for a fourth channel to be added before anyone revisits this.
+        governedClasses:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.notification.v1.NotificationClass'
+          title: governed_classes
+          maxItems: 8
+          description: |-
+            The classes a channel toggle actually governs.
+
+             Computed from the same predicate the dispatcher applies at delivery time,
+             never from a list written here — so if that predicate ever changed, this
+             response would change with it instead of quietly describing behaviour the
+             server no longer has.
+             Bounded by `NotificationClass`: a list of enum members cannot be longer than
+             the enum, and 8 leaves room for it to grow.
+        alwaysDeliveredClasses:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.notification.v1.NotificationClass'
+          title: always_delivered_classes
+          maxItems: 8
+          description: |-
+            The classes delivered regardless of every toggle above.
+
+             Security and transactional messages ignore preferences and carry no
+             unsubscribe (NOTIFICATIONS §3). This is a legal distinction as much as a
+             product one, and stating it in the response is what lets a settings screen
+             say so without a client hardcoding the rule.
+      title: GetNotificationPreferencesResponse
+      additionalProperties: false
+      description: |-
+        GetNotificationPreferencesResponse is the settings screen.
+
+         It reports not only what the caller has chosen but WHAT THOSE CHOICES REACH,
+         because a settings screen that shows three switches and says nothing else
+         implies they govern everything — and they deliberately do not.
+    chronos.notification.v1.GetUnreadCountRequest:
+      type: object
+      properties:
+        orgId:
+          type: string
+          examples:
+            - org_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: org_id
+          maxLength: 30
+          pattern: ^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: The organization whose badge to count. See ListNotificationsRequest.org_id.
+      title: GetUnreadCountRequest
+      additionalProperties: false
+      description: GetUnreadCountRequest asks how many of the caller's notifications are unread.
+    chronos.notification.v1.GetUnreadCountResponse:
+      type: object
+      properties:
+        unread:
+          examples:
+            - "8"
+          title: unread
+          description: |-
+            Unread items in this organization. It is the value a client shows on first
+             paint; afterwards the realtime stream moves it, so this is not polled.
+
+             The ceiling is 2^31-1, and it is NOT the wire type's maximum even though this
+             field is an int64. gnostic's `maximum` is a DOUBLE, and 2^63-1 does not
+             survive a round trip through one: it came back as 9223372036854776000, which
+             is larger than any int64 and is a number that appeared in the published
+             document looking like a typo. 2^31-1 is exactly representable, is far above
+             any unread count a person can accumulate, and is a bound a client can act on.
+
+             The floor is a `gte` rule rather than an annotation because `minimum: 0` is
+             proto3's zero value for that field and would be dropped before the generator
+             saw it.
+          oneOf:
+            - type: integer
+              format: int64
+              minimum: 0
+              maximum: 2147483647
+            - type: string
+              pattern: ^-?[0-9]+$
+              maxLength: 20
+      title: GetUnreadCountResponse
+      additionalProperties: false
+      description: GetUnreadCountResponse is the badge number.
+    chronos.notification.v1.ListNotificationsRequest:
+      type: object
+      properties:
+        orgId:
+          type: string
+          examples:
+            - org_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: org_id
+          maxLength: 30
+          pattern: ^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            The organization whose feed to read.
+
+             A request field, and stated here as a temporary shape rather than a
+             permanent one: once the org-context gate resolves the organization from the
+             request's own context (ADR-021 gate 1), this field is deprecated and the
+             scope comes from there. It is safe in the meantime because it grants
+             NOTHING — every statement behind it is additionally filtered by the
+             caller's own pseudonym and additionally scoped by row-level security, so
+             naming an organization the caller does not belong to returns an empty page
+             rather than somebody else's.
+        pageSize:
+          type: integer
+          examples:
+            - "50"
+          title: page_size
+          maximum: 1000
+          minimum: 0
+          format: int32
+          description: |-
+            How many items to return. Zero takes the default of 50; anything above 200
+             is CAPPED rather than refused, so a client asking for too much still gets a
+             correct answer plus a token.
+        pageToken:
+          type: string
+          examples:
+            - PLACEHOLDER-opaque-cursor-from-a-previous-response
+          title: page_token
+          maxLength: 512
+          pattern: ^[A-Za-z0-9_-]*$
+          description: |-
+            The `next_page_token` from the previous response. Empty starts at the
+             newest item. A token minted for another list, another sort or another
+             caller is an ERROR here, never a silent restart.
+      title: ListNotificationsRequest
+      additionalProperties: false
+      description: ListNotificationsRequest asks for one page of the caller's own feed.
+    chronos.notification.v1.ListNotificationsResponse:
+      type: object
+      properties:
+        notifications:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.notification.v1.Notification'
+          title: notifications
+          maxItems: 200
+          description: |-
+            The page. Fewer items than requested is ordinary — the server caps an
+             oversized `page_size` — so a client must stop on an empty
+             `next_page_token`, never on a short page.
+
+             The ceiling is `page.MaxSize`, which is what "the server caps an oversized
+             page_size" means in numbers: 200. `page_size` above admits up to 1000 as an
+             ASK, and the two are different quantities — one is what a client may request,
+             this is what a response may contain.
+        nextPageToken:
+          type: string
+          examples:
+            - PLACEHOLDER-opaque-cursor-for-the-next-page
+          title: next_page_token
+          maxLength: 512
+          pattern: ^[A-Za-z0-9_-]*$
+          description: Where to resume. Empty means the feed is exhausted.
+      title: ListNotificationsResponse
+      additionalProperties: false
+      description: ListNotificationsResponse is one page of the feed, newest first.
+    chronos.notification.v1.MarkNotificationsReadRequest:
+      type: object
+      properties:
+        orgId:
+          type: string
+          examples:
+            - org_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: org_id
+          maxLength: 30
+          pattern: ^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: The organization the items belong to. See ListNotificationsRequest.org_id.
+        notificationIds:
+          type: array
+          items:
+            type: string
+            maxLength: 32
+            pattern: ^notif_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          title: notification_ids
+          maxItems: 100
+          minItems: 1
+          uniqueItems: true
+          description: |-
+            The items to mark. A batch, because a client dismissing a screenful must
+             not make one call per row, and bounded at 100 because an unbounded batch is
+             an unbounded append to the log from one request.
+
+             An id that is not in the CALLER'S OWN feed is refused, and refused
+             identically to one that does not exist — a caller able to tell those apart
+             could test notification ids for existence.
+      title: MarkNotificationsReadRequest
+      additionalProperties: false
+      description: MarkNotificationsReadRequest dismisses items the caller has seen.
+    chronos.notification.v1.MarkNotificationsReadResponse:
+      type: object
+      properties:
+        marked:
+          type: integer
+          examples:
+            - "3"
+          title: marked
+          maximum: 100
+          minimum: 0
+          format: int32
+          description: |-
+            How many items this call moved from unread to read. Zero is NOT an error:
+             marking something already read is the caller getting what they asked for.
+
+             The ceiling is the batch the request admits: this call cannot mark more items
+             than it was given, so 100 is a real bound rather than the wire type's.
+      title: MarkNotificationsReadResponse
+      additionalProperties: false
+      description: MarkNotificationsReadResponse reports what changed.
+    chronos.notification.v1.Notification:
+      type: object
+      properties:
+        notificationId:
+          type: string
+          examples:
+            - notif_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: notification_id
+          maxLength: 32
+          pattern: ^notif_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            The item's permanent identifier, `notif_` followed by a ULID. It is what
+             `MarkNotificationsRead` names, and what the web-push payload and the
+             realtime announcement carry, so a client can dedupe one notification
+             arriving down two channels.
+        template:
+          type: string
+          examples:
+            - identity.password_changed
+          title: template
+          maxLength: 128
+          pattern: ^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$
+          description: |-
+            The wording's name, e.g. `identity.password_changed`. Permanent: it appears
+             in metrics, in logs and in operator overrides.
+
+             The pattern is what "it appears in metrics" requires rather than a
+             decoration: a template name becomes a Prometheus label value and a log field,
+             so dotted lower snake is the shape every consumer downstream is already
+             written against.
+        class:
+          title: class
+          description: |-
+            Which class this belongs to, which is what decides whether any preference
+             could ever have suppressed it.
+          allOf:
+            - $ref: '#/components/schemas/chronos.notification.v1.NotificationClass'
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.notification.v1.TemplateValue'
+          title: data
+          maxItems: 64
+          description: |-
+            Template input — the counts, flags and labels the wording needs, sorted by
+             key.
+
+             It carries no personal data by construction: the recipient's name and
+             address live in the PII vault and are resolved by whoever renders, never
+             carried here (ADR-002).
+
+             Bounded because it is rendered: a client substitutes every entry into one
+             string, and a feed row whose input list has no ceiling is a render loop with
+             no ceiling. No wording in this system takes anything near 64 placeholders.
+        workspaceId:
+          type: string
+          examples:
+            - ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: workspace_id
+          maxLength: 29
+          pattern: ^$|^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: The workspace this concerns, empty for an organization-level fact.
+        occurredAt:
+          title: occurred_at
+          description: |-
+            When the underlying event happened, in UTC. This is the sort key, and it is
+             the event's own instant rather than the moment the row was written.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+        readAt:
+          title: read_at
+          description: |-
+            When the caller first read it, unset while unread. It is the FIRST read,
+             not the most recent: reading something twice does not move when you first
+             saw it, and email arbitration asks exactly that question.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: Notification
+      additionalProperties: false
+      description: |-
+        Notification is one item in the caller's in-app feed.
+
+         It carries the TEMPLATE and its data, never rendered text: wording is resolved
+         at read time in the reader's own locale and timezone, so changing a
+         translation changes history's presentation without rewriting history.
+    chronos.notification.v1.NotificationClass:
+      type: string
+      title: NotificationClass
+      enum:
+        - NOTIFICATION_CLASS_UNSPECIFIED
+        - NOTIFICATION_CLASS_SECURITY
+        - NOTIFICATION_CLASS_TRANSACTIONAL
+        - NOTIFICATION_CLASS_ACTIVITY
+        - NOTIFICATION_CLASS_PRODUCT
+      description: |-
+        NotificationClass decides whether a notification is delivered at all, and
+         whether the recipient may switch it off (NOTIFICATIONS §3).
+
+         It appears in this schema for two reasons and no others: to label a feed item
+         so a client can style a security alert differently from a mention, and to let
+         `GetNotificationPreferences` state which classes a channel toggle governs. It
+         is never an INPUT — see the package comment.
+    chronos.notification.v1.RegisterPushSubscriptionRequest:
+      type: object
+      properties:
+        orgId:
+          type: string
+          examples:
+            - org_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: org_id
+          maxLength: 30
+          pattern: ^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            The organization this device should receive push for. See
+             ListNotificationsRequest.org_id.
+
+             One browser produces ONE endpoint across every organization a person
+             belongs to, so registering the same endpoint in a second organization is
+             normal and creates a second subscription rather than moving the first
+             (ADR-043).
+        endpoint:
+          type: string
+          title: endpoint
+          maxLength: 2048
+          minLength: 12
+          pattern: ^https://
+          format: uri
+          description: |-
+            The push service URL the browser was issued.
+
+             HTTPS only, and further restricted by the server: a host that is an IP
+             literal, a loopback name or an internal suffix is refused. The server POSTs
+             to this URL, so an unconstrained value here is a request-forgery primitive
+             aimed at whatever the server can reach.
+        p256dh:
+          type: string
+          title: p256dh
+          maxLength: 256
+          minLength: 1
+          pattern: ^[A-Za-z0-9_-]+=*$
+          description: |-
+            The subscription's P-256 ECDH public key, base64url as the browser reports
+             it. A transport credential, never returned by any response.
+        auth:
+          type: string
+          title: auth
+          maxLength: 256
+          minLength: 1
+          pattern: ^[A-Za-z0-9_-]+=*$
+          description: |-
+            The subscription's authentication secret, base64url as the browser reports
+             it. A transport credential, never returned by any response.
+        userAgent:
+          type: string
+          examples:
+            - Mozilla/5.0 (X11; Linux x86_64) Chrome/126.0
+          title: user_agent
+          maxLength: 512
+          pattern: ^[\x20-\x7E]*$
+          description: |-
+            The browser's user agent, so a person can recognise a device in a support
+             conversation. Optional, and truncated rather than rejected by the client.
+      title: RegisterPushSubscriptionRequest
+      additionalProperties: false
+      description: |-
+        RegisterPushSubscriptionRequest enrols one browser profile on one device.
+
+         The values come from the browser's own `PushSubscription`, so the caller is
+         relaying what the push service issued rather than choosing it.
+    chronos.notification.v1.RegisterPushSubscriptionResponse:
+      type: object
+      properties:
+        subscriptionId:
+          type: string
+          examples:
+            - push_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: subscription_id
+          maxLength: 31
+          pattern: ^push_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            The subscription's identifier, `push_` followed by a ULID.
+
+             Derived from the organization and the endpoint together, so re-registering
+             the same browser in the same organization returns the SAME id and collapses
+             onto one row, while the same browser in a second organization gets a
+             different one. That is ADR-043's uniqueness rule expressed in the
+             identifier itself rather than only in an index.
+      title: RegisterPushSubscriptionResponse
+      additionalProperties: false
+      description: RegisterPushSubscriptionResponse names the subscription that now exists.
+    chronos.notification.v1.RemovePushSubscriptionRequest:
+      type: object
+      properties:
+        orgId:
+          type: string
+          examples:
+            - org_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: org_id
+          maxLength: 30
+          pattern: ^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            The organization to stop pushing to. See ListNotificationsRequest.org_id.
+
+             Removal is per organization for the same reason registration is: the same
+             endpoint may legitimately be registered in several, and unsubscribing from
+             one must not silence the others.
+        endpoint:
+          type: string
+          title: endpoint
+          maxLength: 2048
+          minLength: 12
+          pattern: ^https://
+          format: uri
+          description: The push service URL to retire. Same constraints as registration.
+      title: RemovePushSubscriptionRequest
+      additionalProperties: false
+      description: |-
+        RemovePushSubscriptionRequest retires a browser endpoint.
+
+         It names the ENDPOINT rather than the subscription id, because the endpoint is
+         what a browser holds: a service worker unsubscribing knows its own endpoint
+         and has no reason to have kept an id we minted.
+    chronos.notification.v1.RemovePushSubscriptionResponse:
+      type: object
+      properties:
+        subscriptionId:
+          type: string
+          examples:
+            - push_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: subscription_id
+          maxLength: 31
+          pattern: ^push_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            The subscription that was retired, or would have been. Returned so a client
+             can correlate the call with the row it will see disappear.
+      title: RemovePushSubscriptionResponse
+      additionalProperties: false
+      description: RemovePushSubscriptionResponse reports what happened.
+    chronos.notification.v1.SetNotificationPreferencesRequest:
+      type: object
+      properties:
+        orgId:
+          type: string
+          examples:
+            - org_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: org_id
+          maxLength: 30
+          pattern: ^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: The organization whose toggles to change. See ListNotificationsRequest.org_id.
+        channels:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.notification.v1.ChannelPreference'
+          title: channels
+          maxItems: 3
+          minItems: 1
+          description: |
+            The toggles to apply, at most one entry per channel.
+
+             A repeated field rather than one call per channel, so a settings screen's
+             Save button is ONE command and one append: two calls could half-apply, and a
+             person who turned two things off and saw one of them come back would not
+             trust the screen again.
+
+             Channels left out are left alone. There is no way to name a class or a
+             template here, and there must not be — see the package comment.
+            notification.preferences.one_entry_per_channel // each channel may appear at most once
+      title: SetNotificationPreferencesRequest
+      additionalProperties: false
+      description: SetNotificationPreferencesRequest changes the caller's own channel toggles.
+    chronos.notification.v1.SetNotificationPreferencesResponse:
+      type: object
+      properties:
+        channels:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.notification.v1.ChannelPreference'
+          title: channels
+          maxItems: 8
+          description: |-
+            Every channel with its state after the change, in the same shape
+             `GetNotificationPreferences` returns, so a client can render the result
+             without a second call.
+             Always all three, so the ceiling is `Channel` minus its UNSPECIFIED member,
+             with room for a fourth channel to be added before anyone revisits this.
+        governedClasses:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.notification.v1.NotificationClass'
+          title: governed_classes
+          maxItems: 8
+          description: |-
+            The classes those toggles govern. See
+             GetNotificationPreferencesResponse.governed_classes.
+             Bounded by `NotificationClass`: a list of enum members cannot be longer than
+             the enum, and 8 leaves room for it to grow.
+        alwaysDeliveredClasses:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.notification.v1.NotificationClass'
+          title: always_delivered_classes
+          maxItems: 8
+          description: |-
+            The classes delivered regardless. See
+             GetNotificationPreferencesResponse.always_delivered_classes.
+      title: SetNotificationPreferencesResponse
+      additionalProperties: false
+      description: SetNotificationPreferencesResponse is the settings screen as it now stands.
+    chronos.notification.v1.TemplateValue:
+      type: object
+      properties:
+        key:
+          type: string
+          examples:
+            - Count
+          title: key
+          maxLength: 64
+          pattern: ^[A-Za-z][A-Za-z0-9_]*$
+          description: The placeholder's name, e.g. `Count`. Unique within one notification.
+        value:
+          type: string
+          examples:
+            - "8"
+          title: value
+          maxLength: 512
+          pattern: ^[^\r\n]*$
+          description: |-
+            Its rendered value, e.g. `8`.
+
+             One line: every value here is a count, a flag or a short label destined for
+             substitution into a sentence, and a line break in one of those is a rendering
+             bug travelling as data.
+      title: TemplateValue
+      additionalProperties: false
+      description: |-
+        TemplateValue is one placeholder a feed item's wording needs.
+
+         # Why a repeated pair rather than a map or a Struct
+
+         Both alternatives were tried and both fail the published-contract check that
+         every schema in the OpenAPI document be reachable — `google.protobuf.Struct`
+         publishes `ListValue`, `NullValue` and `Struct.FieldsEntry` while referencing
+         none of them, and a protobuf `map` publishes its synthetic `DataEntry` message
+         the same way. A field whose type no client can resolve from the published
+         document is worse documentation than a pair of strings every client can, and
+         this shape also gives the list a STABLE order, which neither of the others
+         can.
+
+         # Why the value is text
+
+         Every value here exists to be substituted into a template, and a template
+         renders text — so a string is not a lossy encoding of the value, it is the
+         value's destination. Numbers arrive without a spurious decimal point and
+         booleans as `true`/`false`.
     chronos.options.v1.AssuranceLevel:
       type: string
       title: AssuranceLevel
@@ -1574,6 +2739,415 @@ components:
       description: |-
         AssuranceLevel is the authentication strength a method requires
          (identity.md §2). Step-up raises a session for a time-boxed window.
+    chronos.profile.v1.Avatar:
+      type: object
+      properties:
+        url:
+          type: string
+          examples:
+            - https://s3.example/avatars/PLACEHOLDER?X-Amz-Signature=PLACEHOLDER
+          title: url
+          maxLength: 2048
+          minLength: 8
+          pattern: ^https://[^\s]+$
+          description: |-
+            A time-limited URL a browser can GET directly. Empty is never returned —
+             an absent avatar is an absent `Avatar` message.
+        contentType:
+          type: string
+          examples:
+            - image/png
+          title: content_type
+          maxLength: 128
+          pattern: ^[a-z]+/[a-z0-9.+-]+$
+          description: |-
+            The stored object's media type, e.g. `image/png`. Reported from what the
+             object store actually holds, never from what the uploader claimed.
+
+             The pattern is the GRAMMAR of a media type rather than the three types
+             `CreateAvatarUploadRequest` admits, and the looseness is deliberate: this
+             field reports what the store holds, so pinning it to today's allow-list would
+             make the document wrong the moment that list grows by one.
+        sizeBytes:
+          examples:
+            - "20480"
+          title: size_bytes
+          description: |-
+            The stored object's size in bytes, as the object store reports it.
+
+             The ceiling is the one the upload policy pins — the object store refused
+             anything larger before it was stored, so no larger object can be described
+             here.
+          oneOf:
+            - type: integer
+              format: int64
+              minimum: 0
+              maximum: 5242880
+            - type: string
+              pattern: ^-?[0-9]+$
+              maxLength: 20
+        urlExpiresAt:
+          title: url_expires_at
+          description: When `url` stops working, UTC. Always set.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: Avatar
+      additionalProperties: false
+      description: |-
+        Avatar is a picture of the person, as a URL rather than as bytes.
+
+         The URL is SIGNED AND SHORT-LIVED, minted per response by the object store.
+         It is not a stable address and must not be stored by a client: caching it
+         past `url_expires_at` produces a broken image, and the fix is to ask for the
+         profile again.
+    chronos.profile.v1.CreateAvatarUploadRequest:
+      type: object
+      properties:
+        contentType:
+          type: string
+          examples:
+            - image/png
+          title: content_type
+          maxLength: 32
+          pattern: ^image/(png|jpeg|webp)$
+          enum:
+            - image/png
+            - image/jpeg
+            - image/webp
+          description: |-
+            The media type the browser is about to upload.
+
+             Declared UP FRONT because the signed policy pins it: the stored object
+             cannot then claim to be something else, and a mismatch is refused by the
+             object store rather than discovered afterwards. The list is the one the
+             server allows and is reported by the error when it does not match.
+
+             `in` is the rule that decides, and the `pattern` beside it says the same
+             thing in a keyword the OpenAPI generator can carry: protovalidate's `in` has
+             no JSON Schema equivalent the generator emits, so without the pattern this
+             published field is an unbounded string that the server happens to refuse.
+             The two must be changed together, and the pattern must never be tighter than
+             the list.
+        sizeBytes:
+          title: size_bytes
+          description: |-
+            How many bytes the browser is about to upload.
+
+             Declared so the signed policy can pin a `content-length-range`, which is
+             enforced BY THE OBJECT STORE before a byte is stored. That is the property
+             a presigned PUT cannot give, and it is why the upload is a POST.
+          oneOf:
+            - type: integer
+              format: int64
+              maximum: 5242880
+              exclusiveMinimum: 0
+            - type: string
+              pattern: ^-?[0-9]+$
+              maxLength: 20
+      title: CreateAvatarUploadRequest
+      additionalProperties: false
+      description: CreateAvatarUploadRequest asks for somewhere to put an image.
+    chronos.profile.v1.CreateAvatarUploadResponse:
+      type: object
+      properties:
+        uploadUrl:
+          type: string
+          examples:
+            - https://s3.example/avatars
+          title: upload_url
+          maxLength: 2048
+          minLength: 8
+          pattern: ^https://[^\s]+$
+          description: Where to POST the multipart form.
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.profile.v1.FormField'
+          title: fields
+          maxItems: 32
+          description: |-
+            The form fields to send with it, in order, before the file part. Every one
+             is required and none may be altered — they are covered by the signature.
+        objectKey:
+          type: string
+          examples:
+            - kx7m2q/PLACEHOLDERobjectkeyvalue
+          title: object_key
+          maxLength: 128
+          pattern: ^[a-z0-9]{1,72}/[a-z2-9]{20,48}$
+          description: |-
+            The key the grant is signed for. Send this back to `UpdateProfile` once the
+             upload succeeds.
+
+             It is chosen by the SERVER and carries no business meaning (ADR-013): a
+             per-caller opaque prefix and a random name. It is also new on every call,
+             which is what keeps stored objects immutable — a replaced avatar is a new
+             key and a new event, never an overwrite.
+
+             The bounds are `UpdateProfileRequest.avatar_object_key`'s, minus the empty
+             alternative: that request admits `""` to mean "remove the avatar", and no
+             grant is ever issued for it.
+        expiresAt:
+          title: expires_at
+          description: When the grant stops working, UTC.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+        maxBytes:
+          examples:
+            - "5242880"
+          title: max_bytes
+          description: |-
+            The size ceiling the policy pins, in bytes. Echoed so a client can show a
+             limit without hardcoding one.
+          oneOf:
+            - type: integer
+              format: int64
+              minimum: 1
+              maximum: 5242880
+            - type: string
+              pattern: ^-?[0-9]+$
+              maxLength: 20
+      title: CreateAvatarUploadResponse
+      additionalProperties: false
+      description: |-
+        CreateAvatarUploadResponse is a signed, single-use, expiring upload target.
+
+         # The bytes never reach this server
+
+         The browser POSTs the image straight to the object store using `upload_url`
+         and `fields`. Nothing in this system reads, buffers, re-encodes or forwards
+         it. That is not an optimisation: an image arriving through the API would have
+         to be held in memory by every replica that could receive it, would put a
+         client-controlled decoder on the request path, and would make the request
+         size limit a product decision instead of a security one.
+
+         # What the grant pins, and why each matters
+
+         The policy is signed over the bucket, the exact key, a content-length range
+         and the content type, and it expires. So a leaked grant cannot be redirected
+         to another bucket, cannot overwrite another object by naming it, cannot store
+         more bytes than were declared, cannot store something that is not the media
+         type it claims, and stops working shortly after it is issued.
+
+         # Why a second call is still needed
+
+         The object store tells the browser the upload succeeded; it does not tell
+         this server. `UpdateProfile` with `avatar_object_key` is what records the
+         fact, and it verifies the stored object before it does.
+    chronos.profile.v1.FormField:
+      type: object
+      properties:
+        key:
+          type: string
+          examples:
+            - x-amz-signature
+          title: key
+          maxLength: 128
+          pattern: ^[A-Za-z0-9_.-]+$
+          description: The form field's name, e.g. `x-amz-signature`.
+        value:
+          type: string
+          examples:
+            - PLACEHOLDER-signature
+          title: value
+          maxLength: 4096
+          pattern: ^[^\r\n]*$
+          description: |-
+            Its value, to be sent verbatim.
+
+             The ceiling accommodates the signed policy document, which is the longest
+             field a presigned POST carries — base64 of a JSON policy, comfortably under
+             4 KiB and unbounded by nothing else.
+      title: FormField
+      additionalProperties: false
+      description: |-
+        FormField is one field a browser must include in the upload POST.
+
+         A repeated pair rather than a map, for the reason `chronos.notification.v1`
+         gives at `TemplateValue`: a protobuf map publishes a synthetic entry message
+         that the published OpenAPI document references and no client can resolve, and
+         a repeated pair gives the list a stable order that a map cannot.
+    chronos.profile.v1.GetProfileRequest:
+      type: object
+      title: GetProfileRequest
+      additionalProperties: false
+      description: |-
+        GetProfileRequest asks for the caller's own profile.
+
+         Deliberately empty. There is no subject id to supply — see the package
+         comment — and there is no organization either: a person has ONE profile
+         across every organization they belong to, exactly as they have one account.
+    chronos.profile.v1.GetProfileResponse:
+      type: object
+      properties:
+        subjectId:
+          type: string
+          examples:
+            - subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: subject_id
+          maxLength: 31
+          pattern: ^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            The caller's pseudonym (ADR-002). Returned so a client can correlate this
+             with the account `chronos.identity.v1.GetUser` describes without holding a
+             second identifier.
+        displayName:
+          type: string
+          examples:
+            - Ada Lovelace
+          title: display_name
+          maxLength: 80
+          pattern: ^$|^\S(.*\S)?$
+          description: |-
+            The name other people read. Empty means none has been set.
+
+             Resolved from the PII vault at read time and stored nowhere else. An erased
+             subject reads as empty here rather than as an error: erasure destroyed the
+             key, and there is no name left to return (ADR-002).
+
+             The bounds are `UpdateProfileRequest.display_name`'s, with the empty string
+             additionally admitted — that is the never-set and the erased case, which the
+             request cannot express and this response must.
+        locale:
+          type: string
+          examples:
+            - en-GB
+          title: locale
+          maxLength: 35
+          pattern: ^$|^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$
+          description: |-
+            The language wording is rendered in, e.g. `en`, `en-GB`, `de-AT`. Empty
+             means none has been set, and the server's default applies.
+        timezone:
+          type: string
+          examples:
+            - Europe/Berlin
+          title: timezone
+          maxLength: 64
+          pattern: ^$|^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+.-]+)*$
+          description: |-
+            The IANA zone timestamps are rendered in, e.g. `Europe/Berlin`. Empty means
+             none has been set, and UTC applies. Storage is always UTC (ADR-008); this
+             affects presentation only.
+        avatar:
+          title: avatar
+          description: The caller's avatar, unset when they have none.
+          allOf:
+            - $ref: '#/components/schemas/chronos.profile.v1.Avatar'
+        updatedAt:
+          title: updated_at
+          description: |-
+            When the profile last changed, UTC. Unset means it has never been touched,
+             which is the state of every account that has not visited this service.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: GetProfileResponse
+      additionalProperties: false
+      description: GetProfileResponse is the caller's own profile.
+    chronos.profile.v1.UpdateProfileRequest:
+      type: object
+      properties:
+        displayName:
+          type:
+            - string
+            - "null"
+          title: display_name
+          maxLength: 80
+          minLength: 1
+          pattern: ^\S(.*\S)?$
+          description: |-
+            The name other people read.
+
+             It CANNOT be cleared, only replaced, and the reason is the vault rather
+             than a product decision: `internal/platform/pii` can destroy a subject's
+             KEY and cannot delete one field, so there is no operation this request
+             could name. Sending an empty string is refused rather than silently
+             treated as "unchanged", because a client that meant to clear it deserves an
+             error instead of a save that appears to have worked.
+        locale:
+          type:
+            - string
+            - "null"
+          title: locale
+          maxLength: 35
+          pattern: ^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$
+          description: |-
+            The language to render wording in, as a BCP-47 tag: `en`, `en-GB`,
+             `zh-Hans`, `de-AT`.
+
+             Cannot be cleared, for the same reason as `display_name`.
+        timezone:
+          type:
+            - string
+            - "null"
+          title: timezone
+          maxLength: 64
+          pattern: ^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+.-]+)*$
+          description: |-
+            The IANA zone to render timestamps in, e.g. `Europe/Berlin`, `UTC`.
+
+             A zone name, never a UTC offset. An offset is not a timezone: `+01:00` is
+             wrong for half of every year in most of the world, and a person who set one
+             in January would silently receive mail an hour out from March. Cannot be
+             cleared, for the same reason as `display_name`.
+        avatarObjectKey:
+          type:
+            - string
+            - "null"
+          title: avatar_object_key
+          maxLength: 128
+          pattern: ^$|^[a-z0-9]{1,72}/[a-z2-9]{20,48}$
+          description: |-
+            The object key of an avatar that has ALREADY been uploaded, or the empty
+             string to remove the current one.
+
+             This is the field that makes clearing expressible: it is the one profile
+             value whose storage this module owns outright, so removing it is an
+             operation that exists. Sending the empty string removes the avatar; leaving
+             the field out keeps it.
+
+             The key must be one `CreateAvatarUpload` minted FOR THIS CALLER. It is not
+             a name a client may invent: the server derives the caller's own key prefix
+             from their pseudonym and refuses any key outside it, so a key belonging to
+             somebody else is rejected before the object store is contacted. The object
+             is then verified — it must exist, be non-empty, be within the size the
+             grant allowed, and still carry the media type the grant pinned.
+      title: UpdateProfileRequest
+      additionalProperties: false
+      description: |-
+        UpdateProfileRequest changes some of the caller's own profile.
+
+         # Sparse, and the sparseness is the schema's job
+
+         Every field has EXPLICIT PRESENCE. An omitted field is not "set this to
+         empty" — it is "do not touch this", and the two are different requests that
+         a client must be able to tell apart. A settings screen that saves only the
+         field somebody edited sends only that field, and cannot accidentally wipe the
+         three it did not render.
+
+         # Adding a field later costs a field number and a column
+
+         This message and its one event (`profile.ProfileUpdated.v1`) are the entire
+         extension point. Pronouns, a job title, a pronunciation clip: each is a new
+         optional field here, a new pointer on the event, and a new column. No new
+         event type, no catalogue entry, and no upcaster — because the event's shape
+         does not change when a field is added to it, only its contents.
+    chronos.profile.v1.UpdateProfileResponse:
+      type: object
+      properties:
+        profile:
+          title: profile
+          description: The profile after the change.
+          allOf:
+            - $ref: '#/components/schemas/chronos.profile.v1.GetProfileResponse'
+      title: UpdateProfileResponse
+      additionalProperties: false
+      description: |-
+        UpdateProfileResponse is the profile as it now stands.
+
+         The whole profile, in the same shape `GetProfile` returns, so a settings
+         screen can render the result of a save without a second call — and so it
+         renders what the SYSTEM will do rather than what this call decided.
     chronos.system.v1.Criticality:
       type: string
       title: Criticality
@@ -1590,39 +3164,70 @@ components:
       properties:
         name:
           type: string
+          examples:
+            - postgres
           title: name
-          description: Stable identifier, e.g. "postgres" or "openfga". Safe to switch on.
+          maxLength: 64
+          pattern: ^[a-z][a-z0-9_]*$
+          description: |-
+            Stable identifier, e.g. "postgres" or "openfga". Safe to switch on.
+
+             "Safe to switch on" is what the pattern makes true: lower snake, so a client
+             matching on it is matching on an identifier rather than on prose that could
+             acquire a capital or a space.
         health:
           title: health
           description: Current observed state.
-          $ref: '#/components/schemas/chronos.system.v1.Health'
+          allOf:
+            - $ref: '#/components/schemas/chronos.system.v1.Health'
         criticality:
           title: criticality
           description: What losing this dependency costs the product.
-          $ref: '#/components/schemas/chronos.system.v1.Criticality'
+          allOf:
+            - $ref: '#/components/schemas/chronos.system.v1.Criticality'
         detail:
           type: string
+          examples:
+            - map[connect:connection refused]
           title: detail
+          maxLength: 512
+          pattern: ^[^\r\n]*$
           description: |-
             Operator-facing detail, such as a connection error. Never contains
              credentials or personal data.
         impact:
           type: string
+          examples:
+            - Live updates stop; reloading a page still shows current data.
           title: impact
+          maxLength: 512
+          pattern: ^[^\r\n]*$
           description: |-
             Client-facing description of what is unavailable while this dependency is
              not up, so a UI can explain itself rather than showing a generic error.
         lastCheckedAt:
           title: last_checked_at
           description: When this dependency was last probed, in UTC (ADR-008).
-          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
         latencyMs:
-          type:
-            - integer
-            - string
+          examples:
+            - "3"
           title: latency_ms
-          format: int64
-          description: Observed latency of the most recent probe, in milliseconds.
+          description: |-
+            Observed latency of the most recent probe, in milliseconds.
+
+             The ceiling is one hour, which no probe can approach: every probe runs under
+             a context deadline far shorter than that. It is stated because a duration
+             published without one describes a field a client must treat as arbitrary.
+          oneOf:
+            - type: integer
+              format: int64
+              minimum: 0
+              maximum: 3600000
+            - type: string
+              pattern: ^-?[0-9]+$
+              maxLength: 20
       title: Dependency
       additionalProperties: false
       description: |-
@@ -1651,21 +3256,44 @@ components:
           items:
             $ref: '#/components/schemas/chronos.system.v1.Dependency'
           title: dependencies
-          description: One entry per registered dependency, in registration order.
+          maxItems: 32
+          description: |-
+            One entry per registered dependency, in registration order.
+
+             The registry is a compile-time list, so the ceiling is a statement about this
+             binary rather than about a request: nine components today (CLAUDE.md's
+             architecture table), with room to double.
         version:
           type: string
+          examples:
+            - 1.4.0
           title: version
-          description: Build version of the running binary.
+          maxLength: 64
+          pattern: ^[A-Za-z0-9._+-]*$
+          description: |-
+            Build version of the running binary.
+
+             Bounded but NOT pinned to semantic versioning: a development build carries
+             whatever `git describe` produced, and a document that promised `x.y.z` would
+             be wrong on every machine that is not a release runner.
         startedAt:
           title: started_at
           description: When this process started, in UTC.
-          $ref: '#/components/schemas/google.protobuf.Timestamp'
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
         timezone:
           type: string
+          examples:
+            - UTC
           title: timezone
+          maxLength: 64
+          pattern: ^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+.-]+)*$
           description: |-
             The server's presentation timezone. Storage is always UTC (ADR-008); this
              is exposed so a misconfigured deployment is visible.
+
+             An IANA zone name, with the same grammar `chronos.profile.v1` holds a
+             person's timezone to.
       title: GetStatusResponse
       additionalProperties: false
       description: GetStatusResponse is the full picture of server and dependency state.
@@ -1680,6 +3308,7 @@ components:
       description: Health is a dependency's current state.
     compression:
       title: compression
+      type: string
       enum:
         - identity
         - gzip
@@ -1687,20 +3316,22 @@ components:
       description: Which compression algorithm to use for this request
     connect:
       title: connect
+      type: string
       enum:
         - v1
       description: Define the version of the Connect protocol
     connect-protocol-version:
       type: number
       title: Connect-Protocol-Version
-      enum:
-        - 1
       description: Define the version of the Connect protocol
       const: 1
     connect-timeout-header:
-      type: number
+      type: integer
       title: Connect-Timeout-Ms
       description: Define the timeout, in ms
+      format: int32
+      maximum: 3600000
+      minimum: 0
     connect.error:
       type: object
       properties:
@@ -1729,59 +3360,56 @@ components:
         message:
           type: string
           description: A developer-facing error message, which should be in English. Any user-facing error message should be localized and sent in the [google.rpc.Status.details][google.rpc.Status.details] field, or localized by the client.
+          maxLength: 4096
+          pattern: ^[\s\S]*$
         details:
           type: array
           items:
             $ref: '#/components/schemas/connect.error_details.Any'
           description: A list of messages that carry the error details. There is no limit on the number of messages.
+          maxItems: 64
       title: Connect Error
-      additionalProperties: true
+      additionalProperties: false
       description: 'Error type returned by Connect: https://connectrpc.com/docs/go/errors/#http-representation'
     connect.error_details.Any:
       type: object
+      title: Error detail envelope
+      description: |
+        One entry of a Connect error's `details` array.
+
+        This server attaches exactly one detail type — the `ErrorDetail` below —
+        and attaches it to every error it raises, so `debug` is the decoded form
+        of `value` rather than an arbitrary message. Read `debug.reason`.
       properties:
         type:
           type: string
-          description: 'A URL that acts as a globally unique identifier for the type of the serialized message. For example: `type.googleapis.com/google.rpc.ErrorInfo`. This is used to determine the schema of the data in the `value` field and is the discriminator for the `debug` field.'
+          maxLength: 512
+          pattern: '^[A-Za-z0-9.-]+/[A-Za-z0-9_.]+$'
+          examples:
+            - type.googleapis.com/chronos.errors.v1.ErrorDetail
+          description: |
+            The detail's type URL. Today it is always
+            `type.googleapis.com/chronos.errors.v1.ErrorDetail`; it is published as
+            a pattern rather than a constant so that adding a second detail type
+            is not a breaking change to this document.
         value:
           type: string
-          format: binary
-          description: The Protobuf message, serialized as bytes and base64-encoded. The specific message type is identified by the `type` field.
+          contentEncoding: base64
+          maxLength: 65536
+          pattern: '^[A-Za-z0-9+/]*={0,2}$'
+          description: |
+            The detail, protobuf-serialized and base64-encoded. A client that reads
+            `debug` never needs this.
         debug:
-          oneOf:
-            - type: object
-              title: Any
-              additionalProperties: true
-              description: Detailed error information.
-            - $ref: '#/components/schemas/google.rpc.ErrorInfo'
-            - $ref: '#/components/schemas/google.rpc.RetryInfo'
-            - $ref: '#/components/schemas/google.rpc.DebugInfo'
-            - $ref: '#/components/schemas/google.rpc.QuotaFailure'
-            - $ref: '#/components/schemas/google.rpc.PreconditionFailure'
-            - $ref: '#/components/schemas/google.rpc.BadRequest'
-            - $ref: '#/components/schemas/google.rpc.RequestInfo'
-            - $ref: '#/components/schemas/google.rpc.ResourceInfo'
-            - $ref: '#/components/schemas/google.rpc.Help'
-            - $ref: '#/components/schemas/google.rpc.LocalizedMessage'
-          discriminator:
-            propertyName: type
-            mapping:
-              type.googleapis.com/google.rpc.ErrorInfo: '#/components/schemas/google.rpc.ErrorInfo'
-              type.googleapis.com/google.rpc.RetryInfo: '#/components/schemas/google.rpc.RetryInfo'
-              type.googleapis.com/google.rpc.DebugInfo: '#/components/schemas/google.rpc.DebugInfo'
-              type.googleapis.com/google.rpc.QuotaFailure: '#/components/schemas/google.rpc.QuotaFailure'
-              type.googleapis.com/google.rpc.PreconditionFailure: '#/components/schemas/google.rpc.PreconditionFailure'
-              type.googleapis.com/google.rpc.BadRequest: '#/components/schemas/google.rpc.BadRequest'
-              type.googleapis.com/google.rpc.RequestInfo: '#/components/schemas/google.rpc.RequestInfo'
-              type.googleapis.com/google.rpc.ResourceInfo: '#/components/schemas/google.rpc.ResourceInfo'
-              type.googleapis.com/google.rpc.Help: '#/components/schemas/google.rpc.Help'
-              type.googleapis.com/google.rpc.LocalizedMessage: '#/components/schemas/google.rpc.LocalizedMessage'
+          allOf:
+            - $ref: '#/components/schemas/chronos.errors.v1.ErrorDetail'
           title: Debug
-          description: Deserialized error detail payload. The 'type' field indicates the schema. This field is for easier debugging and should not be relied upon for application logic.
-      additionalProperties: true
-      description: Contains an arbitrary serialized message along with a @type that describes the type of the serialized message, with an additional debug field for ConnectRPC error details.
+          description: |
+            The decoded detail. Branch on its `reason`.
+      additionalProperties: false
     encoding:
       title: encoding
+      type: string
       enum:
         - proto
         - json
@@ -1882,148 +3510,49 @@ components:
          the Joda Time's [`ISODateTimeFormat.dateTime()`](
          http://joda-time.sourceforge.net/apidocs/org/joda/time/format/ISODateTimeFormat.html#dateTime()
          ) to obtain a formatter capable of generating timestamps in this format.
-    google.rpc.BadRequest:
-      type: object
-      properties:
-        field_violations:
-          type: array
-          items:
-            type: object
-            properties:
-              field:
-                type: string
-                description: A path that leads to a field in the request body.
-              description:
-                type: string
-                description: A description of why the request element is bad.
-      title: BadRequest
-      description: A message type used to describe a bad request.
-    google.rpc.DebugInfo:
-      type: object
-      properties:
-        stack_entries:
-          type: array
-          items:
-            type: string
-        detail:
-          type: string
-      title: DebugInfo
-      description: Contains debugging information.
-    google.rpc.ErrorInfo:
-      type: object
-      properties:
-        reason:
-          type: string
-          description: The reason of the error. This is a constant value that identifies the proximate cause of the error. Error reasons are unique within a particular domain of errors. This should be at most 63 characters and match a regular expression of `[A-Z][A-Z0-9_]+[A-Z0-9]`, which represents UPPER_SNAKE_CASE.
-        domain:
-          type: string
-          description: 'The logical grouping to which the "reason" belongs. The error domain is typically the registered service name of the tool or product that generates the error. Example: "pubsub.googleapis.com". If the error is generated by some common infrastructure, the error domain must be a globally unique value that identifies the infrastructure. For Google API infrastructure, the error domain is "googleapis.com".'
-        metadata:
-          type: object
-          additionalProperties:
-            type: string
-          description: 'Additional structured details about this error. Keys must match a regular expression of `[a-z][a-zA-Z0-9-_]+` but should ideally be lowerCamelCase. Also, they must be limited to 64 characters in length. When identifying the current value of an exceeded limit, the units should be contained in the key, not the value.  For example, rather than `{"instanceLimit": "100/request"}`, should be returned as, `{"instanceLimitPerRequest": "100"}`, if the client exceeds the number of instances that can be created in a single (batch) request.'
-      title: ErrorInfo
-      description: Describes the cause of the error with structured details.
-    google.rpc.Help:
-      type: object
-      properties:
-        links:
-          type: array
-          items:
-            type: object
-            properties:
-              description:
-                type: string
-                description: A description of the link.
-              url:
-                type: string
-                description: The URL of the link.
-      title: Help
-      description: Provides links to documentation or for performing an out-of-band action.
-    google.rpc.LocalizedMessage:
-      type: object
-      properties:
-        locale:
-          type: string
-          description: The locale used following the specification defined at http://www.rfc-editor.org/rfc/bcp/bcp47.txt.
-        message:
-          type: string
-          description: The localized message in the locale.
-      title: LocalizedMessage
-      description: A message type used to provide a localized message.
-    google.rpc.PreconditionFailure:
-      type: object
-      properties:
-        violations:
-          type: array
-          items:
-            type: object
-            properties:
-              type:
-                type: string
-                description: The type of PreconditionFailure. We recommend using a service-specific enum type to define the supported precondition violation types.
-              subject:
-                type: string
-                description: The subject, relative to the type, that failed the precondition.
-              description:
-                type: string
-                description: A description of how the precondition failed.
-      title: PreconditionFailure
-      description: A message type used to describe a failed precondition.
-    google.rpc.QuotaFailure:
-      type: object
-      properties:
-        violations:
-          type: array
-          items:
-            type: object
-            properties:
-              subject:
-                type: string
-                description: The subject on which the quota check failed.
-              description:
-                type: string
-                description: A description of how the quota check failed.
-      title: QuotaFailure
-      description: Describes how a quota check failed.
-    google.rpc.RequestInfo:
-      type: object
-      properties:
-        request_id:
-          type: string
-          description: An opaque string that could be used by the client to trace the request.
-        serving_data:
-          type: string
-          description: The serving data that were used to process the request.
-      title: RequestInfo
-      description: Contains metadata about the request that clients can attach when filing a bug or providing other forms of feedback.
-    google.rpc.ResourceInfo:
-      type: object
-      properties:
-        resource_type:
-          type: string
-          description: A name for the type of resource being accessed, e.g. "sql table", "cloud storage bucket", etc.
-        resource_name:
-          type: string
-          description: The name of the resource being accessed.
-        owner:
-          type: string
-          description: The owner of the resource (optional).
-        description:
-          type: string
-          description: A description of the resource (optional).
-      title: ResourceInfo
-      description: Describes the resource that is being accessed.
-    google.rpc.RetryInfo:
-      type: object
-      properties:
-        retry_delay:
-          type: string
-          format: duration
-          description: Clients consuming this error should wait at least this long before retrying. The value is a duration string, following the protobuf Duration format (e.g., "1.5s" for one and a half seconds).
-      title: RetryInfo
-      description: Describes when the clients can retry a failed request.
+      maxLength: 64
+      pattern: ^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$
+    idempotency-key:
+      type: string
+      title: Idempotency-Key
+      minLength: 1
+      maxLength: 128
+      pattern: '^[^|]+$'
+      examples:
+        - 01ARZ3NDEKTSV4RRFFQ69G5FAV
+      description: |
+        A client-generated key, required on every mutating call. A ULID or a UUID
+        is the recommended form — both are unique without coordination, which is
+        the only property that matters.
+
+        On an AUTHENTICATED call, replaying it with the SAME body returns the
+        stored response instead of re-executing, and replaying it with a DIFFERENT
+        body returns `CONFLICT`. That record is scoped to
+        `(principal, method, key)` and retained 24 hours.
+
+        On a PUBLIC call there is no principal to scope a record to, so nothing is
+        stored and no response is replayed — the key is still required, and it is
+        what gives the resulting command a stable identity across retries.
+
+        Generate one per logical operation, not per HTTP attempt: a retry of the
+        same operation must reuse the same key, which is the entire point.
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        The session token returned by `IdentityService/CreateSession`, sent as
+        `Authorization: Bearer <token>`.
+
+        Returned by that call and by no other, ever: only its digest is stored,
+        so there is no endpoint that can re-display it. It is opaque — do not
+        parse it.
+
+        Two deadlines bound it, and both are returned with it. The IDLE deadline
+        moves forward on each authenticated request; the ABSOLUTE one does not,
+        and it is what bounds a stolen token held by an attacker who keeps it
+        warm, which an idle deadline alone cannot do. Revocation through
+        `RevokeSession` or `RevokeAllSessions` is immediate.
 paths:
   /chronos.identity.v1.IdentityService/Authenticate:
     post:
@@ -2046,15 +3575,28 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
         - name: Connect-Timeout-Ms
           in: header
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
       requestBody:
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/chronos.identity.v1.AuthenticateRequest'
+            example:
+              identifier: ada@example.com
+              password: PLACEHOLDER-not-a-real-password
+              code: "000000"
+              deviceId: dev_9f2c1b7e
         required: true
       responses:
         default:
@@ -2083,8 +3625,93 @@ paths:
                 offered:
                   - METHOD_KIND_TOTP
                   - METHOD_KIND_RECOVERY_CODE
-      security:
-        - {}
+      security: []
+  /chronos.identity.v1.IdentityService/CheckUsernameAvailability:
+    post:
+      tags:
+        - IdentityService
+      summary: CheckUsernameAvailability reports whether a public handle can be claimed.
+      description: |-
+        Public: it is reached from the signup form, by a browser that has never
+         authenticated and by definition has no account.
+
+         # It IS an enumeration oracle, and that is the intended behaviour
+
+         A caller can learn that @alice is taken. That is not a leak, because a handle
+         is PUBLISHED — publication is its entire purpose (ADR-051) — and the same
+         fact is readable from any page that renders a mention, from a profile URL,
+         and from the person themselves. Every other public RPC in this service is
+         shaped to make its two outcomes indistinguishable; this one is shaped to make
+         them distinguishable, and the difference is not an oversight in the schema.
+
+         Do NOT "fix" this into an undifferentiated response. The resulting endpoint
+         would answer no question at all, the signup form could not tell a person
+         their handle was taken until after they had spent a verification link they
+         cannot get back, and the information would remain freely available everywhere
+         else in the product.
+
+         The ONE thing it must not distinguish is a tombstoned handle from a taken
+         one; see CheckUsernameAvailabilityResponse for why that single merge is a
+         privacy control rather than the same tidiness.
+
+         # The answer is advisory
+
+         It reads the handle's reservation stream at an instant. Uniqueness is
+         enforced at the moment of the WRITE by an atomic append with a precondition
+         (ADR-044, ADR-051), so a handle reported free may be taken by the time
+         VerifyEmail claims it — any check-then-claim is racy by construction. The
+         point of this call is that a person finds out at the FORM rather than after
+         clicking a link.
+
+         A READ: it appends nothing, mints nothing and sends no mail. It is rate
+         limited per caller regardless — "an attacker may learn whether @alice exists"
+         is not the same permission as "an attacker may read a stream from the event
+         store as fast as they can open sockets".
+      operationId: IdentityService_CheckUsernameAvailability
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.CheckUsernameAvailabilityRequest'
+            example:
+              username: ada_lovelace
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            Whether the handle can be claimed, and its normalized form. Unlike every
+            other public endpoint in this service the two outcomes are DELIBERATELY
+            distinguishable: a username is published by design, so telling a caller
+            that one is taken discloses nothing that a mention, a profile URL or the
+            person themselves does not. `available: false` covers taken, reserved and
+            tombstoned alike — the last of those is merged in on purpose, because
+            "this handle belonged to an erased account" is a fact about a person.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.CheckUsernameAvailabilityResponse'
+              example:
+                available: false
+                username: ada_lovelace
+      security: []
   /chronos.identity.v1.IdentityService/ConfirmTotp:
     post:
       tags:
@@ -2113,29 +3740,25 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
         - name: Connect-Timeout-Ms
           in: header
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
         - name: Idempotency-Key
           in: header
-          description: |
-            A client-generated ULID or UUID, required on every authenticated mutating
-            call. Replaying it with the SAME body returns the stored response instead
-            of re-executing; replaying it with a DIFFERENT body returns `CONFLICT`.
-            Scoped to `(principal, method, key)` and retained 24 hours — see
-            *Idempotency* in the introduction.
           required: true
           explode: false
           schema:
-            type: string
-            examples:
-              - 01ARZ3NDEKTSV4RRFFQ69G5FAV
+            $ref: '#/components/schemas/idempotency-key'
       requestBody:
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/chronos.identity.v1.ConfirmTotpRequest'
+            example:
+              code: "000000"
         required: true
       responses:
         default:
@@ -2176,15 +3799,28 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
         - name: Connect-Timeout-Ms
           in: header
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
       requestBody:
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/chronos.identity.v1.CreateSessionRequest'
+            example:
+              identifier: ada@example.com
+              password: PLACEHOLDER-not-a-real-password
+              code: "000000"
+              deviceId: dev_9f2c1b7e
         required: true
       responses:
         default:
@@ -2215,8 +3851,94 @@ paths:
                 idleExpiresAt: '2026-08-14T12:04:55Z'
                 absoluteExpiresAt: '2026-08-21T11:04:55Z'
                 requiresCredentialRotation: false
-      security:
-        - {}
+      security: []
+  /chronos.identity.v1.IdentityService/DeactivateAccount:
+    post:
+      tags:
+        - IdentityService
+      summary: |-
+        DeactivateAccount switches the caller's own account off, and ends every
+         session on it in the same atomic append.
+      description: |-
+        # Reversible, and how
+
+         Deactivation is the holder's own switch and the holder undoes it by SIGNING
+         IN again with every factor the account has — the successful authentication
+         records the reactivation in the same append as itself, so the account is on
+         again before the new session exists. There is deliberately no
+         `ReactivateAccount` RPC: it would need a session, a session needs an
+         authentication, and an authentication refuses a deactivated account, so its
+         only precondition would be one its own subject can never satisfy. See
+         `identity.md` §1.
+
+         Suspension is the administrative counterpart and is NOT here. It is not
+         reversible by the holder, every method on this service is reached by the
+         holder acting on their own account, and there is no operator surface in this
+         repository yet — so an RPC for it could only be a self-suspension, which
+         makes the account unreachable by every route this module has.
+
+         # AAL2
+
+         On RevokeAllSessions' argument: the sign-out is total, so the denial of
+         service an attacker holding a stolen password could inflict with it is total.
+         No `bootstrap_min_aal`, deliberately — an account still enrolling its first
+         factor has nothing to switch off, and the exemption exists for enrolment
+         alone.
+      operationId: IdentityService_DeactivateAccount
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.DeactivateAccountRequest'
+            example: {}
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            The account is off and every session on it has ended, in one atomic
+            append. The token used to make this call is among the revoked ones: a
+            deactivation spares nothing, because an account switched off everywhere
+            except on the device that switched it off is not what was asked for.
+
+            `changed` is false when the account was already deactivated. The sessions
+            are still swept in that case, and that is not tidying: a login whose
+            ceremony began before the first deactivation committed can have minted a
+            session the first sweep never saw.
+
+            To come back, sign in again with every factor the account has. The
+            successful authentication reactivates it, and a security mail says so.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.DeactivateAccountResponse'
+              example:
+                changed: true
+                sessionsRevoked: 2
+                sessionsScanned: 2
   /chronos.identity.v1.IdentityService/EnrollTotp:
     post:
       tags:
@@ -2251,29 +3973,24 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
         - name: Connect-Timeout-Ms
           in: header
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
         - name: Idempotency-Key
           in: header
-          description: |
-            A client-generated ULID or UUID, required on every authenticated mutating
-            call. Replaying it with the SAME body returns the stored response instead
-            of re-executing; replaying it with a DIFFERENT body returns `CONFLICT`.
-            Scoped to `(principal, method, key)` and retained 24 hours — see
-            *Idempotency* in the introduction.
           required: true
           explode: false
           schema:
-            type: string
-            examples:
-              - 01ARZ3NDEKTSV4RRFFQ69G5FAV
+            $ref: '#/components/schemas/idempotency-key'
       requestBody:
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/chronos.identity.v1.EnrollTotpRequest'
+            example: {}
         required: true
       responses:
         default:
@@ -2340,29 +4057,24 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
         - name: Connect-Timeout-Ms
           in: header
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
         - name: Idempotency-Key
           in: header
-          description: |
-            A client-generated ULID or UUID, required on every authenticated mutating
-            call. Replaying it with the SAME body returns the stored response instead
-            of re-executing; replaying it with a DIFFERENT body returns `CONFLICT`.
-            Scoped to `(principal, method, key)` and retained 24 hours — see
-            *Idempotency* in the introduction.
           required: true
           explode: false
           schema:
-            type: string
-            examples:
-              - 01ARZ3NDEKTSV4RRFFQ69G5FAV
+            $ref: '#/components/schemas/idempotency-key'
       requestBody:
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/chronos.identity.v1.GenerateRecoveryCodesRequest'
+            example: {}
         required: true
       responses:
         default:
@@ -2420,33 +4132,40 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
         - name: Connect-Timeout-Ms
           in: header
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
         - name: message
           in: query
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.identity.v1.GetUserRequest'
+          example: '{}'
         - name: encoding
           in: query
           required: true
           schema:
             $ref: '#/components/schemas/encoding'
+          example: json
         - name: base64
           in: query
           schema:
             $ref: '#/components/schemas/base64'
+          example: "1"
         - name: compression
           in: query
           schema:
             $ref: '#/components/schemas/compression'
+          example: identity
         - name: connect
           in: query
           schema:
             $ref: '#/components/schemas/connect'
+          example: v1
       responses:
         default:
           description: Error
@@ -2494,15 +4213,18 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
         - name: Connect-Timeout-Ms
           in: header
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
       requestBody:
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/chronos.identity.v1.GetUserRequest'
+            example: {}
         required: true
       responses:
         default:
@@ -2551,33 +4273,40 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
         - name: Connect-Timeout-Ms
           in: header
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
         - name: message
           in: query
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.identity.v1.ListLoginHistoryRequest'
+          example: '{}'
         - name: encoding
           in: query
           required: true
           schema:
             $ref: '#/components/schemas/encoding'
+          example: json
         - name: base64
           in: query
           schema:
             $ref: '#/components/schemas/base64'
+          example: "1"
         - name: compression
           in: query
           schema:
             $ref: '#/components/schemas/compression'
+          example: identity
         - name: connect
           in: query
           schema:
             $ref: '#/components/schemas/connect'
+          example: v1
       responses:
         default:
           description: Error
@@ -2645,15 +4374,20 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
         - name: Connect-Timeout-Ms
           in: header
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
       requestBody:
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/chronos.identity.v1.ListLoginHistoryRequest'
+            example:
+              pageSize: "50"
+              pageToken: PLACEHOLDER-opaque-cursor-from-a-previous-response
         required: true
       responses:
         default:
@@ -2723,33 +4457,40 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
         - name: Connect-Timeout-Ms
           in: header
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
         - name: message
           in: query
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.identity.v1.ListMethodsRequest'
+          example: '{}'
         - name: encoding
           in: query
           required: true
           schema:
             $ref: '#/components/schemas/encoding'
+          example: json
         - name: base64
           in: query
           schema:
             $ref: '#/components/schemas/base64'
+          example: "1"
         - name: compression
           in: query
           schema:
             $ref: '#/components/schemas/compression'
+          example: identity
         - name: connect
           in: query
           schema:
             $ref: '#/components/schemas/connect'
+          example: v1
       responses:
         default:
           description: Error
@@ -2813,15 +4554,18 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
         - name: Connect-Timeout-Ms
           in: header
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
       requestBody:
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/chronos.identity.v1.ListMethodsRequest'
+            example: {}
         required: true
       responses:
         default:
@@ -2887,33 +4631,40 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
         - name: Connect-Timeout-Ms
           in: header
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
         - name: message
           in: query
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.identity.v1.ListSessionsRequest'
+          example: '{}'
         - name: encoding
           in: query
           required: true
           schema:
             $ref: '#/components/schemas/encoding'
+          example: json
         - name: base64
           in: query
           schema:
             $ref: '#/components/schemas/base64'
+          example: "1"
         - name: compression
           in: query
           schema:
             $ref: '#/components/schemas/compression'
+          example: identity
         - name: connect
           in: query
           schema:
             $ref: '#/components/schemas/connect'
+          example: v1
       responses:
         default:
           description: Error
@@ -2969,15 +4720,20 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
         - name: Connect-Timeout-Ms
           in: header
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
       requestBody:
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/chronos.identity.v1.ListSessionsRequest'
+            example:
+              pageSize: "50"
+              pageToken: PLACEHOLDER-opaque-cursor-from-a-previous-response
         required: true
       responses:
         default:
@@ -3040,15 +4796,25 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
         - name: Connect-Timeout-Ms
           in: header
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
       requestBody:
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/chronos.identity.v1.RegisterRequest'
+            example:
+              email: ada@example.com
         required: true
       responses:
         default:
@@ -3069,8 +4835,96 @@ paths:
               schema:
                 $ref: '#/components/schemas/chronos.identity.v1.RegisterResponse'
               example: {}
-      security:
-        - {}
+      security: []
+  /chronos.identity.v1.IdentityService/RequestAccountDeletion:
+    post:
+      tags:
+        - IdentityService
+      summary: |-
+        RequestAccountDeletion asks for the caller's own account to be erased, and
+         starts the grace period.
+      description: |-
+        # Nothing acts on it yet
+
+         The request is appended to the account's stream and that is the whole
+         behaviour. Erasure is the compliance domain's work — destroy the key, and the
+         personal data becomes unreadable everywhere at once — and that module does not
+         exist. Neither does the workflow that runs the grace period, the mail that
+         names the date, nor a command to cancel. The account keeps working.
+
+         This is stated on the RPC rather than only in a design document because a
+         client that reads "deletion requested" as "account gone" will build a screen
+         that lies to the person using it.
+
+         # AAL2, plus a typed confirmation
+
+         identity.md §2 lists account deletion among the operations that require
+         step-up. The step-up proves WHO is asking; the `confirmation` field is what
+         makes it hard to ask by accident, which matters here and nowhere else in this
+         service, because nothing in this module undoes it.
+
+         # It does not sign anybody out
+
+         Every other destructive call here voids sessions. This one deliberately does
+         not: the grace period exists so the person can change their mind, and signing
+         them out of an account that still works teaches them the request took effect
+         immediately, which it did not.
+      operationId: IdentityService_RequestAccountDeletion
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.RequestAccountDeletionRequest'
+            example:
+              confirmation: DELETE
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            The request is recorded and `scheduledFor` is when erasure falls due.
+
+            Nothing consumes it yet: the compliance domain that would perform the
+            erasure does not exist, and neither does the workflow that would run the
+            grace period or a command to cancel. The account keeps working, and every
+            other endpoint keeps serving it.
+
+            `changed` is false when a request was already outstanding, and
+            `scheduledFor` is then the ORIGINAL deadline — a second request must not
+            move a date the holder has already been given.
+
+            No session is revoked by this call, deliberately: the grace period exists
+            so the person can change their mind.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.RequestAccountDeletionResponse'
+              example:
+                changed: true
+                scheduledFor: '2026-09-19T08:15:00Z'
   /chronos.identity.v1.IdentityService/RequestPasswordReset:
     post:
       tags:
@@ -3101,15 +4955,25 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
         - name: Connect-Timeout-Ms
           in: header
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
       requestBody:
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/chronos.identity.v1.RequestPasswordResetRequest'
+            example:
+              email: ada@example.com
         required: true
       responses:
         default:
@@ -3130,8 +4994,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/chronos.identity.v1.RequestPasswordResetResponse'
               example: {}
-      security:
-        - {}
+      security: []
   /chronos.identity.v1.IdentityService/ResendEmailVerification:
     post:
       tags:
@@ -3159,15 +5022,25 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
         - name: Connect-Timeout-Ms
           in: header
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
       requestBody:
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/chronos.identity.v1.ResendEmailVerificationRequest'
+            example:
+              email: ada@example.com
         required: true
       responses:
         default:
@@ -3182,8 +5055,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.identity.v1.ResendEmailVerificationResponse'
-      security:
-        - {}
+      security: []
   /chronos.identity.v1.IdentityService/ResetPassword:
     post:
       tags:
@@ -3209,15 +5081,26 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
         - name: Connect-Timeout-Ms
           in: header
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
       requestBody:
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/chronos.identity.v1.ResetPasswordRequest'
+            example:
+              token: PLACEHOLDER-not-a-real-reset-token
+              password: PLACEHOLDER-not-a-real-password
         required: true
       responses:
         default:
@@ -3239,8 +5122,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/chronos.identity.v1.ResetPasswordResponse'
               example: {}
-      security:
-        - {}
+      security: []
   /chronos.identity.v1.IdentityService/RevokeAllSessions:
     post:
       tags:
@@ -3259,29 +5141,26 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
         - name: Connect-Timeout-Ms
           in: header
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
         - name: Idempotency-Key
           in: header
-          description: |
-            A client-generated ULID or UUID, required on every authenticated mutating
-            call. Replaying it with the SAME body returns the stored response instead
-            of re-executing; replaying it with a DIFFERENT body returns `CONFLICT`.
-            Scoped to `(principal, method, key)` and retained 24 hours — see
-            *Idempotency* in the introduction.
           required: true
           explode: false
           schema:
-            type: string
-            examples:
-              - 01ARZ3NDEKTSV4RRFFQ69G5FAV
+            $ref: '#/components/schemas/idempotency-key'
       requestBody:
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/chronos.identity.v1.RevokeAllSessionsRequest'
+            example:
+              exceptSessionId: sess_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              reason: user_signed_out
         required: true
       responses:
         default:
@@ -3329,29 +5208,26 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
         - name: Connect-Timeout-Ms
           in: header
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
         - name: Idempotency-Key
           in: header
-          description: |
-            A client-generated ULID or UUID, required on every authenticated mutating
-            call. Replaying it with the SAME body returns the stored response instead
-            of re-executing; replaying it with a DIFFERENT body returns `CONFLICT`.
-            Scoped to `(principal, method, key)` and retained 24 hours — see
-            *Idempotency* in the introduction.
           required: true
           explode: false
           schema:
-            type: string
-            examples:
-              - 01ARZ3NDEKTSV4RRFFQ69G5FAV
+            $ref: '#/components/schemas/idempotency-key'
       requestBody:
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/chronos.identity.v1.RevokeSessionRequest'
+            example:
+              sessionId: sess_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              reason: user_signed_out
         required: true
       responses:
         default:
@@ -3399,15 +5275,27 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
         - name: Connect-Timeout-Ms
           in: header
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
       requestBody:
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/chronos.identity.v1.VerifyEmailRequest'
+            example:
+              token: PLACEHOLDER-not-a-real-verification-token
+              password: PLACEHOLDER-not-a-real-password
+              username: ada_lovelace
         required: true
       responses:
         default:
@@ -3431,8 +5319,748 @@ paths:
                 subjectId: subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
                 userId: usr_01ARZ3NDEKTSV4RRFFQ69G5FAV
                 changed: true
-      security:
-        - {}
+      security: []
+  /chronos.notification.v1.NotificationService/GetNotificationPreferences:
+    get:
+      tags:
+        - NotificationService
+      summary: GetNotificationPreferences
+      description: |-
+        GetNotificationPreferences returns the caller's own channel toggles, and
+         what those toggles reach.
+      operationId: NotificationService_GetNotificationPreferences.get
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: message
+          in: query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.notification.v1.GetNotificationPreferencesRequest'
+          example: '{}'
+        - name: encoding
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/encoding'
+          example: json
+        - name: base64
+          in: query
+          schema:
+            $ref: '#/components/schemas/base64'
+          example: "1"
+        - name: compression
+          in: query
+          schema:
+            $ref: '#/components/schemas/compression'
+          example: identity
+        - name: connect
+          in: query
+          schema:
+            $ref: '#/components/schemas/connect'
+          example: v1
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.notification.v1.GetNotificationPreferencesResponse'
+    post:
+      tags:
+        - NotificationService
+      summary: GetNotificationPreferences
+      description: |-
+        GetNotificationPreferences returns the caller's own channel toggles, and
+         what those toggles reach.
+      operationId: NotificationService_GetNotificationPreferences
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.notification.v1.GetNotificationPreferencesRequest'
+            example:
+              orgId: org_01ARZ3NDEKTSV4RRFFQ69G5FAV
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.notification.v1.GetNotificationPreferencesResponse'
+  /chronos.notification.v1.NotificationService/GetUnreadCount:
+    get:
+      tags:
+        - NotificationService
+      summary: GetUnreadCount returns how many of the caller's notifications are unread.
+      description: |-
+        Separate from the list because it is what a badge needs on first paint,
+         before any page has been fetched. It is not a polling endpoint: the realtime
+         stream moves the badge afterwards.
+      operationId: NotificationService_GetUnreadCount.get
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: message
+          in: query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.notification.v1.GetUnreadCountRequest'
+          example: '{}'
+        - name: encoding
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/encoding'
+          example: json
+        - name: base64
+          in: query
+          schema:
+            $ref: '#/components/schemas/base64'
+          example: "1"
+        - name: compression
+          in: query
+          schema:
+            $ref: '#/components/schemas/compression'
+          example: identity
+        - name: connect
+          in: query
+          schema:
+            $ref: '#/components/schemas/connect'
+          example: v1
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.notification.v1.GetUnreadCountResponse'
+    post:
+      tags:
+        - NotificationService
+      summary: GetUnreadCount returns how many of the caller's notifications are unread.
+      description: |-
+        Separate from the list because it is what a badge needs on first paint,
+         before any page has been fetched. It is not a polling endpoint: the realtime
+         stream moves the badge afterwards.
+      operationId: NotificationService_GetUnreadCount
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.notification.v1.GetUnreadCountRequest'
+            example:
+              orgId: org_01ARZ3NDEKTSV4RRFFQ69G5FAV
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.notification.v1.GetUnreadCountResponse'
+  /chronos.notification.v1.NotificationService/ListNotifications:
+    get:
+      tags:
+        - NotificationService
+      summary: |-
+        ListNotifications returns one page of the caller's in-app feed, newest
+         first.
+      description: |-
+        Keyset paginated over `(occurred_at DESC, notification_id DESC)`. Offsets
+         are banned: a notification arriving between two requests shifts every later
+         OFFSET page, so a person walking their inbox would silently miss items.
+      operationId: NotificationService_ListNotifications.get
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: message
+          in: query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.notification.v1.ListNotificationsRequest'
+          example: '{}'
+        - name: encoding
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/encoding'
+          example: json
+        - name: base64
+          in: query
+          schema:
+            $ref: '#/components/schemas/base64'
+          example: "1"
+        - name: compression
+          in: query
+          schema:
+            $ref: '#/components/schemas/compression'
+          example: identity
+        - name: connect
+          in: query
+          schema:
+            $ref: '#/components/schemas/connect'
+          example: v1
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.notification.v1.ListNotificationsResponse'
+    post:
+      tags:
+        - NotificationService
+      summary: |-
+        ListNotifications returns one page of the caller's in-app feed, newest
+         first.
+      description: |-
+        Keyset paginated over `(occurred_at DESC, notification_id DESC)`. Offsets
+         are banned: a notification arriving between two requests shifts every later
+         OFFSET page, so a person walking their inbox would silently miss items.
+      operationId: NotificationService_ListNotifications
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.notification.v1.ListNotificationsRequest'
+            example:
+              orgId: org_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              pageSize: "50"
+              pageToken: PLACEHOLDER-opaque-cursor-from-a-previous-response
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.notification.v1.ListNotificationsResponse'
+  /chronos.notification.v1.NotificationService/MarkNotificationsRead:
+    post:
+      tags:
+        - NotificationService
+      summary: MarkNotificationsRead dismisses items the caller has seen.
+      description: |-
+        It appends one `notification.Read.v1` event per item, atomically across
+         every item's stream: a batch either lands whole or not at all, so a client
+         never has to reconcile a half-dismissed screen.
+
+         Marking is idempotent in the strongest sense available — the FIRST read
+         time is kept, so a replay, a retry and a second device all leave the same
+         answer to "when did they first see this", which is the question email
+         arbitration asks (ADR-026).
+      operationId: NotificationService_MarkNotificationsRead
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.notification.v1.MarkNotificationsReadRequest'
+            example:
+              orgId: org_01ARZ3NDEKTSV4RRFFQ69G5FAV
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.notification.v1.MarkNotificationsReadResponse'
+  /chronos.notification.v1.NotificationService/RegisterPushSubscription:
+    post:
+      tags:
+        - NotificationService
+      summary: RegisterPushSubscription enrols one browser profile on one device.
+      description: |-
+        Re-registering the same browser in the same organization is the NORMAL case,
+         not an error: a permission prompt answered again produces the same endpoint,
+         and this collapses onto the existing subscription rather than creating a
+         second one that would push to that device twice.
+      operationId: NotificationService_RegisterPushSubscription
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.notification.v1.RegisterPushSubscriptionRequest'
+            example:
+              orgId: org_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              userAgent: Mozilla/5.0 (X11; Linux x86_64) Chrome/126.0
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.notification.v1.RegisterPushSubscriptionResponse'
+  /chronos.notification.v1.NotificationService/RemovePushSubscription:
+    post:
+      tags:
+        - NotificationService
+      summary: RemovePushSubscription retires a browser endpoint.
+      description: |-
+        The row is marked expired rather than deleted, because "why did I stop
+         getting push?" is a real support question and a deleted row cannot answer
+         it. Removing an endpoint that was never registered is not an error: the
+         caller wanted it gone, and it is gone.
+      operationId: NotificationService_RemovePushSubscription
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.notification.v1.RemovePushSubscriptionRequest'
+            example:
+              orgId: org_01ARZ3NDEKTSV4RRFFQ69G5FAV
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.notification.v1.RemovePushSubscriptionResponse'
+  /chronos.notification.v1.NotificationService/SetNotificationPreferences:
+    post:
+      tags:
+        - NotificationService
+      summary: SetNotificationPreferences changes the caller's own channel toggles.
+      description: |-
+        It appends `notification.ChannelPreferenceSet.v1` and never writes the
+         preference table: that table is a projection, and a handler writing it
+         directly would put state in PostgreSQL that no replay reproduces and the
+         next rebuild deletes.
+
+         Concurrent saves are serialised by the preference stream's own revision, so
+         two settings screens saving at once produce one ordering rather than a torn
+         mixture of both.
+      operationId: NotificationService_SetNotificationPreferences
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.notification.v1.SetNotificationPreferencesRequest'
+            example:
+              orgId: org_01ARZ3NDEKTSV4RRFFQ69G5FAV
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.notification.v1.SetNotificationPreferencesResponse'
+  /chronos.profile.v1.ProfileService/CreateAvatarUpload:
+    post:
+      tags:
+        - ProfileService
+      summary: |-
+        CreateAvatarUpload mints a signed target the browser uploads an image to
+         directly.
+      description: |-
+        A mutation rather than a read, deliberately: it issues a CAPABILITY. The
+         grant is signed, addressed to one key, and usable by whoever holds it until
+         it expires, so it is not something to hand out on a cacheable, retry-happy
+         read — and the idempotency gate makes a double-clicked button reuse one
+         grant instead of littering the bucket with abandoned ones.
+      operationId: ProfileService_CreateAvatarUpload
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.profile.v1.CreateAvatarUploadRequest'
+            example:
+              contentType: image/png
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.profile.v1.CreateAvatarUploadResponse'
+  /chronos.profile.v1.ProfileService/GetProfile:
+    get:
+      tags:
+        - ProfileService
+      summary: GetProfile returns the caller's own profile.
+      description: |-
+        The display name, locale and timezone are resolved from the PII vault on
+         every call, and the avatar URL is signed on every call. Neither is cached
+         in a projection: the first because it is personal data, the second because
+         a stored URL outlives its signature.
+      operationId: ProfileService_GetProfile.get
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: message
+          in: query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.profile.v1.GetProfileRequest'
+          example: '{}'
+        - name: encoding
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/encoding'
+          example: json
+        - name: base64
+          in: query
+          schema:
+            $ref: '#/components/schemas/base64'
+          example: "1"
+        - name: compression
+          in: query
+          schema:
+            $ref: '#/components/schemas/compression'
+          example: identity
+        - name: connect
+          in: query
+          schema:
+            $ref: '#/components/schemas/connect'
+          example: v1
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.profile.v1.GetProfileResponse'
+    post:
+      tags:
+        - ProfileService
+      summary: GetProfile returns the caller's own profile.
+      description: |-
+        The display name, locale and timezone are resolved from the PII vault on
+         every call, and the avatar URL is signed on every call. Neither is cached
+         in a projection: the first because it is personal data, the second because
+         a stored URL outlives its signature.
+      operationId: ProfileService_GetProfile
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.profile.v1.GetProfileRequest'
+            example: {}
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.profile.v1.GetProfileResponse'
+  /chronos.profile.v1.ProfileService/UpdateProfile:
+    post:
+      tags:
+        - ProfileService
+      summary: UpdateProfile changes some of the caller's own profile.
+      description: |-
+        It appends ONE `profile.ProfileUpdated.v1` carrying only the fields that
+         actually changed, and it never writes the projection: that table is derived,
+         and a handler writing it would put state in PostgreSQL that no replay
+         reproduces and the next rebuild deletes.
+
+         Concurrent saves are serialised by the profile stream's own revision, so two
+         browser tabs saving at once produce one ordering rather than a mixture of
+         both. The loser is told `CONFLICT` and retries against the winner's state
+         — it is not silently overwritten.
+      operationId: ProfileService_UpdateProfile
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.profile.v1.UpdateProfileRequest'
+            example: {}
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.profile.v1.UpdateProfileResponse'
   /chronos.system.v1.SystemService/GetStatus:
     get:
       tags:
@@ -3450,33 +6078,40 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
         - name: Connect-Timeout-Ms
           in: header
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
         - name: message
           in: query
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.system.v1.GetStatusRequest'
+          example: '{}'
         - name: encoding
           in: query
           required: true
           schema:
             $ref: '#/components/schemas/encoding'
+          example: json
         - name: base64
           in: query
           schema:
             $ref: '#/components/schemas/base64'
+          example: "1"
         - name: compression
           in: query
           schema:
             $ref: '#/components/schemas/compression'
+          example: identity
         - name: connect
           in: query
           schema:
             $ref: '#/components/schemas/connect'
+          example: v1
       responses:
         default:
           description: Error
@@ -3524,8 +6159,7 @@ paths:
                     impact: Live updates stop; reloading a page still shows current data.
                     lastCheckedAt: '2026-08-14T11:04:55Z'
                     latencyMs: '1004'
-      security:
-        - {}
+      security: []
     post:
       tags:
         - SystemService
@@ -3542,15 +6176,18 @@ paths:
           required: true
           schema:
             $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
         - name: Connect-Timeout-Ms
           in: header
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
       requestBody:
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/chronos.system.v1.GetStatusRequest'
+            example: {}
         required: true
       responses:
         default:
@@ -3599,8 +6236,7 @@ paths:
                     impact: Live updates stop; reloading a page still shows current data.
                     lastCheckedAt: '2026-08-14T11:04:55Z'
                     latencyMs: '1004'
-      security:
-        - {}
+      security: []
 tags:
   - name: IdentityService
     description: |-
@@ -3650,5 +6286,25 @@ tags:
        password-only session from touching credentials or sessions. A method added
        here without a `min_aal` is single-factor by default, and the enrolment
        carve-out is what makes that reachable in practice.
+  - name: NotificationService
+    description: |-
+      NotificationService is a person's own notification surface.
+
+       Every method here is SELF-SCOPED: the caller acts on their own feed, their own
+       devices and their own toggles, and the account is resolved from the session
+       rather than named in the request (CONVENTIONS §7, ADR-021). There is no
+       administrative method in this service and there must not be — a person's
+       notification settings are theirs, and an endpoint that let an administrator
+       change them would be an endpoint that lets an administrator silence someone.
+  - name: ProfileService
+    description: |-
+      ProfileService is a person's own presentation surface.
+
+       Every method here is SELF-SCOPED: the caller acts on their own profile, and
+       the account is resolved from the session rather than named in the request
+       (CONVENTIONS §7, ADR-021). There is no administrative method in this service
+       and there must not be — an endpoint that let an administrator set somebody
+       else's display name is an endpoint that lets them impersonate that person to
+       their own colleagues.
   - name: SystemService
     description: SystemService reports server and dependency state.

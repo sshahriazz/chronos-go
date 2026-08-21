@@ -22,7 +22,6 @@ import (
 	"github.com/chronos/chronos-go/internal/modules/identity/app"
 	"github.com/chronos/chronos-go/internal/modules/identity/domain"
 	"github.com/chronos/chronos-go/internal/platform/clientip"
-	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/config"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/platform/ratelimit"
@@ -155,6 +154,42 @@ var mailAddressRules = []ratelimit.Rule{
 var mailCallerRules = []ratelimit.Rule{
 	{Name: "hourly", Limit: 20, Window: time.Hour},
 	{Name: "daily", Limit: 100, Window: 24 * time.Hour},
+}
+
+// usernameCheckLimitPrefix namespaces the username-availability counter.
+//
+// Its OWN prefix, and not shared with the mail budgets. Sharing would let a
+// person picking a handle at the signup form spend the budget that stops a
+// stranger mail-bombing their mailbox, which is the one budget in this file whose
+// exhaustion has a victim other than the caller.
+const usernameCheckLimitPrefix = "username_check"
+
+// usernameCheckRules bound how many handles one caller may test.
+//
+// This is NOT an information control and must not be read as one. The endpoint
+// is an enumeration oracle by design (ADR-051): a handle is published, so
+// "@alice is taken" is readable from any mention, any profile URL and the person
+// themselves, and no ceiling here changes that. What it bounds is RESOURCE use —
+// each call reads one stream from KurrentDB, and an unmetered public endpoint
+// that does so is an amplification vector.
+//
+// The numbers are therefore set for a person choosing a handle rather than
+// against an adversary who has better ways to get the same answers:
+//
+//   - hourly, 60. A signup form that checks as the user types debounces to a few
+//     calls per candidate, and somebody trying twenty candidates is still well
+//     inside it.
+//   - daily, 600.
+//
+// Both are far above mailCallerRules, deliberately: this call sends no mail,
+// creates nothing and grants nothing, so refusing it early costs a real user
+// their signup and buys nothing back. It carries the same
+// API_TRUSTED_PROXY_HOPS deployment constraint mailCallerRules documents in
+// full — left at 0 behind a terminating proxy, every caller collapses into one
+// bucket and this becomes a global ceiling.
+var usernameCheckRules = []ratelimit.Rule{
+	{Name: "hourly", Limit: 60, Window: time.Hour},
+	{Name: "daily", Limit: 600, Window: 24 * time.Hour},
 }
 
 // startIdentity builds the identity module and the enforcement pipeline.
@@ -396,8 +431,14 @@ func (d *dependencies) buildIdentity(
 	if err != nil {
 		return nil, fmt.Errorf("verification-mail caller ceiling: %w", err)
 	}
+	usernameCheckLimiter, err := ratelimit.New(
+		counter, usernameCheckLimitPrefix, usernameCheckRules...)
+	if err != nil {
+		return nil, fmt.Errorf("username check ceiling: %w", err)
+	}
 	d.mailAddressLimiter = mailAddressLimiter
 	d.mailCallerLimiter = mailCallerLimiter
+	d.usernameCheckLimiter = usernameCheckLimiter
 
 	// ---- the caller-scope trust boundary ---------------------------------
 	//
@@ -432,7 +473,20 @@ func (d *dependencies) buildIdentity(
 	reservations := eventsourcing.NewRepository[*domain.EmailReservation](
 		d.store, d.codec, d.upcasters, app.ReservationCategory, domain.NewReservation)
 
-	clk := clock.System{}
+	// The public handle's reservation (ADR-051). A repository of its own because
+	// it is a different aggregate on a different category — and the category's key
+	// is the HANDLE in the clear rather than a keyed index, which is the one place
+	// this differs from the address's: hiding a value that is published by design
+	// would cost log readability and protect nothing.
+	usernameReservations := eventsourcing.NewRepository[*domain.UsernameReservation](
+		d.store, d.codec, d.upcasters, app.UsernameCategory, domain.NewUsernameReservation)
+
+	// The process clock, not a second one built here. It is clock.System{} in
+	// every deployment; in local it may be the movable clock (ADR-054), and
+	// identity is precisely the module that has to follow it — a TOTP step, a
+	// session deadline and a token expiry that disagreed with the rest of the
+	// process about what time it is would each be a different kind of bug.
+	clk := d.clock
 
 	// ---- use cases -------------------------------------------------------
 	// One minter for verification tokens. Held in a local rather than built inline
@@ -513,10 +567,15 @@ func (d *dependencies) buildIdentity(
 		Vault:        d.vault,
 		Credentials:  credentials,
 		Reservations: reservations,
-		Users:        users,
-		Appender:     d.store,
-		Tokens:       guards,
-		Digest:       token.Digest,
+		// The SAME loader the availability check reads through, so "is this handle
+		// free" is answered from one place. A second loader would be a second answer
+		// to a question that must have one, and the two would diverge exactly when
+		// one of them was changed.
+		Usernames: usernameReservations,
+		Users:     users,
+		Appender:  d.store,
+		Tokens:    guards,
+		Digest:    token.Digest,
 		// The verification token's minter. A function rather than the *Minter
 		// itself because adapter/token imports app, so app cannot name the
 		// adapter's return type — the same shape as Digest above and TotpEnroller
@@ -649,6 +708,53 @@ func (d *dependencies) buildIdentity(
 		return nil, fmt.Errorf("second factors: %w", err)
 	}
 
+	// The account lifecycle: the holder's own off switch, and the request to be
+	// erased.
+	//
+	// `Revocations` is the SAME *app.Authentication the password reset holds, and
+	// for the stronger version of the same reason. A reset revokes and then
+	// appends, in two writes, and that order fails safe because the revocation is
+	// its destructive half. A deactivation has no granting half, so it folds the
+	// revocation into its OWN append and needs the planning half of the same code
+	// — one answer to "what does revoking everything for this subject mean",
+	// reached two ways.
+	//
+	// `Subjects` is `readModel`, the reader that already answers "which account is
+	// this pseudonym" for verification and for the reset. A third reader would be
+	// a third answer to a question that must have one.
+	//
+	// GracePeriod is left at zero so the use case applies its own default, which
+	// is the 30-day statutory clock FEATURES.md names. It is a field rather than a
+	// constant in the use case so a deployment can shorten it; there is no
+	// environment variable yet because nothing consumes the request, and a knob
+	// that changes nothing observable is a knob that gets set wrong unnoticed.
+	lifecycle, err := app.NewLifecycle(app.LifecycleDeps{
+		Clock:       clk,
+		Subjects:    readModel,
+		Users:       users,
+		Appender:    d.store,
+		Schemas:     d.upcasters,
+		Revocations: authentication,
+		Log:         log,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("account lifecycle: %w", err)
+	}
+
+	// The public availability check. It holds a LOADER and a ceiling and nothing
+	// else — no appender, no token store, no vault — so the handler for it cannot
+	// create an account, spend a token or claim a handle. That narrowness is the
+	// point: it is the only public RPC in this service whose answer is deliberately
+	// distinguishable, so it must be the one that can do the least.
+	usernames, err := app.NewUsernames(app.UsernamesDeps{
+		Reservations:  usernameReservations,
+		CallerLimiter: usernameCheckLimiter,
+		Log:           log,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("username availability: %w", err)
+	}
+
 	queries, err := app.NewQueries(app.QueriesDeps{
 		Accounts: readModel,
 		Sessions: readModel,
@@ -667,8 +773,10 @@ func (d *dependencies) buildIdentity(
 		Registration:   registration,
 		Resender:       resend,
 		Resets:         passwordResets,
+		Usernames:      usernames,
 		Authentication: authentication,
 		SecondFactor:   secondFactor,
+		Lifecycle:      lifecycle,
 		Queries:        queries,
 		Directory:      readModel,
 		CallerScope:    callerScope,

@@ -13,21 +13,24 @@ var verbs = map[string]bool{
 	"get": true, "post": true, "put": true, "patch": true, "delete": true,
 }
 
-// intentionallyUnreferenced names the one schema published on purpose with
-// nothing pointing at it.
+// intentionallyUnreferenced names schemas published on purpose with nothing
+// pointing at them. It is EMPTY, and the empty map is the interesting part.
 //
-// chronos.errors.v1.ErrorDetail is injected by internal/tools/gendocs as the
-// generator's `override=` input, and it reaches a client inside
-// `connect.error.details`, whose items are google.protobuf.Any. OpenAPI cannot
-// express "an Any that is really this message", so there is no $ref to find and
-// the generator's own trimming would drop it. Published deliberately,
-// unreachable unavoidably.
+// It used to hold chronos.errors.v1.ErrorDetail. That schema is injected by
+// internal/tools/gendocs, and it reaches a client inside `connect.error.details`
+// — whose item schema the generator synthesised from the Connect protocol as a
+// free-form object, because the protocol cannot know what a given server puts
+// there. So the document's most important type was published with no `$ref`
+// anywhere, and this exemption is what let that pass.
+//
+// It no longer needs to. gendocs now overrides `connect.error_details.Any` too,
+// naming ErrorDetail as the decoded `debug` payload — which is simply true: every
+// error this server raises is built in one function, and it attaches exactly that
+// one detail type. The reference exists, so the exemption does not.
 //
 // The exemption is checked in both directions: a name listed here that is not
 // published at all is a stale exemption, and a stale exemption is a hole.
-var intentionallyUnreferenced = map[string]bool{
-	"chronos.errors.v1.ErrorDetail": true,
-}
+var intentionallyUnreferenced = map[string]bool{}
 
 // reporter accumulates problems while narrating what it checked.
 //
@@ -72,7 +75,7 @@ func (r *reporter) paint(code, s string) string {
 //
 // spec is the decoded document; declared is every RPC the .proto sources declare
 // mapped to its `(chronos.options.v1.public)` option.
-func validate(r *reporter, spec map[string]any, declared map[string]bool) {
+func validate(r *reporter, spec map[string]any, declared map[string]rpc) {
 	_, _ = fmt.Fprint(r.out, "openapi spec validation\n\n")
 
 	r.check(strings.HasPrefix(str(spec["openapi"]), "3."), "declares OpenAPI 3.x")
@@ -100,10 +103,12 @@ func validate(r *reporter, spec map[string]any, declared map[string]bool) {
 	r.check(len(seen) == ops, fmt.Sprintf("every operationId is unique (%d of %d)", len(seen), ops))
 
 	checkSecurityAgreement(r, paths, declared, ops)
+	checkIdempotencyAgreement(r, paths, declared)
 
 	refs := collectRefs(spec)
 	checkRefsResolve(r, spec, refs)
-	checkSchemaReachability(r, components, refs)
+	checkSchemaReachability(r, components, refs, intentionallyUnreferenced)
+	checkBounds(r, spec)
 }
 
 // checkOperations walks every operation once, enforcing the three properties a
@@ -155,7 +160,7 @@ func checkOperations(r *reporter, paths map[string]any) (ops int, seen map[strin
 // hand-written the two had already diverged: ResendEmailVerification is
 // `public = true` and was published as requiring a bearer token. That is a
 // documented lie about an authentication boundary.
-func checkSecurityAgreement(r *reporter, paths map[string]any, declared map[string]bool, ops int) {
+func checkSecurityAgreement(r *reporter, paths map[string]any, declared map[string]rpc, ops int) {
 	r.check(len(declared) > 0,
 		fmt.Sprintf("the .proto descriptors were read (%d RPCs found)", len(declared)))
 
@@ -170,7 +175,7 @@ func checkSecurityAgreement(r *reporter, paths map[string]any, declared map[stri
 			sec := op["security"]
 			where := strings.ToUpper(verb) + " " + path
 
-			if declared[path] {
+			if declared[path].public {
 				// An empty requirement overrides the document default. `[]`
 				// cannot be produced from a proto annotation (an empty repeated
 				// field is indistinguishable from an unset one), so `[{}]` —
@@ -192,8 +197,8 @@ func checkSecurityAgreement(r *reporter, paths map[string]any, declared map[stri
 		"published security matches (chronos.options.v1.public) on all %d operations", ops))
 
 	var missing []string
-	for route, public := range declared {
-		if public && paths[route] == nil {
+	for route, meta := range declared {
+		if meta.public && paths[route] == nil {
 			missing = append(missing, route)
 		}
 	}
@@ -208,11 +213,121 @@ func checkSecurityAgreement(r *reporter, paths map[string]any, declared map[stri
 	}
 }
 
-// isOpenRequirement reports whether v is `[{}]`: one requirement satisfiable by
-// nothing, which is how "this operation needs no credentials" is spelled once a
-// document-level default exists.
+// checkIdempotencyAgreement compares the published document against the header
+// the server actually demands.
+//
+// internal/server/interceptor/idempotency refuses EVERY mutating request that
+// arrives without an `Idempotency-Key`, and it decides which requests those are
+// from `(chronos.options.v1.operation)` — the same option this check reads. So
+// the header is not advice: an operation the document does not mention it on is
+// an operation whose every first call fails, and the client author has nothing
+// in the published contract to tell them why.
+//
+// It was already wrong when this check was written. IdentityService declared the
+// parameter on all seven of its mutations; NotificationService and ProfileService
+// declared it on none of theirs, so six published operations documented a call
+// the server refuses. That is the same class of defect as the security drift
+// above — the document and the interceptor disagreeing about a request's
+// requirements — and it is caught the same way.
+// The rule is UNCONDITIONAL, and the earlier version of this check asserted the
+// opposite. It carved out public methods on the reasoning that a public method
+// "returns from internal/server/interceptor/gates before idempotency is reached
+// — there is no principal to scope a key to". The FIRST half of that is exactly
+// right: gates.go really does return at `if p.Public { return next(ctx, req) }`
+// before Idempotency.Do, so the interceptor never enforces the header on a
+// public method.
+//
+// The conclusion drawn from it is what was wrong. Enforcement moves rather than
+// disappearing: identity/api/service.go's idempotencyKey() reads the same header
+// and refuses with the same message, so the requirement survives the bypass.
+// What the check compared the document against was one enforcement point, not
+// the behaviour, and the document has to describe the behaviour.
+//
+// So the carve-out inverted the gate for the seven public mutations — Register,
+// VerifyEmail, ResendEmailVerification, RequestPasswordReset, ResetPassword,
+// Authenticate and CreateSession. Those are sign-up and sign-in: every one of
+// them refuses a request without the header, and the document was not merely
+// silent about it but was defended by a check that would REJECT the correction.
+// A client generated from the published spec could not register or authenticate
+// anyone.
+//
+// Verified against the running server, not inferred:
+//
+//	POST /chronos.identity.v1.IdentityService/Register  (no header)
+//	  400 "Idempotency-Key is required on every mutating request"
+//	POST /chronos.identity.v1.IdentityService/Register  (with header)
+//	  200 {}
+func checkIdempotencyAgreement(r *reporter, paths map[string]any, declared map[string]rpc) {
+	var mismatched []string
+	checked := 0
+	for _, path := range sortedKeys(paths) {
+		meta, known := declared[path]
+		if !known || !meta.mutating {
+			continue
+		}
+		item := mapOf(paths[path])
+		for _, verb := range sortedKeys(item) {
+			if !verbs[verb] {
+				continue
+			}
+			checked++
+			where := strings.ToUpper(verb) + " " + path
+			has := declaresHeader(mapOf(item[verb]), idempotencyHeader)
+
+			if !has {
+				mismatched = append(mismatched, fmt.Sprintf(
+					"%s: is a mutation, which the idempotency interceptor refuses without an "+
+						"%s, but the document declares no such parameter",
+					where, idempotencyHeader))
+			}
+		}
+	}
+	r.problems = append(r.problems, mismatched...)
+	r.check(len(mismatched) == 0, fmt.Sprintf(
+		"every mutating operation agrees with the idempotency gate about %s (%d checked)",
+		idempotencyHeader, checked))
+}
+
+// idempotencyHeader is interceptor.IdempotencyHeader, restated for mutatingClass's
+// reason: a build-time documentation tool does not import the running server.
+const idempotencyHeader = "Idempotency-Key"
+
+func declaresHeader(op map[string]any, name string) bool {
+	for _, p := range sliceOf(op["parameters"]) {
+		param := mapOf(p)
+		if strings.EqualFold(str(param["name"]), name) && str(param["in"]) == "header" {
+			return true
+		}
+	}
+	return false
+}
+
+// isOpenRequirement reports whether v says "this operation needs no
+// credentials", in either of the two forms that say it.
+//
+// `[]` is the specification's own spelling — an empty array removes the
+// document-level default — and is what the published document carries, because
+// internal/tools/fixopenapi rewrites the other form into it.
+//
+// `[{}]` is what a .proto can produce, and is therefore what arrives here before
+// the fixer runs: `security` is a repeated field on the gnostic annotation, and
+// an empty repeated field is indistinguishable from an unset one, so writing
+// `security: []` in a .proto means "say nothing" — which leaves `bearerAuth` in
+// force and publishes a public endpoint as authenticated. One requirement
+// satisfiable by nothing is the only thing the annotation can express.
+//
+// Both are accepted because this rule is about WHICH operations are open, not
+// about which spelling reached it. Accepting only the canonical form would make
+// the gate depend on the fixer having run, and a gate that passes only after
+// another tool has been run is a gate that reports on that tool.
 func isOpenRequirement(v any) bool {
-	list := sliceOf(v)
+	list, isList := v.([]any)
+	if !isList {
+		return false
+	}
+	if len(list) == 0 {
+		return true
+	}
 	if len(list) != 1 {
 		return false
 	}
@@ -274,7 +389,7 @@ func resolves(spec map[string]any, ref string) bool {
 // telling a reader where `security` comes from. Meanwhile it would have said
 // nothing about an unused type from any other package. So the property is stated
 // directly instead.
-func checkSchemaReachability(r *reporter, components map[string]any, refs []string) {
+func checkSchemaReachability(r *reporter, components map[string]any, refs []string, exempt map[string]bool) {
 	schemas := mapOf(components["schemas"])
 
 	referenced := map[string]bool{}
@@ -286,7 +401,7 @@ func checkSchemaReachability(r *reporter, components map[string]any, refs []stri
 
 	var orphans []string
 	for _, name := range sortedKeys(schemas) {
-		if intentionallyUnreferenced[name] {
+		if exempt[name] {
 			continue
 		}
 		if !referenced[pointerEscape(name)] {
@@ -295,7 +410,7 @@ func checkSchemaReachability(r *reporter, components map[string]any, refs []stri
 	}
 
 	// The exemption must not outlive the thing it exempts.
-	for name := range intentionallyUnreferenced {
+	for name := range exempt {
 		if _, ok := schemas[name]; !ok {
 			r.note("%s is exempted from the reachability check but is not published at all "+
 				"— drop the exemption", name)

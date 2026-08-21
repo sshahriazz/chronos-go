@@ -131,19 +131,84 @@ func writeOpenAPIErrors() {
 	}
 	b.WriteString("          examples:\n            - ACCESS_DENIED\n")
 	b.WriteString("        metadata:\n          type: object\n")
+	// Bounded, like every other value in the published document (see
+	// internal/tools/checkopenapi/bounds.go). A metadata value is a short label —
+	// a field name, a limit, a plan — and the ceiling says so; the pattern says it
+	// is one line, which is what "never SQL, never driver text" means in a keyword
+	// rather than in prose.
 	b.WriteString("          additionalProperties:\n            type: string\n")
+	b.WriteString("            maxLength: 1024\n")
+	// Single-quoted in YAML deliberately: a double-quoted scalar processes `\r`
+	// and `\n` as escapes, which would put a real carriage return inside the
+	// regex instead of the two-character escape the regex needs.
+	b.WriteString("            pattern: '^[^\\r\\n]*$'\n")
+	b.WriteString("          maxProperties: 32\n")
 	b.WriteString("          description: |\n")
 	b.WriteString("            Client-safe structured detail: the limit that was exceeded, the\n")
 	b.WriteString("            field that failed validation, the plan that would satisfy the\n")
 	b.WriteString("            request. Never personal data, never SQL, never driver text.\n")
 	b.WriteString("          examples:\n            - {field: email}\n")
 	b.WriteString("        traceId:\n          type: string\n")
+	// A W3C Trace Context trace id: 32 lowercase hex characters. The empty
+	// alternative is the case where the request carried no trace — the field is
+	// present and blank rather than absent, because this document publishes
+	// default values (see info.description).
+	b.WriteString("          maxLength: 32\n")
+	b.WriteString("          pattern: '^$|^[0-9a-f]{32}$'\n")
 	b.WriteString("          description: |\n")
 	b.WriteString("            Correlation id for this request. The server-side cause is NOT in\n")
 	b.WriteString("            this message; an operator finds it by searching traces for this\n")
 	b.WriteString("            id, so a user can paste it into a support ticket and lose nothing.\n")
 	b.WriteString("          examples:\n            - 4bf92f3577b34da6a3ce929d0e0e4736\n")
 	b.WriteString("      required:\n        - reason\n")
+
+	// The envelope, overridden by key so the generated one is replaced.
+	//
+	// protoc-gen-connect-openapi synthesises `connect.error_details.Any` from the
+	// PROTOCOL, which cannot know what this server puts inside it, so it published
+	// the only thing it could: a `oneOf` holding one free-form object, with a
+	// `discriminator: {propertyName: type}` whose target declares no `type`
+	// property. That is an invalid discriminator, and it described a payload no
+	// client could decode.
+	//
+	// This server attaches exactly ONE detail type, and it does so at exactly one
+	// place — internal/server/connect/errors.go builds every wire error, and every
+	// error in this system passes through it. So the envelope's contents are known
+	// here, and naming them turns `debug` from "some object" into the message a
+	// client is about to branch on.
+	//
+	// Written in the hoisted `allOf` form the fixer would produce anyway, so the
+	// two agree and `make api-docs` stays idempotent.
+	b.WriteString("    connect.error_details.Any:\n")
+	b.WriteString("      type: object\n")
+	b.WriteString("      title: Error detail envelope\n")
+	b.WriteString("      description: |\n")
+	b.WriteString("        One entry of a Connect error's `details` array.\n\n")
+	b.WriteString("        This server attaches exactly one detail type — the `ErrorDetail` below —\n")
+	b.WriteString("        and attaches it to every error it raises, so `debug` is the decoded form\n")
+	b.WriteString("        of `value` rather than an arbitrary message. Read `debug.reason`.\n")
+	b.WriteString("      properties:\n")
+	b.WriteString("        type:\n          type: string\n")
+	b.WriteString("          maxLength: 512\n")
+	b.WriteString("          pattern: '^[A-Za-z0-9.-]+/[A-Za-z0-9_.]+$'\n")
+	b.WriteString("          examples:\n            - type.googleapis.com/chronos.errors.v1.ErrorDetail\n")
+	b.WriteString("          description: |\n")
+	b.WriteString("            The detail's type URL. Today it is always\n")
+	b.WriteString("            `type.googleapis.com/chronos.errors.v1.ErrorDetail`; it is published as\n")
+	b.WriteString("            a pattern rather than a constant so that adding a second detail type\n")
+	b.WriteString("            is not a breaking change to this document.\n")
+	b.WriteString("        value:\n          type: string\n")
+	b.WriteString("          contentEncoding: base64\n")
+	b.WriteString("          maxLength: 65536\n")
+	b.WriteString("          pattern: '^[A-Za-z0-9+/]*={0,2}$'\n")
+	b.WriteString("          description: |\n")
+	b.WriteString("            The detail, protobuf-serialized and base64-encoded. A client that reads\n")
+	b.WriteString("            `debug` never needs this.\n")
+	b.WriteString("        debug:\n")
+	b.WriteString("          allOf:\n            - $ref: '#/components/schemas/chronos.errors.v1.ErrorDetail'\n")
+	b.WriteString("          title: Debug\n")
+	b.WriteString("          description: |\n")
+	b.WriteString("            The decoded detail. Branch on its `reason`.\n")
 
 	const out = "docs/api/openapi.errors.yaml"
 	// #nosec G306 -- generated documentation is intended to be world-readable

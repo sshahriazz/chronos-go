@@ -324,6 +324,59 @@ func TestAccountSafetyAlertsCannotBeSwitchedOff(t *testing.T) {
 				"goes to the person whose account it is", event, spec.Audience)
 		}
 	}
+
+	// The list above answers "did somebody delete this alert?". It cannot answer
+	// "did somebody downgrade an alert that is not on the list?", because a
+	// hand-maintained list only covers what was on it the day it was written.
+	//
+	// That gap was real and was found by mutation: reclassifying
+	// UserDeletionRequested from Security to Transactional left the entire
+	// repository green, because that event is marked Sec ★ in NOTIFICATIONS §4
+	// and was never added here. Transactional respects the recipient's
+	// preferences, so the downgrade would have handed an attacker who reached a
+	// session the ability to schedule an erasure AND suppress the only message
+	// that reports it.
+	//
+	// So the sweep below inverts the question. Every identity entry in the
+	// catalogue must be Security to the subject unless it is named as an
+	// exception — which makes the DEFAULT for a new identity alert the
+	// unsuppressible one, and makes a downgrade an edit somebody has to justify
+	// in this table rather than a one-word change in cmd/worker/events.go.
+	transactionalByDesign := map[string]string{
+		// NOTIFICATIONS §5 marks the welcome Txn ★, not Sec ★: it is the message
+		// the person's own verification asked for, it reports no change to the
+		// account's security posture, and there is nothing in it an attacker
+		// would want silenced.
+		"identity.EmailVerified.v1": "the welcome message; NOTIFICATIONS §5 marks it Txn ★",
+	}
+
+	for _, event := range cat.Events() {
+		if !strings.HasPrefix(event, "identity.") {
+			continue
+		}
+		spec, ok := cat.For(event)
+		if !ok {
+			continue
+		}
+		if _, exempt := transactionalByDesign[event]; exempt {
+			if spec.Class == notify.Security {
+				t.Errorf("%s is named in transactionalByDesign but is class Security; "+
+					"remove it from that table rather than leaving a stale exemption "+
+					"that would hide a future downgrade", event)
+			}
+			continue
+		}
+		if spec.Class != notify.Security {
+			t.Errorf("%s notifies as class %s. Every identity notification is a security "+
+				"alert unless transactionalByDesign says why not, because %s respects the "+
+				"recipient's preferences — so this one can be switched off by whoever "+
+				"reached the account", event, spec.Class, spec.Class)
+		}
+		if spec.Audience != notify.AudienceSubject {
+			t.Errorf("%s notifies the %s audience; an identity alert concerns one "+
+				"account and goes to the person whose account it is", event, spec.Audience)
+		}
+	}
 }
 
 func silenceNote(reason string, silent bool) string {

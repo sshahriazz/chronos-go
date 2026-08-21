@@ -140,6 +140,13 @@ api-docs: ## Generate the REST/OpenAPI reference and the error catalogue
 	@# reason enum the previous build left behind.
 	@go run ./internal/tools/gendocs
 	@buf generate --template buf.gen.openapi.yaml
+	@# fixopenapi LAST, and never by hand: it writes the properties protobuf
+	@# cannot express — additionalProperties, $$ref annotations hoisted into allOf,
+	@# the Connect protocol's own parameters, and the request-body examples it
+	@# assembles from the field examples the .proto already declares. It is
+	@# forbidden from inventing a bound on a chronos.* field, which is what keeps
+	@# `make api-validate` measuring the schema rather than measuring this step.
+	@go run ./internal/tools/fixopenapi
 	@echo "  wrote docs/api/chronos-openapi.yaml"
 	@$(MAKE) --no-print-directory docs-assets
 
@@ -355,8 +362,12 @@ test-integration: ## Integration tests against the running stack (make up first)
 	@#
 	@# Guarded on the file existing so this still runs in an environment that
 	@# supplies the variables some other way (CI does).
+	@#
+	@# -timeout 20m matches CI. The identity suite alone is ~240s and growing, and
+	@# go test's 10-minute default kills the binary with a bare "signal: terminated"
+	@# and no failing test name, which reads as a crash rather than a timeout.
 	@set -a; [ -f .env ] && . ./.env; set +a; \
-	go test -tags=integration ./... -count=1
+	go test -tags=integration ./... -count=1 -timeout 20m
 
 .PHONY: cover
 cover: ## Test with coverage summary

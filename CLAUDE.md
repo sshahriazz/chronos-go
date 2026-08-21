@@ -50,6 +50,17 @@ category, so a service, RPC, message or field without a doc comment **fails the
 build**. `buf breaking` runs in `make check`. The OpenAPI spec and the error
 catalogue are generated from the same sources the server uses, and a test fails
 if an `errs.Reason` is declared without a catalogue entry.
+
+**Every value on the wire is bounded, and `make check` fails if one is not.**
+Every string carries `maxLength` and `pattern`, every array `maxItems`, every
+number a floor and a ceiling — declared in the `.proto` and enforced by
+protovalidate, so the published bound and the refused request are one number.
+Where a rule would be an oracle, would be stricter than the handler, or would
+contradict a documented clamp, the bound is published as a
+`(gnostic.openapi.v3.property)` annotation instead — documented, not enforced.
+`internal/tools/checkopenapi` also compares published `security` against
+`(chronos.options.v1.public)` and published `Idempotency-Key` against
+`(chronos.options.v1.operation)`. Read **CONVENTIONS §7.2 before adding an RPC.**
 | Go | 1.27.x (installed: 1.27.0) | |
 | Key custody | OpenBao transit (ADR-028) | cloud KMS, app-held KEK |
 | Event evolution | upcast on read (ADR-029) | rewriting stored events |
@@ -137,6 +148,7 @@ directly when a flag is wanted:
 
 ```bash
 go run ./internal/tools/gendocs                 # docs/api/errors.md + the OpenAPI error fragment
+go run ./internal/tools/fixopenapi              # -spec <file>; runs after buf generate, never by hand
 go run ./internal/tools/gendashboards           # -out <dir>
 go run ./internal/tools/checkopenapi            # -spec <file> -proto <dir>
 go run ./internal/tools/checkdashboards         # -dashboards <dir> -prometheus <url>

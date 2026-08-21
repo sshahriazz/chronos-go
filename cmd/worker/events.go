@@ -1,10 +1,14 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
 	"github.com/chronos/chronos-go/internal/modules/identity"
 	identityevents "github.com/chronos/chronos-go/internal/modules/identity/contract"
 	"github.com/chronos/chronos-go/internal/modules/notification/contract"
+	"github.com/chronos/chronos-go/internal/modules/profile"
+	profilecontract "github.com/chronos/chronos-go/internal/modules/profile/contract"
 	"github.com/chronos/chronos-go/internal/platform/notify"
 )
 
@@ -35,6 +39,7 @@ func registerEvents(codec *eventcodec.JSON) {
 	eventcodec.Register[contract.PushSubscribed](codec)
 	eventcodec.Register[contract.PushSubscriptionExpired](codec)
 	eventcodec.Register[contract.PushSent](codec)
+	eventcodec.Register[contract.ChannelPreferenceSet](codec)
 
 	// Identity registers its own types from the module's composition surface,
 	// exactly as cmd/projector does. Listing them here instead would be a
@@ -42,6 +47,7 @@ func registerEvents(codec *eventcodec.JSON) {
 	// cannot decode the event, so the notification is never sent, no error is
 	// raised and no metric moves.
 	identity.RegisterEvents(codec)
+	profile.RegisterEvents(codec)
 }
 
 // notifications declares what each event sends, and to whom.
@@ -83,6 +89,97 @@ func notifications() *notify.Catalogue {
 // and the qualified event is declared silent pointing at it.
 func identityNotifications(cat *notify.Catalogue) {
 	// ---------------------------------------------------------------------
+	// Somebody tried to register with an address this account already holds.
+	//
+	// SECURITY class. It is the only signal the address's owner ever gets that
+	// somebody is trying to create an account with it — the wire answer to the
+	// person attempting it is deliberately empty (identity.md §11), so this mail
+	// is the entire disclosure, and it goes to the mailbox because controlling
+	// the mailbox is what proves the right to know.
+	//
+	// It is also the returning user's way out of a dead end: before this existed
+	// the screen said "check your email" and no mail was ever sent, which is the
+	// branch a returning user hits most often.
+	//
+	// Only a VERIFIED claim produces it (see the event's own doc): mailing an
+	// address whose claim nobody has proven is unsolicited mail to somebody who
+	// never asked for it and never showed they can read it.
+	cat.On[identityevents.DuplicateRegistrationAttempted](notify.Spec{
+		Template: "identity.duplicate_registration_attempted",
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, func(e *identityevents.DuplicateRegistrationAttempted) map[string]any {
+		// AttemptedAt and nothing else. The index is a keyed HMAC and the
+		// attempting party is unauthenticated and unnamed — there is nothing
+		// truthful to say about who tried, and inventing a hint would be worse
+		// than silence.
+		return map[string]any{"AttemptedAt": e.AttemptedAt}
+	})
+
+	// Profile — display name, locale, timezone, avatar (ADR-056)
+	// ---------------------------------------------------------------------
+
+	// SECURITY, not Activity, and the class is the whole decision.
+	//
+	// A display name and a picture are how colleagues recognise a person — in a
+	// mention, in an invitation, in a member list. Somebody holding a stolen
+	// session who changes them is impersonating the holder to everyone they work
+	// with, and the holder is the only person who can notice. Security class is
+	// what makes this alert unsuppressable by any preference (see
+	// domain.AlwaysDeliveredClasses); as Activity it could be switched off, and an
+	// attacker's first move would be to switch it off.
+	//
+	// The data names FIELDS, never values. A value here is personal data leaving
+	// the vault and entering a template, which is the one thing ADR-002 forbids
+	// this path from doing.
+	cat.On[profilecontract.ProfileUpdated](notify.Spec{
+		Template: "profile.profile_updated",
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, func(e *profilecontract.ProfileUpdated) map[string]any {
+		var changed []string
+		if e.DisplayName != nil {
+			changed = append(changed, "display name")
+		}
+		if e.Locale != nil {
+			changed = append(changed, "language")
+		}
+		if e.Timezone != nil {
+			changed = append(changed, "timezone")
+		}
+		if e.Avatar != nil {
+			if e.Avatar.Change == profilecontract.Cleared {
+				changed = append(changed, "picture removed")
+			} else {
+				changed = append(changed, "picture")
+			}
+		}
+		return map[string]any{"Fields": strings.Join(changed, ", ")}
+	})
+
+	// Username reservation — the public handle (ADR-051)
+	// ---------------------------------------------------------------------
+	//
+	// All three are Silent for the same reason the email-reservation trio below
+	// is: they are the uniqueness mechanism, not facts a person acts on.
+
+	cat.Silent[identityevents.UsernameReserved](
+		"the uniqueness mechanism for the public handle (ADR-051), the same role " +
+			"EmailReserved plays for an address. The account-side fact is " +
+			"UsernameAssigned, and at signup that rides the same append as " +
+			"EmailVerified, which is the entry that mails the person")
+	cat.Silent[identityevents.UsernameAssigned](
+		"claimed in the same request as the proof and the first password (ADR-051), so " +
+			"it rides the append that EmailVerified already mails about. Telling somebody " +
+			"the handle they just chose is circular. A LATER change of handle is a " +
+			"different fact — an impersonation risk worth alerting on — and there is no " +
+			"command that performs one yet; this becomes an On the day there is")
+	cat.Silent[identityevents.UsernameTombstoned](
+		"records that a handle may never be reissued, which is what stops an erased " +
+			"person's mentions re-pointing at a stranger (ADR-051). Its cause is erasure, " +
+			"so the subject it concerns has deliberately been made unreachable — there is " +
+			"nobody left to notify, and the key that would resolve an address is destroyed")
+
 	// Email reservation — internal to identity (ADR-044)
 	// ---------------------------------------------------------------------
 
@@ -131,6 +228,28 @@ func identityNotifications(cat *notify.Catalogue) {
 			"address was proven (EmailVerified) and a second factor was enrolled " +
 			"(TotpEnabled). A third message repeating both is noise, and noise in a " +
 			"security stream is what trains people to ignore the message that matters")
+
+	// The ONLY signal that somebody scheduled this account for erasure.
+	//
+	// Notified rather than Silent because the request needs no session state the
+	// holder can see: the account keeps working through the grace period, so
+	// nothing in the product tells them. A compromised session could otherwise
+	// queue a deletion and the owner would first learn when the account was gone.
+	//
+	// The template deliberately offers NO cancel link. NOTIFICATIONS §4 describes
+	// one ("Deletion scheduled for date — cancel"), and nothing implements it:
+	// there is no cancel command and no UserDeletionCancelled event (identity.md
+	// §1.1). A link to a route that does not exist is worse than no link, so the
+	// message names the two things that DO work and take effect immediately —
+	// revoking every session and changing the password — and sends them to
+	// support for the deletion itself.
+	cat.On[identityevents.UserDeletionRequested](notify.Spec{
+		Template: "identity.account_deletion_requested",
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, func(e *identityevents.UserDeletionRequested) map[string]any {
+		return map[string]any{"ByAnotherParty": actedOnBehalf(e.ActorID, e.SubjectID)}
+	})
 
 	cat.On[identityevents.UserDeactivated](notify.Spec{
 		Template: "identity.account_deactivated",
@@ -366,6 +485,15 @@ func notificationModuleNotifications(cat *notify.Catalogue) {
 	cat.Silent[contract.PushSubscribed]("the person just granted permission in the browser; they know")
 	cat.Silent[contract.PushSubscriptionExpired]("a dead endpoint is an operational fact, surfaced in-app if it matters")
 	cat.Silent[contract.PushSent]("operational record of push delivery")
+	cat.Silent[contract.ChannelPreferenceSet](
+		"the person just changed their own notification settings, so telling them so is " +
+			"circular — the same reason PushSubscribed is silent. This is safe ONLY because " +
+			"the preference surface cannot switch off a Security-class alert: that boundary " +
+			"is enforced in app.Preferences and guarded from the other side by " +
+			"TestAccountSafetyAlertsCannotBeSwitchedOff. If either is ever relaxed, an " +
+			"attacker holding a session could silence the alerts and then act quietly, and " +
+			"this entry becomes the last thing standing between them and a silent takeover — " +
+			"at which point it must become an On")
 }
 
 // lowRecoveryCodes is when "you are running low" starts appearing in the mail

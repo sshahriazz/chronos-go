@@ -20,6 +20,13 @@ const (
 const (
 	publicRoute    = "/chronos.identity.v1.IdentityService/ResendEmailVerification"
 	protectedRoute = "/chronos.identity.v1.IdentityService/ListSessions"
+
+	// An authenticated mutation, which must publish an Idempotency-Key, and a
+	// PUBLIC mutation, which must not: the gate pipeline returns before the
+	// idempotency interceptor for a public method. Both properties are asserted
+	// in TestTheIdempotencyFixturesStillHoldTheirProperties.
+	mutatingRoute       = "/chronos.identity.v1.IdentityService/RevokeSession"
+	publicMutatingRoute = "/chronos.identity.v1.IdentityService/Register"
 )
 
 func loadSpec(t *testing.T) map[string]any {
@@ -60,27 +67,27 @@ func TestValidateRejects(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		corrupt func(spec map[string]any, declared map[string]bool)
+		corrupt func(spec map[string]any, declared map[string]rpc)
 		want    string
 	}{
 		{
 			// The regression this whole tool exists to catch.
 			name: "paths is empty",
-			corrupt: func(spec map[string]any, _ map[string]bool) {
+			corrupt: func(spec map[string]any, _ map[string]rpc) {
 				spec["paths"] = map[string]any{}
 			},
 			want: "paths is NOT empty (0 documented)",
 		},
 		{
 			name: "paths is absent entirely",
-			corrupt: func(spec map[string]any, _ map[string]bool) {
+			corrupt: func(spec map[string]any, _ map[string]rpc) {
 				delete(spec, "paths")
 			},
 			want: "paths is NOT empty (0 documented)",
 		},
 		{
 			name: "two operations share one operationId",
-			corrupt: func(spec map[string]any, _ map[string]bool) {
+			corrupt: func(spec map[string]any, _ map[string]rpc) {
 				ids := allOperations(spec)
 				op(ids[0]).(map[string]any)["operationId"] =
 					op(ids[1]).(map[string]any)["operationId"]
@@ -89,21 +96,21 @@ func TestValidateRejects(t *testing.T) {
 		},
 		{
 			name: "an operation has no operationId",
-			corrupt: func(spec map[string]any, _ map[string]bool) {
+			corrupt: func(spec map[string]any, _ map[string]rpc) {
 				delete(op(allOperations(spec)[0]).(map[string]any), "operationId")
 			},
 			want: "no operationId (generated clients need it)",
 		},
 		{
 			name: "an operation documents no responses",
-			corrupt: func(spec map[string]any, _ map[string]bool) {
+			corrupt: func(spec map[string]any, _ map[string]rpc) {
 				delete(op(allOperations(spec)[0]).(map[string]any), "responses")
 			},
 			want: "no responses documented",
 		},
 		{
 			name: "an operation has neither summary nor description",
-			corrupt: func(spec map[string]any, _ map[string]bool) {
+			corrupt: func(spec map[string]any, _ map[string]rpc) {
 				o := op(allOperations(spec)[0]).(map[string]any)
 				delete(o, "summary")
 				delete(o, "description")
@@ -114,7 +121,7 @@ func TestValidateRejects(t *testing.T) {
 			// The real bug this cross-check was written for: an RPC declared
 			// public in the proto, published as requiring a bearer token.
 			name: "a public RPC is published as requiring a bearer token",
-			corrupt: func(spec map[string]any, _ map[string]bool) {
+			corrupt: func(spec map[string]any, _ map[string]rpc) {
 				post(spec, publicRoute)["security"] = []any{
 					map[string]any{"bearerAuth": []any{}},
 				}
@@ -123,7 +130,7 @@ func TestValidateRejects(t *testing.T) {
 		},
 		{
 			name: "a public RPC publishes no security override at all",
-			corrupt: func(spec map[string]any, _ map[string]bool) {
+			corrupt: func(spec map[string]any, _ map[string]rpc) {
 				delete(post(spec, publicRoute), "security")
 			},
 			want: "declares public = true but publishes security",
@@ -132,21 +139,21 @@ func TestValidateRejects(t *testing.T) {
 			// The other direction, which is the quieter one: an authenticated
 			// RPC documented as needing nothing.
 			name: "a protected RPC is published as open",
-			corrupt: func(spec map[string]any, _ map[string]bool) {
+			corrupt: func(spec map[string]any, _ map[string]rpc) {
 				post(spec, protectedRoute)["security"] = []any{map[string]any{}}
 			},
 			want: "is NOT public but overrides the document security default",
 		},
 		{
 			name: "a public RPC is missing from the document",
-			corrupt: func(spec map[string]any, _ map[string]bool) {
+			corrupt: func(spec map[string]any, _ map[string]rpc) {
 				delete(mapOf(spec["paths"]), publicRoute)
 			},
 			want: "public RPC is absent from the document",
 		},
 		{
 			name: "a $ref points at nothing",
-			corrupt: func(spec map[string]any, _ map[string]bool) {
+			corrupt: func(spec map[string]any, _ map[string]rpc) {
 				op(allOperations(spec)[0]).(map[string]any)["requestBody"] =
 					map[string]any{"$ref": "#/components/schemas/NoSuchSchema"}
 			},
@@ -154,25 +161,27 @@ func TestValidateRejects(t *testing.T) {
 		},
 		{
 			name: "a published schema is reachable from nothing",
-			corrupt: func(spec map[string]any, _ map[string]bool) {
+			corrupt: func(spec map[string]any, _ map[string]rpc) {
 				schemas := mapOf(mapOf(spec["components"])["schemas"])
 				schemas["chronos.options.v1.Authz"] = map[string]any{"type": "object"}
 			},
 			want: "published but referenced by nothing",
 		},
 		{
-			// The exemption must not outlive the thing it exempts, or it becomes
-			// a permanent hole in the reachability rule.
-			name: "the exempted schema is no longer published",
-			corrupt: func(spec map[string]any, _ map[string]bool) {
-				delete(mapOf(mapOf(spec["components"])["schemas"]),
-					"chronos.errors.v1.ErrorDetail")
+			// The type every client branches on. It reaches them inside
+			// `connect.error_details.Any.debug`, which gendocs overrides
+			// precisely so that reference exists — before that it was published
+			// with nothing pointing at it and an exemption hiding the fact.
+			name: "the error detail loses the only reference to it",
+			corrupt: func(spec map[string]any, _ map[string]rpc) {
+				any := mapOf(mapOf(mapOf(spec["components"])["schemas"])["connect.error_details.Any"])
+				delete(mapOf(any["properties"]), "debug")
 			},
-			want: "drop the exemption",
+			want: "chronos.errors.v1.ErrorDetail: published but referenced by nothing",
 		},
 		{
 			name: "no RPC was discovered at all",
-			corrupt: func(_ map[string]any, declared map[string]bool) {
+			corrupt: func(_ map[string]any, declared map[string]rpc) {
 				for k := range declared {
 					delete(declared, k)
 				}
@@ -181,52 +190,76 @@ func TestValidateRejects(t *testing.T) {
 		},
 		{
 			name: "the document does not declare OpenAPI 3",
-			corrupt: func(spec map[string]any, _ map[string]bool) {
+			corrupt: func(spec map[string]any, _ map[string]rpc) {
 				spec["openapi"] = "2.0"
 			},
 			want: "declares OpenAPI 3.x",
 		},
 		{
 			name: "info.title is missing",
-			corrupt: func(spec map[string]any, _ map[string]bool) {
+			corrupt: func(spec map[string]any, _ map[string]rpc) {
 				delete(mapOf(spec["info"]), "title")
 			},
 			want: "info.title is set",
 		},
 		{
 			name: "info.version is missing",
-			corrupt: func(spec map[string]any, _ map[string]bool) {
+			corrupt: func(spec map[string]any, _ map[string]rpc) {
 				delete(mapOf(spec["info"]), "version")
 			},
 			want: "info.version is set",
 		},
 		{
 			name: "info.description is a placeholder",
-			corrupt: func(spec map[string]any, _ map[string]bool) {
+			corrupt: func(spec map[string]any, _ map[string]rpc) {
 				mapOf(spec["info"])["description"] = "TODO"
 			},
 			want: "info.description is substantive",
 		},
 		{
 			name: "no servers are declared",
-			corrupt: func(spec map[string]any, _ map[string]bool) {
+			corrupt: func(spec map[string]any, _ map[string]rpc) {
 				delete(spec, "servers")
 			},
 			want: "servers are declared",
 		},
 		{
 			name: "externalDocs is missing",
-			corrupt: func(spec map[string]any, _ map[string]bool) {
+			corrupt: func(spec map[string]any, _ map[string]rpc) {
 				delete(spec, "externalDocs")
 			},
 			want: "externalDocs links the error catalogue",
 		},
 		{
 			name: "no security scheme is documented",
-			corrupt: func(spec map[string]any, _ map[string]bool) {
+			corrupt: func(spec map[string]any, _ map[string]rpc) {
 				delete(mapOf(spec["components"]), "securitySchemes")
 			},
 			want: "security schemes are documented",
+		},
+		{
+			// The defect this rule was written for: NotificationService and
+			// ProfileService published six mutations without it, so every first
+			// call to any of them was refused by an interceptor the document
+			// never mentioned.
+			name: "a mutation stops publishing the Idempotency-Key it requires",
+			corrupt: func(spec map[string]any, _ map[string]rpc) {
+				delete(post(spec, mutatingRoute), "parameters")
+			},
+			want: "the document declares no such parameter",
+		},
+		{
+			// The rule covers PUBLIC mutations too, and that is the half most
+			// likely to be lost: gate 5 is never reached from the public branch,
+			// so it is the WrapUnary public branch that requires the key (see
+			// TestAPublicMutationRequiresAnIdempotencyKey). A rule that quietly
+			// skipped public methods would leave five unauthenticated writes
+			// publishing no key while the server refuses them without one.
+			name: "a public mutation stops publishing the Idempotency-Key it requires",
+			corrupt: func(spec map[string]any, _ map[string]rpc) {
+				delete(post(spec, publicMutatingRoute), "parameters")
+			},
+			want: "the document declares no such parameter",
 		},
 	}
 

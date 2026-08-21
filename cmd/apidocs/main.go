@@ -14,6 +14,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"errors"
@@ -55,6 +56,13 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	spec, err := fs.ReadFile(sub, "openapi.yaml")
+	if err != nil {
+		log.Error("the embedded OpenAPI document is missing — run `make api-docs`", "error", err)
+		os.Exit(1)
+	}
+	mux.HandleFunc("GET /openapi.yaml", serveSpec(withLocalServer(spec, apiPort)))
+
 	// Serve the generated artifacts directly: the spec, the error catalogue, and
 	// the proto sources under /proto/.
 	mux.Handle("GET /", withContentTypes(http.FileServer(http.FS(sub))))
@@ -81,6 +89,47 @@ func main() {
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
 	log.Info("stopped")
+}
+
+// withLocalServer puts the dev stack back at the top of `servers`.
+//
+// The PUBLISHED document declares https servers only, deliberately: it describes
+// an API whose one credential is a bearer token, and `http://localhost:8090` sat
+// at the top of that list telling every reader that the default way to call it is
+// in the clear (proto/openapi.base.yaml says more).
+//
+// The convenience was real, though — a docs UI with no reachable server has no
+// working "Try it" button — so it is restored HERE, in a binary that only ever
+// runs beside a dev stack, and never written to the artefact `make api-docs`
+// produces. That is the whole difference: the same YAML reaches a developer's
+// browser, and nothing reaches a client, a registry or an auditor.
+//
+// A textual splice rather than a parse-and-re-emit. Round-tripping this document
+// through a YAML library rewrites every block scalar in it — the introduction
+// alone is 200 lines of Markdown — so the diff between what is published and what
+// is served would stop being one entry long, and nobody could see at a glance
+// that the two are otherwise the same file.
+func withLocalServer(spec []byte, apiPort string) []byte {
+	const anchor = "\nservers:\n"
+	i := bytes.Index(spec, []byte(anchor))
+	if i < 0 {
+		// Serve what we have. A missing `servers:` block is a generator fault
+		// that `internal/tools/checkopenapi` fails the build for; degrading the
+		// docs UI a second time here would add nothing.
+		return spec
+	}
+	local := fmt.Sprintf("  - url: http://localhost:%s\n    description: Local development (injected by cmd/apidocs; not in the published document)\n", apiPort)
+	out := make([]byte, 0, len(spec)+len(local))
+	out = append(out, spec[:i+len(anchor)]...)
+	out = append(out, local...)
+	return append(out, spec[i+len(anchor):]...)
+}
+
+func serveSpec(spec []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
+		_, _ = w.Write(spec)
+	}
 }
 
 func page(html string) http.HandlerFunc {

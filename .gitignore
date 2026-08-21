@@ -13,6 +13,8 @@
 .idea/
 .vscode/
 .DS_Store
+# 42Crunch OpenAPI audit, a VS Code extension's local scan output
+/.42c/
 
 # local code index (rebuildable via `codegraph index`)
 /.codegraph/
@@ -21,7 +23,24 @@
 /data/
 bin/
 
-# Stray `go build -o api ./cmd/api` output. The binaries are built into ./bin
-# or run with `go run`; a 50 MB executable at the repo root is always an
+# Stray `go build -o <name> ./cmd/<name>` output. The binaries are built into
+# ./bin or run with `go run`; a 50 MB executable at the repo root is always an
 # accident, and it shows up in the gate as an untracked file.
+#
+# Listed by name rather than by a pattern: a bare `/apidocs` glob would be a
+# guess, while every entry here is a real main package in this tree, and a
+# pattern loose enough to catch them all would also hide a directory somebody
+# meant to add.
 /api
+/apidocs
+/migrate
+/projector
+/worker
+
+# internal/tools — same thing, one binary per generator and gate.
+/checkdashboards
+/checkopenapi
+/fixopenapi
+/gendashboards
+/gendocs
+/obsprobe

@@ -11,13 +11,20 @@ import (
 	fgaadapter "github.com/chronos/chronos-go/internal/adapter/openfga"
 	"github.com/chronos/chronos-go/internal/adapter/piivault"
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
+	"github.com/chronos/chronos-go/internal/adapter/seaweedfs"
 	valkeyadapter "github.com/chronos/chronos-go/internal/adapter/valkey"
 	"github.com/chronos/chronos-go/internal/modules/identity"
 	"github.com/chronos/chronos-go/internal/modules/identity/adapter/argon2id"
 	identityapi "github.com/chronos/chronos-go/internal/modules/identity/api"
 	"github.com/chronos/chronos-go/internal/modules/identity/app"
+	"github.com/chronos/chronos-go/internal/modules/notification"
+	notificationapi "github.com/chronos/chronos-go/internal/modules/notification/api"
+	"github.com/chronos/chronos-go/internal/modules/profile"
+	profileapi "github.com/chronos/chronos-go/internal/modules/profile/api"
 	"github.com/chronos/chronos-go/internal/platform/authz"
+	"github.com/chronos/chronos-go/internal/platform/blob"
 	"github.com/chronos/chronos-go/internal/platform/clientip"
+	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/config"
 	"github.com/chronos/chronos-go/internal/platform/cqrs"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
@@ -40,6 +47,25 @@ type dependencies struct {
 	probes  []health.Probe
 	closes  []func()
 	metrics *obs.Metrics
+
+	// clock is the ONE clock this binary has. Everything time-derived reads it:
+	// session deadlines, token expiry, attempt ceilings, TOTP verification, the
+	// health registry's uptime.
+	//
+	// One, because two is how a process comes to disagree with itself about
+	// whether a token has expired. It is clock.System{} unless the local-only
+	// movable clock was asked for (ADR-054), and in that case it is the SAME
+	// object movableClock points at — a second offset clock would be a second
+	// answer to "what time is it" that only some rules would follow.
+	clock clock.Clock
+
+	// movableClock is non-nil in exactly one case: CLOCK_CONTROL_ENABLED is true.
+	//
+	// It is the same object as clock, held again at its concrete type because
+	// moving time is not part of the clock.Clock interface and must not become
+	// part of it. Only the control listener receives this field, so no
+	// collaborator in this binary is able to move time even by accident.
+	movableClock *clock.Offset
 
 	// profiling is the /debug/pprof listener (Go 1.27's goroutineleak profile
 	// among them). Never nil: disabled is a working object whose Addr is "".
@@ -110,6 +136,25 @@ type dependencies struct {
 	// be built without it: registration has nowhere to put the address.
 	vault app.SubjectVault
 
+	// piiVault is the SAME object as vault, held concretely because profile
+	// READS from it and identity's port deliberately cannot.
+	//
+	// app.SubjectVault is write-only on purpose — ports.go says a port that could
+	// read is a port through which an address reaches a log — and that constraint
+	// is worth keeping for identity even though profile needs the other half.
+	// Widening the shared port would remove the guarantee from the module that
+	// asked for it, so the two views are separate and both point at one vault.
+	piiVault *piivault.Vault
+
+	// blobs is the object store. Avatar bytes never pass through this process:
+	// the client is handed a signed POST target and uploads straight to it.
+	blobs *seaweedfs.Store
+
+	// profile is display name, locale, timezone and avatar — its own module,
+	// because identity answers "who is this" and every attribute added there
+	// widens the aggregate that guards authentication (ADR-020's reasoning).
+	profile *profileapi.Service
+
 	// counter backs the authentication attempt ceiling. Nil when Valkey is
 	// unreachable — and identity is then refused outright, because a login path
 	// with no ceiling permits unlimited guessing with nothing reporting it.
@@ -119,6 +164,13 @@ type dependencies struct {
 	// and main leaves the service UNREGISTERED rather than registering something
 	// that panics on first use.
 	identity *identityapi.Service
+
+	// notification is the client surface over the feed, the push subscriptions
+	// and the per-person channel preferences. Held on the struct, not built in
+	// main, so a composition-root test can assert it was constructed — the whole
+	// module was written, tested and reachable by nobody for exactly as long as
+	// nothing asserted this.
+	notification *notificationapi.Service
 
 	// revocations is the authentication service, held ONLY so a composition-root
 	// test can assert that revoking a session also invalidates the authorization
@@ -154,6 +206,14 @@ type dependencies struct {
 	// composition-root assertion can tell the difference.
 	mailAddressLimiter *ratelimit.Limiter
 	mailCallerLimiter  *ratelimit.Limiter
+
+	// usernameCheckLimiter bounds the public username-availability endpoint.
+	//
+	// Its own limiter over its own key prefix, so a person picking a handle cannot
+	// spend the budget that stops a stranger mail-bombing their mailbox. It is a
+	// RESOURCE bound, not an information one: the endpoint is an enumeration
+	// oracle by design (ADR-051).
+	usernameCheckLimiter *ratelimit.Limiter
 
 	// callerScope is the trust boundary the per-caller ceiling's bucket key is
 	// derived through. Held for the sharpest version of the reason above: every
@@ -218,14 +278,33 @@ func decisionsOrNil(a *valkeyadapter.Authz) authz.Decisions {
 func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func()) {
 	d := &dependencies{metrics: obs.New()}
 
+	// The clock, FIRST. Everything below that carries a deadline reads it, and a
+	// collaborator built before the clock it should have been given is how a
+	// process ends up with two of them.
+	d.clock, d.movableClock = newClock(cfg)
+
 	// The event registry, built before anything that reads or writes an event.
 	// Types come from each module's own composition surface rather than from a
 	// list here: a list in this file is a second place to forget a type, and the
 	// module test that guards the schema registry checks the module's list.
+	//
+	// EVERY module that this binary writes, not just identity. Registering only
+	// identity made every notification and profile aggregate writable exactly
+	// ONCE and then permanently broken: the first append succeeds because an
+	// empty stream decodes zero events, and every later command fails to load
+	// its own aggregate with `event type "profile.ProfileUpdated.v1" is not
+	// registered`. The read side keeps answering — cmd/projector has its own
+	// codec and registers all six — so the projections, the dashboards and every
+	// GET stay green while writes are dead. Found by protocolit's
+	// TestASecondWriteToAnAggregateIsRefused.
 	d.upcasters = eventsourcing.NewUpcasterRegistry()
 	identity.RegisterSchemas(d.upcasters)
+	notification.RegisterSchemas(d.upcasters)
+	profile.RegisterSchemas(d.upcasters)
 	d.codec = eventcodec.NewJSON(d.upcasters)
 	identity.RegisterEvents(d.codec)
+	notification.RegisterEvents(d.codec)
+	profile.RegisterEvents(d.codec)
 
 	// ---- PostgreSQL: lazy pool, no connection attempted here -------------
 	if pool, err := pgadapter.NewPool(context.Background(), cfg.Postgres.AppDSN(), cfg.Postgres.MaxConns); err != nil {
@@ -399,8 +478,10 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 			// resolves at most one subject per request, so a cache would buy nothing
 			// and would widen the window in which an erased subject's key is still
 			// usable in a replica that missed its invalidation (ADR-041).
-			d.vault = vaultOrNil(piivault.New(pgadapter.New(d.pool),
-				openbao.NewKeyRing(bc, cfg.OpenBao.KEKName)))
+			v := piivault.New(pgadapter.New(d.pool),
+				openbao.NewKeyRing(bc, cfg.OpenBao.KEKName))
+			d.vault = vaultOrNil(v)
+			d.piiVault = v
 		}
 	}
 
@@ -436,6 +517,54 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 	// a thing constructed before what it depends on is how a composition root
 	// grows a nil that nobody notices until a request arrives.
 	d.startIdentity(cfg, log)
+
+	// The object store. Constructed here because it was constructed by NO binary
+	// until now — the third adapter in this repository to be fully built, fully
+	// tested and wired into nothing (CLAUDE.md names the pattern; codegraph found
+	// the first two). An avatar is a reference to an object, so profile cannot be
+	// built without it.
+	if limits, err := (blob.Limits{
+		MaxBytes:            cfg.Storage.MaxUploadBytes,
+		MaxBatchCount:       cfg.Storage.MaxBatchCount,
+		AllowedContentTypes: cfg.Storage.AllowedContentTypes,
+		ResumableThreshold:  cfg.Storage.ResumableThresholdBytes,
+		PartSize:            cfg.Storage.PartSizeBytes,
+		MaxExpiry:           cfg.Storage.GrantExpiry,
+	}).Defaults(); err != nil {
+		log.Error("object store limits are inconsistent; no avatar can be uploaded",
+			"error", err)
+	} else {
+		d.blobs = seaweedfs.New(seaweedfs.Config{
+			Endpoint:       cfg.Storage.Endpoint,
+			Region:         cfg.Storage.Region,
+			Bucket:         cfg.Storage.Bucket,
+			AccessKey:      cfg.Storage.AccessKey,
+			SecretKey:      cfg.Storage.SecretKey.Expose(),
+			PublicEndpoint: cfg.Storage.PublicEndpoint,
+			Limits:         limits,
+		}, d.clock)
+	}
+
+	// Notification after identity, for the same ordering reason: it needs the
+	// pool, the store and the clock, and it is a client surface over projections
+	// rather than something identity depends on.
+	if svc, err := d.buildNotification(cfg, log); err != nil {
+		log.Error("the notification service is NOT constructed; the feed, push "+
+			"registration and every per-person channel preference answer "+
+			"'unimplemented' for the lifetime of this process", "error", err)
+	} else {
+		d.notification = svc
+	}
+
+	// Profile last: it needs the pool, the store, the vault, the clock AND the
+	// object store, so it is built after every one of them.
+	if svc, err := d.buildProfile(cfg, log); err != nil {
+		log.Error("the profile service is NOT constructed; the display name, locale, "+
+			"timezone and avatar answer 'unimplemented' for the lifetime of this process",
+			"error", err)
+	} else {
+		d.profile = svc
+	}
 
 	return d, func() {
 		for _, c := range d.closes {

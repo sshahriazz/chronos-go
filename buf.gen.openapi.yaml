@@ -36,6 +36,15 @@ plugins:
       # Readable operationIds and tags for generated clients and docs UIs
       - short-operation-ids
       - short-service-tags
-      # Include google.rpc error detail schemas alongside our reason codes
-      - with-google-error-detail
+      # `with-google-error-detail` is DELIBERATELY ABSENT.
+      #
+      # It publishes google.rpc.BadRequest, QuotaFailure, PreconditionFailure and
+      # seven more as a `oneOf` under `connect.error_details.Any.debug`, with a
+      # discriminator mapping `type.googleapis.com/...` onto each. This server
+      # raises exactly ONE detail type — chronos.errors.v1.ErrorDetail, generated
+      # from `errs.Catalogue()` — so those ten schemas documented payloads no
+      # endpoint can return, and the discriminator named a `type` property none of
+      # them declares, which is an invalid discriminator rather than a cosmetic
+      # one. 163 lines of generated document describing responses that do not
+      # exist. Removing the option deleted all of them.
       - with-streaming
