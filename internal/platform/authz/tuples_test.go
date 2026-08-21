@@ -249,3 +249,94 @@ func TestConfirmAllReportsTheFirstFailure(t *testing.T) {
 		t.Fatal("a failed confirmation was reported as success")
 	}
 }
+
+// A tuple subject may be an OBJECT, and must not be both.
+//
+// # Why this shape
+//
+// `organization:acme parent workspace:eng` is the edge the whole access topology
+// rests on — it is what makes an org admin an admin of every workspace in the
+// org with no fan-out — and an organization is not an actor. PrincipalKind is a
+// closed set on purpose, so that a typo cannot invent an actor kind, which left
+// that edge unwritable: the first attempt failed with `unknown principal kind
+// "organization"`.
+//
+// Widening PrincipalKind would have been the wrong repair. It would also permit
+// an organization as the subject of a CHECK — "may organization:acme read this"
+// — which is a question with no meaning, and the type would have stopped
+// refusing it.
+//
+// So the two are separate fields and exactly one may be set. A subject carrying
+// both is refused rather than resolved by precedence, because whichever one a
+// precedence rule picked would silently be a different grant than the caller
+// wrote.
+func TestATupleSubjectIsAPrincipalOrAnObjectButNeverBoth(t *testing.T) {
+	t.Parallel()
+
+	resource := authz.ResourceRef{Type: "workspace", ID: "eng"}
+
+	t.Run("an object subject is valid and renders as an object reference", func(t *testing.T) {
+		t.Parallel()
+		tuple := authz.Tuple{
+			Subject:  authz.Subject{Object: authz.ResourceRef{Type: "organization", ID: "acme"}},
+			Relation: "parent",
+			Resource: resource,
+		}
+		if err := tuple.Validate(); err != nil {
+			t.Fatalf("the parent edge is refused, so the inheritance topology cannot be "+
+				"written at all: %v", err)
+		}
+		if got, want := tuple.Subject.String(), "organization:acme"; got != want {
+			t.Errorf("rendered %q, want %q", got, want)
+		}
+	})
+
+	t.Run("a principal subject still works", func(t *testing.T) {
+		t.Parallel()
+		tuple := authz.Tuple{
+			Subject:  authz.Subject{Principal: authz.Principal{Kind: authz.KindUser, ID: "alice"}},
+			Relation: "admin",
+			Resource: resource,
+		}
+		if err := tuple.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if got, want := tuple.Subject.String(), "user:alice"; got != want {
+			t.Errorf("rendered %q, want %q", got, want)
+		}
+	})
+
+	t.Run("both set is refused", func(t *testing.T) {
+		t.Parallel()
+		tuple := authz.Tuple{
+			Subject: authz.Subject{
+				Principal: authz.Principal{Kind: authz.KindUser, ID: "alice"},
+				Object:    authz.ResourceRef{Type: "organization", ID: "acme"},
+			},
+			Relation: "parent",
+			Resource: resource,
+		}
+		if err := tuple.Validate(); err == nil {
+			t.Fatal("a subject naming both a principal and an object was accepted; whichever " +
+				"one the writer picks is silently a different grant than was written")
+		}
+	})
+
+	t.Run("an object subject may still be a userset", func(t *testing.T) {
+		t.Parallel()
+		tuple := authz.Tuple{
+			Subject: authz.Subject{
+				Object:   authz.ResourceRef{Type: "team", ID: "eng"},
+				Relation: "member",
+			},
+			Relation: "viewer",
+			Resource: resource,
+		}
+		if err := tuple.Validate(); err != nil {
+			t.Fatalf("a team userset is the scale lever in access.md §4 and it is refused: %v", err)
+		}
+		if got, want := tuple.Subject.String(), "team:eng#member"; got != want {
+			t.Errorf("rendered %q, want %q", got, want)
+		}
+	})
+}

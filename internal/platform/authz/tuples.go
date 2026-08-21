@@ -7,41 +7,79 @@ import (
 	"strings"
 )
 
-// Subject is who a tuple grants to.
+// Subject is what a tuple grants to — an actor, or another object.
 //
-// It is a Principal, optionally narrowed by a Relation to name a USERSET —
+// Usually a Principal, optionally narrowed by a Relation to name a USERSET —
 // "everyone related to this object by this relation", written `team:eng#member`
 // in OpenFGA. That indirection is the scale lever the whole model rests on: one
 // tuple grants a team, and adding a member to the team grants them every one of
 // the team's resources without writing anything (access.md §4).
+//
+// # Why Object exists as well
+//
+// Not every edge in the graph runs from an actor. The one the entire topology
+// depends on does not: `organization:acme parent workspace:eng` names an
+// organization on the left, and organizations are not actors. That single edge
+// is what makes every org admin an admin of every workspace in the org, present
+// and future, with no fan-out (organization.md §5.1).
+//
+// Modelling the left side as a Principal alone made that edge unwritable —
+// PrincipalKind is a CLOSED set of actor kinds, deliberately, so that a typo
+// cannot invent an actor — and the first attempt to write it failed with
+// `unknown principal kind "organization"`. Widening PrincipalKind would have
+// been the wrong repair: it would let `organization` be the subject of a CHECK,
+// which is a question with no meaning.
+//
+// So a Subject is exactly one of the two, and valid() enforces that.
 type Subject struct {
 	Principal Principal
 
-	// Relation, when set, makes this a userset rather than a single principal.
+	// Object names a non-actor subject, for edges between two resources.
+	// Exactly one of Principal and Object is set.
+	Object ResourceRef
+
+	// Relation, when set, makes this a userset rather than a single subject.
 	Relation Relation
 }
 
-// String renders the OpenFGA user reference: `user:alice` or `team:eng#member`.
+// String renders the OpenFGA user reference: `user:alice`, `team:eng#member`,
+// or `organization:acme`.
 func (s Subject) String() string {
-	if s.Relation == "" {
-		return s.Principal.String()
+	base := s.Principal.String()
+	if s.isObject() {
+		base = s.Object.String()
 	}
-	return s.Principal.String() + "#" + string(s.Relation)
+	if s.Relation == "" {
+		return base
+	}
+	return base + "#" + string(s.Relation)
 }
 
-// IsUserset reports whether this names a set of principals rather than one.
+// IsUserset reports whether this names a set of subjects rather than one.
 func (s Subject) IsUserset() bool { return s.Relation != "" }
 
+func (s Subject) isObject() bool { return s.Object.Type != "" || s.Object.ID != "" }
+
 func (s Subject) valid() error {
-	if err := s.Principal.valid(); err != nil {
-		return err
+	switch {
+	case s.isObject() && s.Principal.Kind != "":
+		return fmt.Errorf("%w: subject names both principal %s and object %s; an edge has "+
+			"one subject", ErrInvalid, s.Principal, s.Object)
+	case s.isObject():
+		if err := s.Object.valid(); err != nil {
+			return err
+		}
+	default:
+		if err := s.Principal.valid(); err != nil {
+			return err
+		}
 	}
 	if s.Relation == "" {
 		return nil
 	}
-	// Principal.valid already rejects ':' and '#' in the id, which is what stops a
-	// userset reference from naming a different set of people than the caller
-	// meant.
+	// Principal.valid and ResourceRef.valid already reject ':' and '#' in the id,
+	// which is what stops a userset reference from naming a different set than
+	// the caller meant.
 	return s.Relation.valid()
 }
 
