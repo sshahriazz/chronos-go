@@ -770,14 +770,14 @@ func (a *Authentication) Authenticate(
 			"module", "identity", "subject_id", subjectID)
 	}
 
-	position, err := a.appendAttempt(ctx, cmd.IdempotencyKey, index, subjectID,
+	position, err := a.succeed(ctx, cmd.IdempotencyKey, index, user, account.UserID, subjectID,
 		&contract.AuthenticationSucceeded{
 			SubjectID:   subjectID,
 			Methods:     methods,
 			AAL:         aal,
 			DeviceID:    cmd.DeviceID,
 			SucceededAt: now,
-		})
+		}, now)
 	if err != nil {
 		return AuthenticateResult{}, err
 	}
@@ -792,6 +792,183 @@ func (a *Authentication) Authenticate(
 		},
 		Position: position,
 	}, nil
+}
+
+// reactivateKeySuffix namespaces the event ids the account stream gets when a
+// login reactivates.
+//
+// Both streams in that append derive their ids from the same idempotency key, so
+// without a namespace the attempt journal's first event and the account's first
+// event would claim the SAME id — and the store collapses by id, so one of the
+// two would silently become a no-op. That is the failure api.CreateSession
+// already namespaces its two commands against; this is the same hazard one level
+// down.
+const reactivateKeySuffix = ":reactivate"
+
+// reactivateAttempts bounds the retry when a reactivating login loses the race
+// for the account's own stream.
+//
+// Three, for appendChanged's reason: the contention is another single write to
+// the same account stream — a second login, a lockout, a rehash — not a stream of
+// them. A larger number stalls a login synchronously; a smaller one fails on the
+// first ordinary collision.
+const reactivateAttempts = 3
+
+// succeed records a completed authentication, and switches a deactivated account
+// back on in the SAME atomic append when that is what the ceremony earned.
+//
+// # Why the reactivation lives here and not behind an RPC
+//
+// See domain.User.NeedsReactivation. In one line: a `Reactivate` RPC needs a
+// session, a session needs an authentication, and an authentication refuses a
+// deactivated account — so the reversal identity.md §1 promises the holder would
+// have exactly one precondition its own subject can never satisfy.
+//
+// # Why ONE append and not two
+//
+// The two facts are "this ceremony succeeded" and "this account is on again",
+// and neither is safe alone. Recording the success first and failing would leave
+// the caller holding a Proof for an account the log still says is off — and
+// CreateSession does not re-read the account, so that Proof mints an ordinary
+// session on a deactivated account, which is precisely the state
+// NeedsReactivation exists to make unreachable. Recording the reactivation first
+// and failing would switch an account on with no authentication behind it in the
+// log, which is the one entry the security mail is derived from.
+//
+// AppendToMany evaluates every precondition and commits all of them or none
+// (verified against the running server), so neither half can be observed without
+// the other.
+//
+// # What the precondition buys
+//
+// The account stream carries the exact revision the aggregate was loaded at. Two
+// simultaneous logins against one deactivated account therefore produce exactly
+// one UserReactivated: the loser's whole append is rolled back — its
+// AuthenticationSucceeded included — and it retries against the reloaded stream,
+// where the account is already Active and the ordinary single-stream path
+// applies. A deactivation racing this login is the same race in the other
+// direction and resolves the same way.
+//
+// An ACTIVE account writes nothing to its own stream here, deliberately: an
+// event per successful login would make the account stream grow with TRAFFIC
+// rather than with state, which is the reason identity.md §13 refuses to record
+// ApiKeyUsed.
+func (a *Authentication) succeed(
+	ctx context.Context,
+	idempotencyKey string,
+	index contract.EmailIndex,
+	user *domain.User,
+	userID ids.UserID,
+	subjectID string,
+	succeeded *contract.AuthenticationSucceeded,
+	now time.Time,
+) (eventsourcing.Position, error) {
+	if !user.NeedsReactivation() {
+		return a.appendAttempt(ctx, idempotencyKey, index, subjectID, succeeded)
+	}
+
+	attempts, err := eventsourcing.NewStreamID(AttemptCategory, attemptStreamKey(now))
+	if err != nil {
+		return eventsourcing.Position{}, err
+	}
+	account, err := eventsourcing.NewStreamID(UserCategory, userID.String())
+	if err != nil {
+		return eventsourcing.Position{}, err
+	}
+	meta := a.metadata(ctx, subjectID, idempotencyKey)
+
+	current := user
+	var lastErr error
+	for attempt := range reactivateAttempts {
+		if attempt > 0 {
+			reloaded, loadErr := a.users.Load(ctx, userID.String())
+			if loadErr != nil {
+				return eventsourcing.Position{}, fmt.Errorf(
+					"reloading the account to record a reactivating authentication: %w", loadErr)
+			}
+			// Cleared before re-deciding so a loader that hands back the SAME
+			// instance cannot accumulate one UserReactivated per attempt. The
+			// repository builds a fresh aggregate every time and this is a no-op
+			// against it; the port's contract says nothing about instance identity,
+			// and the alternative failure — a retry appending two identical events —
+			// is silent.
+			current.ClearUncommitted()
+			current = reloaded
+			current.ClearUncommitted()
+			if !current.NeedsReactivation() {
+				// Somebody else's login reactivated it, or an operator did. The
+				// account is on; this ceremony has nothing left to record about it and
+				// takes the ordinary single-stream path.
+				return a.appendAttempt(ctx, idempotencyKey, index, subjectID, succeeded)
+			}
+		}
+		// The actor is the account holder: this is the holder signing in, and there
+		// is no delegation convention on this path.
+		if err := current.Reactivate(subjectID, now); err != nil {
+			return eventsourcing.Position{}, err
+		}
+		pending := current.Uncommitted()
+		if len(pending) == 0 {
+			return eventsourcing.Position{}, errs.Internalf(
+				"a reactivating authentication produced no account event to append")
+		}
+
+		accountEvents := make([]eventsourcing.PendingEvent, 0, len(pending))
+		for i, e := range pending {
+			accountEvents = append(accountEvents, eventsourcing.PendingEvent{
+				ID:    eventsourcing.DeriveEventID(idempotencyKey+reactivateKeySuffix, i),
+				Event: e,
+				Meta:  eventsourcing.StampSchemaVersion(meta, a.schemas, e.EventType()),
+			})
+		}
+
+		results, appendErr := a.appender.AppendToMany(ctx, []eventsourcing.StreamAppend{
+			{
+				Stream: account,
+				// The exact loaded revision, which is the whole concurrency story.
+				Expected: eventsourcing.ExpectedFor(current),
+				Events:   accountEvents,
+			},
+			{
+				Stream: attempts,
+				// AnyRevision, as every other attempt append uses: the journal is a
+				// per-day append-only stream that many accounts share, so a
+				// precondition on it would make one login fail because another
+				// happened.
+				Expected: eventsourcing.AnyRevision(),
+				Events: []eventsourcing.PendingEvent{{
+					ID:    eventsourcing.DeriveEventID(idempotencyKey, 0),
+					Event: succeeded,
+					Meta:  eventsourcing.StampSchemaVersion(meta, a.schemas, succeeded.EventType()),
+				}},
+			},
+		})
+		if appendErr == nil {
+			if len(results) == 0 {
+				return eventsourcing.Position{}, errs.Internalf("the append reported no result")
+			}
+			current.ClearUncommitted()
+			return results[0].Position, nil
+		}
+		if !errors.Is(appendErr, eventsourcing.ErrWrongExpectedRevision) {
+			return eventsourcing.Position{}, appendErr
+		}
+		lastErr = appendErr
+	}
+
+	// Every attempt lost the race for the account's stream. NOTHING was written —
+	// the append is atomic — so the caller is refused and signs in again, which is
+	// the recoverable direction: the alternative is a Proof for an account the log
+	// still says is deactivated.
+	//
+	// A CONFLICT rather than the ordinary undifferentiated refusal, and that is not
+	// an ADR-036 violation. This point is reached only after every factor the
+	// account holds has verified, so the caller already knows they hold working
+	// credentials; the state it discloses is one they can establish by retrying.
+	// Answering with the login refusal instead would tell somebody holding the
+	// right password that it is wrong, which is a worse lie than a true conflict.
+	return eventsourcing.Position{}, errs.Conflictf(
+		"this account is being changed by another request; try again").Wrap(lastErr)
 }
 
 // bootstrapProof completes the one authentication that stops at AAL1: an
@@ -1900,30 +2077,113 @@ type RevokeAllSessionsResult struct {
 func (a *Authentication) RevokeAllSessions(
 	ctx context.Context, cmd RevokeAllSessionsCommand,
 ) (RevokeAllSessionsResult, error) {
+	plan, err := a.PlanRevokeAllSessions(ctx, cmd)
+	if err != nil {
+		return RevokeAllSessionsResult{}, err
+	}
+	result := RevokeAllSessionsResult{Scanned: plan.Scanned}
+	if len(plan.Appends) == 0 {
+		return result, nil
+	}
+
+	// Once, for the subject, before the append — see RevokeSession for why the
+	// order is not the other one. It covers the SPARED session too, and must: the
+	// decision cache is keyed by principal, so there is no per-session entry to
+	// keep. The spared session simply recomputes its next check against OpenFGA,
+	// which costs one round trip and can only return what that principal is still
+	// entitled to.
+	if err := a.InvalidateAuthorization(ctx, cmd.SubjectID); err != nil {
+		return RevokeAllSessionsResult{}, err
+	}
+
+	results, err := a.appender.AppendToMany(ctx, plan.Appends)
+	if err != nil {
+		return RevokeAllSessionsResult{}, err
+	}
+	if len(results) == 0 {
+		return RevokeAllSessionsResult{}, errs.Internalf("the append reported no result")
+	}
+	// Cleared only now. Clearing before the append is durable would lose the events
+	// if the caller retried after a transient failure.
+	plan.Commit()
+	result.Revoked = len(plan.Appends)
+	result.Position = results[0].Position
+	return result, nil
+}
+
+// SessionRevocationPlan is what a revocation WOULD write, before anything is
+// written.
+//
+// It exists so a command that must revoke every session AND record something
+// else can put both in ONE atomic append. `Deactivate` is that command: an
+// account switched off with a session still live is a deactivated account with
+// full API access — nothing in the request pipeline reads the account's state —
+// and two sequential appends have a window in which exactly that is true.
+//
+// The alternative shape, "RevokeAllSessions then append", is what the password
+// reset does, and it is correct there for a reason that does not carry over: a
+// reset's two writes fail towards LESS access in that order, because the
+// revocation is the destructive half and the credential change is the granting
+// one. A deactivation has no granting half, so there is no ordering that fails
+// safe and the write has to be indivisible instead.
+type SessionRevocationPlan struct {
+	// Appends is one entry per session that will actually be revoked, each with
+	// the exact revision its aggregate was loaded at.
+	Appends []eventsourcing.StreamAppend
+
+	// Sessions are the aggregates behind those entries, held so the caller can
+	// clear their uncommitted events AFTER the append is durable.
+	Sessions []*domain.Session
+
+	// Scanned is how many live sessions the work list returned, the spared one
+	// included.
+	Scanned int
+}
+
+// Commit clears the uncommitted events of every session the plan revoked.
+//
+// Called only once the append is durable. Clearing earlier would lose the events
+// if the caller retried after a transient failure.
+func (p SessionRevocationPlan) Commit() {
+	for _, session := range p.Sessions {
+		session.ClearUncommitted()
+	}
+}
+
+// PlanRevokeAllSessions builds the revocation without performing it.
+//
+// Every rule RevokeAllSessions enforces lives here — the work list, the
+// per-session stream precondition, the subject cross-check, the derived event
+// ids — so there is exactly ONE implementation of "revoke everything for this
+// subject" and a caller that folds it into a larger append cannot acquire a
+// different one.
+//
+// It writes NOTHING, including the authorization-cache invalidation: that is a
+// side effect and it belongs beside the append that makes the revocation real,
+// not in the planning step, which a caller may legitimately abandon.
+func (a *Authentication) PlanRevokeAllSessions(
+	ctx context.Context, cmd RevokeAllSessionsCommand,
+) (SessionRevocationPlan, error) {
 	switch {
 	case cmd.IdempotencyKey == "":
-		return RevokeAllSessionsResult{}, errs.ValidationFailedf("an idempotency key is required")
+		return SessionRevocationPlan{}, errs.ValidationFailedf("an idempotency key is required")
 	case cmd.SubjectID == "":
-		return RevokeAllSessionsResult{}, errs.ValidationFailedf("a subject id is required")
+		return SessionRevocationPlan{}, errs.ValidationFailedf("a subject id is required")
 	}
 
 	now := a.clock.Now().UTC()
 	live, err := a.live.List(ctx, cmd.SubjectID, now)
 	if err != nil {
-		return RevokeAllSessionsResult{}, fmt.Errorf("listing live sessions: %w", err)
+		return SessionRevocationPlan{}, fmt.Errorf("listing live sessions: %w", err)
 	}
 
 	actor := cmd.ActorID
 	if actor == "" {
 		actor = cmd.SubjectID
 	}
-	result := RevokeAllSessionsResult{Scanned: len(live)}
+	plan := SessionRevocationPlan{Scanned: len(live)}
 
-	var (
-		appends []eventsourcing.StreamAppend
-		revoked []*domain.Session
-		seq     int
-	)
+	var seq int
 	meta := a.metadata(ctx, cmd.SubjectID, cmd.IdempotencyKey)
 	for _, id := range live {
 		if !cmd.Except.IsZero() && id == cmd.Except {
@@ -1931,7 +2191,7 @@ func (a *Authentication) RevokeAllSessions(
 		}
 		session, err := a.sessions.Load(ctx, id.String())
 		if err != nil {
-			return RevokeAllSessionsResult{}, fmt.Errorf("loading session %s for revocation: %w", id, err)
+			return SessionRevocationPlan{}, fmt.Errorf("loading session %s for revocation: %w", id, err)
 		}
 		if session.SubjectID() != cmd.SubjectID {
 			// The row said this session belongs to the subject and its own stream
@@ -1943,7 +2203,7 @@ func (a *Authentication) RevokeAllSessions(
 			continue
 		}
 		if err := session.Revoke(actor, cmd.Reason, now); err != nil {
-			return RevokeAllSessionsResult{}, err
+			return SessionRevocationPlan{}, err
 		}
 		pending := session.Uncommitted()
 		if len(pending) == 0 {
@@ -1954,7 +2214,7 @@ func (a *Authentication) RevokeAllSessions(
 
 		stream, err := eventsourcing.NewStreamID(SessionCategory, id.String())
 		if err != nil {
-			return RevokeAllSessionsResult{}, err
+			return SessionRevocationPlan{}, err
 		}
 		events := make([]eventsourcing.PendingEvent, 0, len(pending))
 		for _, e := range pending {
@@ -1967,7 +2227,7 @@ func (a *Authentication) RevokeAllSessions(
 			})
 			seq++
 		}
-		appends = append(appends, eventsourcing.StreamAppend{
+		plan.Appends = append(plan.Appends, eventsourcing.StreamAppend{
 			Stream: stream,
 			// The exact loaded revision. A session elevated or revoked between the
 			// load and the append is refused rather than layered on top of a state
@@ -1975,37 +2235,19 @@ func (a *Authentication) RevokeAllSessions(
 			Expected: eventsourcing.ExpectedFor(session),
 			Events:   events,
 		})
-		revoked = append(revoked, session)
+		plan.Sessions = append(plan.Sessions, session)
 	}
-	if len(appends) == 0 {
-		return result, nil
-	}
+	return plan, nil
+}
 
-	// Once, for the subject, before the append — see RevokeSession for why the
-	// order is not the other one. It covers the SPARED session too, and must: the
-	// decision cache is keyed by principal, so there is no per-session entry to
-	// keep. The spared session simply recomputes its next check against OpenFGA,
-	// which costs one round trip and can only return what that principal is still
-	// entitled to.
-	if err := a.invalidateAuthorization(ctx, cmd.SubjectID); err != nil {
-		return RevokeAllSessionsResult{}, err
-	}
-
-	results, err := a.appender.AppendToMany(ctx, appends)
-	if err != nil {
-		return RevokeAllSessionsResult{}, err
-	}
-	if len(results) == 0 {
-		return RevokeAllSessionsResult{}, errs.Internalf("the append reported no result")
-	}
-	// Cleared only now. Clearing before the append is durable would lose the events
-	// if the caller retried after a transient failure.
-	for _, session := range revoked {
-		session.ClearUncommitted()
-	}
-	result.Revoked = len(appends)
-	result.Position = results[0].Position
-	return result, nil
+// InvalidateAuthorization bumps the subject's revocation epoch.
+//
+// Exported so a command that commits a SessionRevocationPlan performs the same
+// invalidation RevokeAllSessions does. Forgetting it leaves a cached allow
+// decision alive for a principal whose sessions have just been destroyed, which
+// is the failure the epoch exists to prevent (ADR-045).
+func (a *Authentication) InvalidateAuthorization(ctx context.Context, subjectID string) error {
+	return a.invalidateAuthorization(ctx, subjectID)
 }
 
 // ---------------------------------------------------------------------------

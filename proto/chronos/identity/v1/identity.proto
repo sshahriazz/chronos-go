@@ -177,8 +177,25 @@ message RegisterRequest {
   // Every bound is measured on the TRIMMED value, because the handler trims
   // first. Bounds are BYTES, not characters — RFC 5321 counts octets, and so
   // does the normalizer.
+  //
+  // `max_length` and `pattern` are declared on the GNOSTIC annotation rather than
+  // as protovalidate rules, and which of the two carries them is the whole point.
+  // A protovalidate rule is enforced by the interceptor against the RAW value,
+  // while every rule below is measured against the TRIMMED one — so `max_len: 254`
+  // as a rule would refuse a 250-byte address sent with six bytes of leading
+  // whitespace, an address the handler accepts. That is the "a rule stricter than
+  // the handler" failure named four paragraphs up, and it is the one this file
+  // must not commit while closing an audit finding. As annotations they publish
+  // the bound to clients and to the auditor and add no refusal the server does not
+  // make. The pattern is deliberately the LOOSEST reading of the shape rule: a
+  // published pattern that refuses more than the handler does turns a valid
+  // address into a client-side rejection nothing on this side can see.
   string email = 1 [
-    (gnostic.openapi.v3.property) = {example: {yaml: "ada@example.com"}},
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "ada@example.com"}
+      max_length: 254
+      pattern: "^.+@.+\\..+$"
+    },
     (buf.validate.field) = {
       required: true
     cel: [
@@ -238,7 +255,16 @@ message VerifyEmailRequest {
   // far above any token this system mints: it must not become a probe for the
   // token's real length. A wrong token and a spent one remain one refusal.
   string token = 1 [
-    (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-not-a-real-verification-token"}},
+    // The published `pattern` says only that a token carries no whitespace, and
+    // its looseness is deliberate: the real alphabet is base64url, and publishing
+    // THAT would hand a guesser the shape the ceiling above is careful not to
+    // leak. "No spaces" is true of every token this system mints, refuses nothing
+    // the handler accepts, and describes the field for a client without
+    // describing it for an attacker.
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "PLACEHOLDER-not-a-real-verification-token"}
+      pattern: "^\\S+$"
+    },
     (buf.validate.field) = {
       required: true
       string: {max_len: 512}
@@ -268,10 +294,74 @@ message VerifyEmailRequest {
   // NFC-normalized one, which can only be shorter — so this rule is never
   // stricter than the handler it fronts.
   string password = 2 [
-    (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-not-a-real-password"}},
+    // `max_bytes` is a byte count and OpenAPI's `maxLength` is a character count,
+    // so the rule below cannot publish itself: the generator correctly declines to
+    // restate 4096 bytes as 4096 characters. The annotation states the character
+    // ceiling separately, and 4096 characters is the loosest true reading of a
+    // 4096-byte limit — every input the rule accepts satisfies it.
+    //
+    // The pattern excludes the C0 controls and DEL, which `domain.NormalizePassword`
+    // refuses outright (RFC 8264 §7.5, and tabs and newlines by name). It is a
+    // subset of what the handler refuses rather than a superset, which is the only
+    // safe direction for a published pattern.
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "PLACEHOLDER-not-a-real-password"}
+      max_length: 4096
+      pattern: "^[^\\u0000-\\u001F\\u007F]+$"
+    },
     (buf.validate.field).string = {
       min_len: 8
       max_bytes: 4096
+    }
+  ];
+
+  // The public handle the account will be known by. MANDATORY (ADR-051).
+  //
+  // It arrives here, beside the password, and NOT on RegisterRequest. Two
+  // reasons, and the second decides it.
+  //
+  // A handle claimed at registration is claimed by whoever typed an address they
+  // may not control. The address squat that leaves is bounded — an unverified
+  // claim lapses after 48 hours — but a handle squat is not: a handle is claimed
+  // permanently and, once tombstoned by an erasure, can never be reissued even in
+  // principle. So the cheapest attack would be a script sweeping every desirable
+  // handle with addresses it never proves. Claiming here prices each squatted
+  // handle at one mailbox the attacker must actually control.
+  //
+  // The decisive reason is that a handle on RegisterRequest would DESTROY
+  // registration's indistinguishability. RegisterResponse is empty precisely so
+  // "the address was free" and "the address was taken" are one answer. Pair the
+  // address with a fresh random handle and they stop being one answer: register,
+  // then ask CheckUsernameAvailability about the handle. Taken means the
+  // registration went through, which means the address was free. One extra
+  // unauthenticated call, and the account-existence oracle identity.md §11 closes
+  // is open again — through a field rather than through a message.
+  //
+  // The rules below mirror `domain.NormalizeUsername` rather than approximating
+  // it. The character set is ASCII [A-Za-z0-9_] — the handler folds case, so the
+  // rule must accept both — and it excludes the HYPHEN for a technical reason
+  // rather than a stylistic one: the handle names a KurrentDB stream key, and a
+  // dash in a key is refused because KurrentDB derives a category from everything
+  // before the first one.
+  //
+  // Reserved names (`admin`, `support`, `api`, …) are NOT expressible here and
+  // are refused by the handler. A CEL rule listing them would be a second copy of
+  // a list that must have one, and the two would disagree the first time either
+  // changed.
+  //
+  // Stating the rules in full is safe for RegisterRequest.email's reason: this is
+  // the ENROLMENT side, the policy is public and printed beside the field, and
+  // the handler screens the handle BEFORE it spends the token — so a refusal here
+  // says nothing about the token and leaves the link live.
+  string username = 3 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "ada_lovelace"}},
+    (buf.validate.field) = {
+      required: true
+      string: {
+        min_len: 3
+        max_len: 30
+        pattern: "^[A-Za-z][A-Za-z0-9]*(_[A-Za-z0-9]+)*$"
+      }
     }
   ];
 }
@@ -284,10 +374,22 @@ message VerifyEmailRequest {
 // token is one undifferentiated refusal.
 message VerifyEmailResponse {
   // The account's pseudonym. Every other call names the account by this.
-  string subject_id = 1;
+  string subject_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "subj_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
 
   // The account's public identifier, a prefixed ULID (ADR-030).
-  string user_id = 2;
+  string user_id = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "usr_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^usr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
 
   // False when the token was valid but everything it asserts was already
   // recorded — a link clicked twice, or prefetched by a mail client. Nothing was
@@ -314,7 +416,11 @@ message ResendEmailVerificationRequest {
   // than "that address has no pending account", which is the first half of an
   // enumeration oracle.
   string email = 1 [
-    (gnostic.openapi.v3.property) = {example: {yaml: "ada@example.com"}},
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "ada@example.com"}
+      max_length: 254
+      pattern: "^.+@.+\\..+$"
+    },
     (buf.validate.field) = {
       required: true
     cel: [
@@ -383,7 +489,11 @@ message RequestPasswordResetRequest {
   // than "that address has no account", which is the first half of an
   // enumeration oracle.
   string email = 1 [
-    (gnostic.openapi.v3.property) = {example: {yaml: "ada@example.com"}},
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "ada@example.com"}
+      max_length: 254
+      pattern: "^.+@.+\\..+$"
+    },
     (buf.validate.field) = {
       required: true
     cel: [
@@ -445,7 +555,11 @@ message ResetPasswordRequest {
   // token's real length. A wrong token, a spent one and an expired one remain
   // one refusal.
   string token = 1 [
-    (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-not-a-real-reset-token"}},
+    // Loose by design, as on VerifyEmailRequest.token.
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "PLACEHOLDER-not-a-real-reset-token"}
+      pattern: "^\\S+$"
+    },
     (buf.validate.field) = {
       required: true
       string: {max_len: 512}
@@ -470,7 +584,21 @@ message ResetPasswordRequest {
   // `min_len` counts CHARACTERS and `max_bytes` counts BYTES, matching
   // `domain.MinPasswordRunes` (8) and `domain.MaxPasswordBytes` (4096).
   string password = 2 [
-    (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-not-a-real-password"}},
+    // `max_bytes` is a byte count and OpenAPI's `maxLength` is a character count,
+    // so the rule below cannot publish itself: the generator correctly declines to
+    // restate 4096 bytes as 4096 characters. The annotation states the character
+    // ceiling separately, and 4096 characters is the loosest true reading of a
+    // 4096-byte limit — every input the rule accepts satisfies it.
+    //
+    // The pattern excludes the C0 controls and DEL, which `domain.NormalizePassword`
+    // refuses outright (RFC 8264 §7.5, and tabs and newlines by name). It is a
+    // subset of what the handler refuses rather than a superset, which is the only
+    // safe direction for a published pattern.
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "PLACEHOLDER-not-a-real-password"}
+      max_length: 4096
+      pattern: "^[^\\u0000-\\u001F\\u007F]+$"
+    },
     (buf.validate.field).string = {
       min_len: 8
       max_bytes: 4096
@@ -510,7 +638,15 @@ message AuthenticateRequest {
   // address, and the answer is still no", and the second is the answer an
   // enumerating attacker is trying to buy.
   string identifier = 1 [
-    (gnostic.openapi.v3.property) = {example: {yaml: "ada@example.com"}},
+    // Published bounds, not rules — the CEL above measures the trimmed value and
+    // the interceptor would measure the raw one. `pattern` says only "one line,
+    // no line breaks": it is NOT the address grammar, because publishing that here
+    // would describe the shape the paragraph above refuses to distinguish on.
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "ada@example.com"}
+      max_length: 254
+      pattern: "^[^\\r\\n]+$"
+    },
     (buf.validate.field).cel = {
       id: "identity.identifier.length"
       message: "an identifier may not exceed 254 bytes"
@@ -529,7 +665,19 @@ message AuthenticateRequest {
   // Length is still bounded — by `domain.MaxPasswordBytes` inside the handler
   // and by Connect's message size cap in front of it — so declaring nothing here
   // costs no denial-of-service protection.
-  string password = 2 [(gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-not-a-real-password"}}];
+  //
+  // The published `maxLength` is an ANNOTATION, so it adds no interceptor rule and
+  // no refusal: it restates `domain.MaxPasswordBytes`, which the handler already
+  // enforces, for the benefit of a client and of a document that must not contain
+  // an unbounded string. The paragraph above rules out a protovalidate maximum,
+  // not a documented one — what makes a ceiling an oracle is the interceptor
+  // answering "structurally wrong" before the handler runs, and nothing here does
+  // that.
+  string password = 2 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "PLACEHOLDER-not-a-real-password"}
+    max_length: 4096
+    pattern: "^[^\\u0000-\\u001F\\u007F]*$"
+  }];
 
   // The second factor, and OPTIONAL. Sent empty on a first leg, which is
   // answered with the kinds the account can complete with rather than with a
@@ -551,7 +699,17 @@ message AuthenticateRequest {
   // would report which second factors the account holds — the inventory
   // AuthenticateResponse.offered is deliberately trimmed to kinds in order not
   // to publish.
-  string code = 3 [(gnostic.openapi.v3.property) = {example: {yaml: "000000"}}];
+  // The bounds are ANNOTATIONS — published, not enforced — so the paragraph above
+  // still holds: no interceptor rule distinguishes a TOTP code from a recovery
+  // code, and nothing refuses either shape before the handler runs. The pattern is
+  // "one line" and nothing more, deliberately: `normalizeRecoveryCode` accepts
+  // lowercase, spaces, hyphens and stray punctuation and reduces them, so any
+  // tighter pattern would describe a rejection this system does not perform.
+  string code = 3 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "000000"}
+    max_length: 64
+    pattern: "^[^\\r\\n]*$"
+  }];
 
   // An opaque pseudonym for the client. It is NOT a device name, a platform
   // string, a user agent or an address — all of those are personal data and
@@ -563,7 +721,14 @@ message AuthenticateRequest {
   // that reaches the log is unbounded there forever.
   string device_id = 4 [
     (gnostic.openapi.v3.property) = {example: {yaml: "dev_9f2c1b7e"}},
-    (buf.validate.field).string.max_len = 128
+    (buf.validate.field).string = {
+      max_len: 128
+      // Printable ASCII, which is what an opaque handle minted by a client can be
+      // held to without constraining what it MEANS. The value enters events, and
+      // an event is append-only: a control character or a newline that reaches the
+      // log is there forever, and every consumer of that log has to survive it.
+      pattern: "^[\\x20-\\x7E]*$"
+    }
   ];
 }
 
@@ -585,7 +750,11 @@ message AuthenticateResponse {
   // anyone holding a correct password enumerate the account's authenticators,
   // which is the inventory an attacker choosing an attack wants. Empty when no
   // second factor is owed.
-  repeated MethodKind offered = 2;
+  // The ceiling is the number of kinds `MethodKind` declares, so it cannot be
+  // reached by anything but a new enum value — which is the point. An unbounded
+  // array in a published response is a promise that a client's rendering loop has
+  // no upper bound on work, and this one has a very small one.
+  repeated MethodKind offered = 2 [(buf.validate.field).repeated.max_items = 8];
 }
 
 // CreateSessionRequest completes a login and asks for a bearer token.
@@ -601,7 +770,15 @@ message CreateSessionRequest {
   // The address as typed, as in AuthenticateRequest — bounded, not
   // format-checked, for the same reason.
   string identifier = 1 [
-    (gnostic.openapi.v3.property) = {example: {yaml: "ada@example.com"}},
+    // Published bounds, not rules — the CEL above measures the trimmed value and
+    // the interceptor would measure the raw one. `pattern` says only "one line,
+    // no line breaks": it is NOT the address grammar, because publishing that here
+    // would describe the shape the paragraph above refuses to distinguish on.
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "ada@example.com"}
+      max_length: 254
+      pattern: "^[^\\r\\n]+$"
+    },
     (buf.validate.field).cel = {
       id: "identity.identifier.length"
       message: "an identifier may not exceed 254 bytes"
@@ -609,8 +786,14 @@ message CreateSessionRequest {
     }
   ];
 
-  // The secret as typed. NO RULES, as on AuthenticateRequest.password.
-  string password = 2 [(gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-not-a-real-password"}}];
+  // The secret as typed. NO RULES, as on AuthenticateRequest.password — the
+  // bounds below are annotations, published and not enforced, for that field's
+  // reason.
+  string password = 2 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "PLACEHOLDER-not-a-real-password"}
+    max_length: 4096
+    pattern: "^[^\\u0000-\\u001F\\u007F]*$"
+  }];
 
   // The second factor. Required in practice for every account on this system,
   // because a session is never minted below AAL2.
@@ -621,12 +804,30 @@ message CreateSessionRequest {
   // refusal with a distinct VALIDATION_FAILED — turning the absence of a second
   // factor into a separately observable outcome. Shape rules are absent for the
   // reason given on AuthenticateRequest.code.
-  string code = 3 [(gnostic.openapi.v3.property) = {example: {yaml: "000000"}}];
+  //
+  // The bounds are ANNOTATIONS — published, not enforced — so the paragraph above
+  // still holds: no interceptor rule distinguishes a TOTP code from a recovery
+  // code, and nothing refuses either shape before the handler runs. The pattern is
+  // "one line" and nothing more, deliberately: `normalizeRecoveryCode` accepts
+  // lowercase, spaces, hyphens and stray punctuation and reduces them, so any
+  // tighter pattern would describe a rejection this system does not perform.
+  string code = 3 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "000000"}
+    max_length: 64
+    pattern: "^[^\\r\\n]*$"
+  }];
 
   // An opaque pseudonym for the client, as in AuthenticateRequest.
   string device_id = 4 [
     (gnostic.openapi.v3.property) = {example: {yaml: "dev_9f2c1b7e"}},
-    (buf.validate.field).string.max_len = 128
+    (buf.validate.field).string = {
+      max_len: 128
+      // Printable ASCII, which is what an opaque handle minted by a client can be
+      // held to without constraining what it MEANS. The value enters events, and
+      // an event is append-only: a control character or a newline that reaches the
+      // log is there forever, and every consumer of that log has to survive it.
+      pattern: "^[\\x20-\\x7E]*$"
+    }
   ];
 }
 
@@ -634,15 +835,38 @@ message CreateSessionRequest {
 message CreateSessionResponse {
   // The session's public identifier, a prefixed ULID (ADR-030). It is not a
   // secret: it appears in the device list of every screen that renders one.
-  string session_id = 1;
+  string session_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "sess_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^sess_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
 
   // The authenticated account's pseudonym.
-  string subject_id = 2;
+  string subject_id = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "subj_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
 
   // The plaintext bearer token. Only its digest is stored, so this is the only
   // moment it exists anywhere this system can reach: it is returned here and by
   // no other call, ever. Clients must keep it out of URLs, logs and analytics.
-  string token = 3;
+  //
+  // The exact shape IS published here, unlike the emailed tokens on
+  // VerifyEmailRequest and ResetPasswordRequest, and the asymmetry is which
+  // direction the value travels. Those fields are REQUESTS: describing the
+  // alphabet there tells a guesser which guesses are worth making. This one is a
+  // RESPONSE, so the only party who learns the shape is the party the server just
+  // handed the token to — who is holding it. 32 bytes of crypto/rand rendered as
+  // unpadded base64url is exactly 43 characters.
+  string token = 3 [(buf.validate.field).string = {
+    len: 43
+    pattern: "^[A-Za-z0-9_-]{43}$"
+  }];
 
   // The assurance level this session was established at. Always at least AAL2 —
   // a lower one is refused rather than downgraded, because a session recording
@@ -684,10 +908,22 @@ message GetUserRequest {}
 message GetUserResponse {
   // The account's pseudonym. Whatever renders a human-readable identity resolves
   // this against the vault.
-  string subject_id = 1;
+  string subject_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "subj_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
 
   // The account's public identifier, a prefixed ULID (ADR-030).
-  string user_id = 2;
+  string user_id = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "usr_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^usr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
 
   // Where the account sits in its lifecycle.
   AccountState state = 3;
@@ -708,6 +944,100 @@ message GetUserResponse {
 
   // When the account was suspended administratively, UTC. Unset means never.
   google.protobuf.Timestamp suspended_at = 8;
+
+  // When the holder asked for the account to be erased, UTC. Unset means never.
+  //
+  // This is NOT a lifecycle state and `state` does not move because of it. A
+  // request changes nothing the account can do: it keeps its credentials, its
+  // sessions and its position in the lifecycle until the compliance domain acts
+  // on it. Rendering it as "deleted" would contradict every other endpoint,
+  // which will keep serving this account normally.
+  google.protobuf.Timestamp deletion_requested_at = 9;
+
+  // When erasure falls due, UTC. Unset means no request is outstanding.
+  //
+  // The date carried by the request itself, never recomputed from today's grace
+  // period — this is the date the holder was told, and a deadline that moved
+  // after it was communicated would be worse than none.
+  google.protobuf.Timestamp deletion_scheduled_for = 10;
+
+  // The account's public handle, in the clear (ADR-051).
+  //
+  // It is the ONE field in this whole file that returns user-supplied text about
+  // a person, and it is the ONE piece of personal data that leaves the read
+  // model. Both are the same deliberate exception: a handle is PUBLISHED by
+  // design — @alice in a mention, /u/alice in a URL — so the PII vault cannot
+  // protect it (crypto-shredding does nothing to a value that was published) and
+  // there is nothing for a pseudonym to stand in for.
+  //
+  // Empty means the account has not claimed one, which is exactly the window
+  // between registering and following the verification link — or means it was
+  // erased, in which case it is empty forever and the handle is tombstoned so
+  // nobody else can take it.
+  //
+  // The published bounds are the same three CheckUsernameAvailabilityRequest
+  // declares, and they have to be: a handle this response can carry but that
+  // request would refuse is a value no client could ever round-trip. The `^$`
+  // alternative is the empty case above — a handle not yet claimed, or erased.
+  string username = 11 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "ada_lovelace"}},
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^$|^[A-Za-z][A-Za-z0-9]*(_[A-Za-z0-9]+)*$"
+    }
+  ];
+}
+
+// CheckUsernameAvailabilityRequest asks whether a public handle can be claimed.
+message CheckUsernameAvailabilityRequest {
+  // The handle to test, as typed. It is normalized server-side — case folded to
+  // lower — and the normalized form comes back in the response so a client can
+  // show what would actually be claimed.
+  //
+  // The rules mirror VerifyEmailRequest.username exactly, and must: a handle
+  // this call reports available and that call then refuses as malformed would be
+  // worse than no check at all.
+  string username = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "ada_lovelace"}},
+    (buf.validate.field) = {
+      required: true
+      string: {
+        min_len: 3
+        max_len: 30
+        pattern: "^[A-Za-z][A-Za-z0-9]*(_[A-Za-z0-9]+)*$"
+      }
+    }
+  ];
+}
+
+// CheckUsernameAvailabilityResponse answers with one boolean.
+//
+// # There is deliberately no reason field, and there must not be one
+//
+// Taken, reserved and tombstoned are ONE answer. Merging the first two is only
+// tidiness — the action is the same, pick another handle — but merging the THIRD
+// is a privacy control. "This handle was tombstoned" means "the account that
+// held it was erased", which is a fact about a PERSON, and the tombstone exists
+// precisely to protect that person. A field that distinguished it would undo the
+// protection at the point of use.
+message CheckUsernameAvailabilityResponse {
+  // True only when the handle is free, well-formed and not reserved.
+  bool available = 1;
+
+  // The NORMALIZED handle — what would actually be claimed. Case folded to
+  // lower. Returned so a client can show the canonical form rather than echo
+  // what was typed.
+  //
+  // Case folded, so the published pattern is the lowercase half of the request's
+  // — this field cannot carry a capital, and a client rendering it does not have
+  // to allow for one.
+  string username = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "ada_lovelace"}},
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^$|^[a-z][a-z0-9]*(_[a-z0-9]+)*$"
+    }
+  ];
 }
 
 // ListSessionsRequest asks for a page of the caller's device list.
@@ -721,7 +1051,19 @@ message ListSessionsRequest {
   // treats a negative size as a caller bug and an oversized one as a request to
   // satisfy with less. Declaring `lte: 200` here would REFUSE what the server
   // deliberately clamps, which is the contradiction this file avoids.
-  int32 page_size = 1 [(buf.validate.field).int32.gte = 0];
+  //
+  // The published `maximum` is an ANNOTATION for exactly that reason. 200 is a
+  // true statement about this field — nothing above it has any effect — and a
+  // document that leaves a numeric input unbounded describes an API that will
+  // accept 2^31-1 and try. Stating it as an annotation publishes the ceiling
+  // without converting the clamp into a refusal.
+  int32 page_size = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "50"}
+      maximum: 200
+    },
+    (buf.validate.field).int32.gte = 0
+  ];
 
   // An opaque cursor from a previous response's next_page_token. Empty starts at
   // the beginning.
@@ -735,7 +1077,15 @@ message ListSessionsRequest {
   // query, and the server mints it, so no legitimate client produces a long one.
   string page_token = 2 [
     (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-opaque-cursor-from-a-previous-response"}},
-    (buf.validate.field).string.max_len = 1024
+    (buf.validate.field).string = {
+      max_len: 1024
+      // `page.Encode` renders every cursor as unpadded base64url, so this refuses
+      // only values `page.Decode` was going to refuse anyway — one line earlier
+      // and with the field named. Opaque to the CLIENT is not opaque to the
+      // server: the alphabet is ours, and publishing it costs nothing because a
+      // cursor carries no authority (page/token.go deliberately does not sign it).
+      pattern: "^[A-Za-z0-9_-]*$"
+    }
   ];
 }
 
@@ -747,12 +1097,28 @@ message ListSessionsRequest {
 // credential on the one screen whose entire purpose is to let a user revoke one.
 message Session {
   // The session's public identifier, and what RevokeSession names.
-  string session_id = 1;
+  string session_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "sess_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^sess_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
 
   // The opaque client-supplied handle, empty when the client sent none. It is
   // NOT a device name: a name is personal data the user typed, and personal data
   // may not enter a projection.
-  string device_id = 2;
+  //
+  // The bounds are the ones AuthenticateRequest.device_id enforces on the way in.
+  // They are restated on the way out because a client reading this list is
+  // rendering the value, and what it may contain is a property of the render.
+  string device_id = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "dev_9f2c1b7e"}},
+    (buf.validate.field).string = {
+      max_len: 128
+      pattern: "^[\\x20-\\x7E]*$"
+    }
+  ];
 
   // The level this session was established at, so a screen can mark one that has
   // only ever presented a single factor.
@@ -778,12 +1144,22 @@ message Session {
 // ListSessionsResponse is one page of the device list, newest first.
 message ListSessionsResponse {
   // The page, newest first.
-  repeated Session sessions = 1;
+  //
+  // The ceiling is the page size the server clamps to (200). A client sizing a
+  // buffer, a virtual list or a render budget from this document gets the real
+  // number rather than "unbounded", and the two are very different to build for.
+  repeated Session sessions = 1 [(buf.validate.field).repeated.max_items = 200];
 
   // The cursor for the next page. EMPTY MEANS DONE — it is the only termination
   // signal, and a client must not infer the end from a short page, because a
   // clamped page size makes short pages ordinary.
-  string next_page_token = 2;
+  string next_page_token = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-opaque-cursor-for-the-next-page"}},
+    (buf.validate.field).string = {
+      max_len: 1024
+      pattern: "^[A-Za-z0-9_-]*$"
+    }
+  ];
 }
 
 // ListMethodsRequest is empty: it lists the caller's own methods.
@@ -798,7 +1174,13 @@ message ListMethodsRequest {}
 // whoever reaches this screen how many attempts remain before a factor locks.
 message AuthMethod {
   // The credential's identifier, a prefixed ULID (ADR-030).
-  string credential_id = 1;
+  string credential_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "cred_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
 
   // What kind of factor this is.
   MethodKind kind = 2;
@@ -831,7 +1213,12 @@ message AuthMethod {
 // holds at most one usable credential per kind, and there are five kinds.
 message ListMethodsResponse {
   // The methods, in no guaranteed order.
-  repeated AuthMethod methods = 1;
+  //
+  // The ceiling is the sentence above stated as a rule: five kinds, at most one
+  // usable credential per kind, and room for the enum to grow before anyone has
+  // to think about this again. "Unpaginated" is only safe while something bounds
+  // it, and until now nothing did.
+  repeated AuthMethod methods = 1 [(buf.validate.field).repeated.max_items = 16];
 }
 
 // ListLoginHistoryRequest asks for a page of the caller's recent activity.
@@ -839,13 +1226,33 @@ message ListLoginHistoryRequest {
   // How many entries to return. Zero means the server's default (50), and the
   // server clamps at its maximum (200). Only a negative size is refused, as on
   // ListSessionsRequest.page_size.
-  int32 page_size = 1 [(buf.validate.field).int32.gte = 0];
+  //
+  // The published `maximum` is an ANNOTATION for exactly that reason. 200 is a
+  // true statement about this field — nothing above it has any effect — and a
+  // document that leaves a numeric input unbounded describes an API that will
+  // accept 2^31-1 and try. Stating it as an annotation publishes the ceiling
+  // without converting the clamp into a refusal.
+  int32 page_size = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "50"}
+      maximum: 200
+    },
+    (buf.validate.field).int32.gte = 0
+  ];
 
   // An opaque cursor from a previous response, with the same rules as
   // ListSessionsRequest.page_token. Empty starts at the beginning.
   string page_token = 2 [
     (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-opaque-cursor-from-a-previous-response"}},
-    (buf.validate.field).string.max_len = 1024
+    (buf.validate.field).string = {
+      max_len: 1024
+      // `page.Encode` renders every cursor as unpadded base64url, so this refuses
+      // only values `page.Decode` was going to refuse anyway — one line earlier
+      // and with the field named. Opaque to the CLIENT is not opaque to the
+      // server: the alphabet is ours, and publishing it costs nothing because a
+      // cursor carries no authority (page/token.go deliberately does not sign it).
+      pattern: "^[A-Za-z0-9_-]*$"
+    }
   ];
 }
 
@@ -867,7 +1274,7 @@ message LoginAttempt {
 
   // The factors presented. Empty for an attempt refused before any credential
   // was examined.
-  repeated MethodKind methods = 3;
+  repeated MethodKind methods = 3 [(buf.validate.field).repeated.max_items = 8];
 
   // The level the attempt established. Unspecified for a failure — nothing was
   // established.
@@ -875,7 +1282,13 @@ message LoginAttempt {
 
   // The opaque client pseudonym the attempt came from, empty when none was sent.
   // Never a device name (see Session.device_id).
-  string device_id = 5;
+  string device_id = 5 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "dev_9f2c1b7e"}},
+    (buf.validate.field).string = {
+      max_len: 128
+      pattern: "^[\\x20-\\x7E]*$"
+    }
+  ];
 
   // When the attempt happened, UTC.
   google.protobuf.Timestamp occurred_at = 6;
@@ -883,39 +1296,55 @@ message LoginAttempt {
 
 // ListLoginHistoryResponse is one page of recent activity, newest first.
 message ListLoginHistoryResponse {
-  // The page, newest first.
-  repeated LoginAttempt attempts = 1;
+  // The page, newest first. Bounded by the clamped page size, as on
+  // ListSessionsResponse.sessions.
+  repeated LoginAttempt attempts = 1 [(buf.validate.field).repeated.max_items = 200];
 
   // The cursor for the next page. Empty means done.
-  string next_page_token = 2;
+  string next_page_token = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-opaque-cursor-for-the-next-page"}},
+    (buf.validate.field).string = {
+      max_len: 1024
+      pattern: "^[A-Za-z0-9_-]*$"
+    }
+  ];
 }
 
 // EnrollTotpRequest asks for a new authenticator secret.
 message EnrollTotpRequest {
-  // What the user sees under the issuer in their authenticator app, normally
-  // their own address.
+  // IGNORED. The authenticator label is derived by the server.
   //
-  // It is PERSONAL DATA, and it is supplied by the caller rather than read
-  // server-side because the vault port is write-only by design — a port that
-  // could read is a port through which an address reaches a log. It is placed in
-  // the provisioning URI returned below, rendered to the enrolling user's own
-  // screen, and reaches no event, no log line and no error message.
+  // It used to carry the account's email address, and that put personal data in
+  // the otpauth:// URI — rendered to a QR code, then stored PERMANENTLY by the
+  // authenticator app, synced to the holder's cloud backup and shown on their
+  // lock screen. That is the one place ADR-002 can never reach to erase.
   //
-  // An empty value is refused. The authenticator app would show an unlabelled
-  // entry, which is how people delete the wrong credential.
+  // The server now uses the account's own public handle (ADR-051), which is
+  // public by design and is what a public label should carry. Deriving it
+  // server-side also removes a caller-controlled string from a QR code: a session
+  // holder could otherwise enrol with the label "security@chronos.io" and produce
+  // an entry indistinguishable from an official one.
   //
-  // `required` matches the handler, which refuses a value that is empty or
-  // whitespace-only; this rule catches the first case and the handler still
-  // catches the second, so the two do not disagree. The ceiling is the ONE rule
-  // in this file stricter than the code behind it — the handler imposes no
-  // maximum — and it is here because this value is embedded verbatim in the
-  // otpauth:// URI rendered into a QR code. It is sized at RFC 5321's 320-byte
-  // path, comfortably above the address this normally holds.
+  // DEPRECATED rather than deleted, and the distinction is not cosmetic. Removing
+  // field 1 fails `buf breaking`'s FIELD_NO_DELETE, which the FILE ruleset in
+  // buf.yaml includes; relaxing that ruleset to admit this deletion would be
+  // widening a gate to fit a change, which is how gates stop meaning anything.
+  // So the field stays, is documented as ignored, and is deleted at the first
+  // release boundary — the standard protobuf deprecation path.
+  //
+  // A value sent here is discarded. No validation rule applies, because a rule
+  // on an ignored field only tells a client its input mattered.
+  //
+  // The published bounds are ANNOTATIONS, which is the only form that keeps the
+  // sentence above true: they describe the field for a document that may not
+  // contain an unbounded string, and they add no rule, so a client still learns
+  // nothing about whether its input mattered. It did not.
   string account_name = 1 [
-    (gnostic.openapi.v3.property) = {example: {yaml: "ada@example.com"}},
-    (buf.validate.field) = {
-      required: true
-      string: {max_bytes: 320}
+    deprecated = true,
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: ""}
+      max_length: 256
+      pattern: "^[^\\r\\n]*$"
     }
   ];
 }
@@ -930,15 +1359,32 @@ message EnrollTotpRequest {
 // second factor.
 message EnrollTotpResponse {
   // The credential this enrolment provisioned, a prefixed ULID (ADR-030).
-  string credential_id = 1;
+  string credential_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "cred_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
 
   // The base32 shared secret, for manual entry when a camera is unavailable.
   // Returned ONLY here. Never log it, never persist it client-side.
-  string secret = 2;
+  //
+  // `totp.SecretBytes` is 20 — RFC 4226 §4 R6 — and 20 bytes of unpadded base32
+  // is exactly 32 characters from the alphabet A-Z2-7. Describing a RESPONSE
+  // precisely costs nothing: the only reader is the caller the server just handed
+  // it to.
+  string secret = 2 [(buf.validate.field).string = {
+    len: 32
+    pattern: "^[A-Z2-7]{32}$"
+  }];
 
   // The otpauth:// value behind the QR code. It CONTAINS the secret and the
   // account label. Returned ONLY here. Never log it.
-  string provisioning_uri = 3;
+  string provisioning_uri = 3 [(buf.validate.field).string = {
+    max_len: 512
+    pattern: "^otpauth://totp/[^\\s]*$"
+  }];
 
   // When this unproven secret stops being confirmable, UTC.
   //
@@ -966,7 +1412,14 @@ message ConfirmTotpRequest {
   // verifier's business, and pinning it in the schema would refuse a longer code
   // if the verifier is ever configured to issue one.
   string code = 1 [
-    (gnostic.openapi.v3.property) = {example: {yaml: "000000"}},
+    // The published `pattern` is an annotation and says only "one line", so the
+    // paragraph above still holds — no digit count, no character class, nothing
+    // that would refuse a longer code if the verifier is reconfigured to issue
+    // one.
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "000000"}
+      pattern: "^[^\\r\\n]+$"
+    },
     (buf.validate.field) = {
       required: true
       string: {max_len: 32}
@@ -977,7 +1430,13 @@ message ConfirmTotpRequest {
 // ConfirmTotpResponse reports what the confirmation produced.
 message ConfirmTotpResponse {
   // The credential that was proven.
-  string credential_id = 1;
+  string credential_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "cred_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
 
   // True when this confirmation was the event that completed the account: a
   // verified address plus a REAL second factor. Only a TOTP confirmation can set
@@ -1014,11 +1473,33 @@ message GenerateRecoveryCodesRequest {
 // every factor on the account.
 message GenerateRecoveryCodesResponse {
   // The credential holding this set, a prefixed ULID (ADR-030).
-  string credential_id = 1;
+  string credential_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "cred_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
 
   // The plaintext codes, in the order they should be presented. Returned ONLY
   // here. Never log them; show them once and tell the user to store them.
-  repeated string codes = 2;
+  //
+  // The ceiling is `app.MaxRecoveryCodeCount`, which the request's `lte` already
+  // refuses above — so the two ends of this call now state the same number, and a
+  // client sizing a printable list gets it from the document. Each code is 10
+  // bytes of entropy as unpadded base32, presented in groups of four: 16
+  // characters from A-Z2-7 and three hyphens.
+  repeated string codes = 2 [
+    (buf.validate.field).repeated = {
+      max_items: 20
+      items: {
+        string: {
+          len: 19
+          pattern: "^[A-Z2-7]{4}(-[A-Z2-7]{4}){3}$"
+        }
+      }
+    }
+  ];
 }
 
 // RevokeSessionRequest ends one of the caller's sessions.
@@ -1038,7 +1519,10 @@ message RevokeSessionRequest {
     (gnostic.openapi.v3.property) = {example: {yaml: "sess_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
     (buf.validate.field) = {
       required: true
-      string: {pattern: "^sess_[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}$"}
+      string: {
+        max_len: 31
+        pattern: "^sess_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+      }
     }
   ];
 
@@ -1081,7 +1565,10 @@ message RevokeAllSessionsRequest {
   // compromise response — unexpressible.
   string except_session_id = 1 [
     (gnostic.openapi.v3.property) = {example: {yaml: "sess_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
-    (buf.validate.field).string.pattern = "^$|^sess_[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}$"
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^$|^sess_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
   ];
 
   // A short machine-readable label recorded with each revocation, as in
@@ -1103,12 +1590,149 @@ message RevokeAllSessionsRequest {
 message RevokeAllSessionsResponse {
   // How many sessions this call ended. Sessions already revoked or expired are
   // not counted — nothing was appended for them.
-  int32 revoked = 1;
+  //
+  // The published range is the honest one: a count of rows has no ceiling this
+  // module imposes, so the ceiling is the wire type's. Stating it is not
+  // ceremony — a client that reads "integer, no maximum" from a document has to
+  // assume the value may not fit the number type it decodes into, and for a
+  // 32-bit count that assumption is wrong in a way that costs real work.
+  int32 revoked = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "3"}
+      maximum: 2147483647
+    },
+    // The floor is a RULE rather than an annotation, and it has to be: `minimum: 0`
+    // on the annotation is proto3's zero value for that field, indistinguishable
+    // from unset, so the generator never sees it and the document silently loses
+    // the bound. `gte` survives, and on a response message it adds no refusal to
+    // anything — the interceptor validates requests.
+    (buf.validate.field).int32.gte = 0
+  ];
 
   // How many live sessions the work list returned, the spared one included.
   // Reported so a client can tell "nothing to do" apart from "the list came back
   // empty because it is broken".
-  int32 scanned = 2;
+  int32 scanned = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "4"}
+      maximum: 2147483647
+    },
+    // The floor is a RULE rather than an annotation, and it has to be: `minimum: 0`
+    // on the annotation is proto3's zero value for that field, indistinguishable
+    // from unset, so the generator never sees it and the document silently loses
+    // the bound. `gte` survives, and on a response message it adds no refusal to
+    // anything — the interceptor validates requests.
+    (buf.validate.field).int32.gte = 0
+  ];
+}
+
+// DeactivateAccountRequest switches the caller's own account off.
+//
+// It carries NOTHING, and the emptiness is the security property rather than an
+// oversight. The account is named by the caller's session and by nothing else, so
+// there is no field a request could use to aim this at somebody else's account —
+// identity has no delegation convention, and a `subject_id` here would let any
+// authenticated caller switch off any account whose pseudonym they could obtain.
+//
+// The same reasoning the account-screen reads are built on (see GetUserRequest).
+message DeactivateAccountRequest {}
+
+// DeactivateAccountResponse reports what the deactivation did.
+//
+// The whole operation is ONE atomic append: the account is switched off and every
+// session on it ends together, or neither happens. The two orderings a pair of
+// appends could take both fail badly — an account off in the log with a live
+// session keeps full API access, because nothing in the request pipeline reads an
+// account's state — so the write is indivisible instead of ordered.
+message DeactivateAccountResponse {
+  // Whether this call is what switched the account off. False means it was
+  // already deactivated; the sessions are still swept in that case, because a
+  // login whose ceremony began before the first deactivation committed can have
+  // minted a session that sweep never saw.
+  bool changed = 1;
+
+  // How many live sessions this call ended, the caller's own included. A
+  // deactivation spares nothing: an account switched off everywhere except on the
+  // device that switched it off is not what was asked for.
+  //
+  // Range as on RevokeAllSessionsResponse.revoked.
+  int32 sessions_revoked = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "3"}
+      maximum: 2147483647
+    },
+    // The floor is a RULE rather than an annotation, and it has to be: `minimum: 0`
+    // on the annotation is proto3's zero value for that field, indistinguishable
+    // from unset, so the generator never sees it and the document silently loses
+    // the bound. `gte` survives, and on a response message it adds no refusal to
+    // anything — the interceptor validates requests.
+    (buf.validate.field).int32.gte = 0
+  ];
+
+  // How many live sessions the work list returned. Reported so a client can tell
+  // "nothing to do" apart from "the list came back empty because it is broken".
+  int32 sessions_scanned = 3 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "4"}
+      maximum: 2147483647
+    },
+    // The floor is a RULE rather than an annotation, and it has to be: `minimum: 0`
+    // on the annotation is proto3's zero value for that field, indistinguishable
+    // from unset, so the generator never sees it and the document silently loses
+    // the bound. `gte` survives, and on a response message it adds no refusal to
+    // anything — the interceptor validates requests.
+    (buf.validate.field).int32.gte = 0
+  ];
+}
+
+// RequestAccountDeletionRequest asks for the caller's own account to be erased.
+//
+// It names no account, for DeactivateAccountRequest's reason. What it does carry
+// is a typed confirmation, and that is the one field on any request in this
+// service whose purpose is to be DIFFICULT to send by accident.
+message RequestAccountDeletionRequest {
+  // The literal string `DELETE`, typed by the account holder.
+  //
+  // Every other destructive call in this service is undone by doing it again the
+  // other way: a revoked session is replaced by signing in, a deactivated account
+  // is reactivated by signing in, a changed password is changed back. This one is
+  // not — nothing in this module cancels a deletion request, and the module that
+  // will act on it destroys a key. A step-up to AAL2 proves WHO is asking; it
+  // does not prove they meant to ask, and a mis-wired client retrying a failed
+  // request would satisfy it perfectly.
+  //
+  // Constrained by protovalidate rather than checked in a handler, so the
+  // requirement is part of the schema every client generates from and is rejected
+  // by the validation interceptor before any account is loaded (ADR-007).
+  //
+  // It is deliberately NOT localized and not derived from anything the account
+  // holds. A confirmation that echoed the address would put personal data in a
+  // request body for no gain, and one that varied by locale would be a
+  // client-side string table standing between a person and their own account.
+  string confirmation = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "DELETE"}},
+    (buf.validate.field).string.const = "DELETE"
+  ];
+}
+
+// RequestAccountDeletionResponse reports the deadline the request now carries.
+//
+// # Read this before building anything on it
+//
+// The request is APPENDED and nothing consumes it. Erasure belongs to the
+// compliance domain (ADR-002: destroy the key), that module does not exist, and
+// neither does the workflow that would run the grace period, the mail that would
+// name the date, or a command to cancel. The account keeps working — indefinitely
+// — and this response says only that the intent is now in the log.
+message RequestAccountDeletionResponse {
+  // Whether this call recorded the request. False means one was already
+  // outstanding, and `scheduled_for` is then the ORIGINAL deadline: a second
+  // request must not move a date the holder has already been given, or anyone
+  // holding the session could push erasure out forever.
+  bool changed = 1;
+
+  // When erasure falls due, UTC. Always set on a successful call.
+  google.protobuf.Timestamp scheduled_for = 2;
 }
 
 // IdentityService is the account, its credentials and its sessions.
@@ -1179,6 +1803,33 @@ service IdentityService {
     // it REPLACES a status code it is given rather than merging into it.
     option (gnostic.openapi.v3.operation) = {
       security: [{}]
+      // A MUTATION, so it carries an Idempotency-Key — and this one is PUBLIC,
+      // which changes who enforces the header but not whether it is required.
+      //
+      // The gate pipeline returns at `if p.Public { return next(ctx, req) }` in
+      // interceptor/gates.go, BEFORE it reaches Idempotency.Do, so the
+      // interceptor never sees this call. identity/api/service.go's
+      // idempotencyKey() refuses it instead, from the same header and with the
+      // same message. The requirement is therefore real and the document must
+      // state it: without the key this RPC answers VALIDATION_FAILED, and a
+      // client generated from a spec that omitted the parameter could not
+      // register or authenticate anyone.
+      //
+      // These are also the calls that need a key MOST — sign-up and sign-in are
+      // what a user retries on a flaky connection.
+      //
+      // The header is described once, in proto/openapi.base.yaml's components,
+      // and every operation that requires it references that one description.
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
       responses: {
         response_or_reference: [
           {
@@ -1225,6 +1876,33 @@ service IdentityService {
 
     option (gnostic.openapi.v3.operation) = {
       security: [{}]
+      // A MUTATION, so it carries an Idempotency-Key — and this one is PUBLIC,
+      // which changes who enforces the header but not whether it is required.
+      //
+      // The gate pipeline returns at `if p.Public { return next(ctx, req) }` in
+      // interceptor/gates.go, BEFORE it reaches Idempotency.Do, so the
+      // interceptor never sees this call. identity/api/service.go's
+      // idempotencyKey() refuses it instead, from the same header and with the
+      // same message. The requirement is therefore real and the document must
+      // state it: without the key this RPC answers VALIDATION_FAILED, and a
+      // client generated from a spec that omitted the parameter could not
+      // register or authenticate anyone.
+      //
+      // These are also the calls that need a key MOST — sign-up and sign-in are
+      // what a user retries on a flaky connection.
+      //
+      // The header is described once, in proto/openapi.base.yaml's components,
+      // and every operation that requires it references that one description.
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
       responses: {
         response_or_reference: [
           {
@@ -1280,7 +1958,116 @@ service IdentityService {
     option (chronos.options.v1.public) = true;
     option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
 
-    option (gnostic.openapi.v3.operation) = {security: [{}]};
+    option (gnostic.openapi.v3.operation) = {
+      security: [{}]
+      // A MUTATION, so it carries an Idempotency-Key — and this one is PUBLIC,
+      // which changes who enforces the header but not whether it is required.
+      //
+      // The gate pipeline returns at `if p.Public { return next(ctx, req) }` in
+      // interceptor/gates.go, BEFORE it reaches Idempotency.Do, so the
+      // interceptor never sees this call. identity/api/service.go's
+      // idempotencyKey() refuses it instead, from the same header and with the
+      // same message. The requirement is therefore real and the document must
+      // state it: without the key this RPC answers VALIDATION_FAILED, and a
+      // client generated from a spec that omitted the parameter could not
+      // register or authenticate anyone.
+      //
+      // These are also the calls that need a key MOST — sign-up and sign-in are
+      // what a user retries on a flaky connection.
+      //
+      // The header is described once, in proto/openapi.base.yaml's components,
+      // and every operation that requires it references that one description.
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // CheckUsernameAvailability reports whether a public handle can be claimed.
+  //
+  // Public: it is reached from the signup form, by a browser that has never
+  // authenticated and by definition has no account.
+  //
+  // # It IS an enumeration oracle, and that is the intended behaviour
+  //
+  // A caller can learn that @alice is taken. That is not a leak, because a handle
+  // is PUBLISHED — publication is its entire purpose (ADR-051) — and the same
+  // fact is readable from any page that renders a mention, from a profile URL,
+  // and from the person themselves. Every other public RPC in this service is
+  // shaped to make its two outcomes indistinguishable; this one is shaped to make
+  // them distinguishable, and the difference is not an oversight in the schema.
+  //
+  // Do NOT "fix" this into an undifferentiated response. The resulting endpoint
+  // would answer no question at all, the signup form could not tell a person
+  // their handle was taken until after they had spent a verification link they
+  // cannot get back, and the information would remain freely available everywhere
+  // else in the product.
+  //
+  // The ONE thing it must not distinguish is a tombstoned handle from a taken
+  // one; see CheckUsernameAvailabilityResponse for why that single merge is a
+  // privacy control rather than the same tidiness.
+  //
+  // # The answer is advisory
+  //
+  // It reads the handle's reservation stream at an instant. Uniqueness is
+  // enforced at the moment of the WRITE by an atomic append with a precondition
+  // (ADR-044, ADR-051), so a handle reported free may be taken by the time
+  // VerifyEmail claims it — any check-then-claim is racy by construction. The
+  // point of this call is that a person finds out at the FORM rather than after
+  // clicking a link.
+  //
+  // A READ: it appends nothing, mints nothing and sends no mail. It is rate
+  // limited per caller regardless — "an attacker may learn whether @alice exists"
+  // is not the same permission as "an attacker may read a stream from the event
+  // store as fast as they can open sockets".
+  rpc CheckUsernameAvailability(CheckUsernameAvailabilityRequest) returns (CheckUsernameAvailabilityResponse) {
+    option (chronos.options.v1.public) = true;
+    option (chronos.options.v1.operation) = OPERATION_CLASS_READ;
+
+    option (gnostic.openapi.v3.operation) = {
+      security: [{}]
+      responses: {
+        response_or_reference: [
+          {
+            name: "200"
+            value: {
+              response: {
+                description:
+                  "Whether the handle can be claimed, and its normalized form. Unlike every\n"
+                  "other public endpoint in this service the two outcomes are DELIBERATELY\n"
+                  "distinguishable: a username is published by design, so telling a caller\n"
+                  "that one is taken discloses nothing that a mention, a profile URL or the\n"
+                  "person themselves does not. `available: false` covers taken, reserved and\n"
+                  "tombstoned alike — the last of those is merged in on purpose, because\n"
+                  "\"this handle belonged to an erased account\" is a fact about a person.\n"
+                content: {
+                  additional_properties: [
+                    {
+                      name: "application/json"
+                      value: {
+                        schema: {reference: {_ref: "#/components/schemas/chronos.identity.v1.CheckUsernameAvailabilityResponse"}}
+                        example: {
+                          yaml:
+                            "available: false\n"
+                            "username: ada_lovelace\n"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    };
   }
 
   // RequestPasswordReset sends a reset link to the address a registered account
@@ -1307,6 +2094,33 @@ service IdentityService {
 
     option (gnostic.openapi.v3.operation) = {
       security: [{}]
+      // A MUTATION, so it carries an Idempotency-Key — and this one is PUBLIC,
+      // which changes who enforces the header but not whether it is required.
+      //
+      // The gate pipeline returns at `if p.Public { return next(ctx, req) }` in
+      // interceptor/gates.go, BEFORE it reaches Idempotency.Do, so the
+      // interceptor never sees this call. identity/api/service.go's
+      // idempotencyKey() refuses it instead, from the same header and with the
+      // same message. The requirement is therefore real and the document must
+      // state it: without the key this RPC answers VALIDATION_FAILED, and a
+      // client generated from a spec that omitted the parameter could not
+      // register or authenticate anyone.
+      //
+      // These are also the calls that need a key MOST — sign-up and sign-in are
+      // what a user retries on a flaky connection.
+      //
+      // The header is described once, in proto/openapi.base.yaml's components,
+      // and every operation that requires it references that one description.
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
       responses: {
         response_or_reference: [
           {
@@ -1358,6 +2172,33 @@ service IdentityService {
 
     option (gnostic.openapi.v3.operation) = {
       security: [{}]
+      // A MUTATION, so it carries an Idempotency-Key — and this one is PUBLIC,
+      // which changes who enforces the header but not whether it is required.
+      //
+      // The gate pipeline returns at `if p.Public { return next(ctx, req) }` in
+      // interceptor/gates.go, BEFORE it reaches Idempotency.Do, so the
+      // interceptor never sees this call. identity/api/service.go's
+      // idempotencyKey() refuses it instead, from the same header and with the
+      // same message. The requirement is therefore real and the document must
+      // state it: without the key this RPC answers VALIDATION_FAILED, and a
+      // client generated from a spec that omitted the parameter could not
+      // register or authenticate anyone.
+      //
+      // These are also the calls that need a key MOST — sign-up and sign-in are
+      // what a user retries on a flaky connection.
+      //
+      // The header is described once, in proto/openapi.base.yaml's components,
+      // and every operation that requires it references that one description.
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
       responses: {
         response_or_reference: [
           {
@@ -1405,6 +2246,33 @@ service IdentityService {
 
     option (gnostic.openapi.v3.operation) = {
       security: [{}]
+      // A MUTATION, so it carries an Idempotency-Key — and this one is PUBLIC,
+      // which changes who enforces the header but not whether it is required.
+      //
+      // The gate pipeline returns at `if p.Public { return next(ctx, req) }` in
+      // interceptor/gates.go, BEFORE it reaches Idempotency.Do, so the
+      // interceptor never sees this call. identity/api/service.go's
+      // idempotencyKey() refuses it instead, from the same header and with the
+      // same message. The requirement is therefore real and the document must
+      // state it: without the key this RPC answers VALIDATION_FAILED, and a
+      // client generated from a spec that omitted the parameter could not
+      // register or authenticate anyone.
+      //
+      // These are also the calls that need a key MOST — sign-up and sign-in are
+      // what a user retries on a flaky connection.
+      //
+      // The header is described once, in proto/openapi.base.yaml's components,
+      // and every operation that requires it references that one description.
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
       responses: {
         response_or_reference: [
           {
@@ -1456,6 +2324,33 @@ service IdentityService {
 
     option (gnostic.openapi.v3.operation) = {
       security: [{}]
+      // A MUTATION, so it carries an Idempotency-Key — and this one is PUBLIC,
+      // which changes who enforces the header but not whether it is required.
+      //
+      // The gate pipeline returns at `if p.Public { return next(ctx, req) }` in
+      // interceptor/gates.go, BEFORE it reaches Idempotency.Do, so the
+      // interceptor never sees this call. identity/api/service.go's
+      // idempotencyKey() refuses it instead, from the same header and with the
+      // same message. The requirement is therefore real and the document must
+      // state it: without the key this RPC answers VALIDATION_FAILED, and a
+      // client generated from a spec that omitted the parameter could not
+      // register or authenticate anyone.
+      //
+      // These are also the calls that need a key MOST — sign-up and sign-in are
+      // what a user retries on a flaky connection.
+      //
+      // The header is described once, in proto/openapi.base.yaml's components,
+      // and every operation that requires it references that one description.
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
       responses: {
         response_or_reference: [
           {
@@ -1825,18 +2720,7 @@ service IdentityService {
             name: "Idempotency-Key"
             in: "header"
             required: true
-            description:
-              "A client-generated ULID or UUID, required on every authenticated mutating\n"
-              "call. Replaying it with the SAME body returns the stored response instead\n"
-              "of re-executing; replaying it with a DIFFERENT body returns `CONFLICT`.\n"
-              "Scoped to `(principal, method, key)` and retained 24 hours — see\n"
-              "*Idempotency* in the introduction.\n"
-            schema: {
-              schema: {
-                type: "string"
-                example: {yaml: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}
-              }
-            }
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
           }
         }
       ]
@@ -1920,18 +2804,7 @@ service IdentityService {
             name: "Idempotency-Key"
             in: "header"
             required: true
-            description:
-              "A client-generated ULID or UUID, required on every authenticated mutating\n"
-              "call. Replaying it with the SAME body returns the stored response instead\n"
-              "of re-executing; replaying it with a DIFFERENT body returns `CONFLICT`.\n"
-              "Scoped to `(principal, method, key)` and retained 24 hours — see\n"
-              "*Idempotency* in the introduction.\n"
-            schema: {
-              schema: {
-                type: "string"
-                example: {yaml: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}
-              }
-            }
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
           }
         }
       ]
@@ -2007,18 +2880,7 @@ service IdentityService {
             name: "Idempotency-Key"
             in: "header"
             required: true
-            description:
-              "A client-generated ULID or UUID, required on every authenticated mutating\n"
-              "call. Replaying it with the SAME body returns the stored response instead\n"
-              "of re-executing; replaying it with a DIFFERENT body returns `CONFLICT`.\n"
-              "Scoped to `(principal, method, key)` and retained 24 hours — see\n"
-              "*Idempotency* in the introduction.\n"
-            schema: {
-              schema: {
-                type: "string"
-                example: {yaml: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}
-              }
-            }
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
           }
         }
       ]
@@ -2094,18 +2956,7 @@ service IdentityService {
             name: "Idempotency-Key"
             in: "header"
             required: true
-            description:
-              "A client-generated ULID or UUID, required on every authenticated mutating\n"
-              "call. Replaying it with the SAME body returns the stored response instead\n"
-              "of re-executing; replaying it with a DIFFERENT body returns `CONFLICT`.\n"
-              "Scoped to `(principal, method, key)` and retained 24 hours — see\n"
-              "*Idempotency* in the introduction.\n"
-            schema: {
-              schema: {
-                type: "string"
-                example: {yaml: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}
-              }
-            }
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
           }
         }
       ]
@@ -2166,18 +3017,7 @@ service IdentityService {
             name: "Idempotency-Key"
             in: "header"
             required: true
-            description:
-              "A client-generated ULID or UUID, required on every authenticated mutating\n"
-              "call. Replaying it with the SAME body returns the stored response instead\n"
-              "of re-executing; replaying it with a DIFFERENT body returns `CONFLICT`.\n"
-              "Scoped to `(principal, method, key)` and retained 24 hours — see\n"
-              "*Idempotency* in the introduction.\n"
-            schema: {
-              schema: {
-                type: "string"
-                example: {yaml: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}
-              }
-            }
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
           }
         }
       ]
@@ -2211,6 +3051,185 @@ service IdentityService {
                           yaml:
                             "revoked: 3\n"
                             "scanned: 4\n"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    };
+  }
+
+  // DeactivateAccount switches the caller's own account off, and ends every
+  // session on it in the same atomic append.
+  //
+  // # Reversible, and how
+  //
+  // Deactivation is the holder's own switch and the holder undoes it by SIGNING
+  // IN again with every factor the account has — the successful authentication
+  // records the reactivation in the same append as itself, so the account is on
+  // again before the new session exists. There is deliberately no
+  // `ReactivateAccount` RPC: it would need a session, a session needs an
+  // authentication, and an authentication refuses a deactivated account, so its
+  // only precondition would be one its own subject can never satisfy. See
+  // `identity.md` §1.
+  //
+  // Suspension is the administrative counterpart and is NOT here. It is not
+  // reversible by the holder, every method on this service is reached by the
+  // holder acting on their own account, and there is no operator surface in this
+  // repository yet — so an RPC for it could only be a self-suspension, which
+  // makes the account unreachable by every route this module has.
+  //
+  // # AAL2
+  //
+  // On RevokeAllSessions' argument: the sign-out is total, so the denial of
+  // service an attacker holding a stolen password could inflict with it is total.
+  // No `bootstrap_min_aal`, deliberately — an account still enrolling its first
+  // factor has nothing to switch off, and the exemption exists for enrolment
+  // alone.
+  rpc DeactivateAccount(DeactivateAccountRequest) returns (DeactivateAccountResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+    option (chronos.options.v1.min_aal) = ASSURANCE_LEVEL_2;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+      responses: {
+        response_or_reference: [
+          {
+            name: "200"
+            value: {
+              response: {
+                description:
+                  "The account is off and every session on it has ended, in one atomic\n"
+                  "append. The token used to make this call is among the revoked ones: a\n"
+                  "deactivation spares nothing, because an account switched off everywhere\n"
+                  "except on the device that switched it off is not what was asked for.\n"
+                  "\n"
+                  "`changed` is false when the account was already deactivated. The sessions\n"
+                  "are still swept in that case, and that is not tidying: a login whose\n"
+                  "ceremony began before the first deactivation committed can have minted a\n"
+                  "session the first sweep never saw.\n"
+                  "\n"
+                  "To come back, sign in again with every factor the account has. The\n"
+                  "successful authentication reactivates it, and a security mail says so.\n"
+                content: {
+                  additional_properties: [
+                    {
+                      name: "application/json"
+                      value: {
+                        schema: {reference: {_ref: "#/components/schemas/chronos.identity.v1.DeactivateAccountResponse"}}
+                        example: {
+                          yaml:
+                            "changed: true\n"
+                            "sessionsRevoked: 2\n"
+                            "sessionsScanned: 2\n"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    };
+  }
+
+  // RequestAccountDeletion asks for the caller's own account to be erased, and
+  // starts the grace period.
+  //
+  // # Nothing acts on it yet
+  //
+  // The request is appended to the account's stream and that is the whole
+  // behaviour. Erasure is the compliance domain's work — destroy the key, and the
+  // personal data becomes unreadable everywhere at once — and that module does not
+  // exist. Neither does the workflow that runs the grace period, the mail that
+  // names the date, nor a command to cancel. The account keeps working.
+  //
+  // This is stated on the RPC rather than only in a design document because a
+  // client that reads "deletion requested" as "account gone" will build a screen
+  // that lies to the person using it.
+  //
+  // # AAL2, plus a typed confirmation
+  //
+  // identity.md §2 lists account deletion among the operations that require
+  // step-up. The step-up proves WHO is asking; the `confirmation` field is what
+  // makes it hard to ask by accident, which matters here and nowhere else in this
+  // service, because nothing in this module undoes it.
+  //
+  // # It does not sign anybody out
+  //
+  // Every other destructive call here voids sessions. This one deliberately does
+  // not: the grace period exists so the person can change their mind, and signing
+  // them out of an account that still works teaches them the request took effect
+  // immediately, which it did not.
+  rpc RequestAccountDeletion(RequestAccountDeletionRequest) returns (RequestAccountDeletionResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+    option (chronos.options.v1.min_aal) = ASSURANCE_LEVEL_2;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+      responses: {
+        response_or_reference: [
+          {
+            name: "200"
+            value: {
+              response: {
+                description:
+                  "The request is recorded and `scheduledFor` is when erasure falls due.\n"
+                  "\n"
+                  "Nothing consumes it yet: the compliance domain that would perform the\n"
+                  "erasure does not exist, and neither does the workflow that would run the\n"
+                  "grace period or a command to cancel. The account keeps working, and every\n"
+                  "other endpoint keeps serving it.\n"
+                  "\n"
+                  "`changed` is false when a request was already outstanding, and\n"
+                  "`scheduledFor` is then the ORIGINAL deadline — a second request must not\n"
+                  "move a date the holder has already been given.\n"
+                  "\n"
+                  "No session is revoked by this call, deliberately: the grace period exists\n"
+                  "so the person can change their mind.\n"
+                content: {
+                  additional_properties: [
+                    {
+                      name: "application/json"
+                      value: {
+                        schema: {reference: {_ref: "#/components/schemas/chronos.identity.v1.RequestAccountDeletionResponse"}}
+                        example: {
+                          yaml:
+                            "changed: true\n"
+                            "scheduledFor: '2026-09-19T08:15:00Z'\n"
                         }
                       }
                     }

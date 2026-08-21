@@ -259,7 +259,7 @@ the shape is forced rather than chosen.
 | # | Task | Notes |
 | --- | --- | --- |
 | S1-28 | Integration tests | end-to-end register→verify→enrol→login→authenticated call; concurrent registration; rebuild preserves credentials |
-| S1-29 | Final mutation pass | |
+| ~~S1-29~~ | ~~Final mutation pass~~ | **Done.** 36 mutations, 3 survivors, all three killed. See "S1-29" below |
 
 Everything from S1-01 to S1-27 is built, wired and gated: `cmd/api` registers
 `IdentityService` behind the gate pipeline, and `cmd/worker` runs the sweep,
@@ -519,3 +519,162 @@ Also outstanding, and not from the review: an attacker can still CLAIM an addres
 they do not own and deny it to its owner until the reservation lapses (48h). That
 is bounded, self-clearing and strictly less than takeover, and it is asserted at
 the end of the pre-hijack test rather than left as prose.
+
+---
+
+## S1-29 — the closing mutation pass
+
+36 mutations across the finished slice, every one verified applied (a non-zero
+`diff` line count), verified to COMPILE, run, reverted, and the revert verified
+back to zero. A mutation that did not compile was not counted as a result — that
+mistake was made three times in the earlier passes and each time reported a
+build failure as a catch.
+
+**Three survived.** All three were security properties the slice claims and no
+test held. Each now has a named test, and each of those tests was itself
+re-checked by re-running the mutation it was written for.
+
+| Survivor | What it means | Killed by |
+| --- | --- | --- |
+| `Authenticate`'s empty-password branch answering `VALIDATION_FAILED` instead of the one refusal | Two of the refusals ADR-036 governs are decided BEFORE the account lookup, and `TestEveryRefusalIsIdentical` cannot hold them: every case in that table asserts one password verification and one `AuthenticationFailed` event, and these branches deliberately do neither | `TestTheRefusalsBeforeAnyAccountLookupAreAlsoIdentical` |
+| The same, for an identifier `NormalizeEmail` rejects | " | " |
+| `ResetPassword` answering "that link has expired" for an unknown, spent or expired token | `TestAnExpiredResetLinkIsRefusedLikeAnUnknownOne` compares two facts that reach `Complete` through the SAME branch — `Consume` returns `ErrTokenNotFound` for all three — so they are equal by construction and stay equal however that branch is written. Nothing compared it against the refusals decided further down | `TestEveryUnusableResetLinkIsRefusedIdentically`, five cases at three depths |
+| `UserDeletionRequested` reclassified from `Security` to `Transactional` | `TestAccountSafetyAlertsCannotBeSwitchedOff` checked a HAND-WRITTEN list, and that event — Sec ★ in NOTIFICATIONS §4 — was never added to it. `Transactional` respects preferences, so the downgrade would let whoever reached a session schedule an erasure AND suppress the only message that reports it | the same test, rewritten to SWEEP every identity catalogue entry and require `Security` unless an explicit `transactionalByDesign` table says why not |
+
+The last one is the pattern worth keeping: a hand-maintained list of things that
+must not break only covers what was on it the day it was written. Inverting it —
+every identity alert is unsuppressible unless named as an exception — makes the
+safe answer the default for an alert that does not exist yet, and makes a
+downgrade an edit somebody has to justify in a table rather than a one-word
+change in `cmd/worker/events.go`.
+
+### The other 32, by property
+
+Each was caught by a NAMED test; the full list lives in the session record. What
+they cover: ADR-036 uniformity across `Authenticate` (the reason never reaches
+the wire), `Register` (a taken address is not a conflict), `ResendVerification`
+and `RequestPasswordReset` (an unknown address is not a 404); the reset's §4.5
+obligations (every session, every token of every purpose, the stored index rather
+than the requested one); the bootstrap carve-out at all four of its gates
+(`AALFloor` relaxing only for `EnrolmentBootstrap`, an unrecognised enrolment
+string denying rather than granting, `bootstrapProof` reachable only through
+`NeedsFirstSecondFactor`, and `CreateSession` refusing a bootstrap proof at any
+level but AAL1); pre-hijacking (`SetPassword` before verification);
+uniqueness (a verified email claim never becoming available again); erasure (a
+tombstoned handle never reissued, and the projector's `ClearUsername` handler);
+the notification catalogue's completeness guard; the revocation epoch bump and
+its refusal to be swallowed; TOTP replay, its fail-CLOSED behaviour when the
+guard is unreachable, and the constructor's refusal to build an authenticator
+without one; and the recovery code's single use, mutated in the SQL the adapter
+actually issues.
+
+**One mutation was caught only at the integration tier**: deleting the
+`UsernameTombstoned` handler's effect from `identity/projection/user.go` leaves
+every unit test in `identity/projection` green and is caught by
+`TestATombstonedHandleIsNeverReissued` against live infrastructure. That is a
+real catch, but it means the projection package's own suite does not cover what
+its handlers write.
+
+### The four repaired gates, re-checked
+
+Each was verified to FAIL when it should, because a repaired gate nobody re-ran
+is the same risk as the original.
+
+| Gate | Probe | Result |
+| --- | --- | --- |
+| `api-validate` | removed one `operationId` from the spec | `FAIL every operationId is unique (24 of 25)`, exit 2 |
+| `api-validate` | pointed one `$ref` at a schema that does not exist | `FAIL all 69 $refs resolve — dangling`, exit 2 |
+| `proto-breaking` | renamed `AuthenticateRequest.identifier` | buf reported both the field and the `json_name` change, exit 100 |
+| `vet-integration` | put a type error in an integration-tagged file | `go build ./...` PASSED (blind to it, which is the whole reason the gate exists); `make vet-integration` exit 2 |
+| notification completeness | deleted `EmailReserved`'s `Silent` decision | `TestEveryEventHasANotificationDecision` FAILED |
+
+### The harness leak that invalidated an earlier pass
+
+A `t.Fatal` inside `harness.rebuild` is `runtime.Goexit`, so the deferred
+`cancel()` ran and the function returned **while the rebuild goroutine was still
+draining** — still holding that projection's advisory lease and still writing
+rows into a table it had just truncated. The caller's `defer h.startProjectors()`
+then raced it, the live projectors came up as STANDBYS, and every later
+assertion in the package read a projection nobody in that process was advancing.
+A mutation asserted against it reads as CAUGHT while nothing caught it, which is
+the worst answer a mutation pass can give: silently wrong in the direction of
+"all clear".
+
+Three fixes, and the second is the one that matters:
+
+1. `rebuild` now cancels AND WAITS on every exit path, the three `t.Fatal`s
+   included.
+2. `harness.startProjectors` returns an error and blocks until this process holds
+   all three leases. `projection.Lease.Acquire`'s `held=false` is swallowed by the
+   runner's retry loop — a standby logs at DEBUG and retries forever — so a
+   `leaseWatch` decorator records what was actually won and `awaitLeases` fails
+   the whole run when something else holds them, naming the leaked binary as the
+   usual cause. **Verified by taking `pg_advisory_lock(7448013631503080364)` from
+   a psql session and starting a run**: it failed in 66s with that message. Before
+   the fix the same run would have proceeded.
+3. `TestMain` installs a SIGINT/SIGTERM/SIGQUIT handler that tears the harness
+   down. `go test` enforces `-timeout` with SIGQUIT and a signalled process runs
+   no deferred function, so a timing-out suite used to orphan the `cmd/api` child.
+
+**Was any result in this pass affected?** No. The pass began with a clean `ps`
+(no `identityit.test`, no `chronos-api-identityit`), the leak fix and the
+standby guard were the first changes made, every integration run since has held
+all three leases, and each finished with no orphaned child.
+
+### Known defect 2 is NOT root-caused, and one hypothesis is now refuted
+
+`TestADeactivatedAccountCanGetBackIn` reproduced on the very first baseline run
+of this pass — `GetUser after signing back in: unauthenticated: authentication
+failed`, on a bearer token `CreateSession` had just returned.
+
+The obvious suspect was the session's two halves. `CreateSession` appends
+`SessionCreated` and then writes `session_token` itself; `session_view` is
+written by the identity_session PROJECTOR, and migration 00010 split them so a
+session resolves only when both exist. Between the append and the projector,
+that token authenticates nothing and every request with it produces exactly the
+observed message.
+
+**Measured rather than assumed, and the measurement refutes it.**
+`harness.awaitSessionProjected` now times the window. Across 14 sign-ins — one
+suite run alone, and one run concurrent with six other integration packages
+hammering the same PostgreSQL — the projection was resolvable in **1 ms, worst
+case 2 ms**. That is not a window a test loses two runs in five to.
+
+So the cause is still open. What the wait is kept for is what it does after
+eliminating that hypothesis: it costs about a millisecond, it removes a whole
+class of cause from every later investigation, and if the window ever does grow
+the test says so with a number instead of failing elsewhere with "authentication
+failed".
+
+### Known defect 3 is closed
+
+`CheckUsernameAvailability`'s ceiling had never been driven to exhaustion
+against real Valkey — `usernameCheckRules` was compared against a table and
+`app.Usernames.spend` was driven through a fake counter that returned whatever
+the test told it to. `cmd/api/usernameceiling_integration_test.go` now spends the
+production limiter — `d.usernameCheckLimiter`, the object `newDependencies`
+handed to `app.NewUsernames`, not a rebuilt one — against the real counter, on a
+scope freshly generated per run so one run cannot spend the next one's budget for
+an hour.
+
+60 allowed, the 61st refused, naming the window that tripped and a `RetryAfter`
+inside it; a second caller who has spent nothing is still allowed. Both halves
+were mutation-checked: making `Limiter.Allow` never refuse, and dropping the
+scope from the counter key, each fail it with the message written for that
+failure.
+
+### Two notes for whoever reads this next
+
+**The refusal-uniformity tests now come in two shapes, and the split is load
+bearing.** One asserts a refusal costs exactly one password verification; the
+other asserts a refusal costs ZERO. A branch that refuses before the account
+lookup must not reach the hasher — otherwise an unauthenticated caller spends
+Argon2id evaluations on bytes they choose — and a branch that refuses after it
+must, or response time answers the question the uniform message refuses to.
+Putting a case in the wrong table makes it assert the opposite of its property.
+
+**Two mutations of the reset flow were kept as separate results on purpose.**
+`M08c` (no usable password) and `M08d` (unknown subject) exist to prove the five
+cases in `TestEveryUnusableResetLinkIsRefusedIdentically` reach three genuinely
+different branches. Without them the table could have been five spellings of one
+code path, which is exactly the way the test it replaced was vacuous.

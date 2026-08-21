@@ -758,11 +758,16 @@ func TestResultShapes_CarryNothingThatVerifiesOrIdentifies(t *testing.T) {
 	}{
 		{
 			name: "AccountView", typ: reflect.TypeFor[AccountView](),
-			want: []string{"SubjectID", "UserID", "State", "EmailVerified",
-				"RegisteredAt", "ActivatedAt", "DeactivatedAt", "SuspendedAt"},
+			want: []string{"SubjectID", "UserID", "State", "EmailVerified", "Username",
+				"RegisteredAt", "ActivatedAt", "DeactivatedAt", "SuspendedAt",
+				"DeletionRequestedAt", "DeletionScheduledFor"},
 			notes: "no address and no email index: the address is resolved from the " +
 				"SubjectID by the vault, and the index is a lookup key an actor holding " +
-				"the blind-index key can confirm a candidate address against",
+				"the blind-index key can confirm a candidate address against. Username " +
+				"IS here and is the ONE exception in this list (ADR-051): a public " +
+				"handle is published by design, so the vault cannot protect it — " +
+				"crypto-shredding does nothing to a value that was published — and " +
+				"there is nothing for a pseudonym to stand in for",
 		},
 		{
 			name: "SessionSummary", typ: reflect.TypeFor[SessionSummary](),

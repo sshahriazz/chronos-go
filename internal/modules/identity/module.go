@@ -25,15 +25,22 @@ func RegisterEvents(codec *eventcodec.JSON) {
 	eventcodec.Register[contract.EmailReserved](codec)
 	eventcodec.Register[contract.EmailReservationConfirmed](codec)
 	eventcodec.Register[contract.EmailReleased](codec)
+	eventcodec.Register[contract.DuplicateRegistrationAttempted](codec)
+
+	// Username reservation — the public handle's uniqueness mechanism (ADR-051).
+	eventcodec.Register[contract.UsernameReserved](codec)
+	eventcodec.Register[contract.UsernameTombstoned](codec)
 
 	// Account lifecycle.
 	eventcodec.Register[contract.UserRegistered](codec)
 	eventcodec.Register[contract.EmailVerificationRequested](codec)
 	eventcodec.Register[contract.EmailVerified](codec)
+	eventcodec.Register[contract.UsernameAssigned](codec)
 	eventcodec.Register[contract.UserActivated](codec)
 	eventcodec.Register[contract.UserDeactivated](codec)
 	eventcodec.Register[contract.UserReactivated](codec)
 	eventcodec.Register[contract.UserSuspended](codec)
+	eventcodec.Register[contract.UserDeletionRequested](codec)
 
 	// Password.
 	eventcodec.Register[contract.PasswordResetRequested](codec)
@@ -90,12 +97,15 @@ func RegisterSchemas(r *eventsourcing.UpcasterRegistry) {
 func eventTypes() []string {
 	events := []eventsourcing.Event{
 		&contract.EmailReserved{}, &contract.EmailReservationConfirmed{},
-		&contract.EmailReleased{},
+		&contract.EmailReleased{}, &contract.DuplicateRegistrationAttempted{},
+
+		&contract.UsernameReserved{}, &contract.UsernameAssigned{},
+		&contract.UsernameTombstoned{},
 
 		&contract.UserRegistered{}, &contract.EmailVerificationRequested{},
 		&contract.EmailVerified{}, &contract.UserActivated{},
 		&contract.UserDeactivated{}, &contract.UserReactivated{},
-		&contract.UserSuspended{},
+		&contract.UserSuspended{}, &contract.UserDeletionRequested{},
 
 		&contract.PasswordResetRequested{},
 		&contract.PasswordSet{}, &contract.PasswordChanged{},

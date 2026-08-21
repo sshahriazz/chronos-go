@@ -41,6 +41,20 @@ func (s *Service) GetUser(
 		ActivatedAt:   protoTime(account.ActivatedAt),
 		DeactivatedAt: protoTime(account.DeactivatedAt),
 		SuspendedAt:   protoTime(account.SuspendedAt),
+
+		// Reported, and reported as timestamps rather than as a state. An
+		// outstanding deletion request changes nothing the account can do — nothing
+		// consumes it yet — so folding it into `state` would make this screen
+		// contradict every other endpoint, which will keep serving this account.
+		DeletionRequestedAt:  protoTime(account.DeletionRequestedAt),
+		DeletionScheduledFor: protoTime(account.DeletionScheduledFor),
+
+		// The public handle, in the clear, and the ONE piece of personal data any
+		// response in this package carries (ADR-051). It is returned for the same
+		// reason the address is not: a handle is published by design, so the vault
+		// cannot protect it and there is nothing for a pseudonym to stand in for.
+		// Empty means the account has not claimed one yet, or that it was erased.
+		Username: account.Username,
 	}), nil
 }
 

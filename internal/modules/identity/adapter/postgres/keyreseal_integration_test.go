@@ -491,17 +491,37 @@ func seedResealAccount(t *testing.T, pool *pgxpool.Pool) string {
 	return subject
 }
 
+// resealFenceHorizon is how far ahead of wall time the fence is minted.
+//
+// A fence at time.Now() was the original design and it is NOT enough, which took
+// a reproducible failure to establish. credential_id is a ULID minted from the
+// APPLICATION's clock, and in local that clock is movable and forward-only
+// (ADR-054): internal/adapter/identityit pushes it past every TOTP step boundary
+// it needs, so the credentials that suite leaves behind carry ids MINUTES INTO
+// THE FUTURE. Against a wall-clock fence those rows sort after it, they match
+// `pepper_version < n` like any other, and every page assertion in this file
+// fails by however many accounts that suite happened to create — reproducibly in
+// a combined `go test -tags=integration ./...`, and alone for as long as it takes
+// wall time to catch up. The symptom ("9 rows after the cursor, want 2") names
+// nothing that would lead anyone here.
+//
+// Thirty days is chosen for the gap between two magnitudes rather than tuned:
+// the advances are TOTP steps and token lifetimes, tens of minutes at most, and
+// nothing anywhere moves a clock by days. Rows seeded above it are still deleted
+// by seedResealAccount's cleanup, so nothing accumulates.
+const resealFenceHorizon = 30 * 24 * time.Hour
+
 // resealFence returns a cursor that every row seeded from now on sorts AFTER,
-// and every row already in the table sorts BEFORE.
+// and every row written by anything else sorts BEFORE.
 //
 // It is what makes these tests assertable against a shared database. credential_id
-// is a ULID and the work list is ordered by it, so a ULID minted at this instant
-// separates "rows this test created" from "rows some earlier test left behind" —
-// without it, every assertion about page contents would be at the mercy of
-// whatever else has ever run against this schema.
+// is a ULID and the work list is ordered by it, so a ULID minted beyond every
+// other writer's reach separates "rows this test created" from "rows some other
+// suite left behind" — without it, every assertion about page contents would be
+// at the mercy of whatever else has ever run against this schema.
 func resealFence(t *testing.T) (string, time.Time) {
 	t.Helper()
-	at := time.Now()
+	at := time.Now().Add(resealFenceHorizon)
 	return ids.New[ids.Credential](at, ids.Entropy()).String(), at.Add(time.Second)
 }
 

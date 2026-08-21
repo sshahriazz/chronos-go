@@ -1,0 +1,11 @@
+{{define "title"}}Your Chronos account is scheduled for deletion{{end}}
+{{define "content"}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 14px;">Deletion of your Chronos account was requested on <strong>{{datetime .OccurredAt}}</strong>{{if .ByAnotherParty}},
+  by somebody other than you{{end}}.</p>
+<p style="margin:0 0 14px;">Your account still works normally for now. Nothing has been erased yet.</p>
+<p style="margin:0 0 14px;">If you did not ask for this, treat it as an account compromise and act now:
+  sign out every device from your security settings, and change your password. Both take effect
+  immediately.</p>
+<p style="margin:0 0 20px;">Then contact support to stop the deletion.</p>
+{{end}}

@@ -11,6 +11,7 @@
 package systemv1
 
 import (
+	_ "buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go/buf/validate"
 	_ "github.com/chronos/chronos-go/gen/proto/chronos/options/v1"
 	_ "github.com/google/gnostic/openapiv3"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
@@ -148,6 +149,10 @@ func (Criticality) EnumDescriptor() ([]byte, []int) {
 type Dependency struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Stable identifier, e.g. "postgres" or "openfga". Safe to switch on.
+	//
+	// "Safe to switch on" is what the pattern makes true: lower snake, so a client
+	// matching on it is matching on an identifier rather than on prose that could
+	// acquire a capital or a space.
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	// Current observed state.
 	Health Health `protobuf:"varint,2,opt,name=health,proto3,enum=chronos.system.v1.Health" json:"health,omitempty"`
@@ -162,6 +167,10 @@ type Dependency struct {
 	// When this dependency was last probed, in UTC (ADR-008).
 	LastCheckedAt *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=last_checked_at,json=lastCheckedAt,proto3" json:"last_checked_at,omitempty"`
 	// Observed latency of the most recent probe, in milliseconds.
+	//
+	// The ceiling is one hour, which no probe can approach: every probe runs under
+	// a context deadline far shorter than that. It is stated because a duration
+	// published without one describes a field a client must treat as arbitrary.
 	LatencyMs     int64 `protobuf:"varint,7,opt,name=latency_ms,json=latencyMs,proto3" json:"latency_ms,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -292,13 +301,24 @@ type GetStatusResponse struct {
 	// fully operational — for example with realtime degraded.
 	FullyOperational bool `protobuf:"varint,2,opt,name=fully_operational,json=fullyOperational,proto3" json:"fully_operational,omitempty"`
 	// One entry per registered dependency, in registration order.
+	//
+	// The registry is a compile-time list, so the ceiling is a statement about this
+	// binary rather than about a request: nine components today (CLAUDE.md's
+	// architecture table), with room to double.
 	Dependencies []*Dependency `protobuf:"bytes,3,rep,name=dependencies,proto3" json:"dependencies,omitempty"`
 	// Build version of the running binary.
+	//
+	// Bounded but NOT pinned to semantic versioning: a development build carries
+	// whatever `git describe` produced, and a document that promised `x.y.z` would
+	// be wrong on every machine that is not a release runner.
 	Version string `protobuf:"bytes,4,opt,name=version,proto3" json:"version,omitempty"`
 	// When this process started, in UTC.
 	StartedAt *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
 	// The server's presentation timezone. Storage is always UTC (ADR-008); this
 	// is exposed so a misconfigured deployment is visible.
+	//
+	// An IANA zone name, with the same grammar `chronos.profile.v1` holds a
+	// person's timezone to.
 	Timezone      string `protobuf:"bytes,6,opt,name=timezone,proto3" json:"timezone,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -380,26 +400,29 @@ var File_chronos_system_v1_system_proto protoreflect.FileDescriptor
 
 const file_chronos_system_v1_system_proto_rawDesc = "" +
 	"\n" +
-	"\x1echronos/system/v1/system.proto\x12\x11chronos.system.v1\x1a chronos/options/v1/options.proto\x1a$gnostic/openapi/v3/annotations.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xa8\x02\n" +
+	"\x1echronos/system/v1/system.proto\x12\x11chronos.system.v1\x1a\x1bbuf/validate/validate.proto\x1a chronos/options/v1/options.proto\x1a$gnostic/openapi/v3/annotations.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xfb\x03\n" +
 	"\n" +
-	"Dependency\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\x121\n" +
+	"Dependency\x12=\n" +
+	"\x04name\x18\x01 \x01(\tB)\xbaG\f:\n" +
+	"\x12\bpostgres\xbaH\x17r\x15\x18@2\x11^[a-z][a-z0-9_]*$R\x04name\x121\n" +
 	"\x06health\x18\x02 \x01(\x0e2\x19.chronos.system.v1.HealthR\x06health\x12@\n" +
-	"\vcriticality\x18\x03 \x01(\x0e2\x1e.chronos.system.v1.CriticalityR\vcriticality\x12\x16\n" +
-	"\x06detail\x18\x04 \x01(\tR\x06detail\x12\x16\n" +
-	"\x06impact\x18\x05 \x01(\tR\x06impact\x12B\n" +
-	"\x0flast_checked_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\rlastCheckedAt\x12\x1d\n" +
+	"\vcriticality\x18\x03 \x01(\x0e2\x1e.chronos.system.v1.CriticalityR\vcriticality\x12N\n" +
+	"\x06detail\x18\x04 \x01(\tB6\xbaG\x1f:\x1d\x12\x1bconnect: connection refused\xbaH\x11r\x0f\x18\x80\x042\n" +
+	"^[^\\r\\n]*$R\x06detail\x12p\n" +
+	"\x06impact\x18\x05 \x01(\tBX\xbaGA:?\x12=Live updates stop; reloading a page still shows current data.\xbaH\x11r\x0f\x18\x80\x042\n" +
+	"^[^\\r\\n]*$R\x06impact\x12B\n" +
+	"\x0flast_checked_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\rlastCheckedAt\x123\n" +
 	"\n" +
-	"latency_ms\x18\a \x01(\x03R\tlatencyMs\"\x12\n" +
-	"\x10GetStatusRequest\"\x8a\x02\n" +
+	"latency_ms\x18\a \x01(\x03B\x14\xbaG\x05:\x03\x12\x013\xbaH\t\"\a\x18\x80\xdd\xdb\x01(\x00R\tlatencyMs\"\x12\n" +
+	"\x10GetStatusRequest\"\xff\x02\n" +
 	"\x11GetStatusResponse\x12\x14\n" +
 	"\x05ready\x18\x01 \x01(\bR\x05ready\x12+\n" +
-	"\x11fully_operational\x18\x02 \x01(\bR\x10fullyOperational\x12A\n" +
-	"\fdependencies\x18\x03 \x03(\v2\x1d.chronos.system.v1.DependencyR\fdependencies\x12\x18\n" +
-	"\aversion\x18\x04 \x01(\tR\aversion\x129\n" +
+	"\x11fully_operational\x18\x02 \x01(\bR\x10fullyOperational\x12K\n" +
+	"\fdependencies\x18\x03 \x03(\v2\x1d.chronos.system.v1.DependencyB\b\xbaH\x05\x92\x01\x02\x10 R\fdependencies\x12A\n" +
+	"\aversion\x18\x04 \x01(\tB'\xbaG\t:\a\x12\x051.4.0\xbaH\x18r\x16\x18@2\x12^[A-Za-z0-9._+-]*$R\aversion\x129\n" +
 	"\n" +
-	"started_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x12\x1a\n" +
-	"\btimezone\x18\x06 \x01(\tR\btimezone*U\n" +
+	"started_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x12\\\n" +
+	"\btimezone\x18\x06 \x01(\tB@\xbaG\a:\x05\x12\x03UTC\xbaH3r1\x18@2-^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+.-]+)*$R\btimezone*U\n" +
 	"\x06Health\x12\x16\n" +
 	"\x12HEALTH_UNSPECIFIED\x10\x00\x12\r\n" +
 	"\tHEALTH_UP\x10\x01\x12\x13\n" +

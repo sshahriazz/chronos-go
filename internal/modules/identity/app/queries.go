@@ -58,6 +58,18 @@ type AccountView struct {
 	// (identity.md §2).
 	EmailVerified bool
 
+	// Username is the account's public handle (ADR-051), in the clear.
+	//
+	// It is the ONE field in this file that carries user-supplied text, and it is
+	// the stated exception to the rule the two omissions at the top of this file
+	// describe. A handle is published by design — that is its entire purpose — so
+	// the vault cannot protect it and there is nothing for a pseudonym to stand in
+	// for.
+	//
+	// Empty means the account has not claimed one, which is exactly the window
+	// between registration and verification, or means the handle was erased.
+	Username string
+
 	// RegisteredAt is always set. The other three are zero unless the account has
 	// been through that transition — a zero time here means "never", not
 	// "unknown", because the projector writes each one at the moment it happens.
@@ -65,6 +77,16 @@ type AccountView struct {
 	ActivatedAt   time.Time
 	DeactivatedAt time.Time
 	SuspendedAt   time.Time
+
+	// DeletionRequestedAt and DeletionScheduledFor are zero unless the holder has
+	// asked for the account to be erased. They are NOT a state: an account with an
+	// outstanding request keeps every capability it had, because nothing consumes
+	// the request yet — `compliance` does not exist (app.Lifecycle.RequestDeletion).
+	//
+	// The deadline is the one the LOG holds and the person was mailed, never one
+	// recomputed from the current grace period.
+	DeletionRequestedAt  time.Time
+	DeletionScheduledFor time.Time
 }
 
 // SessionSummary is one entry in the device list.

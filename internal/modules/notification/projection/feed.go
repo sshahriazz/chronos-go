@@ -77,8 +77,16 @@ func NewFeed(codec eventsourcing.Codec) *Feed {
 		// COALESCE keeps the FIRST read time. Reading something twice does not
 		// move when you first saw it, and alert arbitration asks exactly that
 		// question — whether it was read within the window (ADR-026).
+		//
+		// The SUBJECT is passed as well as the id, and the statement matches on
+		// both. A notification id is a stream name, and a stream name is not a
+		// capability: an event carrying somebody else's notification id would
+		// otherwise dismiss the alert on their screen from here, with no error
+		// and no log line. The API refuses such an id before it appends; this is
+		// the half that still holds for an event that was forged, replayed, or
+		// written before that check existed.
 		w.Exec(notificationdb.MarkFeedItemRead,
-			e.NotificationID, e.ReadAt)
+			e.NotificationID, e.ReadAt, e.SubjectID)
 		return nil
 	})
 

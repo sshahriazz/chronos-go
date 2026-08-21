@@ -134,6 +134,11 @@ func TestGetUser(t *testing.T) {
 	// Asserted against the DESCRIPTOR rather than against one rendered message: a
 	// value-level check passes for as long as the fake happens not to supply an
 	// address, while a field that could carry one is a field a later commit fills.
+	//
+	// `username` is the ONE allowed piece of personal data, and the allow-list is
+	// where that exception is written down: adding a second one has to be a
+	// deliberate edit here rather than a field that slips past a rule about
+	// addresses.
 	t.Run("the response has no field that could carry an address", func(t *testing.T) {
 		t.Parallel()
 		fields := (&identityv1.GetUserResponse{}).ProtoReflect().Descriptor().Fields()
@@ -141,6 +146,22 @@ func TestGetUser(t *testing.T) {
 			"subject_id": true, "user_id": true, "state": true, "email_verified": true,
 			"registered_at": true, "activated_at": true, "deactivated_at": true,
 			"suspended_at": true,
+
+			// Two timestamps and no more. An outstanding erasure request is a date,
+			// not a person: nothing here names the address being erased, and nothing
+			// needs to — the caller holds the pseudonym and the vault resolves it.
+			"deletion_requested_at": true, "deletion_scheduled_for": true,
+
+			// The public handle, in the clear, and the single deliberate exception
+			// to everything above (ADR-051). It is allowed for the reason the
+			// address is refused: a handle is PUBLISHED by design, so the vault
+			// cannot protect it — crypto-shredding does nothing to a value that was
+			// published — and there is no pseudonym for it to hide behind.
+			//
+			// It is not a licence to add more. An address here would still be a
+			// second copy of personal data with its own lifetime, and erasure would
+			// silently stop being complete.
+			"username": true,
 		}
 		for i := range fields.Len() {
 			name := string(fields.Get(i).Name())

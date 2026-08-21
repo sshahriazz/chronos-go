@@ -21,7 +21,7 @@
 #
 # Everything that block carried now lives in the .proto as
 # `(gnostic.openapi.v3.operation)`: `security: [{}]` on the public methods, the
-# `Idempotency-Key` parameter on the authenticated mutations, and the `200`
+# `Idempotency-Key` parameter on every mutation, and the `200`
 # description and example on both. See proto/chronos/identity/v1/identity.proto.
 #
 # What belongs here, and what does not:
@@ -42,8 +42,16 @@ openapi: 3.1.0
 info:
   title: Chronos API
   version: v1
-  summary: Multi-tenant workspace platform — identity, organizations, workspaces and access.
+  # `info.summary` is NOT used, and its absence is deliberate rather than an
+  # oversight. It is a 3.1 keyword, and this document declares 3.1 — but a
+  # document read by 3.0-era tooling gets "property not defined in the OpenAPI
+  # Specification" for it, at critical severity, and the one-line summary it
+  # carried is the first line of `description` anyway. Nothing was lost by
+  # removing it and one loud false report was.
   description: |
+    Multi-tenant workspace platform — identity, organizations, workspaces and
+    access.
+
     ## What this document is
 
     Chronos serves **one schema over three protocols on one port** — gRPC,
@@ -90,7 +98,7 @@ info:
     | `Connect-Protocol-Version` | **yes** | `1` |
     | `Connect-Timeout-Ms` | no | Milliseconds; the server cancels the call when it elapses. |
     | `Authorization` | on authenticated methods | `Bearer <token>` — see *Authentication* |
-    | `Idempotency-Key` | on authenticated mutations | See *Idempotency* |
+    | `Idempotency-Key` | on every mutation | See *Idempotency* |
 
     ### Content type
 
@@ -118,7 +126,7 @@ info:
     | --- | --- |
     | `message` | The request message, JSON-encoded |
     | `encoding` | `json` (or `proto`) |
-    | `base64` | `true` if `message` is base64-encoded, which binary data may require |
+    | `base64` | `1` — and only `1` — if `message` is base64url-encoded. Omit it otherwise; the protocol has no other spelling, and `true` reads as OFF |
     | `compression` | Optional content encoding of `message` |
     | `connect` | Protocol version, `v1` |
 
@@ -158,7 +166,7 @@ info:
 
     ## Idempotency
 
-    Every **authenticated mutating** call requires an `Idempotency-Key` header —
+    Every **mutating** call requires an `Idempotency-Key` header —
     a client-generated ULID or UUID.
 
     ```
@@ -177,10 +185,20 @@ info:
     across accounts or reused on a different method. Records are retained for 24
     hours.
 
-    The **public** methods take no key, because the gate that claims one runs
-    after authentication and there is no principal to scope it to. That is why
-    `Register` is instead designed to be safe to repeat: its response is identical
-    whether or not the address was free.
+    The **public** methods need a key too, and they are the ones that need it
+    most: `Register`, `VerifyEmail`, `Authenticate` and `CreateSession` are the
+    calls a user retries on a flaky connection, and a retry without a key is a
+    fresh attempt rather than a replay.
+
+    One difference is worth knowing when reading responses. A public call has no
+    principal, so it is not scoped to `(principal, method, key)` and does not get
+    the stored-response replay described above; the key is required, and it is
+    what gives the resulting command a stable identity. Omitting it returns
+    `VALIDATION_FAILED` exactly as on an authenticated call.
+
+    `Register` is *additionally* designed to be safe to repeat: its response is
+    identical whether or not the address was free. That is an enumeration
+    defence, not a substitute for a key.
 
     Generate a key per logical operation, not per HTTP attempt — a retry of the
     same operation must reuse the same key, which is the entire point.
@@ -290,9 +308,22 @@ externalDocs:
   description: The error catalogue — every reason code, its transport mapping, and what a client should do
   url: https://github.com/chronos/chronos-go/blob/main/docs/api/errors.md
 
+# EVERY URL HERE IS https, AND `http://localhost:8090` IS NOT COMING BACK.
+#
+# It used to be first in this list, which made the published document say that
+# the default way to call this API is over a channel that carries the session
+# bearer token in the clear. A bearer token is a password — whoever holds it IS
+# the session — and the one credential this document describes was being
+# advertised over a transport that does not protect it. An external audit scored
+# it the single highest finding against this document, and it was right to.
+#
+# The local convenience it existed for survives: cmd/apidocs INJECTS a
+# `http://localhost:<DOCS_PORT-derived API_PORT>` server into the copy it serves,
+# at serve time, so "Try it" still works against a dev stack. What is different is
+# that the injection happens in a development-only binary rather than in the
+# artefact that gets published, and `internal/tools/checkopenapi` fails the build
+# if a cleartext URL ever reappears here.
 servers:
-  - url: http://localhost:8090
-    description: Local development
   - url: https://api.staging.chronos.example
     description: Staging
   - url: https://api.chronos.example
@@ -305,6 +336,62 @@ security:
   - bearerAuth: []
 
 components:
+  # The `Idempotency-Key` VALUE, described once, referenced by every authenticated
+  # mutation from its own `(gnostic.openapi.v3.operation)`:
+  #
+  #   schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+  #
+  # It is a components.schemas entry rather than a components.parameters one, and
+  # not by preference: protoc-gen-connect-openapi v0.25.7 panics in
+  # util.MergeParameters on a parameter written as a bare `$ref` — it dereferences
+  # the inline `Parameter` without checking which variant it holds. A schema
+  # reference goes through a different path and works. So `name`, `in` and
+  # `required` are repeated per operation and the CONSTRAINTS, which are the part
+  # that can drift, are not.
+  #
+  # `maxLength` is `cqrs.MaxKeyLen`, which `cqrs.Scope.Validate` enforces — the
+  # published bound and the enforced one are the same number by construction.
+  schemas:
+    idempotency-key:
+      type: string
+      title: Idempotency-Key
+      # `maxLength` is `cqrs.MaxKeyLen` and the pattern is the rest of
+      # `cqrs.Key.Validate`: non-empty, and free of the '|' that separates the
+      # parts of a stored scope key. `internal/tools/checkopenapi` fails the build
+      # if the number here and the constant there disagree.
+      #
+      # NOT the ULID/UUID grammar, which is what this said before. The server
+      # accepts any bounded key — and this repository's own integration harness
+      # sends `idem_evt_01ARZ…` — so publishing the tighter form described a
+      # refusal that does not happen and would have had a strict client reject a
+      # key the server was about to accept. The recommendation to use a ULID or a
+      # UUID is prose below, where a recommendation belongs.
+      #
+      # One nuance the schema cannot express: `maxLength` counts characters and
+      # the server counts BYTES, so a multi-byte key of 128 characters is refused.
+      # Every form documented here is ASCII, where the two coincide.
+      minLength: 1
+      maxLength: 128
+      pattern: '^[^|]+$'
+      examples:
+        - 01ARZ3NDEKTSV4RRFFQ69G5FAV
+      description: |
+        A client-generated key, required on every mutating call. A ULID or a UUID
+        is the recommended form — both are unique without coordination, which is
+        the only property that matters.
+
+        On an AUTHENTICATED call, replaying it with the SAME body returns the
+        stored response instead of re-executing, and replaying it with a DIFFERENT
+        body returns `CONFLICT`. That record is scoped to
+        `(principal, method, key)` and retained 24 hours.
+
+        On a PUBLIC call there is no principal to scope a record to, so nothing is
+        stored and no response is replayed — the key is still required, and it is
+        what gives the resulting command a stable identity across retries.
+
+        Generate one per logical operation, not per HTTP attempt: a retry of the
+        same operation must reuse the same key, which is the entire point.
+
   securitySchemes:
     bearerAuth:
       type: http

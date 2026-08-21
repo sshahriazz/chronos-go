@@ -28,6 +28,58 @@ func (q *Queries) CountUnread(ctx context.Context, arg CountUnreadParams) (int64
 	return count, err
 }
 
+const FeedItemsOwnedBy = `-- name: FeedItemsOwnedBy :many
+SELECT notification_id, read_at IS NOT NULL AS already_read
+FROM notification_feed
+WHERE org_id = $1
+  AND subject_id = $2
+  AND notification_id = ANY($3::text[])
+ORDER BY notification_id
+`
+
+type FeedItemsOwnedByParams struct {
+	OrgID     string
+	SubjectID string
+	Column3   []string
+}
+
+type FeedItemsOwnedByRow struct {
+	NotificationID string
+	AlreadyRead    interface{}
+}
+
+// Of these notification ids, which belong to this subject in this organization.
+//
+// Asked before MarkNotificationsRead appends anything. A notification id is a
+// stream name, and a stream name is not a capability — without this an id
+// obtained by any means could be used to append a read event about somebody
+// else's notification. Ids the caller does not own simply do not come back, so
+// "not yours" and "no such notification" are one answer.
+//
+// ORDERED, and the ordering is load-bearing rather than cosmetic: the caller
+// derives one event id per row from the row's INDEX in this result, so an
+// unordered result would give a retried command different ids from the first
+// attempt and the store's duplicate collapse would not fire.
+func (q *Queries) FeedItemsOwnedBy(ctx context.Context, arg FeedItemsOwnedByParams) ([]FeedItemsOwnedByRow, error) {
+	rows, err := q.db.Query(ctx, FeedItemsOwnedBy, arg.OrgID, arg.SubjectID, arg.Column3)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []FeedItemsOwnedByRow{}
+	for rows.Next() {
+		var i FeedItemsOwnedByRow
+		if err := rows.Scan(&i.NotificationID, &i.AlreadyRead); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const ListFeed = `-- name: ListFeed :many
 SELECT notification_id, subject_id, org_id, workspace_id, template, class,
        data, occurred_at, read_at
@@ -87,21 +139,112 @@ func (q *Queries) ListFeed(ctx context.Context, arg ListFeedParams) ([]ListFeedR
 	return items, nil
 }
 
+const ListFeedPage = `-- name: ListFeedPage :many
+SELECT notification_id, subject_id, org_id, workspace_id, template, class,
+       data, occurred_at, read_at
+FROM notification_feed
+WHERE org_id = $1
+  AND subject_id = $2
+  AND (occurred_at, notification_id) < ($3::timestamptz, $4::text)
+ORDER BY occurred_at DESC, notification_id DESC
+LIMIT $5
+`
+
+type ListFeedPageParams struct {
+	OrgID     string
+	SubjectID string
+	Column3   pgtype.Timestamptz
+	Column4   string
+	Limit     int32
+}
+
+type ListFeedPageRow struct {
+	NotificationID string
+	SubjectID      string
+	OrgID          string
+	WorkspaceID    string
+	Template       string
+	Class          string
+	Data           []byte
+	OccurredAt     pgtype.Timestamptz
+	ReadAt         pgtype.Timestamptz
+}
+
+// One page of the in-app list, newest first.
+//
+// Keyset pagination over (occurred_at, notification_id), ending in the PRIMARY
+// KEY so the tiebreak column is unique: an ordering that can tie loses or
+// repeats rows at a page boundary, silently (platform/page).
+//
+// The comparison is unconditional rather than `$3 IS NULL OR (…)`. The OR makes
+// the predicate non-sargable and the index that exists to serve this exact
+// ORDER BY would stop being used on the one page every client asks for; the
+// first page passes 'infinity'::timestamptz instead, which is strictly above
+// every stored row.
+//
+// Leading with org_id matches the RLS predicate and the composite index, and
+// subject_id is the whole tenant scope beneath it: the caller may read their own
+// feed and nobody else's.
+func (q *Queries) ListFeedPage(ctx context.Context, arg ListFeedPageParams) ([]ListFeedPageRow, error) {
+	rows, err := q.db.Query(ctx, ListFeedPage,
+		arg.OrgID,
+		arg.SubjectID,
+		arg.Column3,
+		arg.Column4,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListFeedPageRow{}
+	for rows.Next() {
+		var i ListFeedPageRow
+		if err := rows.Scan(
+			&i.NotificationID,
+			&i.SubjectID,
+			&i.OrgID,
+			&i.WorkspaceID,
+			&i.Template,
+			&i.Class,
+			&i.Data,
+			&i.OccurredAt,
+			&i.ReadAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const MarkFeedItemRead = `-- name: MarkFeedItemRead :exec
 UPDATE notification_feed
 SET read_at = COALESCE(read_at, $2)
-WHERE notification_id = $1
+WHERE notification_id = $1 AND subject_id = $3
 `
 
 type MarkFeedItemReadParams struct {
 	NotificationID string
 	ReadAt         pgtype.Timestamptz
+	SubjectID      string
 }
 
 // COALESCE keeps the FIRST read time: reading something twice does not move
 // when you first saw it, and arbitration asks exactly that (ADR-026).
+//
+// Matched on the SUBJECT as well as the id, and that second predicate is a
+// containment control rather than a filter. The id names the stream a
+// notification.Read.v1 event was appended to, and a stream name is not a
+// capability: an event carrying somebody else's notification id would otherwise
+// dismiss the alert on THEIR screen. The API refuses such an id before it
+// appends, and this refuses it again after — the two fail independently, and
+// only this one survives a forged or replayed event.
 func (q *Queries) MarkFeedItemRead(ctx context.Context, arg MarkFeedItemReadParams) error {
-	_, err := q.db.Exec(ctx, MarkFeedItemRead, arg.NotificationID, arg.ReadAt)
+	_, err := q.db.Exec(ctx, MarkFeedItemRead, arg.NotificationID, arg.ReadAt, arg.SubjectID)
 	return err
 }
 

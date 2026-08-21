@@ -157,5 +157,12 @@ func (hh *harness) buildKernelFixtures(
 		hh.store, hh.codec, upcasters, app.UserCategory, domain.New)
 	hh.reservationRepo = eventsourcing.NewRepository[*domain.EmailReservation](
 		hh.store, hh.codec, upcasters, app.ReservationCategory, domain.NewReservation)
+	// The public handle's reservation. Held for ONE thing no RPC can do: writing
+	// a tombstone. Erasure is `compliance`'s work and that module does not exist,
+	// so TestATombstonedHandleIsNeverReissued drives the aggregate's own
+	// transition through the kernel's append path — the same way an erasure will
+	// when there is something to perform it.
+	hh.usernameRepo = eventsourcing.NewRepository[*domain.UsernameReservation](
+		hh.store, hh.codec, upcasters, app.UsernameCategory, domain.NewUsernameReservation)
 	return nil
 }

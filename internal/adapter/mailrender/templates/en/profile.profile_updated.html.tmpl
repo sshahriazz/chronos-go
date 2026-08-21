@@ -1,0 +1,11 @@
+{{define "title"}}Your Chronos profile was changed{{end}}
+{{define "content"}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 14px;">Your Chronos profile was changed on <strong>{{datetime .OccurredAt}}</strong>.</p>
+<p style="margin:0 0 14px;">What changed: <strong>{{.Fields}}</strong>.</p>
+<p style="margin:0 0 14px;">Your profile is how colleagues recognise you — in a mention, in an
+  invitation, in a member list. If you did not make this change, somebody else is reaching your
+  account and appearing as you to the people you work with.</p>
+<p style="margin:0 0 20px;">If that was not you: sign out every device from your security
+  settings, and change your password. Both take effect immediately.</p>
+{{end}}

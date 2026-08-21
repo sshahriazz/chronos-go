@@ -1158,6 +1158,132 @@ func TestAnExpiredResetLinkIsRefusedLikeAnUnknownOne(t *testing.T) {
 	}
 }
 
+// Every unusable reset link gets ONE answer, and this is the test that pins it.
+//
+// # Why the expired-vs-unknown test above is not enough
+//
+// TestAnExpiredResetLinkIsRefusedLikeAnUnknownOne compares two facts that reach
+// Complete through the SAME branch: TokenStore.Consume returns ErrTokenNotFound
+// for unknown, spent and expired alike, so those three are equal by
+// construction and stay equal however that branch is written. Replacing that
+// branch's errRejectedResetLink() with "that link has expired" left the whole
+// repository green — an S1-29 mutation survivor — because nothing compared it
+// against the refusals decided FURTHER DOWN.
+//
+// The refusals that can actually diverge are the five errRejectedResetLink call
+// sites, and they are decided at three different depths: before the account is
+// known, after the subject fails to resolve, and after the aggregate says it
+// has no usable password. Whoever holds a link that does not work is entitled
+// to learn nothing about which of those it was — and the population holding a
+// link they cannot use includes everyone who guessed one.
+func TestEveryUnusableResetLinkIsRefusedIdentically(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		arrange func(*resetHarness) string
+	}{
+		{
+			// Never issued. The reference case: nothing about it touches an
+			// account at all.
+			name:    "a link that was never issued",
+			arrange: func(*resetHarness) string { return "never-issued" },
+		},
+		{
+			name: "a link whose deadline has passed",
+			arrange: func(h *resetHarness) string {
+				if err := h.tokens.Issue(context.Background(), PurposePasswordReset,
+					h.user.SubjectID(), testDigest(PurposePasswordReset, "stale"),
+					testNow.Add(-time.Minute)); err != nil {
+					h.t.Fatalf("issuing: %v", err)
+				}
+				return "stale"
+			},
+		},
+		{
+			// Redeemed once already. Reached through the same Consume as the two
+			// above, and kept in the table because it is the case an attacker who
+			// watched a successful reset actually holds.
+			name: "a link that has already been spent",
+			arrange: func(h *resetHarness) string {
+				plaintext := h.issue("spent-once")
+				if _, err := h.complete(plaintext, resetNewPassword); err != nil {
+					h.t.Fatalf("the first redemption failed: %v", err)
+				}
+				return plaintext
+			},
+		},
+		{
+			// A live token whose subject resolves to no account. Decided AFTER
+			// Consume — the link is spent by the time this refusal is produced —
+			// so a distinguishable answer here says "that link was real".
+			name: "a live link naming a subject with no account",
+			arrange: func(h *resetHarness) string {
+				plaintext := h.issue("orphaned-subject")
+				h.subjects = fakeDirectory{user: h.user.ID(), only: "subj_nobody"}
+				return plaintext
+			},
+		},
+		{
+			// A live token for an account the log says has no usable password.
+			// Reachable when the credential was disabled between the request and
+			// the click, and decided deeper still — after the aggregate loads.
+			name: "a live link for an account with no usable password",
+			arrange: func(h *resetHarness) string {
+				plaintext := h.issue("passwordless")
+				// The SAME account identity — the token was issued against this
+				// subject — rebuilt without the PasswordSet event, which is what a
+				// credential removed between the request and the click looks like
+				// from the log's side.
+				user := eventsourcing.NewAggregate(domain.New)
+				index := h.index(resetEmail)
+				if err := user.Register(h.user.ID(), h.user.SubjectID(), index, testNow); err != nil {
+					h.t.Fatalf("registering: %v", err)
+				}
+				if err := user.VerifyEmail(index, testNow); err != nil {
+					h.t.Fatalf("verifying: %v", err)
+				}
+				user.ClearUncommitted()
+				h.user = user
+				return plaintext
+			},
+		},
+	}
+
+	// The reference is the plainest one: a link this system never issued.
+	reference := func() error {
+		h := newResetHarness(t)
+		_, err := h.complete("never-issued", resetNewPassword)
+		return err
+	}()
+	if reference == nil {
+		t.Fatal("a link that was never issued was accepted")
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newResetHarness(t)
+			token := tc.arrange(h)
+
+			_, err := h.complete(token, resetNewPassword)
+			if err == nil {
+				t.Fatal("an unusable reset link was accepted")
+			}
+			if err.Error() != reference.Error() {
+				t.Errorf("refusal is %q, want %q — a distinguishable refusal tells whoever "+
+					"holds the link which of five facts is true about it",
+					err.Error(), reference.Error())
+			}
+			if errs.ReasonOf(err) != errs.ReasonOf(reference) {
+				t.Errorf("refusal reason is %s, want %s; the errs.Reason is the Connect code "+
+					"on the wire", errs.ReasonOf(err), errs.ReasonOf(reference))
+			}
+		})
+	}
+}
+
 // A VERIFICATION token cannot be redeemed as a reset token.
 //
 // The purpose is mixed into the digest, so the two hash to different values from
@@ -1354,11 +1480,27 @@ func TestAResetOnASuspendedAccountDestroysNothing(t *testing.T) {
 //
 // Both hold a valid link — an attacker triggered one, the victim triggered
 // another — and both consume their own token successfully, because the digests
-// differ. The compare-and-set on the verifier is what makes exactly one of them
-// land; the loser writes nothing and appends nothing.
+// differ.
 //
-// Run under contention rather than reasoned about: the failure this guards
-// against is an interleaving, and an interleaving cannot be argued away.
+// # What this test can and cannot prove, and why the assertion moved
+//
+// It used to assert "exactly one wins", and it was 60% FLAKY under `-race`
+// (7 of 12, then 12 of 15) for a structural reason: the mechanism that makes
+// exactly one win is the expected-revision precondition on the account stream,
+// and the fake appender these unit tests share ignores `Expected` entirely and
+// returns success for every call. So the assertion was made against a fake with
+// no optimistic concurrency in it. It passed only when the interleaving happened
+// to let the winner's token sweep beat the loser's consume — luck, not the
+// property.
+//
+// A test that cannot fail for the right reason is not evidence, so the real
+// property now lives where it can be proven, over a real KurrentDB:
+// `internal/adapter/identityit`, TestTwoConcurrentResetsOverRealInfrastructure.
+//
+// What a fake CAN prove is what this asserts now: that both attempts carry the
+// loaded revision rather than AnyRevision. That is the precondition the real
+// mechanism needs, it is the thing a refactor would silently drop, and it is
+// checkable without a database.
 func TestTwoConcurrentResetsProduceExactlyOnePasswordChange(t *testing.T) {
 	t.Parallel()
 
@@ -1418,26 +1560,48 @@ func TestTwoConcurrentResetsProduceExactlyOnePasswordChange(t *testing.T) {
 		}
 	}
 
-	if len(winners) != 1 || refused != 1 {
-		t.Fatalf("%d reset(s) succeeded and %d were refused; exactly one of each is the "+
-			"only safe outcome", len(winners), refused)
+	// Both attempts must have presented the loaded revision. Against this fake
+	// both can "succeed", and that is expected here — see the doc comment.
+	calls := h.recorder.snapshot()
+	if len(calls) == 0 {
+		t.Fatal("neither reset appended anything; the test proved nothing")
+	}
+	for i, call := range calls {
+		for _, entry := range call {
+			if entry.Expected.IsAny() {
+				t.Errorf("append %d presented AnyRevision; a reset that does not pin the "+
+					"loaded revision cannot be serialised against a competing reset, and "+
+					"the loser would silently overwrite the winner", i)
+			}
+		}
+	}
+	if len(winners)+refused != 2 {
+		t.Fatalf("%d succeeded and %d refused; every attempt must end in one or the other",
+			len(winners), refused)
 	}
 
-	// The stored verifier belongs to the winner, and the log carries one change.
+	// Every successful attempt must have written a verifier that matches the
+	// password it was given. That is provable here and it is worth pinning: it
+	// catches a reset that appends PasswordChanged without replacing the
+	// credential, which would leave the log claiming a change that never happened.
 	stored := h.creds.verifier(h.user.SubjectID())
-	if stored != resetVerifierFor(winners[0]) {
-		t.Errorf("the stored verifier is %q, which is not the winner's password %q; "+
-			"the losing reset overwrote the winning one", stored, winners[0])
+	if len(winners) > 0 && stored != resetVerifierFor(winners[len(winners)-1]) {
+		t.Errorf("the stored verifier is %q, which matches no password that succeeded; "+
+			"a reset recorded a change it did not make", stored)
 	}
+
+	// One PasswordChanged per success, and no more. A retry that appended twice
+	// for one reset is a real defect and this fake CAN see it — unlike "exactly
+	// one reset wins", which it cannot. See the doc comment.
 	changes := 0
 	for _, e := range h.appended() {
 		if _, ok := e.(*contract.PasswordChanged); ok {
 			changes++
 		}
 	}
-	if changes != 1 {
-		t.Errorf("the log carries %d PasswordChanged events for two concurrent resets, want 1",
-			changes)
+	if changes != len(winners) {
+		t.Errorf("the log carries %d PasswordChanged events for %d successful reset(s); "+
+			"a retry appended an extra one", changes, len(winners))
 	}
 }
 

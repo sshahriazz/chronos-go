@@ -140,6 +140,7 @@ func TestVerificationMailReachesMailpitAndVerifies(t *testing.T) {
 	got, err := registration.VerifyEmail(ctx, app.VerifyEmailCommand{
 		Token:          plaintext,
 		Password:       "correct-horse-battery-staple-48",
+		Username:       "ada_from_the_link",
 		IdempotencyKey: "cmd-verify-integration",
 	})
 	if err != nil {
@@ -152,7 +153,8 @@ func TestVerificationMailReachesMailpitAndVerifies(t *testing.T) {
 	// Single use. A link that verifies twice is a link that can be replayed out
 	// of a mailbox someone else now reads.
 	if _, err := registration.VerifyEmail(ctx, app.VerifyEmailCommand{
-		Token: plaintext, IdempotencyKey: "cmd-verify-integration-2",
+		Token: plaintext, Username: "ada_from_the_link",
+		IdempotencyKey: "cmd-verify-integration-2",
 	}); err == nil {
 		t.Error("the emailed token was redeemable a second time")
 	}
@@ -195,6 +197,11 @@ func verifyingRegistration(
 	if err := reservation.Reserve(index, subjectID, past.Add(24*time.Hour), past); err != nil {
 		t.Fatalf("building the reservation: %v", err)
 	}
+	// The public handle's reservation, fresh and unclaimed. VerifyEmail claims a
+	// handle in the same atomic append as the proof (ADR-051), so a test that
+	// redeems an emailed link must supply one — this is about mail delivery, and
+	// the handle is scenery, but it is MANDATORY scenery.
+	handle := eventsourcing.NewAggregate(domain.NewUsernameReservation)
 
 	schemas := eventsourcing.NewUpcasterRegistry()
 	identity.RegisterSchemas(schemas)
@@ -208,6 +215,7 @@ func verifyingRegistration(
 		Vault:        stubVault{},
 		Credentials:  stubCredentials{},
 		Reservations: loader[*domain.EmailReservation]{agg: reservation},
+		Usernames:    loader[*domain.UsernameReservation]{agg: handle},
 		Users:        loader[*domain.User]{agg: user},
 		Appender:     stubAppender{},
 		Tokens:       tokens,

@@ -112,6 +112,18 @@ type PasswordResets interface {
 	Complete(ctx context.Context, cmd app.ResetPasswordCommand) (app.ResetPasswordResult, error)
 }
 
+// UsernameChecks answers "is this public handle free?".
+//
+// A port of its own rather than a method on Registration, and the split is the
+// one every other port here is drawn on: a handler holding this interface can
+// READ a reservation stream and can do nothing else. It cannot create an
+// account, spend a token, mint a session or claim a handle — which matters more
+// than usual for this one, because it is the only RPC in the service that is
+// public, unauthenticated, and deliberately NOT an undifferentiated answer.
+type UsernameChecks interface {
+	Check(ctx context.Context, cmd app.CheckUsernameCommand) (app.CheckUsernameResult, error)
+}
+
 // Authentication is the login and session half.
 type Authentication interface {
 	Authenticate(ctx context.Context, cmd app.AuthenticateCommand) (app.AuthenticateResult, error)
@@ -129,6 +141,28 @@ type SecondFactor interface {
 	GenerateRecoveryCodes(
 		ctx context.Context, cmd app.GenerateRecoveryCodesCommand,
 	) (app.GenerateRecoveryCodesResult, error)
+}
+
+// Lifecycle is the account's own on/off switch and its request to be erased.
+//
+// A port of its own rather than more methods on Registration or Authentication,
+// and the split is the same one every other port here is drawn on: a handler
+// holding this interface can switch an account off and can do nothing else. It
+// cannot create an account, replace a credential or mint a session.
+//
+// It has TWO methods and not four. There is no Reactivate, because a deactivated
+// account cannot hold the session such a call would need — the reversal happens
+// inside the authentication instead (app.Lifecycle, domain.User.NeedsReactivation).
+// There is no Suspend, because every caller reaching this service is the account
+// holder acting on their own account, and identity.md §1 makes a suspension
+// something the holder may never perform or reverse.
+type Lifecycle interface {
+	Deactivate(
+		ctx context.Context, cmd app.DeactivateAccountCommand,
+	) (app.DeactivateAccountResult, error)
+	RequestDeletion(
+		ctx context.Context, cmd app.RequestAccountDeletionCommand,
+	) (app.RequestAccountDeletionResult, error)
 }
 
 // Queries is identity's read side.
@@ -153,10 +187,18 @@ type Deps struct {
 	Resender     Resender
 
 	// Resets is the password-reset pair. Required; see New.
-	Resets         PasswordResets
+	Resets PasswordResets
+
+	// Usernames answers the public availability check. Required; see New.
+	Usernames UsernameChecks
+
 	Authentication Authentication
 	SecondFactor   SecondFactor
-	Queries        Queries
+
+	// Lifecycle is deactivation and the deletion request. Required; see New.
+	Lifecycle Lifecycle
+
+	Queries Queries
 
 	// Directory turns the caller's pseudonym into the account id the second-factor
 	// commands are keyed by. See Service.callerUser for why it is here.
@@ -181,8 +223,10 @@ type Service struct {
 	registration Registration
 	resender     Resender
 	resets       PasswordResets
+	usernames    UsernameChecks
 	authn        Authentication
 	secondFactor SecondFactor
+	lifecycle    Lifecycle
 	queries      Queries
 	directory    app.UserDirectory
 	callerScope  clientip.Resolver
@@ -214,10 +258,24 @@ func New(deps Deps) (*Service, error) {
 		// definition the ones already locked out of their own account — the same
 		// argument the resender is refused under, with a worse population.
 		return nil, missing("a password-reset service")
+	case deps.Usernames == nil:
+		// Refused rather than tolerated as "the availability check is optional". A
+		// nil here serves CheckUsernameAvailability with a panic, and that endpoint
+		// is the ONLY way a person can find out their handle is taken before they
+		// spend a verification link they cannot get back — so its absence would show
+		// up as users losing their signup at the last step, which reads as a bug in
+		// verification rather than in wiring.
+		return nil, missing("a username availability service")
 	case deps.Authentication == nil:
 		return nil, missing("an authentication service")
 	case deps.SecondFactor == nil:
 		return nil, missing("a second-factor service")
+	case deps.Lifecycle == nil:
+		// Refused rather than tolerated as "the lifecycle is optional". A nil here
+		// serves both lifecycle RPCs with a panic, and one of them is the only way
+		// a person can switch their own account off — the control a worried account
+		// holder reaches for first.
+		return nil, missing("an account lifecycle service")
 	case deps.Queries == nil:
 		return nil, missing("a read side")
 	case deps.Directory == nil:
@@ -227,8 +285,10 @@ func New(deps Deps) (*Service, error) {
 		registration: deps.Registration,
 		resender:     deps.Resender,
 		resets:       deps.Resets,
+		usernames:    deps.Usernames,
 		authn:        deps.Authentication,
 		secondFactor: deps.SecondFactor,
+		lifecycle:    deps.Lifecycle,
 		queries:      deps.Queries,
 		directory:    deps.Directory,
 		callerScope:  deps.CallerScope,
@@ -367,7 +427,9 @@ var _ identityv1connect.IdentityServiceHandler = (*Service)(nil)
 var (
 	_ Registration   = (*app.Registration)(nil)
 	_ PasswordResets = (*app.PasswordReset)(nil)
+	_ UsernameChecks = (*app.Usernames)(nil)
 	_ Authentication = (*app.Authentication)(nil)
 	_ SecondFactor   = (*app.SecondFactor)(nil)
+	_ Lifecycle      = (*app.Lifecycle)(nil)
 	_ Queries        = (*app.Queries)(nil)
 )

@@ -270,6 +270,7 @@ const (
 	sfSharedValue = "JBSWY3DPEHPK3PXPJBSWY3DP"
 	sfCode        = "123456"
 	sfAccount     = "alice@example.com"
+	sfUsername    = "alice"
 	sfSubject     = "subj_01JQ0000000000000000000001"
 	sfIdempotent  = "idem-second-factor"
 )
@@ -376,6 +377,12 @@ func sfPendingUser(t *testing.T) (*domain.User, ids.UserID) {
 	}
 	if err := user.SetPassword(ids.New[ids.Credential](testNow, entropy), testNow); err != nil {
 		t.Fatalf("setting a password: %v", err)
+	}
+	// The handle, because EnrollTotp now labels the authenticator with it rather
+	// than with a caller-supplied string (ADR-051). A fixture without one would
+	// exercise the unreachable "no username" refusal instead of the real path.
+	if err := user.AssignUsername(sfUsername, testNow); err != nil {
+		t.Fatalf("assigning a username: %v", err)
 	}
 	if user.State() != domain.StatePending {
 		t.Fatalf("the fixture is %s; it must be pending, or activation cannot be observed",
@@ -545,7 +552,7 @@ func TestEnrollingSealsTheSecretAndReturnsItOnce(t *testing.T) {
 	sf := h.build()
 
 	got, err := sf.EnrollTotp(context.Background(), EnrollTotpCommand{
-		UserID: h.userID, AccountName: sfAccount, IdempotencyKey: sfIdempotent,
+		UserID: h.userID, IdempotencyKey: sfIdempotent,
 	})
 	if err != nil {
 		t.Fatalf("enrolling: %v", err)
@@ -563,7 +570,8 @@ func TestEnrollingSealsTheSecretAndReturnsItOnce(t *testing.T) {
 		t.Errorf("the enrolment expires at %v, want %v", got.ExpiresAt,
 			testNow.Add(DefaultEnrollmentWindow))
 	}
-	if len(h.enrollNames) != 1 || h.enrollNames[0] != sfAccount {
+	// The label is the account's own handle now, not a caller-supplied string.
+	if len(h.enrollNames) != 1 || h.enrollNames[0] != sfUsername {
 		t.Errorf("the enroller saw account names %v, want exactly [%q]", h.enrollNames, sfAccount)
 	}
 
@@ -616,7 +624,7 @@ func TestTheSecretIsSealedAgainstTheRowItIsStoredUnder(t *testing.T) {
 	sf := h.build()
 
 	got, err := sf.EnrollTotp(context.Background(), EnrollTotpCommand{
-		UserID: h.userID, AccountName: sfAccount, IdempotencyKey: sfIdempotent,
+		UserID: h.userID, IdempotencyKey: sfIdempotent,
 	})
 	if err != nil {
 		t.Fatalf("enrolling: %v", err)
@@ -646,7 +654,7 @@ func TestEnrollingReusesAnAbandonedEnrollmentsCredentialId(t *testing.T) {
 	sf := h.build()
 
 	first, err := sf.EnrollTotp(context.Background(), EnrollTotpCommand{
-		UserID: h.userID, AccountName: sfAccount, IdempotencyKey: sfIdempotent,
+		UserID: h.userID, IdempotencyKey: sfIdempotent,
 	})
 	if err != nil {
 		t.Fatalf("first enrolment: %v", err)
@@ -660,7 +668,7 @@ func TestEnrollingReusesAnAbandonedEnrollmentsCredentialId(t *testing.T) {
 	})
 
 	second, err := sf.EnrollTotp(context.Background(), EnrollTotpCommand{
-		UserID: h.userID, AccountName: sfAccount, IdempotencyKey: sfIdempotent + "-2",
+		UserID: h.userID, IdempotencyKey: sfIdempotent + "-2",
 	})
 	if err != nil {
 		t.Fatalf("second enrolment: %v", err)
@@ -684,7 +692,7 @@ func TestEnrollingIsRefusedWhenAnAuthenticatorIsAlreadyProven(t *testing.T) {
 	sf := h.build()
 
 	_, err := sf.EnrollTotp(context.Background(), EnrollTotpCommand{
-		UserID: h.userID, AccountName: sfAccount, IdempotencyKey: sfIdempotent,
+		UserID: h.userID, IdempotencyKey: sfIdempotent,
 	})
 	if errs.ReasonOf(err) != errs.Conflict {
 		t.Fatalf("enrolling over a proven authenticator gave %v, want a conflict", err)
@@ -703,7 +711,7 @@ func TestNothingIsStoredWhenSealingFails(t *testing.T) {
 	sf := h.build()
 
 	if _, err := sf.EnrollTotp(context.Background(), EnrollTotpCommand{
-		UserID: h.userID, AccountName: sfAccount, IdempotencyKey: sfIdempotent,
+		UserID: h.userID, IdempotencyKey: sfIdempotent,
 	}); err == nil {
 		t.Fatal("the enrolment succeeded with no working seal")
 	}
@@ -722,7 +730,7 @@ func TestNothingIsAppendedWhenTheSecretCannotBeStored(t *testing.T) {
 	sf := h.build()
 
 	if _, err := sf.EnrollTotp(context.Background(), EnrollTotpCommand{
-		UserID: h.userID, AccountName: sfAccount, IdempotencyKey: sfIdempotent,
+		UserID: h.userID, IdempotencyKey: sfIdempotent,
 	}); err == nil {
 		t.Fatal("the enrolment succeeded with no stored secret")
 	}
@@ -734,10 +742,8 @@ func TestNothingIsAppendedWhenTheSecretCannotBeStored(t *testing.T) {
 
 func TestEnrolmentValidatesItsCommand(t *testing.T) {
 	tests := map[string]EnrollTotpCommand{
-		"no idempotency key": {UserID: ids.MustParse[ids.User]("usr_01ARZ3NDEKTSV4RRFFQ69G5FAV"), AccountName: sfAccount},
-		"no user":            {AccountName: sfAccount, IdempotencyKey: sfIdempotent},
-		"no account name":    {UserID: ids.MustParse[ids.User]("usr_01ARZ3NDEKTSV4RRFFQ69G5FAV"), IdempotencyKey: sfIdempotent},
-		"blank account name": {UserID: ids.MustParse[ids.User]("usr_01ARZ3NDEKTSV4RRFFQ69G5FAV"), AccountName: "   ", IdempotencyKey: sfIdempotent},
+		"no idempotency key": {UserID: ids.MustParse[ids.User]("usr_01ARZ3NDEKTSV4RRFFQ69G5FAV")},
+		"no user":            {IdempotencyKey: sfIdempotent},
 	}
 	for name, cmd := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -761,7 +767,7 @@ func TestEnrolmentValidatesItsCommand(t *testing.T) {
 func (h *sfHarness) enrolled(sf *SecondFactor) ids.CredentialID {
 	h.t.Helper()
 	got, err := sf.EnrollTotp(context.Background(), EnrollTotpCommand{
-		UserID: h.userID, AccountName: sfAccount, IdempotencyKey: sfIdempotent,
+		UserID: h.userID, IdempotencyKey: sfIdempotent,
 	})
 	if err != nil {
 		h.t.Fatalf("enrolling: %v", err)
@@ -1514,7 +1520,7 @@ func TestALostRaceIsAConflictNotAnInternalError(t *testing.T) {
 	sf := h.build()
 
 	_, err := sf.EnrollTotp(context.Background(), EnrollTotpCommand{
-		UserID: h.userID, AccountName: sfAccount, IdempotencyKey: sfIdempotent,
+		UserID: h.userID, IdempotencyKey: sfIdempotent,
 	})
 	if err == nil {
 		t.Fatal("a lost optimistic-concurrency race was reported as success")
@@ -1542,7 +1548,7 @@ func TestAnAppendOutageIsStillInternal(t *testing.T) {
 	sf := h.build()
 
 	_, err := sf.EnrollTotp(context.Background(), EnrollTotpCommand{
-		UserID: h.userID, AccountName: sfAccount, IdempotencyKey: sfIdempotent,
+		UserID: h.userID, IdempotencyKey: sfIdempotent,
 	})
 	if err == nil {
 		t.Fatal("an unreachable event store was reported as success")

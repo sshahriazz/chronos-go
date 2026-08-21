@@ -90,12 +90,102 @@ func (q *Queries) ListActivePushSubscriptions(ctx context.Context, subjectID str
 	return items, nil
 }
 
+const ListChannelPreferences = `-- name: ListChannelPreferences :many
+SELECT channel, enabled, updated_at
+FROM notification_preference
+WHERE org_id = $1 AND subject_id = $2
+ORDER BY channel
+`
+
+type ListChannelPreferencesParams struct {
+	OrgID     string
+	SubjectID string
+}
+
+type ListChannelPreferencesRow struct {
+	Channel   string
+	Enabled   bool
+	UpdatedAt pgtype.Timestamptz
+}
+
+// Every channel this person has explicitly switched, for one organization.
+//
+// Only rows they actually changed come back. ABSENCE MEANS ENABLED, so the
+// caller fills the gaps rather than this statement inventing defaults: a
+// statement that emitted a default would make "never opened the settings
+// screen" and "turned it back on" indistinguishable in the read model.
+func (q *Queries) ListChannelPreferences(ctx context.Context, arg ListChannelPreferencesParams) ([]ListChannelPreferencesRow, error) {
+	rows, err := q.db.Query(ctx, ListChannelPreferences, arg.OrgID, arg.SubjectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListChannelPreferencesRow{}
+	for rows.Next() {
+		var i ListChannelPreferencesRow
+		if err := rows.Scan(&i.Channel, &i.Enabled, &i.UpdatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const TruncateChannelPreferences = `-- name: TruncateChannelPreferences :exec
+TRUNCATE TABLE notification_preference
+`
+
+// TRUNCATE, not DELETE: a rebuild runs in an unscoped system transaction where
+// RLS hides every row, so DELETE would remove none (ADR-019).
+func (q *Queries) TruncateChannelPreferences(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, TruncateChannelPreferences)
+	return err
+}
+
 const TruncatePushSubscriptions = `-- name: TruncatePushSubscriptions :exec
 TRUNCATE TABLE push_subscription
 `
 
 func (q *Queries) TruncatePushSubscriptions(ctx context.Context) error {
 	_, err := q.db.Exec(ctx, TruncatePushSubscriptions)
+	return err
+}
+
+const UpsertChannelPreference = `-- name: UpsertChannelPreference :exec
+INSERT INTO notification_preference (subject_id, org_id, channel, enabled, updated_at)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (org_id, subject_id, channel) DO UPDATE SET
+    enabled    = EXCLUDED.enabled,
+    updated_at = EXCLUDED.updated_at
+`
+
+type UpsertChannelPreferenceParams struct {
+	SubjectID string
+	OrgID     string
+	Channel   string
+	Enabled   bool
+	UpdatedAt pgtype.Timestamptz
+}
+
+// Upsert, not insert: a projector is replayed on restart and on rebuild, so the
+// same event WILL arrive twice.
+//
+// LAST WRITER WINS, and the ordering is the STREAM's rather than the clock's.
+// A person's preference changes all live on one stream, so two settings screens
+// saving at once are already totally ordered by the time this runs — which is
+// what stops a torn result where one channel takes the first save and another
+// takes the second.
+func (q *Queries) UpsertChannelPreference(ctx context.Context, arg UpsertChannelPreferenceParams) error {
+	_, err := q.db.Exec(ctx, UpsertChannelPreference,
+		arg.SubjectID,
+		arg.OrgID,
+		arg.Channel,
+		arg.Enabled,
+		arg.UpdatedAt,
+	)
 	return err
 }
 

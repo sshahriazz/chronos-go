@@ -57,7 +57,7 @@ func TestWhatABootstrapSessionCanReach(t *testing.T) {
 
 	plaintext := h.mintVerificationToken(t, account.subjectID)
 	if _, err := h.client.VerifyEmail(ctx, write(&identityv1.VerifyEmailRequest{
-		Token: plaintext, Password: password,
+		Token: plaintext, Password: password, Username: h.freshUsername("boot"),
 	})); err != nil {
 		t.Fatalf("VerifyEmail: %v\n%s", err, h.serverLogs())
 	}
@@ -128,6 +128,21 @@ func TestWhatABootstrapSessionCanReach(t *testing.T) {
 		{"GenerateRecoveryCodes", func() error {
 			_, err := h.client.GenerateRecoveryCodes(ctx,
 				writeAuth(&identityv1.GenerateRecoveryCodesRequest{}, bearer))
+			return err
+		}},
+		// The two lifecycle writes. Both declare AAL2 and neither declares a
+		// bootstrap floor, deliberately: an account still enrolling its first
+		// factor has nothing to switch off, and a password-only session must not be
+		// able to start an erasure that this module has no command to cancel.
+		{"DeactivateAccount", func() error {
+			_, err := h.client.DeactivateAccount(ctx,
+				writeAuth(&identityv1.DeactivateAccountRequest{}, bearer))
+			return err
+		}},
+		{"RequestAccountDeletion", func() error {
+			_, err := h.client.RequestAccountDeletion(ctx,
+				writeAuth(&identityv1.RequestAccountDeletionRequest{Confirmation: "DELETE"},
+					bearer))
 			return err
 		}},
 	}

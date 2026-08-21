@@ -1,0 +1,493 @@
+syntax = "proto3";
+
+// Package profile is the wire contract for the presentation half of a person:
+// the display name others read, the locale and timezone their mail is rendered
+// in, and the avatar their name appears beside.
+//
+// Five properties of this schema are load-bearing. Each is a rule the messages
+// below are shaped by rather than a convention they happen to follow.
+//
+// **This is not identity.** Identity answers "who is this" — credentials,
+// sessions, lifecycle. Nothing here can authenticate anybody, name an account,
+// or move it through its lifecycle, and identity never learns this service
+// exists. The two meet only at the pseudonym (ADR-002), which is what stops a
+// display name from widening the aggregate that guards authentication — the
+// same reasoning ADR-020 used to split `organization` from `workspace`.
+//
+// **No message here names a subject.** Not one request carries a subject id, a
+// user id or an account id. Every RPC acts on the CALLER, whose pseudonym comes
+// from the authenticated session and from nowhere else. A field naming the
+// person would turn `UpdateProfile` into a way to rename somebody else in front
+// of their colleagues, which is impersonation with a REST endpoint in front of
+// it.
+//
+// **An absent field means UNCHANGED, and that is different from CLEARED.**
+// Every field of `UpdateProfileRequest` has explicit presence. Leaving one out
+// leaves the stored value alone; sending it changes that value. The one field
+// that can be emptied — the avatar — says so by being sent as the empty string,
+// which is a state the schema can express and an omission is not. The vault
+// fields cannot be emptied, and `UpdateProfileRequest` says why at each one.
+//
+// **No image is ever on this wire.** There is no bytes field in this file and
+// there must not be one. `CreateAvatarUpload` hands back a signed POST target
+// the browser uploads to DIRECTLY, and `UpdateProfile` then records the object
+// key the grant named. An image never enters a request body, an event or a
+// database row — see CreateAvatarUploadResponse.
+//
+// **Nothing personal is stored by anything this file describes except the
+// vault.** The display name, the locale and the timezone are personal data
+// (internal/platform/pii) and live only in the PII vault, resolved at read
+// time. What is projected is the fact that they are set, plus the avatar's
+// opaque object key. That is what keeps erasure a key deletion rather than a
+// migration (ADR-002, compliance.md §1).
+package chronos.profile.v1;
+
+import "buf/validate/validate.proto";
+import "chronos/options/v1/options.proto";
+import "gnostic/openapi/v3/annotations.proto";
+import "google/protobuf/timestamp.proto";
+
+// Avatar is a picture of the person, as a URL rather than as bytes.
+//
+// The URL is SIGNED AND SHORT-LIVED, minted per response by the object store.
+// It is not a stable address and must not be stored by a client: caching it
+// past `url_expires_at` produces a broken image, and the fix is to ask for the
+// profile again.
+message Avatar {
+  // A time-limited URL a browser can GET directly. Empty is never returned —
+  // an absent avatar is an absent `Avatar` message.
+  string url = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "https://s3.example/avatars/PLACEHOLDER?X-Amz-Signature=PLACEHOLDER"}},
+    (buf.validate.field).string = {
+      min_len: 8
+      max_len: 2048
+      pattern: "^https://[^\\s]+$"
+    }
+  ];
+
+  // The stored object's media type, e.g. `image/png`. Reported from what the
+  // object store actually holds, never from what the uploader claimed.
+  //
+  // The pattern is the GRAMMAR of a media type rather than the three types
+  // `CreateAvatarUploadRequest` admits, and the looseness is deliberate: this
+  // field reports what the store holds, so pinning it to today's allow-list would
+  // make the document wrong the moment that list grows by one.
+  string content_type = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "image/png"}},
+    (buf.validate.field).string = {
+      max_len: 128
+      pattern: "^[a-z]+/[a-z0-9.+-]+$"
+    }
+  ];
+
+  // The stored object's size in bytes, as the object store reports it.
+  //
+  // The ceiling is the one the upload policy pins — the object store refused
+  // anything larger before it was stored, so no larger object can be described
+  // here.
+  int64 size_bytes = 3 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "20480"}},
+    (buf.validate.field).int64 = {
+      gte: 0
+      lte: 5242880
+    }
+  ];
+
+  // When `url` stops working, UTC. Always set.
+  google.protobuf.Timestamp url_expires_at = 4;
+}
+
+// FormField is one field a browser must include in the upload POST.
+//
+// A repeated pair rather than a map, for the reason `chronos.notification.v1`
+// gives at `TemplateValue`: a protobuf map publishes a synthetic entry message
+// that the published OpenAPI document references and no client can resolve, and
+// a repeated pair gives the list a stable order that a map cannot.
+message FormField {
+  // The form field's name, e.g. `x-amz-signature`.
+  string key = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "x-amz-signature"}},
+    (buf.validate.field).string = {
+      max_len: 128
+      pattern: "^[A-Za-z0-9_.-]+$"
+    }
+  ];
+
+  // Its value, to be sent verbatim.
+  //
+  // The ceiling accommodates the signed policy document, which is the longest
+  // field a presigned POST carries — base64 of a JSON policy, comfortably under
+  // 4 KiB and unbounded by nothing else.
+  string value = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-signature"}},
+    (buf.validate.field).string = {
+      max_len: 4096
+      pattern: "^[^\\r\\n]*$"
+    }
+  ];
+}
+
+// GetProfileRequest asks for the caller's own profile.
+//
+// Deliberately empty. There is no subject id to supply — see the package
+// comment — and there is no organization either: a person has ONE profile
+// across every organization they belong to, exactly as they have one account.
+message GetProfileRequest {}
+
+// GetProfileResponse is the caller's own profile.
+message GetProfileResponse {
+  // The caller's pseudonym (ADR-002). Returned so a client can correlate this
+  // with the account `chronos.identity.v1.GetUser` describes without holding a
+  // second identifier.
+  string subject_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "subj_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // The name other people read. Empty means none has been set.
+  //
+  // Resolved from the PII vault at read time and stored nowhere else. An erased
+  // subject reads as empty here rather than as an error: erasure destroyed the
+  // key, and there is no name left to return (ADR-002).
+  //
+  // The bounds are `UpdateProfileRequest.display_name`'s, with the empty string
+  // additionally admitted — that is the never-set and the erased case, which the
+  // request cannot express and this response must.
+  string display_name = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "Ada Lovelace"}},
+    (buf.validate.field).string = {
+      max_len: 80
+      pattern: "^$|^\\S(.*\\S)?$"
+    }
+  ];
+
+  // The language wording is rendered in, e.g. `en`, `en-GB`, `de-AT`. Empty
+  // means none has been set, and the server's default applies.
+  string locale = 3 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "en-GB"}},
+    (buf.validate.field).string = {
+      max_len: 35
+      pattern: "^$|^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$"
+    }
+  ];
+
+  // The IANA zone timestamps are rendered in, e.g. `Europe/Berlin`. Empty means
+  // none has been set, and UTC applies. Storage is always UTC (ADR-008); this
+  // affects presentation only.
+  string timezone = 4 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "Europe/Berlin"}},
+    (buf.validate.field).string = {
+      max_len: 64
+      pattern: "^$|^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+.-]+)*$"
+    }
+  ];
+
+  // The caller's avatar, unset when they have none.
+  Avatar avatar = 5;
+
+  // When the profile last changed, UTC. Unset means it has never been touched,
+  // which is the state of every account that has not visited this service.
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+// UpdateProfileRequest changes some of the caller's own profile.
+//
+// # Sparse, and the sparseness is the schema's job
+//
+// Every field has EXPLICIT PRESENCE. An omitted field is not "set this to
+// empty" — it is "do not touch this", and the two are different requests that
+// a client must be able to tell apart. A settings screen that saves only the
+// field somebody edited sends only that field, and cannot accidentally wipe the
+// three it did not render.
+//
+// # Adding a field later costs a field number and a column
+//
+// This message and its one event (`profile.ProfileUpdated.v1`) are the entire
+// extension point. Pronouns, a job title, a pronunciation clip: each is a new
+// optional field here, a new pointer on the event, and a new column. No new
+// event type, no catalogue entry, and no upcaster — because the event's shape
+// does not change when a field is added to it, only its contents.
+message UpdateProfileRequest {
+  // The name other people read.
+  //
+  // It CANNOT be cleared, only replaced, and the reason is the vault rather
+  // than a product decision: `internal/platform/pii` can destroy a subject's
+  // KEY and cannot delete one field, so there is no operation this request
+  // could name. Sending an empty string is refused rather than silently
+  // treated as "unchanged", because a client that meant to clear it deserves an
+  // error instead of a save that appears to have worked.
+  optional string display_name = 1 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_len: 80
+      pattern: "^\\S(.*\\S)?$"
+    }
+  ];
+
+  // The language to render wording in, as a BCP-47 tag: `en`, `en-GB`,
+  // `zh-Hans`, `de-AT`.
+  //
+  // Cannot be cleared, for the same reason as `display_name`.
+  optional string locale = 2 [
+    (buf.validate.field).string = {
+      max_len: 35
+      pattern: "^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$"
+    }
+  ];
+
+  // The IANA zone to render timestamps in, e.g. `Europe/Berlin`, `UTC`.
+  //
+  // A zone name, never a UTC offset. An offset is not a timezone: `+01:00` is
+  // wrong for half of every year in most of the world, and a person who set one
+  // in January would silently receive mail an hour out from March. Cannot be
+  // cleared, for the same reason as `display_name`.
+  optional string timezone = 3 [
+    (buf.validate.field).string = {
+      max_len: 64
+      pattern: "^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+.-]+)*$"
+    }
+  ];
+
+  // The object key of an avatar that has ALREADY been uploaded, or the empty
+  // string to remove the current one.
+  //
+  // This is the field that makes clearing expressible: it is the one profile
+  // value whose storage this module owns outright, so removing it is an
+  // operation that exists. Sending the empty string removes the avatar; leaving
+  // the field out keeps it.
+  //
+  // The key must be one `CreateAvatarUpload` minted FOR THIS CALLER. It is not
+  // a name a client may invent: the server derives the caller's own key prefix
+  // from their pseudonym and refuses any key outside it, so a key belonging to
+  // somebody else is rejected before the object store is contacted. The object
+  // is then verified — it must exist, be non-empty, be within the size the
+  // grant allowed, and still carry the media type the grant pinned.
+  optional string avatar_object_key = 4 [
+    (buf.validate.field).string = {
+      max_len: 128
+      pattern: "^$|^[a-z0-9]{1,72}/[a-z2-9]{20,48}$"
+    }
+  ];
+}
+
+// UpdateProfileResponse is the profile as it now stands.
+//
+// The whole profile, in the same shape `GetProfile` returns, so a settings
+// screen can render the result of a save without a second call — and so it
+// renders what the SYSTEM will do rather than what this call decided.
+message UpdateProfileResponse {
+  // The profile after the change.
+  GetProfileResponse profile = 1;
+}
+
+// CreateAvatarUploadRequest asks for somewhere to put an image.
+message CreateAvatarUploadRequest {
+  // The media type the browser is about to upload.
+  //
+  // Declared UP FRONT because the signed policy pins it: the stored object
+  // cannot then claim to be something else, and a mismatch is refused by the
+  // object store rather than discovered afterwards. The list is the one the
+  // server allows and is reported by the error when it does not match.
+  //
+  // `in` is the rule that decides, and the `pattern` beside it says the same
+  // thing in a keyword the OpenAPI generator can carry: protovalidate's `in` has
+  // no JSON Schema equivalent the generator emits, so without the pattern this
+  // published field is an unbounded string that the server happens to refuse.
+  // The two must be changed together, and the pattern must never be tighter than
+  // the list.
+  string content_type = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "image/png"}},
+    (buf.validate.field).string = {
+      in: [
+        "image/png",
+        "image/jpeg",
+        "image/webp"
+      ]
+      max_len: 32
+      pattern: "^image/(png|jpeg|webp)$"
+    }
+  ];
+
+  // How many bytes the browser is about to upload.
+  //
+  // Declared so the signed policy can pin a `content-length-range`, which is
+  // enforced BY THE OBJECT STORE before a byte is stored. That is the property
+  // a presigned PUT cannot give, and it is why the upload is a POST.
+  int64 size_bytes = 2 [
+    (buf.validate.field).int64 = {
+      gt: 0
+      lte: 5242880
+    }
+  ];
+}
+
+// CreateAvatarUploadResponse is a signed, single-use, expiring upload target.
+//
+// # The bytes never reach this server
+//
+// The browser POSTs the image straight to the object store using `upload_url`
+// and `fields`. Nothing in this system reads, buffers, re-encodes or forwards
+// it. That is not an optimisation: an image arriving through the API would have
+// to be held in memory by every replica that could receive it, would put a
+// client-controlled decoder on the request path, and would make the request
+// size limit a product decision instead of a security one.
+//
+// # What the grant pins, and why each matters
+//
+// The policy is signed over the bucket, the exact key, a content-length range
+// and the content type, and it expires. So a leaked grant cannot be redirected
+// to another bucket, cannot overwrite another object by naming it, cannot store
+// more bytes than were declared, cannot store something that is not the media
+// type it claims, and stops working shortly after it is issued.
+//
+// # Why a second call is still needed
+//
+// The object store tells the browser the upload succeeded; it does not tell
+// this server. `UpdateProfile` with `avatar_object_key` is what records the
+// fact, and it verifies the stored object before it does.
+message CreateAvatarUploadResponse {
+  // Where to POST the multipart form.
+  string upload_url = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "https://s3.example/avatars"}},
+    (buf.validate.field).string = {
+      min_len: 8
+      max_len: 2048
+      pattern: "^https://[^\\s]+$"
+    }
+  ];
+
+  // The form fields to send with it, in order, before the file part. Every one
+  // is required and none may be altered — they are covered by the signature.
+  repeated FormField fields = 2 [(buf.validate.field).repeated.max_items = 32];
+
+  // The key the grant is signed for. Send this back to `UpdateProfile` once the
+  // upload succeeds.
+  //
+  // It is chosen by the SERVER and carries no business meaning (ADR-013): a
+  // per-caller opaque prefix and a random name. It is also new on every call,
+  // which is what keeps stored objects immutable — a replaced avatar is a new
+  // key and a new event, never an overwrite.
+  //
+  // The bounds are `UpdateProfileRequest.avatar_object_key`'s, minus the empty
+  // alternative: that request admits `""` to mean "remove the avatar", and no
+  // grant is ever issued for it.
+  string object_key = 3 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "kx7m2q/PLACEHOLDERobjectkeyvalue"}},
+    (buf.validate.field).string = {
+      max_len: 128
+      pattern: "^[a-z0-9]{1,72}/[a-z2-9]{20,48}$"
+    }
+  ];
+
+  // When the grant stops working, UTC.
+  google.protobuf.Timestamp expires_at = 4;
+
+  // The size ceiling the policy pins, in bytes. Echoed so a client can show a
+  // limit without hardcoding one.
+  int64 max_bytes = 5 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "5242880"}},
+    (buf.validate.field).int64 = {
+      gte: 1
+      lte: 5242880
+    }
+  ];
+}
+
+// ProfileService is a person's own presentation surface.
+//
+// Every method here is SELF-SCOPED: the caller acts on their own profile, and
+// the account is resolved from the session rather than named in the request
+// (CONVENTIONS §7, ADR-021). There is no administrative method in this service
+// and there must not be — an endpoint that let an administrator set somebody
+// else's display name is an endpoint that lets them impersonate that person to
+// their own colleagues.
+service ProfileService {
+  // GetProfile returns the caller's own profile.
+  //
+  // The display name, locale and timezone are resolved from the PII vault on
+  // every call, and the avatar URL is signed on every call. Neither is cached
+  // in a projection: the first because it is personal data, the second because
+  // a stored URL outlives its signature.
+  rpc GetProfile(GetProfileRequest) returns (GetProfileResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_READ;
+  }
+
+  // UpdateProfile changes some of the caller's own profile.
+  //
+  // It appends ONE `profile.ProfileUpdated.v1` carrying only the fields that
+  // actually changed, and it never writes the projection: that table is derived,
+  // and a handler writing it would put state in PostgreSQL that no replay
+  // reproduces and the next rebuild deletes.
+  //
+  // Concurrent saves are serialised by the profile stream's own revision, so two
+  // browser tabs saving at once produce one ordering rather than a mixture of
+  // both. The loser is told `CONFLICT` and retries against the winner's state
+  // — it is not silently overwritten.
+  rpc UpdateProfile(UpdateProfileRequest) returns (UpdateProfileResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    // An authenticated mutation, so the idempotency gate refuses it without this
+    // header. The value is described once in proto/openapi.base.yaml and
+    // referenced here; internal/tools/checkopenapi fails the build if a mutating
+    // RPC omits it, or if a public one declares it.
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+
+  }
+
+  // CreateAvatarUpload mints a signed target the browser uploads an image to
+  // directly.
+  //
+  // A mutation rather than a read, deliberately: it issues a CAPABILITY. The
+  // grant is signed, addressed to one key, and usable by whoever holds it until
+  // it expires, so it is not something to hand out on a cacheable, retry-happy
+  // read — and the idempotency gate makes a double-clicked button reuse one
+  // grant instead of littering the bucket with abandoned ones.
+  rpc CreateAvatarUpload(CreateAvatarUploadRequest) returns (CreateAvatarUploadResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    // An authenticated mutation, so the idempotency gate refuses it without this
+    // header. The value is described once in proto/openapi.base.yaml and
+    // referenced here; internal/tools/checkopenapi fails the build if a mutating
+    // RPC omits it, or if a public one declares it.
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+
+  }
+}

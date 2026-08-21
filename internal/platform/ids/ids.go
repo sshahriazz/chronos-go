@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,6 +50,12 @@ type (
 	Notification struct{}
 	Event        struct{}
 	Subject      struct{}
+
+	// PushSubscription is one browser profile on one device, in one
+	// organization. Not one per person: a person commonly has several, and one
+	// browser produces a distinct subscription in every organization they
+	// belong to (ADR-043).
+	PushSubscription struct{}
 )
 
 func (Org) Prefix() string       { return "org" }
@@ -72,6 +79,14 @@ func (Notification) Prefix() string { return "notif" }
 func (Event) Prefix() string        { return "evt" }
 func (Subject) Prefix() string      { return "subj" } // pseudonym; appears in every event (ADR-002)
 
+// PushSubscription's id is DERIVED from the organization and the endpoint
+// rather than minted at random, so the same browser re-registering in the same
+// organization resolves to the same subscription and a second organization
+// resolves to a different one. It is therefore not time-ordered, which nothing
+// sorts by, and it leaks no creation time — the one thing ADR-030 warns a ULID
+// does.
+func (PushSubscription) Prefix() string { return "push" }
+
 // Registry reports every registered kind by name. Used by the conformance test
 // that asserts prefixes are unique — a duplicate would make Parse ambiguous.
 func Registry() map[string]string {
@@ -83,9 +98,87 @@ func Registry() map[string]string {
 		"APIKey":     APIKey{}.Prefix(), "Subscription": Subscription{}.Prefix(),
 		"Plan": Plan{}.Prefix(), "PlanVersion": PlanVersion{}.Prefix(),
 		"Notification": Notification{}.Prefix(), "Event": Event{}.Prefix(),
-		"Subject": Subject{}.Prefix(),
+		"Subject":          Subject{}.Prefix(),
+		"PushSubscription": PushSubscription{}.Prefix(),
 	}
 }
+
+// The WIRE GRAMMAR of a rendered identifier, stated once.
+//
+// # Why this lives here and not in each .proto
+//
+// Every request field naming an identifier carries a protovalidate `pattern`, and
+// that pattern is published in the OpenAPI document and enforced by the
+// validation interceptor BEFORE Parse ever runs. So there are two implementations
+// of "what an identifier looks like": this file, and a regular expression written
+// by hand in a .proto. When they disagree, the interceptor wins, and it wins by
+// refusing values Parse would have accepted — a rule stricter than the handler,
+// which is the failure CONVENTIONS §7.2 exists to prevent.
+//
+// They DID disagree, in both directions, and neither was visible:
+//
+//   - The hand-written patterns were UPPERCASE-ONLY, and `ulid.ParseStrict`
+//     accepts lowercase. Every lowercase identifier — a value the parser took
+//     without complaint — was refused at the boundary. That one was resolved by
+//     making PARSE the strict half: an identifier renders in one case, so it is
+//     read in one case, and the aliasing Parse explains at length is gone.
+//   - The hand-written patterns allowed any Crockford character FIRST, and
+//     ParseStrict does not: the leading character carries the top 3 bits of a
+//     48-bit millisecond timestamp, so anything above '7' overflows and is
+//     rejected. The published grammar described identifiers that cannot exist.
+//
+// PatternFor is now the only place the grammar is written, TestThePatternAgrees-
+// WithParse asserts the two accept exactly the same strings, and
+// internal/tools/checkopenapi fails the build if a published pattern is not the
+// one this function returns. A .proto that hand-rolls its own gets a diff.
+const (
+	// crockford is Crockford base32: the digits, and the letters with I, L, O and
+	// U removed because they are the ones misread off a screen.
+	//
+	// UPPER CASE ONLY. The encoding permits either case and Parse deliberately
+	// does not — see the comment there for what an identifier that can be spelled
+	// two ways does to an OpenFGA tuple and a stream name.
+	crockford = "0-9A-HJKMNP-TV-Z"
+
+	// leading is the first character of a ULID's 26. It encodes the top 3 bits of
+	// the timestamp, so only 0-7 can appear; 8 and above is an overflow that
+	// ulid.ParseStrict refuses.
+	leading = "0-7"
+
+	// bodyLen is the rendered length of a ULID.
+	bodyLen = 26
+)
+
+// PatternFor returns the anchored regular expression a rendered identifier of
+// this prefix matches — the value to paste into a `(buf.validate.field).string`
+// rule.
+//
+// Anchored, because an unanchored pattern matches a substring, and an identifier
+// that merely CONTAINS a valid one is not a valid one.
+func PatternFor(prefix string) string {
+	return "^" + prefix + "_[" + leading + "][" + crockford + "]{" + strconv.Itoa(bodyLen-1) + "}$"
+}
+
+// OptionalPatternFor is PatternFor with the empty string additionally admitted —
+// the form for a field that may legitimately be absent, where protobuf-JSON
+// renders "unset" as "".
+//
+// Spelled as an alternation rather than by dropping `required`, because the two
+// say different things: `^$|^…$` says "empty or well-formed", and a missing rule
+// says "anything".
+func OptionalPatternFor(prefix string) string {
+	return "^$|" + PatternFor(prefix)
+}
+
+// Pattern is PatternFor for a Kind known at compile time.
+func Pattern[K Kind]() string { return PatternFor(prefixOf[K]()) }
+
+// RenderedLen is the exact length of a rendered identifier — the value to use as
+// `max_len`.
+//
+// Exact rather than approximate: every identifier of one kind is the same length,
+// so a `max_len` larger than this admits a string no identifier can be.
+func RenderedLen(prefix string) int { return len(prefix) + 1 + bodyLen }
 
 // ID is a ULID tagged with its Kind at compile time.
 type ID[K Kind] struct{ v ulid.ULID }
@@ -108,6 +201,10 @@ type (
 	NotificationID = ID[Notification]
 	EventID        = ID[Event]
 	SubjectID      = ID[Subject]
+
+	// PushSubscriptionID is deliberately not abbreviated to PushID: the thing it
+	// names is a subscription held by a push service, not a push that was sent.
+	PushSubscriptionID = ID[PushSubscription]
 )
 
 var (
@@ -145,7 +242,36 @@ func FromUUID[K Kind](u [16]byte) ID[K] {
 	return ID[K]{v: ulid.ULID(u)}
 }
 
-// Parse validates both the prefix and the ULID body.
+// Parse validates the prefix and the ULID body, and requires the CANONICAL
+// rendering.
+//
+// # Why lowercase is refused
+//
+// Crockford base32 specifies case-insensitive DECODING, and `ulid.ParseStrict`
+// implements that faithfully: it accepts `sess_01arz…` and `sess_01ARZ…` as the
+// same 16 bytes. That is the right rule for a code a human reads off paper. It is
+// the wrong rule for an identifier on a wire, because it makes two distinct
+// strings name one entity, and this system compares identifier STRINGS in places
+// that never parse them:
+//
+//   - an OpenFGA tuple is `user:usr_…` matched textually, so a tuple written in
+//     one case and checked in the other does not match. It fails closed, so it is
+//     not an escalation — it is an authorization decision that is silently wrong
+//     in the safe direction, which is the hardest kind to find;
+//   - a Valkey cache key, a Centrifugo channel and a KurrentDB stream name all
+//     embed the rendered form, so an aliased identifier is two cache entries, two
+//     channels and — worst — two streams for one aggregate.
+//
+// Nothing in this system ever RENDERS lowercase: String, AppendTo and MarshalText
+// all go through ulid's uppercase encoder. So refusing it costs no round trip that
+// works today, and it removes the aliasing entirely rather than asking every
+// downstream user of the string to normalize first. A caller holding a lowercase
+// identifier — a person typing into a support tool — uppercases it at that
+// boundary, which is where the ambiguity belongs.
+//
+// PatternFor publishes exactly this rule, and TestThePatternAgreesWithParse
+// asserts the two agree, so the validation interceptor refuses precisely what
+// this function does.
 func Parse[K Kind](s string) (ID[K], error) {
 	var zero ID[K]
 	if s == "" {
@@ -155,6 +281,14 @@ func Parse[K Kind](s string) (ID[K], error) {
 	body, ok := strings.CutPrefix(s, want+"_")
 	if !ok {
 		return zero, fmt.Errorf("%w: expected prefix %q in %q", ErrWrongTypeCode, want, s)
+	}
+	// Checked before ParseStrict, which would accept it: a byte scan rather than
+	// a ToUpper comparison, so a rejected identifier costs no allocation.
+	for i := range len(body) {
+		if body[i] >= 'a' && body[i] <= 'z' {
+			return zero, fmt.Errorf(
+				"%w: %q is not canonical — identifiers render in upper case", ErrMalformed, s)
+		}
 	}
 	u, err := ulid.ParseStrict(body)
 	if err != nil {

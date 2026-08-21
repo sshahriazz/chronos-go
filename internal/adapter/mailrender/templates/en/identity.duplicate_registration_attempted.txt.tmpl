@@ -1,0 +1,20 @@
+Hello{{if .Name}} {{.Name}}{{end}},
+
+On {{datetime .OccurredAt}}, somebody tried to create a Chronos account with
+this email address. No new account was created: this address already has one.
+
+If that was you, you do not need to sign up again — sign in instead:
+
+  {{url "/sign-in"}}
+
+If you have forgotten your password, you can set a new one here:
+
+  {{url "/forgot-password"}}
+
+If it was not you, you can ignore this message. Nothing changed: no account was
+created, your password was not altered, and nobody was told anything about your
+account. Whoever typed your address saw exactly what they would have seen if
+this address had no account at all.
+
+We send this at most a few times an hour for one address, so repeated attempts
+will not fill your inbox.

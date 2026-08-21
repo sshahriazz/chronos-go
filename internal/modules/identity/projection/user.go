@@ -98,6 +98,63 @@ func NewUser(codec eventsourcing.Codec) *User {
 		return nil
 	})
 
+	// The public handle (ADR-051). Two handlers, on two streams, and the pair is
+	// the only place in this system where a projection is asked to hold personal
+	// data and to DELETE it.
+	//
+	// UsernameAssigned arrives on the ACCOUNT's stream and says which handle this
+	// account answers to. UsernameTombstoned arrives on the HANDLE's own stream
+	// and says the handle is burned — it carries no subject, deliberately, so
+	// nothing links a tombstone back to the person it protects, and the statement
+	// it drives is keyed by the handle instead.
+	//
+	// Ordering across the two is guaranteed the same way the EmailReleased
+	// handler's is, and by the same property of this handler set: the filter names
+	// an event-type PREFIX spanning three stream categories, which resolves to
+	// neither exactly one type nor exactly one category, so a rebuild falls
+	// through to $all and never takes the sharded link-stream path that gives up
+	// cross-aggregate ordering (ADR-044). A rebuild therefore replays
+	// assign-then-tombstone in commit order and lands on cleared, which is what an
+	// erasure must survive: a rebuild that restored an erased handle would undo
+	// the erasure every time the read model was rebuilt.
+	d.On[contract.UsernameAssigned](func(
+		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.UsernameAssigned,
+	) error {
+		w.Exec(identitydb.AssignUsername, e.SubjectID, e.Username)
+		return nil
+	})
+
+	d.On[contract.UsernameTombstoned](func(
+		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.UsernameTombstoned,
+	) error {
+		// Matching no row is the normal case on a replay, and it is not an error:
+		// the first application cleared it, and there is nothing left to clear.
+		w.Exec(identitydb.ClearUsername, e.Username)
+		return nil
+	})
+
+	// UserDeletionRequested is NOT a state transition and is deliberately not in
+	// the table below. The account keeps its lifecycle position — it keeps its
+	// credentials and its sessions too — until `compliance` acts on the request,
+	// and that module does not exist. Writing a state here would make this row
+	// disagree with what every gate in the system still permits.
+	//
+	// Projected anyway, and now rather than when the consumer arrives, because
+	// this row is the only place the request is visible to a person or an
+	// operator until then, and because an event nothing projects is an event
+	// whose REPLAY is never exercised — the first rebuild after the consumer
+	// lands is the worst moment to find out it stops the projector.
+	d.On[contract.UserDeletionRequested](func(
+		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.UserDeletionRequested,
+	) error {
+		// Idempotent in the statement (`deletion_requested_at IS NULL`), not here:
+		// a replay must leave the FIRST deadline standing, because that is the date
+		// already mailed to the person (NOTIFICATIONS.md §4).
+		w.Exec(identitydb.RecordDeletionRequest,
+			e.SubjectID, e.RequestedAt, e.ScheduledFor)
+		return nil
+	})
+
 	// The four state transitions share one shape. Written as a loop over a table
 	// rather than four near-identical closures, so a state added to the domain
 	// without a projector handler is a visibly missing table entry rather than a

@@ -44,6 +44,162 @@ federated link). TOTP and recovery codes are second factors and never satisfy it
 Every removal command checks this and fails with `LastCredentialRemoval` rather
 than locking the user out.
 
+### 1.1 The lifecycle — BUILT, and how the reversal avoids a deadlock
+
+`pending -> active -> deactivated -> suspended -> erased` is the state list. Some
+transitions are reachable through the API and the rest are not; which is which is
+a decision rather than an omission.
+
+| Transition | Reached by | Notes |
+| --- | --- | --- |
+| deactivate | `DeactivateAccount`, AAL2, self-scoped | one atomic append: the account and every session on it |
+| reactivate | **a completed sign-in**, not an RPC | the reversal identity.md §1 promises the holder |
+| suspend | nothing, deliberately | `domain.User.Suspend` is built and tested; it acquires a caller when `operator` exists |
+| deletion request | `RequestAccountDeletion`, AAL2, self-scoped | appends the event and stops; `compliance` does not exist |
+| erased | nothing | `compliance` owns it (ADR-002) |
+
+#### Deactivation is one atomic append, not two
+
+`UserDeactivated` and every `SessionRevoked` it produces go into a single
+`AppendToMany`. The two sequential orderings both fail and neither fails safe:
+
+- **Revoke, then deactivate.** A failure leaves every session dead and the account
+  on — a full sign-out the person did not ask for and nothing in the log explains.
+- **Deactivate, then revoke.** A failure leaves the account off in the log and a
+  live session in whoever's hands held it. **Nothing in the request pipeline reads
+  an account's state** — `GetSessionByToken` joins `user_view` only to read the
+  `enrolment` column — so that session keeps full API access while the person who
+  switched their account off has been told it is off.
+
+The password reset can choose an order because its two writes have a safe
+direction (§4.5). A deactivation has no granting half, so there is no safe
+direction and the write is indivisible instead.
+
+**Measured, because the obvious test for this is wrong.** A `MultiStreamAppend`
+returns ONE log position for the whole append, and the events read back out of
+their own streams carry DIFFERENT `$all` positions — 695823 for the account event
+beside 696384 and 697023 for two revocations, from one atomic write. The reported
+position is the transaction's, not each event's, so "same commit position" is not
+a property of atomicity and asserting it fails against a correct implementation.
+What atomicity does guarantee is CONTIGUITY in `$all`, and that is what
+`TestADeactivationAndItsRevocationsAreContiguousInTheLog` asserts.
+
+The revocation spares **nothing**, including the session that asked. An account
+switched off everywhere except on the device that switched it off is not what was
+asked for. It does **not** sweep outstanding tokens — that is the reset's rule
+(§4.4) and it belongs to a flow that exists because control may have been lost;
+voiding the verification token of an account that deactivated mid-signup would
+destroy the only route back into it, to defend against nothing.
+
+A repeated deactivation records nothing on the account and **still sweeps the
+sessions**, because a login whose ceremony began before the first deactivation
+committed can mint a session the first sweep's work list never saw.
+
+**The residual window, stated rather than hidden.** A deactivation racing a login
+has one outcome the append cannot prevent: a login that had already loaded the
+account can mint its session AFTER the revocation's work list was taken. Closing
+it exactly would need a cross-stream precondition on a stream the login writes no
+event to, and `AppendToMany` refuses an entry carrying only a precondition — so
+the window is real. It is not a privilege gap under this design, because that
+session grants nothing the same credentials could not obtain by signing in a
+second later, which reactivates the account and mails the holder about it. It is
+an incoherence, and the recoveries are the next `DeactivateAccount` (which is why
+the idempotent path still sweeps), `RevokeAllSessions`, and the session's own
+idle deadline. `TestADeactivationRacingALoginDoesNotTear` measures it and logs
+the count rather than asserting one, because both answers are legal.
+
+#### Reactivation is a sign-in, and why it cannot be an RPC
+
+`CanAuthenticate` refused a deactivated account; every authenticated RPC needs a
+session; a session needs an authentication. A `ReactivateAccount` RPC would
+therefore have exactly one precondition — a session — that **its own subject can
+never satisfy**, and "reversible by the holder" would be a sentence in this
+document with no code behind it. That is the shape of the enrolment deadlock
+(§2's bootstrap carve-out), and it is closed the same way: by admitting one more
+state into the authentication, narrowly.
+
+`domain.User.NeedsReactivation` is that admission — deactivated **and** the
+address proven. Three properties bound it:
+
+- **The ceremony is not shortened.** Every factor the account holds is still
+  demanded. A deactivated account presenting a password alone is *challenged* for
+  its second factor exactly as an active one is, so a stolen password cannot undo
+  the step a worried owner took.
+- **No session for a deactivated account is ever minted.** The bootstrap
+  carve-out's mechanism cannot be reused here, because what it bounds is a
+  *level* and this account's problem is a *state* — an AAL2 session on a
+  deactivated account passes every declared floor in the system. So the
+  reactivation is recorded in the **same atomic append** as
+  `AuthenticationSucceeded`, and the account is Active before the session exists.
+  The window in which the two disagree does not exist rather than being small.
+- **The account stream carries a precondition.** Two simultaneous logins produce
+  exactly one `UserReactivated`; the loser's whole append — its
+  `AuthenticationSucceeded` included — is rolled back, and it retries against the
+  reloaded stream. Bounded at three attempts, for §4.5's reason.
+
+An **active** account writes nothing to its own stream on a successful login. An
+event per login would make the account stream grow with *traffic* rather than
+with state, which is why §13 refuses to record `ApiKeyUsed`.
+
+**One state the reversal cannot reach, and why it is not reachable either.**
+`domain.User.Deactivate` accepts a Pending account, and a Pending account that
+deactivated before enrolling a second factor would be admitted by
+`CanAuthenticate` and then refused for offering no second factor —
+`NeedsFirstSecondFactor` requires Pending, so the bootstrap carve-out does not
+apply to it. That account would be stuck. It is unreachable through the API:
+`DeactivateAccount` declares AAL2 with no bootstrap floor, and a Pending account
+cannot reach AAL2. The domain stays permissive because the operator path that
+will eventually call it is not this one; the day it exists, this is the case it
+must refuse.
+
+The compensating control for "an attacker who has the credentials can undo the
+deactivation" is the one the notification catalogue already anticipated:
+`identity.account_reactivated`, Security class, to the subject — added on the
+reasoning that "deactivation is reversible by the holder, so an attacker who has
+an account's credentials can undo the very step a worried owner took."
+
+#### Suspension has no RPC, and must not acquire one
+
+identity.md §1 makes suspension administrative and explicitly not reversible by
+the holder. Every method on `IdentityService` is reached by the account holder
+acting on their own account — `api.callerSubject` refuses an API-key and a
+service-account principal outright — so an RPC here could only ever be a
+**self-suspension**. One call and the account is unreachable by every route this
+module has: `Reactivate` refuses Suspended, `RequestPasswordReset` refuses it,
+`ResendEmailVerification` refuses it, and there is no operator surface anywhere
+in the repository to undo it. The authz annotation would also have to read
+`relation: "self"`, which literally says "the holder may do this" — the opposite
+of the rule.
+
+`domain.User.Suspend` therefore stays built, tested and reachable by nothing, and
+`TestNoRpcSuspendsOrReactivatesAnAccount` fails if a method whose name contains
+`suspend` or `reactivate` is ever added to the service.
+
+#### The deletion request stops at the handoff
+
+`RequestAccountDeletion` appends `UserDeletionRequested` — a pseudonym, an actor,
+the request time and the deadline — and does nothing else. It revokes no session,
+deliberately: the grace period exists so the person can change their mind, and
+signing them out of an account that still works would teach them the request took
+effect immediately. It is idempotent and the **first** deadline stands, because
+that is the date NOTIFICATIONS §4 says the person was mailed.
+
+The account keeps every capability it had. There is no `deleted` state and
+`user_view.state` does not move; two nullable columns
+(`deletion_requested_at`, `deletion_scheduled_for`) carry it, and `GetUser`
+renders them as timestamps rather than as a lifecycle position.
+
+**What is unbuilt on the other side of the handoff**, in full:
+
+- no `compliance` module, so no erasure and no key destruction;
+- no `AccountDeletionWorkflow` (§16), so nothing runs the 30-day clock;
+- no notification catalogue entry, so the "deletion scheduled for *date* —
+  cancel" mail of NOTIFICATIONS §4 is not sent — and `cmd/worker`'s completeness
+  guard fails until one is added;
+- no cancellation command and no `UserDeletionCancelled` event, so the "cancel"
+  the mail would offer has nothing behind it;
+- nothing reads `deletion_scheduled_for`, so a deadline passing has no effect.
+
 ---
 
 ## 2. Authentication assurance levels
@@ -369,6 +525,164 @@ failures (`AuthenticatorDisabled`) cannot be reset — the statement requires
 `disabled_at IS NULL`, and `UsablePasswordCredential` skips it. Re-enabling a
 locked-out authenticator belongs to §11's anomaly response, not to a flow reached
 by anyone who can trigger mail to the address.
+
+### 4.6 The public username — BUILT, and where it attaches
+
+Every account has a **username**: a public, human-chosen handle used for
+mentions, profile URLs and anywhere the product names a person to other people.
+It is **mandatory**, not an optional profile field, and ADR-051 settles what it
+is. This section settles the one thing the ADR leaves open — *where in the
+signup flow it is claimed* — and records the rules the implementation enforces.
+
+#### It is claimed at `VerifyEmail`, beside the password
+
+`VerifyEmailRequest` carries `token`, `password` **and** `username`. All three
+are mandatory. `RegisterRequest` does not carry a handle and must never gain
+one.
+
+Three placements were possible. The reasoning that decided between them is §4.3's
+applied to a second durable choice, plus one argument that is specific to this
+field and is on its own sufficient.
+
+**At `Register`** — rejected, decisively, because it reopens the
+account-existence oracle §11 exists to close. `RegisterResponse` is empty
+precisely so that "the address was free" and "the address was taken" are the same
+answer. Pair the address with a freshly-invented handle and they stop being the
+same answer: register, then ask the public availability RPC about the handle. Taken
+means the registration went through, which means the address was free; free means
+it did not, which means an account already exists for that address. **One extra
+unauthenticated call, and the leak is back — through a field rather than through a
+message.** The obvious repair, claiming the handle even when the address is
+taken, is worse: it orphans handles on behalf of accounts that do not exist, and
+makes an unauthenticated endpoint an unbounded handle-burning vector.
+
+It is also squattable. An unverified address claim lapses after
+`DefaultReservationLease`, which is what bounds the squat §4.3 leaves open; a
+handle is claimed **permanently** and, once tombstoned, cannot be reissued even in
+principle. So a handle at `Register` would let a script sweep every desirable name
+with addresses it never proves, and every name it took would be gone for good.
+
+**A separate `SetUsername` before activation** — rejected because it creates the
+one state "mandatory" cannot survive: an account that is verified, has a password,
+can authenticate, and has no handle. Closing that window needs a whole new gate —
+a session restricted to a single endpoint, like `RequiresCredentialRotation` — to
+stop the account being used before it has a name. That is a large mechanism bought
+to solve a problem the placement below does not have.
+
+**At `VerifyEmail`** — chosen. It is §4.3's rule extended: the party that has just
+proven the mailbox is the party entitled to make the account's durable choices,
+and the handle is claimed in the same atomic append as the proof and the first
+password. Each squatted handle then costs the attacker one mailbox they actually
+control. And the window in which an account has no handle is exactly the window in
+which the account can do nothing at all — Pending, passwordless, unreachable by any
+authentication — so "every usable account has a handle" is true by construction
+rather than by a gate.
+
+**What it costs, and how that is paid.** A handle cannot be *confirmed* available
+until the link is clicked. `CheckUsernameAvailability` is public so a person picks
+and checks at the form, and the check is advisory by construction — any
+check-then-claim is racy, and the append's precondition is the authority. If the
+handle is taken by the time the link is followed, the refusal happens **before the
+token is consumed**, so the link survives and the person picks another name. That
+placement follows §4.3's password-screening argument, with a different
+justification: handle availability is not a function of the caller's own bytes, but
+it is *public and free to query*, so refusing early costs an attacker nothing and
+saves a legitimate user their only route into the account.
+
+#### The refusal is deliberately specific, and that is the one exception
+
+Every other refusal in this module is undifferentiated (ADR-036). "That username
+is not available" is not, and must not be made so: a handle is published by
+design, its availability is served by a public RPC whose entire purpose is to
+answer this question, and a vague refusal would tell the person nothing while
+telling an attacker nothing they could not already read.
+
+The one distinction that is **not** drawn is between a handle somebody holds and a
+handle that was **tombstoned**. That merge is a privacy control rather than
+tidiness: "this handle belonged to an account that was erased" is a fact about a
+person, and the tombstone exists to protect that person.
+
+#### Normalisation, and what it deliberately does not do
+
+The canonical form names a KurrentDB stream, permanently, so these rules are a
+schema rather than a preference. `domain.NormalizeUsername` is the single
+definition; the protovalidate rules on the wire mirror it and are never stricter.
+
+| Rule | Value | Why |
+| --- | --- | --- |
+| Character set | `[a-z0-9_]`, ASCII only | validated, never mapped |
+| Case | folded to lower; only the folded form is stored | `@Alice` and `@alice` must be one handle |
+| Length | 3–30 bytes | a short space is exhaustible; a stream name is permanent |
+| First character | a letter | a leading digit or `_` reads as a generated id |
+| Underscore | may not lead, trail or repeat | each position multiplies near-duplicates for free |
+| Hyphen | **refused** | `NewStreamID` rejects a dash in a key: KurrentDB derives a category from everything before the first one |
+
+The fold is ASCII-only and not `strings.ToLower`, which is not a micro-detail:
+`ToLower` maps `İ` to `i` plus a combining mark, turning input the character-set
+rule refuses into input it accepts.
+
+**Confusables.** The ASCII-only set eliminates the entire *cross-script* homoglyph
+class outright — there is no Cyrillic `а`, no Greek `ο`, no fullwidth `ａ`, because
+there is no non-ASCII input at all. That is the class that matters, because those
+handles are byte-different and pixel-identical.
+
+What remains is the *within-ASCII* class — `0`/`o`, `1`/`l`, `rn`/`m` — and the
+system deliberately does **not** fold it. Folding is worse than the problem:
+`0→o` makes `@bob` and `@b0b` one handle, so the first registrant silently denies
+a whole family of names to everyone else; the mapping is not invertible, so a
+refusal cannot be explained after the fact; and the composition of `rn`/`m`,
+`vv`/`w`, `cl`/`d` collapses a fraction of the handle space that nobody can
+enumerate in review. The residual risk is answered at the **rendering** layer,
+where the reader is: a font that distinguishes `0` from `o`, and never presenting a
+handle as proof of who somebody is.
+
+**Reserved names** are refused on the normalized form, so `Admin`, `ADMIN` and
+`admin` are one refusal. Two families, refused for unrelated reasons:
+
+- **Role impersonation** — `admin`, `support`, `billing`, `security`, `noreply`,
+  `postmaster`… A handle that reads as the operator is a phishing primitive that
+  needs no technical compromise: "@support asked me to confirm your password" is a
+  complete attack, and the only defence is that `@support` cannot exist.
+- **Route collision** — `login`, `settings`, `api`, `new`, `about`… A profile path
+  built from the handle makes a colliding route ambiguous forever, and it cannot be
+  repaired later without taking a name away from somebody other people have linked
+  to.
+
+The list is exact rather than a prefix match (`admin2` is allowed), generous
+rather than minimal (a name added later cannot be reclaimed from whoever holds
+it), and static rather than runtime-editable (an editable list makes "is this
+claimable" a question whose answer changes under a claim already checked).
+
+#### Uniqueness, erasure, and login
+
+- **Uniqueness** is a `UsernameReservation` aggregate on
+  `reservation_username-<handle>`, contended with `NoStream`, exactly as an
+  address is (ADR-044) — with the stream named by the handle **in the clear**,
+  because hiding a published value buys nothing and costs log readability
+  (ADR-051). `user_view.username` carries a partial unique index as a **backstop**;
+  it asserts exactly what the domain guarantees and no more (ADR-052's lesson).
+- **There is no lease and no release.** A handle is claimed by an account that has
+  already proven its mailbox, so there is nothing unproven to expire. The one
+  terminal transition is the tombstone.
+- **Erasure DELETES the handle and tombstones it forever.** `user_view.username` is
+  the one cleartext personal-data column in this system, so key destruction does
+  nothing to it. The tombstone carries the handle and nothing else — no subject, no
+  actor — which is what makes retaining it after an erasure lawful. The producer is
+  `compliance` and does not exist yet; the *mechanism* — the aggregate transition,
+  the event, the projector's deletion, and the refusal every future claim inherits
+  — is built and tested.
+- **It is NOT a login identifier.** `Authenticate` and `CreateSession` take the
+  address only, and there is deliberately no `GetUserByUsername` query. A public
+  handle accepted for login is an enumerable target list to spray and turns the
+  lockout ceiling into a denial of service aimed at anyone whose handle is readable.
+
+#### A username change does not exist
+
+No RPC, no use case, no event, and its absence is a decision rather than a gap: a
+change must **burn** the old handle rather than free it, or every old mention
+re-points at whoever takes it next. `domain.User.AssignUsername` therefore refuses
+a second, different handle. When the flow is built it inherits §4.4's revocation
+rule and ADR-051's tombstone rule together.
 
 ### 4.1 Compromised-credential detection — a lifecycle, not a signup check
 
@@ -840,6 +1154,71 @@ thought was tenant-scoped.
 - Every attempt, success or failure, is an event feeding the audit trail
   (`compliance`).
 
+### 11.1 There is no email-availability RPC, and there will not be one
+
+`CheckUsernameAvailability` exists. `CheckEmailAvailability` does not, and its
+absence is a decision rather than a gap somebody forgot to close (ADR-055).
+
+The two look symmetrical and are not. A **username is published by design**
+(ADR-051): `@alice` appears in mentions, in profile URLs and in mail other people
+already received, so "that handle is taken" is readable from any profile page and
+no endpoint changes what is knowable. It is deliberately the one piece of
+user-supplied text this system publishes, and it sits in a projection column in
+the clear. The availability check is therefore an enumeration oracle *by design*,
+and the ceiling on it in `cmd/api/identity.go` says in its own comment that it is
+a RESOURCE control and explicitly not an information control.
+
+An **address is not published**. It is personal data, it lives in the PII vault
+behind a blind index (ADR-012), and no projection may hold it (compliance.md §1).
+An availability endpoint for it would hand any unauthenticated caller a precise,
+unlimited answer to the exact question registration, login, reset and invitation
+are all shaped to refuse — faster and more cheaply than any of the four.
+
+An authenticated variant does not rescue it: scoped to the caller's own address
+it answers a question the caller can already answer, and scoped to any address it
+is the same oracle with a login in front of it.
+
+The product pressure is real — a signup form wants to say "you already have an
+account" before the user submits. **That answer is given, and it is given to the
+mailbox.** See §11.2. The form's honest text remains "if that address can be
+registered, we have sent it a link", which is true on both branches.
+
+### 11.2 A registration on a claimed address answers the MAILBOX
+
+`Register` returns the same empty response whether the address was free or
+already claimed, and integration tests compare the two as marshalled bytes. That
+is right and it is not enough on its own: until ADR-055 the taken branch sent
+nothing anywhere, so the screen said "check your email" and no mail arrived — and
+that branch is the one a returning user hits most often.
+
+When a **verified** account already holds the address, identity appends
+`identity.DuplicateRegistrationAttempted.v1` to that address's reservation stream
+and the notification catalogue mails the holder: somebody tried to register with
+your address, here is where to sign in, here is where to set a new password, and
+if it was not you there is nothing to do. Nothing reaches the caller.
+
+- **The disclosure line.** The message goes to the address, and reading it
+  already requires controlling the address — the same proof the verification link
+  demands. So "an account exists here" is the intended disclosure. Everything
+  beyond that single fact is withheld: no handle, no creation date, no account
+  state, no second-factor status, and **nothing about whoever made the attempt**,
+  who is unauthenticated and whose IP or client string would be attacker-chosen
+  text repeated into a victim's inbox.
+- **An unverified claim gets nothing.** Nobody has proven they can read mail
+  there, so sending is unsolicited mail to a person who never asked (NOTIFICATIONS
+  §5). The pending registrant already holds a link, and §12.1 issues another.
+- **Two ceilings.** The shared per-address and per-caller triggered-mail budgets
+  (`mailAddressRules`, `mailCallerRules` — 3/hour and 10/day per address, shared
+  with resend and reset so alternating between endpoints cannot double the mail),
+  and a floor derived from the reservation stream itself
+  (`domain.MaxDuplicateNoticesPerHour`) that holds while the shared counter is
+  unwired, degraded or flushed. The shared budget is spent on **both** branches:
+  spending only on the refused one would make the ceiling readable as the answer
+  through a later resend refusal.
+- **A refused ceiling suppresses the notice, never the registration.** A
+  `RATE_LIMITED` only the taken branch can produce is the oracle again, and it
+  would let an attacker block an address from being claimed by probing it.
+
 ---
 
 ## 12. Identifier and email lifecycle
@@ -967,7 +1346,8 @@ The value is refused above 8 at boot and logged at startup as
 
 ## 13. Events published
 
-`UserRegistered` · `EmailVerificationRequested` · `EmailVerified` ·
+`UserRegistered` · `DuplicateRegistrationAttempted` ·
+`EmailVerificationRequested` · `EmailVerified` ·
 `EmailChangeRequested` · `EmailChanged` · `PasswordSet` · `PasswordChanged` ·
 `PasswordResetRequested` · `PasskeyRegistered` · `PasskeyRemoved` ·
 `TotpEnabled` · `TotpDisabled` · `RecoveryCodesGenerated` ·
@@ -977,12 +1357,26 @@ The value is refused above 8 at boot and logged at startup as
 `SessionElevated` · `SessionRevoked` · `SessionExpired` ·
 `SessionCompromiseDetected` · `DeviceRegistered` · `DeviceTrusted` ·
 `ApiKeyCreated` · `ApiKeyRotated` · `ApiKeyRevoked` ·
-`ServiceAccountCreated` · `UserDeactivated` · `UserSuspended` ·
-`UserDeletionRequested`
+`ServiceAccountCreated` · `UserDeactivated` · `UserReactivated` ·
+`UserSuspended` · `UserDeletionRequested` · `UsernameReserved` ·
+`UsernameAssigned` · `UsernameTombstoned`
 
 **Every one carries `SubjectID` pseudonyms only** — no email, no IP, no device
-name, no user agent in the payload (ADR-002). Those live in the PII vault,
+name, no user agent in the payload (ADR-002). `DuplicateRegistrationAttempted`
+goes further and carries no ACTOR either, in the payload or in the metadata: the
+party it records is unauthenticated, so anything attributed to them would be
+attacker-chosen text living forever in the log, and the metadata default — actor
+equals subject — would assert that the account holder tried to register their own
+address (ADR-055). Those live in the PII vault,
 joined at projection time.
+
+**The three username events are the one stated exception**, and it is ADR-051's:
+a public handle is *published by design*, so the vault cannot protect it —
+crypto-shredding does nothing to a value that was published — and there is
+nothing for a pseudonym to stand in for. They carry the handle in the clear, and
+`UsernameTombstoned` carries the handle and **nothing else**: no subject, no
+actor, no timestamp tied to a person. That emptiness is what makes a tombstone
+lawful to retain after an erasure.
 
 ### There is deliberately no `ApiKeyUsed`
 
@@ -1022,7 +1416,7 @@ does not permit rewriting.
 
 | Projection | Serves | Key indexes |
 | --- | --- | --- |
-| `user_view` | profile, status | `(email_index) WHERE email_released_at IS NULL` unique |
+| `user_view` | profile, status, public handle | `(email_index) WHERE email_released_at IS NULL` unique; `(username) WHERE username IS NOT NULL` unique |
 | `auth_method_view` | the security settings screen | `(user_id, method_type)` |
 | `session_view` | device list | `(user_id, status, last_seen_at DESC)` |
 | `linked_account_view` | connected providers | `(issuer, subject)` unique |
@@ -1043,6 +1437,18 @@ path ran. See ADR-052.
 The same column is why `GetUserByEmailIndex` filters on
 `email_released_at IS NULL`: without it the login lookup can resolve an address
 to the abandoned account instead of the one that holds it.
+
+`user_view.username` is the **one personal-data column in any projection in this
+system**, and its uniqueness index is a real backstop rather than an over-claim:
+a handle is claimed permanently, never released and never reissued, so "at most
+one account ever holds a handle" is precisely what the domain promises (§4.6,
+ADR-051). It is `NULL` for an account that has not verified yet and `NULL` again
+after an erasure — the erasure DELETES it, because key destruction does nothing
+to cleartext.
+
+There is deliberately **no `GetUserByUsername`**. Adding one would be the whole of
+making a public handle a login identifier, so its absence is where that property
+is kept.
 
 ---
 
@@ -1080,7 +1486,7 @@ their differences (§7) are contained in adapters and the domain sees a uniform
 | `SessionReaperWorkflow` | idle and absolute timeout sweeps |
 | `ApiKeyExpiryWorkflow` | pre-expiry warning, rotation nudge, disable |
 | `SuspiciousLoginWorkflow` | notify → await response → escalate to revoke-all |
-| `AccountDeletionWorkflow` | grace period, then hand off to `compliance` erasure |
+| `AccountDeletionWorkflow` | grace period, then hand off to `compliance` erasure — **not built**; `UserDeletionRequested` is appended and nothing consumes it (§1.1) |
 
 ---
 

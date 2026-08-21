@@ -369,8 +369,15 @@ text, no stack traces — those go to logs correlated by trace ID (ADR-015).
 Gate 5 of the pipeline (ADR-021).
 
 - Header: `Idempotency-Key` — client-generated ULID or UUID.
-- **Required** on every mutating RPC; the interceptor rejects a mutation without
-  one.
+- **Required** on every mutating RPC, public ones included.
+  - The interceptor rejects an **authenticated** mutation without one.
+  - A **public** mutation never reaches gate 5 — the pipeline returns at
+    `if p.Public` (ADR-021), and the gate's scope is built from a principal a
+    public method does not have — so the handler enforces the same rule
+    (`identity/api.idempotencyKey`). Both refusals are `VALIDATION_FAILED` and
+    both name the header. This is not an exemption: `Register`, `VerifyEmail`,
+    `ResendEmailVerification`, `RequestPasswordReset`, `ResetPassword`,
+    `Authenticate` and `CreateSession` all refuse a request without a key.
 - Scope: `(principal, full_method, key)`.
 - Stored with a hash of the request body and the serialized response.
 - **Replay** with the same key and same body ⇒ the stored response, not a
@@ -439,6 +446,150 @@ permission, operation class and entitlement come from the same protobuf options
 the interceptors read (ADR-021), so *"what permission does this endpoint need?"*
 is answered by the schema rather than by reading the source. That is the payoff
 of declaring enforcement rather than writing it.
+
+### 7.2 Every value on the wire is bounded, and where you say so
+
+An external audit of the published document (the 42Crunch OpenAPI extension)
+returned 255 findings. About 150 were one sentence repeated: *this string has no
+`maxLength`*, *this array has no `maxItems`*, *this integer has no `maximum`*.
+Each one is a field somewhere accepting arbitrary input; none was visible,
+because nothing in `make check` looked. `internal/tools/checkopenapi` now looks,
+and fails the build.
+
+So a new RPC has a rule to satisfy: **every string, array and number a client
+can send or receive carries bounds, and every parameter and request body carries
+a worked example.** There are exactly three places to satisfy it, and choosing
+between them is the whole of this section.
+
+#### 1. `(buf.validate.field)` — the default
+
+A protovalidate rule is published in the document AND enforced by the
+interceptor before any handler runs. Same number, one source. Reach for this
+unless one of the next two applies:
+
+```protobuf
+string session_id = 1 [
+  (gnostic.openapi.v3.property) = {example: {yaml: "sess_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+  (buf.validate.field).string = {
+    // ids.RenderedLen("sess") and ids.PatternFor("sess"). Do not type your own.
+    max_len: 31
+    pattern: "^sess_[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$"
+  }
+];
+
+repeated Session sessions = 1 [(buf.validate.field).repeated.max_items = 200];
+int32 revoked = 1 [(buf.validate.field).int32.gte = 0];
+```
+
+**An identifier's `pattern` and `max_len` come from `internal/platform/ids`.**
+Protobuf has no constant an option value can reference, so both are literals,
+typed out once per field — a copy of a security rule per field, and copies
+drift. These had, in both directions at once, and neither was visible:
+
+- the literals were **uppercase-only** while `ulid.ParseStrict` accepts
+  lowercase, so the validation interceptor refused identifiers the handler would
+  have parsed — a rule stricter than the handler, rejecting valid input at the
+  boundary with nothing in the test suite noticing;
+- they admitted any Crockford character in the **leading** position, which
+  ParseStrict rejects as a timestamp overflow, so the document described
+  identifiers that cannot exist.
+
+So the grammar is now written once, in `ids.PatternFor` / `ids.RenderedLen`,
+beside the `Parse` that implements it. `TestThePatternAgreesWithParse` asserts
+the two accept exactly the same strings, over generated identifiers rather than
+a hand-picked table — neither defect above was a case anybody would have thought
+to write down. `internal/tools/checkopenapi` then fails the build on any
+published identifier that is not what `PatternFor` returns, and prints the
+string to paste. For an optional field, `ids.OptionalPatternFor` adds the `^$|`.
+
+Adding a new identifier kind means adding it to `ids`, which the gate also
+enforces: a pattern naming a prefix `ids` does not register is refused, because
+the boundary would then be validating a shape nothing can parse.
+
+#### 2. `(gnostic.openapi.v3.property)` — published, not enforced
+
+Its schema keywords merge into the generated field schema and add no rule. That
+is the right tool in exactly three situations, each of which exists in this
+repository today:
+
+- **A rule would be an oracle.** `AuthenticateRequest.password` deliberately
+  carries no protovalidate rule at all — a refusal for malformed input tells a
+  guesser their guess was structurally wrong, which is more than a wrong
+  password tells them (ADR-036). The annotation publishes
+  `maxLength: 4096`, which `domain.MaxPasswordBytes` already enforces inside the
+  handler, and adds no interceptor refusal.
+- **A rule would be stricter than the handler.** Every `email` rule is measured
+  on the TRIMMED value by CEL; a `max_len` rule is measured by the interceptor on
+  the raw one, so it would refuse an address the handler accepts.
+- **The server CLAMPS rather than refuses.** `page_size` publishes
+  `maximum: 200` and enforces only `gte: 0`, because `page.Clamp` treats an
+  oversized page as a request to satisfy with less. `lte: 200` would contradict
+  the documented contract.
+
+One trap: `minimum: 0` cannot be written as an annotation. Zero is proto3's
+zero value for that field, indistinguishable from unset, so the generator never
+sees it and the bound silently vanishes. Use `(buf.validate.field).int32.gte = 0`
+— inert on a response message, and it survives.
+
+#### 3. `internal/tools/fixopenapi` — only what protobuf cannot express
+
+`additionalProperties: false`, annotations hoisted out from beside a `$ref`, the
+Connect protocol's own query parameters, `security: [{}]` canonicalised to `[]`,
+and the request-body examples it ASSEMBLES from the per-field examples the
+`.proto` already declares. It runs in `make api-docs`, after `buf generate`.
+
+It also splits a 64-bit integer into a `oneOf` of its two spellings. protobuf-JSON
+lets an int64 travel as a number or as a decimal string, which the generator
+states as `type: [integer, string]` — and then `format: int64` sits on a schema
+whose type includes `string`, the numeric bounds have nothing saying they apply to
+only one branch, and a validator checks `maxLength` against a number. Split, each
+branch says one true thing, and a client gets the same union type it had.
+
+**It is forbidden from inventing a bound on a `chronos.*` field**, and that
+restraint is what keeps the gate meaningful: a fixer permitted to fill in a
+missing `maxLength` would turn every unannotated field green without anyone
+editing a `.proto`, and `make api-validate` would then be measuring the fixer.
+The one table of bounds it originates, `protocolBounds`, contains only schemas
+the Connect protocol owns, and is checked in both directions so a stale entry
+reports itself.
+
+#### What else the gate compares
+
+Two rules check the document against the schema the SERVER enforces rather than
+against a style guide:
+
+- **`security` versus `(chronos.options.v1.public)`.** A public RPC publishes an
+  open requirement; anything else is a documented lie about an authentication
+  boundary. Two spellings mean the same thing and both are accepted: a `.proto`
+  can only emit `security: [{}]` — an empty repeated field on the annotation is
+  indistinguishable from an unset one, so `[]` there would mean "say nothing" and
+  leave `bearerAuth` in force — and `fixopenapi` rewrites it to `security: []`,
+  which is the spelling the specification names and the one an auditor does not
+  read as a scheme somebody deleted.
+- **`Idempotency-Key` versus `(chronos.options.v1.operation)`.** Every mutation
+  publishes the header, and the rule is **unconditional** — public mutations
+  included. It found six operations in `NotificationService` and `ProfileService`
+  whose every first call would have failed with an error the document never
+  mentioned.
+
+  Public mutations are the half worth understanding, because the enforcement
+  MOVES rather than disappearing. `Gates.WrapUnary` returns at `if p.Public`
+  before gate 5 is reached, so the requirement is enforced in that branch
+  instead: the key is required and bounded by `cqrs.Key.Validate`, and it becomes
+  the command's causation id — but it is never claimed in the store, because
+  there is no principal to scope a record to and an anonymous shared scope would
+  hand one caller another's stored response. `Register`, `VerifyEmail`,
+  `ResetPassword`, `Authenticate` and `CreateSession` are roots in the event log;
+  without a key their events are appended with no causation at all, and a log is
+  append-only, so that is not fixable afterwards.
+
+#### `servers` is https-only
+
+The one credential this API has is a bearer token, and a bearer token is a
+password. `http://localhost:8090` used to be the FIRST entry, which published
+"the default way to call this API is in the clear". `cmd/apidocs` now injects a
+local server into the copy it serves at runtime; the artefact stays clean, and
+the gate fails if a cleartext URL reappears.
 
 ---
 
@@ -540,6 +691,24 @@ no sleeps. Prefer `synctest.Sleep`, added in 1.27, over `time.Sleep` followed by
 `synctest.Wait`: it is the same two steps with no window between them to forget.
 `httptest.NewTestServer` (also 1.27) gives a synctest-compatible in-memory server,
 so an HTTP test no longer has to leave the virtual clock to talk to a real port.
+
+**Never sleep through a rule the server derives from its clock.** TOTP steps,
+session deadlines, token expiry, rate-limit windows and lockouts are all
+functions of `clock.Clock`, and `cmd/api` can be started in local with a
+`clock.Offset` a test pushes FORWARD over a loopback control (ADR-054,
+`CLOCK_CONTROL_ENABLED`). Advancing is the same event as waiting, minus the wall
+clock: the identity integration suite went from 244s to ~110s on that change
+alone. Three rules come with it:
+
+- **Forward only.** `clock.Offset.Advance` refuses a non-positive duration.
+  Moving time forward enforces a rule earlier; moving it backwards un-expires
+  tokens and restores elapsed lockouts, and is not a capability that exists.
+- **Local only, and the server refuses to boot otherwise.** Enabling it with
+  `APP_ENV` set to anything but `local` is a startup failure, not a warning.
+- **Keep one caller on the real clock.** Something has to still assert that real
+  elapsed seconds move the deployed server, or the whole suite would pass on a
+  build where the rule had stopped following wall time. In `identityit` that
+  caller is `TestIdentitySliceEndToEnd`.
 
 `goroutineleak` profiling, given how many long-lived subscriptions this design
 implies. **It went generally available in Go 1.27** (`runtime/pprof`, and the

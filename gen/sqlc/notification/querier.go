@@ -13,20 +13,76 @@ type Querier interface {
 	// Marked expired, not deleted: "why did I stop getting push?" is a real support
 	// question and a deleted row cannot answer it.
 	ExpirePushSubscription(ctx context.Context, arg ExpirePushSubscriptionParams) error
+	// Of these notification ids, which belong to this subject in this organization.
+	//
+	// Asked before MarkNotificationsRead appends anything. A notification id is a
+	// stream name, and a stream name is not a capability — without this an id
+	// obtained by any means could be used to append a read event about somebody
+	// else's notification. Ids the caller does not own simply do not come back, so
+	// "not yours" and "no such notification" are one answer.
+	//
+	// ORDERED, and the ordering is load-bearing rather than cosmetic: the caller
+	// derives one event id per row from the row's INDEX in this result, so an
+	// unordered result would give a retried command different ids from the first
+	// attempt and the store's duplicate collapse would not fire.
+	FeedItemsOwnedBy(ctx context.Context, arg FeedItemsOwnedByParams) ([]FeedItemsOwnedByRow, error)
 	// ABSENCE MEANS ENABLED: someone who has never opened the settings screen still
 	// receives their notifications, so a missing row must not read as "off".
 	IsChannelEnabled(ctx context.Context, arg IsChannelEnabledParams) (bool, error)
 	ListActivePushSubscriptions(ctx context.Context, subjectID string) ([]ListActivePushSubscriptionsRow, error)
+	// Every channel this person has explicitly switched, for one organization.
+	//
+	// Only rows they actually changed come back. ABSENCE MEANS ENABLED, so the
+	// caller fills the gaps rather than this statement inventing defaults: a
+	// statement that emitted a default would make "never opened the settings
+	// screen" and "turned it back on" indistinguishable in the read model.
+	ListChannelPreferences(ctx context.Context, arg ListChannelPreferencesParams) ([]ListChannelPreferencesRow, error)
 	// The in-app list, newest first. Leading with org_id matches the RLS predicate,
 	// which is in every query whether or not it was written there.
 	ListFeed(ctx context.Context, arg ListFeedParams) ([]ListFeedRow, error)
+	// One page of the in-app list, newest first.
+	//
+	// Keyset pagination over (occurred_at, notification_id), ending in the PRIMARY
+	// KEY so the tiebreak column is unique: an ordering that can tie loses or
+	// repeats rows at a page boundary, silently (platform/page).
+	//
+	// The comparison is unconditional rather than `$3 IS NULL OR (…)`. The OR makes
+	// the predicate non-sargable and the index that exists to serve this exact
+	// ORDER BY would stop being used on the one page every client asks for; the
+	// first page passes 'infinity'::timestamptz instead, which is strictly above
+	// every stored row.
+	//
+	// Leading with org_id matches the RLS predicate and the composite index, and
+	// subject_id is the whole tenant scope beneath it: the caller may read their own
+	// feed and nobody else's.
+	ListFeedPage(ctx context.Context, arg ListFeedPageParams) ([]ListFeedPageRow, error)
 	// COALESCE keeps the FIRST read time: reading something twice does not move
 	// when you first saw it, and arbitration asks exactly that (ADR-026).
+	//
+	// Matched on the SUBJECT as well as the id, and that second predicate is a
+	// containment control rather than a filter. The id names the stream a
+	// notification.Read.v1 event was appended to, and a stream name is not a
+	// capability: an event carrying somebody else's notification id would otherwise
+	// dismiss the alert on THEIR screen. The API refuses such an id before it
+	// appends, and this refuses it again after — the two fail independently, and
+	// only this one survives a forged or replayed event.
 	MarkFeedItemRead(ctx context.Context, arg MarkFeedItemReadParams) error
+	// TRUNCATE, not DELETE: a rebuild runs in an unscoped system transaction where
+	// RLS hides every row, so DELETE would remove none (ADR-019).
+	TruncateChannelPreferences(ctx context.Context) error
 	// TRUNCATE, not DELETE: a rebuild runs in an unscoped system transaction where
 	// RLS hides every row, so DELETE would remove none (ADR-019).
 	TruncateFeed(ctx context.Context) error
 	TruncatePushSubscriptions(ctx context.Context) error
+	// Upsert, not insert: a projector is replayed on restart and on rebuild, so the
+	// same event WILL arrive twice.
+	//
+	// LAST WRITER WINS, and the ordering is the STREAM's rather than the clock's.
+	// A person's preference changes all live on one stream, so two settings screens
+	// saving at once are already totally ordered by the time this runs — which is
+	// what stops a torn result where one channel takes the first save and another
+	// takes the second.
+	UpsertChannelPreference(ctx context.Context, arg UpsertChannelPreferenceParams) error
 	// Queries for the notification feed.
 	//
 	// The :exec queries here are QUEUED by the feed projector into a single

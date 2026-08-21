@@ -1,0 +1,786 @@
+syntax = "proto3";
+
+// Package notification is the wire contract for a person's OWN notifications:
+// the in-app feed, the browser endpoints their notifications are pushed to, and
+// the channel toggles they control.
+//
+// Four properties of this schema are load-bearing. Each is a rule the messages
+// below are shaped by rather than a convention they happen to follow.
+//
+// **No message here names a recipient.** Not one request carries a subject id, a
+// user id or an account id, and that is the schema's decision rather than the
+// handler's convenience: every RPC acts on the CALLER, whose pseudonym comes
+// from the authenticated session and from nowhere else. A field naming the
+// recipient would turn `ListNotifications` into somebody else's inbox and
+// `MarkNotificationsRead` into a way to dismiss an alert on a victim's screen.
+//
+// **A preference names a CHANNEL and can never name a class or a template.**
+// `SetNotificationPreferencesRequest` carries exactly one repeated field of
+// `(channel, enabled)` pairs. There is deliberately no class field, no template
+// field and no "mute everything" switch, because a preference that could name a
+// class is a preference that could name `NOTIFICATION_CLASS_SECURITY` — and the
+// message telling someone their second factor was removed is the one message an
+// account takeover must not be able to switch off (NOTIFICATIONS §3). The
+// classes a toggle can and cannot reach are REPORTED by
+// `GetNotificationPreferencesResponse`, computed from the same predicate the
+// dispatcher enforces with, so the published contract and the runtime behaviour
+// cannot disagree.
+//
+// **Nothing personal is here.** A feed item carries a template name and its
+// template data, never rendered text and never an address or a name (ADR-002).
+// A push subscription carries transport credentials for a browser, which
+// identify a device rather than a person, and no response ever returns them
+// again.
+//
+// **Pagination is keyset, never offset** (CONVENTIONS §7). `page_token` is
+// opaque, is bound to the exact query and caller it was minted for, and an
+// unreadable one is an error rather than a silent restart at page one.
+package chronos.notification.v1;
+
+import "buf/validate/validate.proto";
+import "chronos/options/v1/options.proto";
+import "gnostic/openapi/v3/annotations.proto";
+import "google/protobuf/timestamp.proto";
+
+// Channel is a way of reaching someone.
+//
+// These three are the ones a person controls. The realtime stream is
+// deliberately absent: it carries transient signals rather than notifications,
+// and a browser that has subscribed to it has already said it wants them.
+enum Channel {
+  CHANNEL_UNSPECIFIED = 0;
+
+  // Email — the durable record of account and security events.
+  CHANNEL_EMAIL = 1;
+
+  // The in-app feed — the persistent list this service reads.
+  CHANNEL_IN_APP = 2;
+
+  // Web push — the alert raised when no attentive tab exists.
+  CHANNEL_WEB_PUSH = 3;
+}
+
+// NotificationClass decides whether a notification is delivered at all, and
+// whether the recipient may switch it off (NOTIFICATIONS §3).
+//
+// It appears in this schema for two reasons and no others: to label a feed item
+// so a client can style a security alert differently from a mention, and to let
+// `GetNotificationPreferences` state which classes a channel toggle governs. It
+// is never an INPUT — see the package comment.
+enum NotificationClass {
+  NOTIFICATION_CLASS_UNSPECIFIED = 0;
+
+  // Account safety: a password change, a second factor removed, a new device.
+  // Always delivered; ignores every preference.
+  NOTIFICATION_CLASS_SECURITY = 1;
+
+  // Something the recipient asked for: verification, an invitation, a receipt.
+  // Always delivered; ignores every preference.
+  NOTIFICATION_CLASS_TRANSACTIONAL = 2;
+
+  // Someone else's action. Governed by the recipient's channel toggles.
+  NOTIFICATION_CLASS_ACTIVITY = 3;
+
+  // Marketing. Opt-in, and governed by the recipient's channel toggles.
+  NOTIFICATION_CLASS_PRODUCT = 4;
+}
+
+// Notification is one item in the caller's in-app feed.
+//
+// It carries the TEMPLATE and its data, never rendered text: wording is resolved
+// at read time in the reader's own locale and timezone, so changing a
+// translation changes history's presentation without rewriting history.
+message Notification {
+  // The item's permanent identifier, `notif_` followed by a ULID. It is what
+  // `MarkNotificationsRead` names, and what the web-push payload and the
+  // realtime announcement carry, so a client can dedupe one notification
+  // arriving down two channels.
+  string notification_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "notif_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 32
+      pattern: "^notif_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // The wording's name, e.g. `identity.password_changed`. Permanent: it appears
+  // in metrics, in logs and in operator overrides.
+  //
+  // The pattern is what "it appears in metrics" requires rather than a
+  // decoration: a template name becomes a Prometheus label value and a log field,
+  // so dotted lower snake is the shape every consumer downstream is already
+  // written against.
+  string template = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "identity.password_changed"}},
+    (buf.validate.field).string = {
+      max_len: 128
+      pattern: "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
+    }
+  ];
+
+  // Which class this belongs to, which is what decides whether any preference
+  // could ever have suppressed it.
+  NotificationClass class = 3;
+
+  // Template input — the counts, flags and labels the wording needs, sorted by
+  // key.
+  //
+  // It carries no personal data by construction: the recipient's name and
+  // address live in the PII vault and are resolved by whoever renders, never
+  // carried here (ADR-002).
+  //
+  // Bounded because it is rendered: a client substitutes every entry into one
+  // string, and a feed row whose input list has no ceiling is a render loop with
+  // no ceiling. No wording in this system takes anything near 64 placeholders.
+  repeated TemplateValue data = 4 [(buf.validate.field).repeated.max_items = 64];
+
+  // The workspace this concerns, empty for an organization-level fact.
+  string workspace_id = 5 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 29
+      pattern: "^$|^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // When the underlying event happened, in UTC. This is the sort key, and it is
+  // the event's own instant rather than the moment the row was written.
+  google.protobuf.Timestamp occurred_at = 6;
+
+  // When the caller first read it, unset while unread. It is the FIRST read,
+  // not the most recent: reading something twice does not move when you first
+  // saw it, and email arbitration asks exactly that question.
+  google.protobuf.Timestamp read_at = 7;
+}
+
+// TemplateValue is one placeholder a feed item's wording needs.
+//
+// # Why a repeated pair rather than a map or a Struct
+//
+// Both alternatives were tried and both fail the published-contract check that
+// every schema in the OpenAPI document be reachable — `google.protobuf.Struct`
+// publishes `ListValue`, `NullValue` and `Struct.FieldsEntry` while referencing
+// none of them, and a protobuf `map` publishes its synthetic `DataEntry` message
+// the same way. A field whose type no client can resolve from the published
+// document is worse documentation than a pair of strings every client can, and
+// this shape also gives the list a STABLE order, which neither of the others
+// can.
+//
+// # Why the value is text
+//
+// Every value here exists to be substituted into a template, and a template
+// renders text — so a string is not a lossy encoding of the value, it is the
+// value's destination. Numbers arrive without a spurious decimal point and
+// booleans as `true`/`false`.
+message TemplateValue {
+  // The placeholder's name, e.g. `Count`. Unique within one notification.
+  string key = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "Count"}},
+    (buf.validate.field).string = {
+      max_len: 64
+      pattern: "^[A-Za-z][A-Za-z0-9_]*$"
+    }
+  ];
+
+  // Its rendered value, e.g. `8`.
+  //
+  // One line: every value here is a count, a flag or a short label destined for
+  // substitution into a sentence, and a line break in one of those is a rendering
+  // bug travelling as data.
+  string value = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "8"}},
+    (buf.validate.field).string = {
+      max_len: 512
+      pattern: "^[^\\r\\n]*$"
+    }
+  ];
+}
+
+// ChannelPreference is one channel switched on or off.
+//
+// The whole vocabulary of a preference, in one message. It cannot name a class
+// or a template, which is what makes "you may turn off product mail but not the
+// message telling you your second factor was removed" a property of the schema
+// rather than a promise in a document.
+message ChannelPreference {
+  // Which channel. `CHANNEL_UNSPECIFIED` is refused rather than defaulted: a
+  // toggle that silently applied to a channel the caller did not name is a
+  // notification silenced by accident.
+  Channel channel = 1 [
+    (buf.validate.field).enum = {
+      defined_only: true
+      not_in: [0]
+    }
+  ];
+
+  // Whether the caller wants this channel. Absence of a preference means
+  // ENABLED, so a person who has never opened the settings screen still
+  // receives their notifications.
+  bool enabled = 2;
+}
+
+// ListNotificationsRequest asks for one page of the caller's own feed.
+message ListNotificationsRequest {
+  // The organization whose feed to read.
+  //
+  // A request field, and stated here as a temporary shape rather than a
+  // permanent one: once the org-context gate resolves the organization from the
+  // request's own context (ADR-021 gate 1), this field is deprecated and the
+  // scope comes from there. It is safe in the meantime because it grants
+  // NOTHING — every statement behind it is additionally filtered by the
+  // caller's own pseudonym and additionally scoped by row-level security, so
+  // naming an organization the caller does not belong to returns an empty page
+  // rather than somebody else's.
+  string org_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "org_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // How many items to return. Zero takes the default of 50; anything above 200
+  // is CAPPED rather than refused, so a client asking for too much still gets a
+  // correct answer plus a token.
+  int32 page_size = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "50"}},
+    (buf.validate.field).int32 = {
+      gte: 0
+      lte: 1000
+    }
+  ];
+
+  // The `next_page_token` from the previous response. Empty starts at the
+  // newest item. A token minted for another list, another sort or another
+  // caller is an ERROR here, never a silent restart.
+  string page_token = 3 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-opaque-cursor-from-a-previous-response"}},
+    (buf.validate.field).string = {
+      max_len: 512
+      // Unpadded base64url — `page.Encode` mints every cursor and no other shape
+      // can reach `page.Decode` successfully.
+      pattern: "^[A-Za-z0-9_-]*$"
+    }
+  ];
+}
+
+// ListNotificationsResponse is one page of the feed, newest first.
+message ListNotificationsResponse {
+  // The page. Fewer items than requested is ordinary — the server caps an
+  // oversized `page_size` — so a client must stop on an empty
+  // `next_page_token`, never on a short page.
+  //
+  // The ceiling is `page.MaxSize`, which is what "the server caps an oversized
+  // page_size" means in numbers: 200. `page_size` above admits up to 1000 as an
+  // ASK, and the two are different quantities — one is what a client may request,
+  // this is what a response may contain.
+  repeated Notification notifications = 1 [(buf.validate.field).repeated.max_items = 200];
+
+  // Where to resume. Empty means the feed is exhausted.
+  string next_page_token = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-opaque-cursor-for-the-next-page"}},
+    (buf.validate.field).string = {
+      max_len: 512
+      pattern: "^[A-Za-z0-9_-]*$"
+    }
+  ];
+}
+
+// GetUnreadCountRequest asks how many of the caller's notifications are unread.
+message GetUnreadCountRequest {
+  // The organization whose badge to count. See ListNotificationsRequest.org_id.
+  string org_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "org_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
+// GetUnreadCountResponse is the badge number.
+message GetUnreadCountResponse {
+  // Unread items in this organization. It is the value a client shows on first
+  // paint; afterwards the realtime stream moves it, so this is not polled.
+  //
+  // The ceiling is 2^31-1, and it is NOT the wire type's maximum even though this
+  // field is an int64. gnostic's `maximum` is a DOUBLE, and 2^63-1 does not
+  // survive a round trip through one: it came back as 9223372036854776000, which
+  // is larger than any int64 and is a number that appeared in the published
+  // document looking like a typo. 2^31-1 is exactly representable, is far above
+  // any unread count a person can accumulate, and is a bound a client can act on.
+  //
+  // The floor is a `gte` rule rather than an annotation because `minimum: 0` is
+  // proto3's zero value for that field and would be dropped before the generator
+  // saw it.
+  int64 unread = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "8"}
+      maximum: 2147483647
+    },
+    (buf.validate.field).int64.gte = 0
+  ];
+}
+
+// MarkNotificationsReadRequest dismisses items the caller has seen.
+message MarkNotificationsReadRequest {
+  // The organization the items belong to. See ListNotificationsRequest.org_id.
+  string org_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "org_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // The items to mark. A batch, because a client dismissing a screenful must
+  // not make one call per row, and bounded at 100 because an unbounded batch is
+  // an unbounded append to the log from one request.
+  //
+  // An id that is not in the CALLER'S OWN feed is refused, and refused
+  // identically to one that does not exist — a caller able to tell those apart
+  // could test notification ids for existence.
+  repeated string notification_ids = 2 [
+    (buf.validate.field).repeated = {
+      min_items: 1
+      max_items: 100
+      unique: true
+      items: {
+        string: {
+          max_len: 32
+          pattern: "^notif_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+        }
+      }
+    }
+  ];
+}
+
+// MarkNotificationsReadResponse reports what changed.
+message MarkNotificationsReadResponse {
+  // How many items this call moved from unread to read. Zero is NOT an error:
+  // marking something already read is the caller getting what they asked for.
+  //
+  // The ceiling is the batch the request admits: this call cannot mark more items
+  // than it was given, so 100 is a real bound rather than the wire type's.
+  int32 marked = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "3"}
+      maximum: 100
+    },
+    (buf.validate.field).int32.gte = 0
+  ];
+}
+
+// RegisterPushSubscriptionRequest enrols one browser profile on one device.
+//
+// The values come from the browser's own `PushSubscription`, so the caller is
+// relaying what the push service issued rather than choosing it.
+message RegisterPushSubscriptionRequest {
+  // The organization this device should receive push for. See
+  // ListNotificationsRequest.org_id.
+  //
+  // One browser produces ONE endpoint across every organization a person
+  // belongs to, so registering the same endpoint in a second organization is
+  // normal and creates a second subscription rather than moving the first
+  // (ADR-043).
+  string org_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "org_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // The push service URL the browser was issued.
+  //
+  // HTTPS only, and further restricted by the server: a host that is an IP
+  // literal, a loopback name or an internal suffix is refused. The server POSTs
+  // to this URL, so an unconstrained value here is a request-forgery primitive
+  // aimed at whatever the server can reach.
+  string endpoint = 2 [
+    (buf.validate.field).string = {
+      uri: true
+      min_len: 12
+      max_len: 2048
+      pattern: "^https://"
+    }
+  ];
+
+  // The subscription's P-256 ECDH public key, base64url as the browser reports
+  // it. A transport credential, never returned by any response.
+  string p256dh = 3 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_len: 256
+      pattern: "^[A-Za-z0-9_-]+=*$"
+    }
+  ];
+
+  // The subscription's authentication secret, base64url as the browser reports
+  // it. A transport credential, never returned by any response.
+  string auth = 4 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_len: 256
+      pattern: "^[A-Za-z0-9_-]+=*$"
+    }
+  ];
+
+  // The browser's user agent, so a person can recognise a device in a support
+  // conversation. Optional, and truncated rather than rejected by the client.
+  string user_agent = 5 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "Mozilla/5.0 (X11; Linux x86_64) Chrome/126.0"}},
+    (buf.validate.field).string = {
+      max_len: 512
+      // RFC 9110 §10.1.5 defines a User-Agent as printable ASCII field content.
+      // A value that is not is not a truncated user agent, it is something else
+      // arriving in a field a support screen renders.
+      pattern: "^[\\x20-\\x7E]*$"
+    }
+  ];
+}
+
+// RegisterPushSubscriptionResponse names the subscription that now exists.
+message RegisterPushSubscriptionResponse {
+  // The subscription's identifier, `push_` followed by a ULID.
+  //
+  // Derived from the organization and the endpoint together, so re-registering
+  // the same browser in the same organization returns the SAME id and collapses
+  // onto one row, while the same browser in a second organization gets a
+  // different one. That is ADR-043's uniqueness rule expressed in the
+  // identifier itself rather than only in an index.
+  string subscription_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "push_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^push_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
+// RemovePushSubscriptionRequest retires a browser endpoint.
+//
+// It names the ENDPOINT rather than the subscription id, because the endpoint is
+// what a browser holds: a service worker unsubscribing knows its own endpoint
+// and has no reason to have kept an id we minted.
+message RemovePushSubscriptionRequest {
+  // The organization to stop pushing to. See ListNotificationsRequest.org_id.
+  //
+  // Removal is per organization for the same reason registration is: the same
+  // endpoint may legitimately be registered in several, and unsubscribing from
+  // one must not silence the others.
+  string org_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "org_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // The push service URL to retire. Same constraints as registration.
+  string endpoint = 2 [
+    (buf.validate.field).string = {
+      uri: true
+      min_len: 12
+      max_len: 2048
+      pattern: "^https://"
+    }
+  ];
+}
+
+// RemovePushSubscriptionResponse reports what happened.
+message RemovePushSubscriptionResponse {
+  // The subscription that was retired, or would have been. Returned so a client
+  // can correlate the call with the row it will see disappear.
+  string subscription_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "push_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^push_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
+// GetNotificationPreferencesRequest asks for the caller's own channel toggles.
+message GetNotificationPreferencesRequest {
+  // The organization whose toggles to read. See ListNotificationsRequest.org_id.
+  //
+  // Preferences are per person PER ORGANIZATION: someone may want activity mail
+  // from the organization they work in and nothing from the one they advise.
+  string org_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "org_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
+// GetNotificationPreferencesResponse is the settings screen.
+//
+// It reports not only what the caller has chosen but WHAT THOSE CHOICES REACH,
+// because a settings screen that shows three switches and says nothing else
+// implies they govern everything — and they deliberately do not.
+message GetNotificationPreferencesResponse {
+  // Every channel the caller controls, with its current state. Always all three,
+  // including the ones they have never touched, which report `enabled: true`.
+  // Always all three, so the ceiling is `Channel` minus its UNSPECIFIED member,
+  // with room for a fourth channel to be added before anyone revisits this.
+  repeated ChannelPreference channels = 1 [(buf.validate.field).repeated.max_items = 8];
+
+  // The classes a channel toggle actually governs.
+  //
+  // Computed from the same predicate the dispatcher applies at delivery time,
+  // never from a list written here — so if that predicate ever changed, this
+  // response would change with it instead of quietly describing behaviour the
+  // server no longer has.
+  // Bounded by `NotificationClass`: a list of enum members cannot be longer than
+  // the enum, and 8 leaves room for it to grow.
+  repeated NotificationClass governed_classes = 2 [(buf.validate.field).repeated.max_items = 8];
+
+  // The classes delivered regardless of every toggle above.
+  //
+  // Security and transactional messages ignore preferences and carry no
+  // unsubscribe (NOTIFICATIONS §3). This is a legal distinction as much as a
+  // product one, and stating it in the response is what lets a settings screen
+  // say so without a client hardcoding the rule.
+  repeated NotificationClass always_delivered_classes = 3 [(buf.validate.field).repeated.max_items = 8];
+}
+
+// SetNotificationPreferencesRequest changes the caller's own channel toggles.
+message SetNotificationPreferencesRequest {
+  // The organization whose toggles to change. See ListNotificationsRequest.org_id.
+  string org_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "org_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // The toggles to apply, at most one entry per channel.
+  //
+  // A repeated field rather than one call per channel, so a settings screen's
+  // Save button is ONE command and one append: two calls could half-apply, and a
+  // person who turned two things off and saw one of them come back would not
+  // trust the screen again.
+  //
+  // Channels left out are left alone. There is no way to name a class or a
+  // template here, and there must not be — see the package comment.
+  repeated ChannelPreference channels = 2 [
+    (buf.validate.field).repeated = {
+      min_items: 1
+      max_items: 3
+    },
+    (buf.validate.field).cel = {
+      id: "notification.preferences.one_entry_per_channel"
+      message: "each channel may appear at most once"
+      expression: "this.map(p, p.channel).unique()"
+    }
+  ];
+}
+
+// SetNotificationPreferencesResponse is the settings screen as it now stands.
+message SetNotificationPreferencesResponse {
+  // Every channel with its state after the change, in the same shape
+  // `GetNotificationPreferences` returns, so a client can render the result
+  // without a second call.
+  // Always all three, so the ceiling is `Channel` minus its UNSPECIFIED member,
+  // with room for a fourth channel to be added before anyone revisits this.
+  repeated ChannelPreference channels = 1 [(buf.validate.field).repeated.max_items = 8];
+
+  // The classes those toggles govern. See
+  // GetNotificationPreferencesResponse.governed_classes.
+  // Bounded by `NotificationClass`: a list of enum members cannot be longer than
+  // the enum, and 8 leaves room for it to grow.
+  repeated NotificationClass governed_classes = 2 [(buf.validate.field).repeated.max_items = 8];
+
+  // The classes delivered regardless. See
+  // GetNotificationPreferencesResponse.always_delivered_classes.
+  repeated NotificationClass always_delivered_classes = 3 [(buf.validate.field).repeated.max_items = 8];
+}
+
+// NotificationService is a person's own notification surface.
+//
+// Every method here is SELF-SCOPED: the caller acts on their own feed, their own
+// devices and their own toggles, and the account is resolved from the session
+// rather than named in the request (CONVENTIONS §7, ADR-021). There is no
+// administrative method in this service and there must not be — a person's
+// notification settings are theirs, and an endpoint that let an administrator
+// change them would be an endpoint that lets an administrator silence someone.
+service NotificationService {
+  // ListNotifications returns one page of the caller's in-app feed, newest
+  // first.
+  //
+  // Keyset paginated over `(occurred_at DESC, notification_id DESC)`. Offsets
+  // are banned: a notification arriving between two requests shifts every later
+  // OFFSET page, so a person walking their inbox would silently miss items.
+  rpc ListNotifications(ListNotificationsRequest) returns (ListNotificationsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_READ;
+  }
+
+  // GetUnreadCount returns how many of the caller's notifications are unread.
+  //
+  // Separate from the list because it is what a badge needs on first paint,
+  // before any page has been fetched. It is not a polling endpoint: the realtime
+  // stream moves the badge afterwards.
+  rpc GetUnreadCount(GetUnreadCountRequest) returns (GetUnreadCountResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_READ;
+  }
+
+  // MarkNotificationsRead dismisses items the caller has seen.
+  //
+  // It appends one `notification.Read.v1` event per item, atomically across
+  // every item's stream: a batch either lands whole or not at all, so a client
+  // never has to reconcile a half-dismissed screen.
+  //
+  // Marking is idempotent in the strongest sense available — the FIRST read
+  // time is kept, so a replay, a retry and a second device all leave the same
+  // answer to "when did they first see this", which is the question email
+  // arbitration asks (ADR-026).
+  rpc MarkNotificationsRead(MarkNotificationsReadRequest) returns (MarkNotificationsReadResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    // An authenticated mutation, so the idempotency gate refuses it without this
+    // header. The parameter is described once in proto/openapi.base.yaml and
+    // referenced here; internal/tools/checkopenapi fails the build if a mutating
+    // RPC omits the reference.
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // RegisterPushSubscription enrols one browser profile on one device.
+  //
+  // Re-registering the same browser in the same organization is the NORMAL case,
+  // not an error: a permission prompt answered again produces the same endpoint,
+  // and this collapses onto the existing subscription rather than creating a
+  // second one that would push to that device twice.
+  rpc RegisterPushSubscription(RegisterPushSubscriptionRequest) returns (RegisterPushSubscriptionResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    // An authenticated mutation, so the idempotency gate refuses it without this
+    // header. The value is described once in proto/openapi.base.yaml and
+    // referenced here; internal/tools/checkopenapi fails the build if a mutating
+    // RPC omits it, or if a public one declares it.
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+
+  }
+
+  // RemovePushSubscription retires a browser endpoint.
+  //
+  // The row is marked expired rather than deleted, because "why did I stop
+  // getting push?" is a real support question and a deleted row cannot answer
+  // it. Removing an endpoint that was never registered is not an error: the
+  // caller wanted it gone, and it is gone.
+  rpc RemovePushSubscription(RemovePushSubscriptionRequest) returns (RemovePushSubscriptionResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    // An authenticated mutation, so the idempotency gate refuses it without this
+    // header. The value is described once in proto/openapi.base.yaml and
+    // referenced here; internal/tools/checkopenapi fails the build if a mutating
+    // RPC omits it, or if a public one declares it.
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+
+  }
+
+  // GetNotificationPreferences returns the caller's own channel toggles, and
+  // what those toggles reach.
+  rpc GetNotificationPreferences(GetNotificationPreferencesRequest) returns (GetNotificationPreferencesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_READ;
+  }
+
+  // SetNotificationPreferences changes the caller's own channel toggles.
+  //
+  // It appends `notification.ChannelPreferenceSet.v1` and never writes the
+  // preference table: that table is a projection, and a handler writing it
+  // directly would put state in PostgreSQL that no replay reproduces and the
+  // next rebuild deletes.
+  //
+  // Concurrent saves are serialised by the preference stream's own revision, so
+  // two settings screens saving at once produce one ordering rather than a torn
+  // mixture of both.
+  rpc SetNotificationPreferences(SetNotificationPreferencesRequest) returns (SetNotificationPreferencesResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    // An authenticated mutation, so the idempotency gate refuses it without this
+    // header. The value is described once in proto/openapi.base.yaml and
+    // referenced here; internal/tools/checkopenapi fails the build if a mutating
+    // RPC omits it, or if a public one declares it.
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+
+  }
+}

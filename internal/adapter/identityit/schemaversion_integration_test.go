@@ -148,6 +148,7 @@ func TestAnInternalErrorReachesTheLog(t *testing.T) {
 	_, err := h.client.VerifyEmail(ctx, write(&identityv1.VerifyEmailRequest{
 		Token:    plaintext,
 		Password: "correct-horse-battery-staple-54",
+		Username: h.freshUsername("schema"),
 	}))
 	if err == nil {
 		t.Skip("VerifyEmail succeeded, so there is no internal error to look for; the " +

@@ -26,6 +26,23 @@ import (
 // It takes no password: the request has no field for one. The credential is
 // created by VerifyEmail, in the same call that proves control of the mailbox
 // (IDENTITY-REVIEW C8).
+//
+// # What the taken branch now does, and why none of it reaches this file
+//
+// It mails the address holder — "somebody tried to register with your address"
+// (ADR-055). That answer travels to the MAILBOX and never to the caller, which
+// is the only channel entitled to carry it: reading it requires controlling the
+// address, and controlling the address is the proof the empty response exists to
+// demand. This handler is unchanged by it, deliberately. There is no new field,
+// no new code and no new branch here, because a branch here is exactly how the
+// property would be lost.
+//
+// The caller scope comes from the transport exactly as ResendEmailVerification's
+// does; see that handler for the whole argument about X-Forwarded-For and
+// API_TRUSTED_PROXY_HOPS. It is here because registration now spends from the
+// same per-caller and per-address triggered-mail ceilings the resend and reset
+// flows spend from — on BOTH branches, so the ceiling cannot be read as an
+// answer.
 func (s *Service) Register(
 	ctx context.Context, req *connect.Request[identityv1.RegisterRequest],
 ) (*connect.Response[identityv1.RegisterResponse], error) {
@@ -35,6 +52,7 @@ func (s *Service) Register(
 	}
 	if _, err := s.registration.Register(ctx, app.RegisterCommand{
 		Email:          req.Msg.GetEmail(),
+		CallerScope:    callerScope(s.callerScope, req),
 		IdempotencyKey: key,
 	}); err != nil {
 		return nil, fail(err)
@@ -53,6 +71,20 @@ func (s *Service) Register(
 // party holding this token is the party that reads mail at the address, and it
 // is the only party entitled to choose the credential the address will be signed
 // into with.
+//
+// The public handle rides here for a related but separate reason (ADR-051): a
+// handle on RegisterRequest would let anyone pair a victim's address with a fresh
+// random handle, register, and then read the answer off the public availability
+// check — reopening the account-existence oracle the empty RegisterResponse
+// exists to close. See app.VerifyEmailCommand.Username.
+//
+// A taken handle comes back as a plain CONFLICT saying so, and that is the ONE
+// refusal in this file allowed to be specific. Everywhere else the app layer
+// answers with one undifferentiated error and this layer renders it unexamined
+// (ADR-036); here the fact being disclosed is public by design, and hiding it
+// would tell the person nothing while telling an attacker nothing they could not
+// read from CheckUsernameAvailability. There is still no switch below — the app
+// layer produces the CONFLICT and `fail` renders whatever it is given.
 func (s *Service) VerifyEmail(
 	ctx context.Context, req *connect.Request[identityv1.VerifyEmailRequest],
 ) (*connect.Response[identityv1.VerifyEmailResponse], error) {
@@ -63,6 +95,7 @@ func (s *Service) VerifyEmail(
 	result, err := s.registration.VerifyEmail(ctx, app.VerifyEmailCommand{
 		Token:          req.Msg.GetToken(),
 		Password:       req.Msg.GetPassword(),
+		Username:       req.Msg.GetUsername(),
 		IdempotencyKey: key,
 	})
 	if err != nil {
@@ -201,6 +234,48 @@ func (s *Service) ResetPassword(
 		return nil, fail(err)
 	}
 	return connect.NewResponse(&identityv1.ResetPasswordResponse{}), nil
+}
+
+// CheckUsernameAvailability reports whether a public handle can be claimed.
+//
+// # The result IS returned, and that is the whole design
+//
+// Every other handler in this file drops what it learned: Register, resend and
+// both reset calls answer identically whether or not an account exists, because
+// an address is secret and a distinguishable answer is an existence oracle. This
+// one returns the answer, because a HANDLE is not secret — publication is its
+// entire purpose (ADR-051) — and the same fact is readable from any page that
+// renders a mention.
+//
+// Do not make this uniform with its neighbours. An indistinguishable answer here
+// would protect nothing, and it would move the moment a person discovers their
+// handle is taken to AFTER they have spent a verification link they cannot get
+// back.
+//
+// The one distinction the app layer refuses to draw is between a taken handle
+// and a tombstoned one, and it refuses it in `app`, not here — see
+// app.CheckUsernameResult. This layer has no field to put it in either way.
+//
+// The caller scope comes from the transport exactly as ResendEmailVerification's
+// does; see that handler for the whole argument about X-Forwarded-For and
+// API_TRUSTED_PROXY_HOPS. It bounds how many streams one caller can make this
+// process read, which is a resource question and not an information one.
+func (s *Service) CheckUsernameAvailability(
+	ctx context.Context, req *connect.Request[identityv1.CheckUsernameAvailabilityRequest],
+) (*connect.Response[identityv1.CheckUsernameAvailabilityResponse], error) {
+	// No idempotency key. It is a READ: it appends nothing, mints nothing and
+	// spends nothing, so there is no second application for a key to collapse.
+	result, err := s.usernames.Check(ctx, app.CheckUsernameCommand{
+		Username:    req.Msg.GetUsername(),
+		CallerScope: callerScope(s.callerScope, req),
+	})
+	if err != nil {
+		return nil, fail(err)
+	}
+	return connect.NewResponse(&identityv1.CheckUsernameAvailabilityResponse{
+		Available: result.Available,
+		Username:  result.Username,
+	}), nil
 }
 
 // callerScope names whoever is calling, for the per-caller ceiling.

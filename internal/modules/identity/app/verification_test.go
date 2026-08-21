@@ -345,7 +345,8 @@ func TestVerifyEmailAcceptsATokenFromTheIssuer(t *testing.T) {
 	}
 
 	got, err := h.build().VerifyEmail(context.Background(), VerifyEmailCommand{
-		Token: issued.Plaintext, Password: testPassword, IdempotencyKey: "cmd-verify",
+		Username: testUsername,
+		Token:    issued.Plaintext, Password: testPassword, IdempotencyKey: "cmd-verify",
 	})
 	if err != nil {
 		t.Fatalf("VerifyEmail refused a token this issuer minted: %v", err)
@@ -357,7 +358,8 @@ func TestVerifyEmailAcceptsATokenFromTheIssuer(t *testing.T) {
 	// Single use, still: the shared store is the real one, so a second click
 	// must be refused rather than confirming twice.
 	if _, err := h.build().VerifyEmail(context.Background(), VerifyEmailCommand{
-		Token: issued.Plaintext, Password: testPassword, IdempotencyKey: "cmd-verify-again",
+		Username: testUsername,
+		Token:    issued.Plaintext, Password: testPassword, IdempotencyKey: "cmd-verify-again",
 	}); err == nil {
 		t.Error("the issued token was redeemable twice")
 	}

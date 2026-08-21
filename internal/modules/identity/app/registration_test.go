@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/platform/ids"
 	"github.com/chronos/chronos-go/internal/platform/pii"
+	"github.com/chronos/chronos-go/internal/platform/ratelimit"
 )
 
 // The real repository must satisfy the loader port. Without this, the port could
@@ -484,6 +486,12 @@ func (e *fixedEntropy) Read(p []byte) (int, error) {
 const (
 	testEmail    = "Alice+Tag@Example.COM"
 	testPassword = "correct horse battery staple"
+
+	// testUsername is the public handle every verification in this file claims.
+	// One value, deliberately: each harness builds a fresh, unheld reservation
+	// aggregate, so the ordinary path always wins the handle and a test that wants
+	// a contested one says so by arranging h.usernameClaim.
+	testUsername = "ada_lovelace"
 )
 
 var testNow = time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
@@ -518,8 +526,20 @@ type harness struct {
 	logs *bytes.Buffer
 
 	reservation *domain.EmailReservation
-	user        *domain.User
-	loadErr     error
+
+	// addrLimiter and callerLimiter are the SHARED triggered-mail ceilings. Nil
+	// by default, which is what cmd/api wires today — see
+	// RegistrationDeps.AddressLimiter and the report that goes with ADR-055.
+	addrLimiter   AttemptLimiter
+	callerLimiter AttemptLimiter
+
+	// usernameClaim is the handle's reservation aggregate. Fresh and unheld by
+	// default, so the ordinary VerifyEmail path claims the handle successfully;
+	// a test that needs a contested handle arranges this one directly.
+	usernameClaim *domain.UsernameReservation
+
+	user    *domain.User
+	loadErr error
 
 	digestCalls []TokenPurpose
 }
@@ -527,19 +547,20 @@ type harness struct {
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	return &harness{
-		t:           t,
-		breach:      &fakeBreach{},
-		hasher:      &fakeHasher{},
-		vault:       &fakeVault{},
-		credentials: &fakeCredentials{},
-		appender:    &fakeAppender{},
-		schemas:     identitySchemas(),
-		tokens:      &fakeTokens{subjectID: "subj_unset"},
-		minter:      &fakeMinter{},
-		revocations: &fakeRevoker{},
-		entropy:     &fixedEntropy{},
-		reservation: eventsourcing.NewAggregate(domain.NewReservation),
-		user:        eventsourcing.NewAggregate(domain.New),
+		t:             t,
+		breach:        &fakeBreach{},
+		hasher:        &fakeHasher{},
+		vault:         &fakeVault{},
+		credentials:   &fakeCredentials{},
+		appender:      &fakeAppender{},
+		schemas:       identitySchemas(),
+		tokens:        &fakeTokens{subjectID: "subj_unset"},
+		minter:        &fakeMinter{},
+		revocations:   &fakeRevoker{},
+		entropy:       &fixedEntropy{},
+		reservation:   eventsourcing.NewAggregate(domain.NewReservation),
+		usernameClaim: eventsourcing.NewAggregate(domain.NewUsernameReservation),
+		user:          eventsourcing.NewAggregate(domain.New),
 	}
 }
 
@@ -549,7 +570,10 @@ func (h *harness) build() *Registration {
 	if h.tokenStore != nil {
 		tokens = h.tokenStore
 	}
-	var log *slog.Logger
+	// Discarded unless a test asks for the bytes. NewRegistration warns whenever
+	// the shared mail ceilings are unwired, which is every harness that does not
+	// wire them, and slog.Default writes that to stderr once per construction.
+	log := slog.New(slog.DiscardHandler)
 	if h.logs != nil {
 		// Debug level, so nothing the handler might log is filtered out before the
 		// assertion can see it. A test that only captured warnings would pass on a
@@ -568,19 +592,25 @@ func (h *harness) build() *Registration {
 			func(context.Context, string) (*domain.EmailReservation, error) {
 				return h.reservation, h.loadErr
 			}),
+		Usernames: loaderFunc[*domain.UsernameReservation](
+			func(context.Context, string) (*domain.UsernameReservation, error) {
+				return h.usernameClaim, h.loadErr
+			}),
 		Users: loaderFunc[*domain.User](func(context.Context, string) (*domain.User, error) {
 			return h.user, h.loadErr
 		}),
 		Appender: h.appender,
 		// The registry the production composition root passes. Without it every
 		// event is appended at schema version 0 while the registry declares 1.
-		Schemas:     h.schemas,
-		Tokens:      tokens,
-		Minter:      h.minter.mint,
-		Digest:      h.digestFn(),
-		Directory:   h.directory,
-		Revocations: h.revocations,
-		Log:         log,
+		Schemas:        h.schemas,
+		Tokens:         tokens,
+		Minter:         h.minter.mint,
+		Digest:         h.digestFn(),
+		Directory:      h.directory,
+		Revocations:    h.revocations,
+		AddressLimiter: h.addrLimiter,
+		CallerLimiter:  h.callerLimiter,
+		Log:            log,
 	})
 	if err != nil {
 		h.t.Fatalf("wiring the handler: %v", err)
@@ -645,6 +675,9 @@ func testCodec(t *testing.T) *eventcodec.JSON {
 	eventcodec.Register[contract.EmailVerified](c)
 	eventcodec.Register[contract.UserActivated](c)
 	eventcodec.Register[contract.PasswordSet](c)
+	eventcodec.Register[contract.UsernameReserved](c)
+	eventcodec.Register[contract.UsernameAssigned](c)
+	eventcodec.Register[contract.UsernameTombstoned](c)
 	return c
 }
 
@@ -696,6 +729,24 @@ func (s *replayStore) Append(
 ) (eventsourcing.AppendResult, error) {
 	s.t.Fatal("a test aggregate was saved through the replay store")
 	return eventsourcing.AppendResult{}, nil
+}
+
+// rebuiltUsernameReservation replays a handle's stream, so a test can arrange a
+// handle that is already held or already tombstoned without reaching into the
+// aggregate's unexported fields.
+func rebuiltUsernameReservation(
+	t *testing.T, events ...eventsourcing.Event,
+) *domain.UsernameReservation {
+	t.Helper()
+	codec := testCodec(t)
+	repo := eventsourcing.NewRepository(
+		&replayStore{t: t, codec: codec, events: events},
+		codec, nil, UsernameCategory, domain.NewUsernameReservation)
+	agg, err := repo.Load(context.Background(), testUsername)
+	if err != nil {
+		t.Fatalf("rebuilding the username reservation: %v", err)
+	}
+	return agg
 }
 
 func rebuiltReservation(t *testing.T, events ...eventsourcing.Event) *domain.EmailReservation {
@@ -1180,19 +1231,29 @@ func TestRegisterDoesNotDiscloseThatAnAddressIsTaken(t *testing.T) {
 	}
 }
 
-func TestRegisterWritesNothingWhenTheAddressIsAlreadyClaimed(t *testing.T) {
+// A refused registration creates NOTHING for the prober — and tells the address
+// holder, on the one channel that proves ownership of the address (ADR-055).
+//
+// This test used to assert that the taken branch wrote nothing at all. That was
+// true and it was the bug: the wire said nothing, the screen said "check your
+// email", and no mail ever arrived, so the person who actually owns the mailbox
+// — the returning user, who is who hits this branch most often — was left at a
+// dead end. What must still hold is everything about the PROBER: no vault row,
+// no credential, no account, and no answer.
+func TestARefusedRegistrationTellsTheHolderAndCreatesNothing(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	index := mustIndex(t, testEmail)
-	h.reservation = rebuiltReservation(t,
-		&contract.EmailReserved{Index: index, SubjectID: "subj_owner", ExpiresAt: testNow.Add(time.Hour)},
-		&contract.EmailReservationConfirmed{Index: index, SubjectID: "subj_owner"},
-	)
+	h.reservation = claimedByOwner(t, index)
 
-	if _, err := h.build().Register(context.Background(), RegisterCommand{
+	got, err := h.build().Register(context.Background(), RegisterCommand{
 		Email: testEmail, IdempotencyKey: "cmd-1",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("Register: %v", err)
+	}
+	if (got != RegisterResult{}) {
+		t.Errorf("a refused registration returned %+v; nothing about the account may leak", got)
 	}
 
 	// A probe must not deposit the prober's address in the vault. The decision is
@@ -1205,9 +1266,378 @@ func TestRegisterWritesNothingWhenTheAddressIsAlreadyClaimed(t *testing.T) {
 	if h.credentials.calls != 0 {
 		t.Errorf("a verifier was stored %d times for a refused registration", h.credentials.calls)
 	}
-	if len(h.appender.calls) != 0 {
-		t.Errorf("%d appends were made for a refused registration", len(h.appender.calls))
+
+	if len(h.appender.calls) != 1 {
+		t.Fatalf("AppendToMany called %d times, want exactly 1 — the notice and nothing else",
+			len(h.appender.calls))
 	}
+	appends := h.appender.calls[0]
+	if len(appends) != 1 {
+		t.Fatalf("the notice touched %d streams (%v); an account stream among them would "+
+			"mean an unauthenticated prober can move a revision the holder's own commands "+
+			"depend on", len(appends), streamsOf(appends))
+	}
+	if want := reservationStream(t, index); appends[0].Stream != want {
+		t.Errorf("the notice landed on %s, want %s", appends[0].Stream, want)
+	}
+	if got := eventTypesOf(appends[0]); len(got) != 1 ||
+		got[0] != (&contract.DuplicateRegistrationAttempted{}).EventType() {
+		t.Fatalf("the notice appended %v, want exactly the duplicate-registration notice", got)
+	}
+
+	ev := appends[0].Events[0]
+	notice, ok := ev.Event.(*contract.DuplicateRegistrationAttempted)
+	if !ok {
+		t.Fatalf("appended %T", ev.Event)
+	}
+	if notice.SubjectID != "subj_owner" {
+		t.Errorf("the notice names %q; it must name the HOLDER, who is who gets told",
+			notice.SubjectID)
+	}
+	if !slices.Equal(ev.Meta.SubjectIDs, []string{"subj_owner"}) {
+		t.Errorf("metadata subjects are %v; the notification kernel resolves the mailbox "+
+			"from these, so a wrong one mails a stranger", ev.Meta.SubjectIDs)
+	}
+	// Whoever typed the address is unauthenticated. Naming them as the actor —
+	// which metadata does by default, actor equals subject — would record in a
+	// permanent audit trail that the holder tried to register their own address.
+	if ev.Meta.ActorID != "" {
+		t.Errorf("the notice records actor %q; the actor is an unauthenticated stranger "+
+			"and must be left unnamed", ev.Meta.ActorID)
+	}
+}
+
+// The notice may not carry the address, in the event or anywhere in its
+// metadata. The vault resolves the mailbox at delivery time (ADR-002).
+func TestTheNoticeCarriesNoAddress(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	index := mustIndex(t, testEmail)
+	h.reservation = claimedByOwner(t, index)
+
+	if _, err := h.build().Register(context.Background(), RegisterCommand{
+		Email: testEmail, IdempotencyKey: "cmd-1",
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if len(h.appender.calls) != 1 {
+		t.Fatalf("%d appends", len(h.appender.calls))
+	}
+	encoded, err := testCodec(t).Marshal(h.appender.calls[0][0].Events[0].Event)
+	if err != nil {
+		t.Fatalf("encoding the notice: %v", err)
+	}
+	blob := string(encoded) + fmt.Sprint(h.appender.calls[0][0].Events[0].Meta)
+	for _, form := range []string{testEmail, strings.ToLower(testEmail), "example.com"} {
+		if strings.Contains(blob, form) {
+			t.Fatalf("the stored notice contains %q; an event may never carry personal data "+
+				"(ADR-002):\n%s", form, blob)
+		}
+	}
+}
+
+// An UNVERIFIED claim gets no notice. Nobody has proven they can read mail at
+// that address, so sending there is unsolicited mail to a person who never asked
+// for anything (NOTIFICATIONS §5) — at an address a stranger typed.
+func TestNoNoticeIsSentForAnUnverifiedClaim(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	index := mustIndex(t, testEmail)
+	h.reservation = rebuiltReservation(t,
+		&contract.EmailReserved{
+			Index: index, SubjectID: "subj_pending", ExpiresAt: testNow.Add(time.Hour),
+		},
+	)
+
+	got, err := h.build().Register(context.Background(), RegisterCommand{
+		Email: testEmail, IdempotencyKey: "cmd-1",
+	})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if (got != RegisterResult{}) {
+		t.Errorf("returned %+v, want the same empty non-answer", got)
+	}
+	if len(h.appender.calls) != 0 {
+		t.Errorf("%d appends were made for an unverified claim; mailing an address nobody "+
+			"has proven is unsolicited mail", len(h.appender.calls))
+	}
+}
+
+// Nothing about the notice may reach the caller — not through the result, not
+// through an error, and not through whether one was sent.
+//
+// The three inputs below produce three different amounts of work and three
+// different amounts of mail. All three must produce the SAME answer, because the
+// answer is the account-existence oracle this handler exists to refuse.
+func TestTheAnswerIsIdenticalWhateverTheNoticeDid(t *testing.T) {
+	t.Parallel()
+
+	index := mustIndex(t, testEmail)
+	tests := map[string]func(h *harness){
+		"claimed, notice sent": func(h *harness) {
+			h.reservation = claimedByOwner(t, index)
+		},
+		"claimed, notice over the address ceiling": func(h *harness) {
+			r := claimedByOwner(t, index)
+			for i := range domain.MaxDuplicateNoticesPerHour {
+				r.NoticeDuplicateRegistration(testNow.Add(time.Duration(i) * time.Minute))
+			}
+			r.ClearUncommitted()
+			h.reservation = r
+		},
+		"claimed, notice suppressed by the shared ceiling": func(h *harness) {
+			h.reservation = claimedByOwner(t, index)
+			h.addrLimiter = refusingLimiter{}
+			h.callerLimiter = allowingLimiter{}
+		},
+		"claimed, the notice append failed": func(h *harness) {
+			h.reservation = claimedByOwner(t, index)
+			h.appender.err = errors.New("kurrentdb is unreachable")
+		},
+		"unverified claim, no notice": func(h *harness) {
+			h.reservation = rebuiltReservation(t, &contract.EmailReserved{
+				Index: index, SubjectID: "subj_pending", ExpiresAt: testNow.Add(time.Hour),
+			})
+		},
+	}
+
+	for name, arrange := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			arrange(h)
+
+			got, err := h.build().Register(context.Background(), RegisterCommand{
+				Email: testEmail, CallerScope: "198.51.100.9", IdempotencyKey: "cmd-1",
+			})
+			if err != nil {
+				t.Fatalf("Register returned %v; only the empty non-answer may reach the "+
+					"caller, or the taken branch becomes distinguishable by its errors", err)
+			}
+			if (got != RegisterResult{}) {
+				t.Errorf("returned %+v, want RegisterResult{}", got)
+			}
+		})
+	}
+}
+
+// The SHARED mail ceilings are spent on BOTH branches, in caller-then-address
+// order.
+//
+// Spending only when the address turns out to be taken would make the ceiling
+// itself the oracle: a prober exhausts an address's budget through Register,
+// then reads the answer off a later ResendEmailVerification for the same address
+// being refused. Both paths mail the address, so both paying is also correct.
+func TestBothRegistrationPathsSpendTheSharedMailCeilings(t *testing.T) {
+	t.Parallel()
+
+	index := mustIndex(t, testEmail)
+	tests := map[string]func(h *harness){
+		"the address was free":    func(*harness) {},
+		"the address was claimed": func(h *harness) { h.reservation = claimedByOwner(t, index) },
+	}
+	for name, arrange := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			arrange(h)
+
+			var calls []string
+			counter := newMemoryCounter()
+			addr, err := ratelimit.New(counter, "mail_address",
+				ratelimit.Rule{Name: "hourly", Limit: 3, Window: time.Hour})
+			if err != nil {
+				t.Fatalf("address ceiling: %v", err)
+			}
+			caller, err := ratelimit.New(counter, "mail_caller",
+				ratelimit.Rule{Name: "hourly", Limit: 20, Window: time.Hour})
+			if err != nil {
+				t.Fatalf("caller ceiling: %v", err)
+			}
+			h.addrLimiter = recordingLimiter{inner: addr, log: &calls, label: "address"}
+			h.callerLimiter = recordingLimiter{inner: caller, log: &calls, label: "caller"}
+
+			if _, err := h.build().Register(context.Background(), RegisterCommand{
+				Email: testEmail, CallerScope: "198.51.100.9", IdempotencyKey: "cmd-1",
+			}); err != nil {
+				t.Fatalf("Register: %v", err)
+			}
+
+			want := []string{"caller:198.51.100.9", "address:" + string(index)}
+			if !slices.Equal(calls, want) {
+				t.Errorf("ceilings spent %v, want %v", calls, want)
+			}
+		})
+	}
+}
+
+// A caller already over its OWN ceiling must not still be able to spend a
+// victim's address budget.
+//
+// Otherwise a sweep converts its own refusal into a denial of service against
+// everyone on its list: each victim's shared budget is drained, and the reset and
+// resend mail those people might actually need is refused with it. The same order
+// and the same argument as ResendVerification.spend.
+func TestACallerOverItsCeilingDoesNotSpendTheAddressBudget(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.reservation = claimedByOwner(t, mustIndex(t, testEmail))
+	var calls []string
+	h.callerLimiter = recordingLimiter{inner: refusingLimiter{}, log: &calls, label: "caller"}
+	h.addrLimiter = recordingLimiter{inner: allowingLimiter{}, log: &calls, label: "address"}
+
+	if _, err := h.build().Register(context.Background(), RegisterCommand{
+		Email: testEmail, CallerScope: "198.51.100.9", IdempotencyKey: "cmd-1",
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	for _, c := range calls {
+		if strings.HasPrefix(c, "address:") {
+			t.Fatalf("the address budget was spent by a caller that was already refused: %v", calls)
+		}
+	}
+	if len(h.appender.calls) != 0 {
+		t.Errorf("%d appends; a refused caller must produce no notice", len(h.appender.calls))
+	}
+}
+
+// A refused ceiling suppresses the NOTICE and nothing else. It must never refuse
+// the registration, or an attacker could stop somebody claiming an address by
+// probing it — through a response only one of the two branches can produce.
+func TestARefusedMailCeilingStillRegistersTheAccount(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.addrLimiter = refusingLimiter{}
+	h.callerLimiter = allowingLimiter{}
+
+	got, err := h.build().Register(context.Background(), RegisterCommand{
+		Email: testEmail, CallerScope: "198.51.100.9", IdempotencyKey: "cmd-1",
+	})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if !got.Created {
+		t.Fatal("an exhausted mail budget refused a registration; the ceiling bounds mail, " +
+			"not accounts")
+	}
+}
+
+// An unavailable ceiling fails OPEN and says so. Failing closed would let a
+// Valkey blip silently switch off the message that tells somebody a stranger is
+// trying to register their address.
+func TestAnUnavailableMailCeilingFailsOpenAndLoudly(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.logs = &bytes.Buffer{}
+	h.reservation = claimedByOwner(t, mustIndex(t, testEmail))
+	h.addrLimiter = brokenLimiter{}
+	h.callerLimiter = brokenLimiter{}
+
+	if _, err := h.build().Register(context.Background(), RegisterCommand{
+		Email: testEmail, CallerScope: "198.51.100.9", IdempotencyKey: "cmd-1",
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if len(h.appender.calls) != 1 {
+		t.Errorf("%d appends; an unreachable ceiling must not silence the notice",
+			len(h.appender.calls))
+	}
+	if !strings.Contains(h.logs.String(), "ceiling_unavailable") {
+		t.Errorf("the degraded ceiling was not reported:\n%s", h.logs.String())
+	}
+}
+
+// A per-caller ceiling with no scope to count against puts every caller in one
+// bucket, which turns it into a global ceiling with no runtime symptom at all.
+// Refused rather than defaulted, exactly as ResendVerification and PasswordReset
+// refuse it.
+func TestRegisterRefusesAWiredCallerCeilingWithNoScope(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	h.callerLimiter = allowingLimiter{}
+
+	_, err := h.build().Register(context.Background(), RegisterCommand{
+		Email: testEmail, IdempotencyKey: "cmd-1",
+	})
+	if err == nil {
+		t.Fatal("a registration with a wired caller ceiling and no scope was accepted")
+	}
+	if got := errs.ReasonOf(err); got != errs.Internal {
+		t.Errorf("reason is %v, want INTERNAL", got)
+	}
+}
+
+// MetersMail reports what the binary actually wired, because the two states are
+// indistinguishable from a healthy log and this repository has shipped six
+// components that were built, tested and constructed by nothing.
+func TestMetersMailReportsWhatWasWired(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t)
+	if h.build().MetersMail() {
+		t.Error("MetersMail said true with no limiters wired")
+	}
+	h.addrLimiter, h.callerLimiter = allowingLimiter{}, allowingLimiter{}
+	if !h.build().MetersMail() {
+		t.Error("MetersMail said false with both limiters wired")
+	}
+}
+
+// claimedByOwner is a reservation a verified account holds — the state a
+// returning user's registration attempt runs into.
+func claimedByOwner(t *testing.T, index contract.EmailIndex) *domain.EmailReservation {
+	t.Helper()
+	return rebuiltReservation(t,
+		&contract.EmailReserved{Index: index, SubjectID: "subj_owner", ExpiresAt: testNow.Add(time.Hour)},
+		&contract.EmailReservationConfirmed{Index: index, SubjectID: "subj_owner"},
+	)
+}
+
+func reservationStream(t *testing.T, index contract.EmailIndex) eventsourcing.StreamID {
+	t.Helper()
+	s, err := eventsourcing.NewStreamID(ReservationCategory, string(index))
+	if err != nil {
+		t.Fatalf("reservation stream: %v", err)
+	}
+	return s
+}
+
+// allowingLimiter permits everything, through the REAL limiter.
+//
+// ratelimit.Decision's allow flag is unexported precisely so that a decision
+// nobody filled in denies, so an allowing decision can only come from the real
+// type. Driving one is better than a fake that could not express that
+// discipline.
+type allowingLimiter struct{}
+
+func (allowingLimiter) Allow(ctx context.Context, scope string) (ratelimit.Decision, error) {
+	limiter, err := ratelimit.New(newMemoryCounter(), "test-mail",
+		ratelimit.Rule{Name: "hourly", Limit: 1000, Window: time.Hour})
+	if err != nil {
+		return ratelimit.Decision{}, err
+	}
+	return limiter.Allow(ctx, scope)
+}
+
+// refusingLimiter is over its ceiling. The zero value of Decision denies, which
+// is the property being relied on here rather than worked around.
+type refusingLimiter struct{}
+
+func (refusingLimiter) Allow(context.Context, string) (ratelimit.Decision, error) {
+	return ratelimit.Decision{Rule: "hourly", RetryAfter: time.Hour}, nil
+}
+
+// brokenLimiter is an unreachable counter. The real limiter returns the error
+// alongside a degraded decision, and the caller is expected to fail OPEN.
+type brokenLimiter struct{}
+
+func (brokenLimiter) Allow(context.Context, string) (ratelimit.Decision, error) {
+	return ratelimit.Decision{Degraded: true}, errors.New("valkey is unreachable")
 }
 
 // TestVerifyEmailScreensThePasswordBeforeSpendingTheToken is the breach check in
@@ -1278,7 +1708,8 @@ func TestVerifyEmailScreensThePasswordBeforeSpendingTheToken(t *testing.T) {
 			h.breach = tc.breach
 
 			_, err := h.build().VerifyEmail(context.Background(), VerifyEmailCommand{
-				Token: "the-emailed-secret", Password: tc.password,
+				Username: testUsername,
+				Token:    "the-emailed-secret", Password: tc.password,
 				IdempotencyKey: "cmd-verify",
 			})
 			switch {
@@ -1324,7 +1755,8 @@ func TestVerifyEmailNormalizesThePasswordBeforeHashing(t *testing.T) {
 	want := "caf\u00e9 brulee forever"
 
 	if _, err := h.build().VerifyEmail(context.Background(), VerifyEmailCommand{
-		Token: "the-emailed-secret", Password: raw, IdempotencyKey: "cmd-verify",
+		Username: testUsername,
+		Token:    "the-emailed-secret", Password: raw, IdempotencyKey: "cmd-verify",
 	}); err != nil {
 		t.Fatalf("VerifyEmail: %v", err)
 	}
@@ -1447,6 +1879,7 @@ func TestNewRegistrationRefusesIncompleteWiring(t *testing.T) {
 			Index: h.indexer, Breach: h.breach, Hasher: h.hasher,
 			Vault: h.vault, Credentials: h.credentials,
 			Reservations: staticLoader(h.reservation, nil),
+			Usernames:    staticLoader(h.usernameClaim, nil),
 			Users:        staticLoader(h.user, nil),
 			Appender:     h.appender, Tokens: h.tokens,
 			Minter: h.minter.mint,
@@ -1467,9 +1900,14 @@ func TestNewRegistrationRefusesIncompleteWiring(t *testing.T) {
 		"vault":        func(d *RegistrationDeps) { d.Vault = nil },
 		"credentials":  func(d *RegistrationDeps) { d.Credentials = nil },
 		"reservations": func(d *RegistrationDeps) { d.Reservations = nil },
-		"users":        func(d *RegistrationDeps) { d.Users = nil },
-		"appender":     func(d *RegistrationDeps) { d.Appender = nil },
-		"tokens":       func(d *RegistrationDeps) { d.Tokens = nil },
+		// A nil username loader has no symptom on the Register path at all — it is
+		// only read by VerifyEmail — so it would ship green and panic on the first
+		// real verification in production, which is the one call every account in
+		// the system must pass through.
+		"usernames": func(d *RegistrationDeps) { d.Usernames = nil },
+		"users":     func(d *RegistrationDeps) { d.Users = nil },
+		"appender":  func(d *RegistrationDeps) { d.Appender = nil },
+		"tokens":    func(d *RegistrationDeps) { d.Tokens = nil },
 		// A nil minter is the shape the original defect had: everything else
 		// present, registration succeeding, and no token ever issued. It has to be
 		// refused at wiring time because there is no later moment at which the
@@ -1628,7 +2066,8 @@ func TestRegisterIssuesATokenThatVerifyEmailCanRedeem(t *testing.T) {
 	plaintext := h.minter.last(t).Plaintext
 
 	verified, err := h.build().VerifyEmail(context.Background(), VerifyEmailCommand{
-		Token: plaintext, Password: testPassword, IdempotencyKey: "cmd-verify",
+		Username: testUsername,
+		Token:    plaintext, Password: testPassword, IdempotencyKey: "cmd-verify",
 	})
 	if err != nil {
 		t.Fatalf("the token this registration issued was refused by VerifyEmail: %v", err)
@@ -1745,7 +2184,8 @@ func TestTheVerificationTokenNeverReachesALogLine(t *testing.T) {
 	})
 	h.directory = fakeDirectory{user: got.UserID}
 	if _, err := h.build().VerifyEmail(context.Background(), VerifyEmailCommand{
-		Token: minted.Plaintext, Password: testPassword, IdempotencyKey: "cmd-logs-verify",
+		Username: testUsername,
+		Token:    minted.Plaintext, Password: testPassword, IdempotencyKey: "cmd-logs-verify",
 	}); err != nil {
 		t.Fatalf("VerifyEmail: %v", err)
 	}
@@ -1940,7 +2380,8 @@ func TestALostRaceLeavesNoRedeemableVerificationToken(t *testing.T) {
 	// The orphan is refused, and refused with the SAME wording an unknown token
 	// gets. Anything else would say "this address has a half-finished account".
 	_, err = handler.VerifyEmail(context.Background(), VerifyEmailCommand{
-		Token: orphan, Password: testPassword, IdempotencyKey: "cmd-verify-orphan",
+		Username: testUsername,
+		Token:    orphan, Password: testPassword, IdempotencyKey: "cmd-verify-orphan",
 	})
 	if err == nil {
 		t.Fatal("a token from an attempt that never created an account verified an address")
@@ -1954,6 +2395,7 @@ func TestALostRaceLeavesNoRedeemableVerificationToken(t *testing.T) {
 	// The retry's own token still works, so the refusal above is about the orphan
 	// and not about the arrangement being broken.
 	verified, err := handler.VerifyEmail(context.Background(), VerifyEmailCommand{
+		Username:       testUsername,
 		Token:          second.minter.last(t).Plaintext,
 		Password:       testPassword,
 		IdempotencyKey: "cmd-verify-live",
@@ -2052,7 +2494,8 @@ func TestVerifyEmailConfirmsBothStreamsInOneAtomicAppend(t *testing.T) {
 	h, userID, index := verifyHarness(t)
 
 	got, err := h.build().VerifyEmail(context.Background(), VerifyEmailCommand{
-		Token: "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
+		Username: testUsername,
+		Token:    "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
 	})
 	if err != nil {
 		t.Fatalf("VerifyEmail: %v", err)
@@ -2069,18 +2512,43 @@ func TestVerifyEmailConfirmsBothStreamsInOneAtomicAppend(t *testing.T) {
 			"the confirmation must not be separable by a crash", len(h.appender.calls))
 	}
 	appends := h.appender.calls[0]
-	if len(appends) != 2 {
-		t.Fatalf("the append carries %v, want both streams", streamsOf(appends))
+	// THREE streams now: the address claim, the public handle's claim, and the
+	// account. A handle written by a separate append would be claimable by an
+	// account that crashed before recording it — permanently, since nothing
+	// releases a handle.
+	if len(appends) != 3 {
+		t.Fatalf("the append carries %v, want all three streams", streamsOf(appends))
 	}
 
 	user := appendFor(t, appends, eventsourcing.MustStreamID(UserCategory, userID.String()))
 	reservation := appendFor(t, appends,
 		eventsourcing.MustStreamID(ReservationCategory, string(index)))
+	handle := appendFor(t, appends,
+		eventsourcing.MustStreamID(UsernameCategory, testUsername))
+
+	if diff := fmt.Sprint(eventTypesOf(handle)); diff != "[identity.UsernameReserved.v1]" {
+		t.Errorf("username stream events %s, want exactly the claim", diff)
+	}
+	// The stream is named by the HANDLE ITSELF and not by a keyed index (ADR-051):
+	// a handle is published by design, so hiding it in the stream name would buy
+	// nothing and cost the ability to read the log.
+	if got := string(handle.Stream); got != "reservation_username-"+testUsername {
+		t.Errorf("the handle's stream is %q, want the handle in the clear", got)
+	}
+	claim, ok := handle.Events[0].Event.(*contract.UsernameReserved)
+	if !ok {
+		t.Fatalf("the handle event is %T, want UsernameReserved", handle.Events[0].Event)
+	}
+	if claim.SubjectID != got.SubjectID {
+		t.Errorf("the claim names subject %q, want %q", claim.SubjectID, got.SubjectID)
+	}
 
 	// The proof and the credential it authorises, in that order and in this one
-	// append. Splitting them is what the pre-hijacking attack needs.
+	// append. Splitting them is what the pre-hijacking attack needs. The handle
+	// follows both: the account is proven, then it can be signed into, then it has
+	// a public name.
 	if diff := fmt.Sprint(eventTypesOf(user)); diff !=
-		"[identity.EmailVerified.v1 identity.PasswordSet.v1]" {
+		"[identity.EmailVerified.v1 identity.PasswordSet.v1 identity.UsernameAssigned.v1]" {
 		t.Errorf("user events %s", diff)
 	}
 	if diff := fmt.Sprint(eventTypesOf(reservation)); diff !=
@@ -2088,13 +2556,33 @@ func TestVerifyEmailConfirmsBothStreamsInOneAtomicAppend(t *testing.T) {
 		t.Errorf("reservation events %s", diff)
 	}
 
-	// Both streams exist, so both preconditions pin the revision they were loaded
-	// at. NoStream here would fail every verification.
+	// The account and address streams already exist, so their preconditions pin
+	// the revision they were loaded at. NoStream there would fail every
+	// verification.
 	for _, a := range appends {
+		if a.Stream == handle.Stream {
+			continue
+		}
 		rev, exact := a.Expected.Exact()
 		if !exact || rev != 0 {
 			t.Errorf("%s precondition is %s, want exact(0)", a.Stream, a.Expected)
 		}
+	}
+
+	// The HANDLE's stream is the opposite, and its precondition is the whole
+	// uniqueness mechanism: NoStream means "nobody has ever claimed this", so two
+	// simultaneous verifications for one handle contend on this entry and the
+	// server rejects one of them (ADR-044, ADR-051). An exact revision here would
+	// mean the aggregate had already recorded a claim, which is the state Reserve
+	// refuses.
+	// IsNoStream, not "not exact". AnyRevision is also not exact, and it is
+	// exactly the mutation that matters: it disables the concurrency check
+	// entirely, so every racer wins and two accounts answer to one public name.
+	// A negative assertion here passed under that mutation.
+	if !handle.Expected.IsNoStream() {
+		t.Errorf("the handle's precondition is %s, want no_stream — anything else "+
+			"lets a second account claim a handle somebody already holds",
+			handle.Expected)
 	}
 
 	verified, ok := user.Events[0].Event.(*contract.EmailVerified)
@@ -2113,7 +2601,8 @@ func TestVerifyEmailSpendsTheTokenUnderItsOwnPurpose(t *testing.T) {
 	h, _, _ := verifyHarness(t)
 
 	if _, err := h.build().VerifyEmail(context.Background(), VerifyEmailCommand{
-		Token: "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
+		Username: testUsername,
+		Token:    "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
 	}); err != nil {
 		t.Fatalf("VerifyEmail: %v", err)
 	}
@@ -2163,7 +2652,8 @@ func TestVerifyEmailVoidsEverySessionEstablishedBeforeTheProof(t *testing.T) {
 	subject := h.tokens.subjectID
 
 	if _, err := h.build().VerifyEmail(context.Background(), VerifyEmailCommand{
-		Token: "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
+		Username: testUsername,
+		Token:    "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
 	}); err != nil {
 		t.Fatalf("VerifyEmail: %v", err)
 	}
@@ -2213,7 +2703,8 @@ func TestVerifyEmailRefusesWhenSessionsCannotBeVoided(t *testing.T) {
 	h.revocations.err = errors.New("valkey unreachable")
 
 	if _, err := h.build().VerifyEmail(context.Background(), VerifyEmailCommand{
-		Token: "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
+		Username: testUsername,
+		Token:    "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
 	}); err == nil {
 		t.Fatal("a verification whose session revocation failed reported success")
 	}
@@ -2230,7 +2721,8 @@ func TestVerifyEmailSpendsTheTokenBeforeAppending(t *testing.T) {
 	h.appender.err = errors.New("kurrentdb unreachable")
 
 	if _, err := h.build().VerifyEmail(context.Background(), VerifyEmailCommand{
-		Token: "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
+		Username: testUsername,
+		Token:    "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
 	}); err == nil {
 		t.Fatal("a failed append reported success")
 	}
@@ -2243,39 +2735,112 @@ func TestVerifyEmailSpendsTheTokenBeforeAppending(t *testing.T) {
 	}
 }
 
+// TestVerifyEmailIsIdempotent covers what a repeated verification does, and the
+// public handle splits it into two cases that used to be one.
+//
+// Before ADR-051 there was a single answer: a token whose assertions were all
+// already recorded appended nothing and reported Changed=false. A handle changes
+// that, because the handle's availability is decided BEFORE the token is spent
+// and that check cannot know who is asking — so a repeat click by an account
+// that already holds the handle is refused rather than treated as a no-op.
+//
+// That trade is deliberate and it is the right way round. The refused case is
+// unreachable through any flow in this module: nothing issues a verification
+// token for an account that is already verified, so a live token beside a held
+// handle cannot occur. The case the early check DOES serve is entirely
+// reachable — somebody picked a handle at the signup form, it was taken before
+// they clicked their link, and they keep the link.
 func TestVerifyEmailIsIdempotent(t *testing.T) {
 	t.Parallel()
-	h, userID, index := verifyHarness(t)
-	subject := h.tokens.subjectID
-	// The state after a first, successful click.
-	h.user = rebuiltUser(t, userID.String(),
-		&contract.UserRegistered{
-			UserID: userID.String(), SubjectID: subject, EmailIndex: index,
-			RegisteredAt: testNow.Add(-time.Hour),
-		},
-		&contract.EmailVerified{SubjectID: subject, Index: index, VerifiedAt: testNow},
-	)
-	h.reservation = rebuiltReservation(t,
-		&contract.EmailReserved{
-			Index: index, SubjectID: subject, ExpiresAt: testNow.Add(24 * time.Hour),
-		},
-		&contract.EmailReservationConfirmed{
-			Index: index, SubjectID: subject, ConfirmedAt: testNow,
-		},
-	)
 
-	got, err := h.build().VerifyEmail(context.Background(), VerifyEmailCommand{
-		Token: "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
+	t.Run("the account and address aggregates contribute nothing", func(t *testing.T) {
+		t.Parallel()
+		h, userID, index := verifyHarness(t)
+		subject := h.tokens.subjectID
+		// The state after a first, successful click — minus the handle, which this
+		// account never claimed. Both aggregates already hold everything the token
+		// asserts, so neither may record anything.
+		h.user = rebuiltUser(t, userID.String(),
+			&contract.UserRegistered{
+				UserID: userID.String(), SubjectID: subject, EmailIndex: index,
+				RegisteredAt: testNow.Add(-time.Hour),
+			},
+			&contract.EmailVerified{SubjectID: subject, Index: index, VerifiedAt: testNow},
+		)
+		h.reservation = rebuiltReservation(t,
+			&contract.EmailReserved{
+				Index: index, SubjectID: subject, ExpiresAt: testNow.Add(24 * time.Hour),
+			},
+			&contract.EmailReservationConfirmed{
+				Index: index, SubjectID: subject, ConfirmedAt: testNow,
+			},
+		)
+
+		got, err := h.build().VerifyEmail(context.Background(), VerifyEmailCommand{
+			Username: testUsername,
+			Token:    "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
+		})
+		if err != nil {
+			t.Fatalf("a second click produced %v; a prefetched link is not a failure", err)
+		}
+		if !got.Changed {
+			t.Fatal("Changed is false although the handle was claimed")
+		}
+		if len(h.appender.calls) != 1 {
+			t.Fatalf("%d appends, want 1", len(h.appender.calls))
+		}
+		// ONLY the handle's two halves. A second EmailVerified, a second
+		// EmailReservationConfirmed or a second PasswordSet here would mean an
+		// aggregate re-recorded a fact it already held.
+		appends := h.appender.calls[0]
+		if got := streamsOf(appends); len(appends) != 2 {
+			t.Fatalf("the append carries %v, want only the handle's two streams", got)
+		}
+		user := appendFor(t, appends,
+			eventsourcing.MustStreamID(UserCategory, userID.String()))
+		if diff := fmt.Sprint(eventTypesOf(user)); diff != "[identity.UsernameAssigned.v1]" {
+			t.Errorf("user events %s, want only the handle assignment — everything else "+
+				"the token asserts was already recorded", diff)
+		}
 	})
-	if err != nil {
-		t.Fatalf("a second click produced %v; a prefetched link is not a failure", err)
-	}
-	if got.Changed {
-		t.Error("Changed is true although both aggregates were already in that state")
-	}
-	if len(h.appender.calls) != 0 {
-		t.Errorf("%d appends for a verification that decided nothing", len(h.appender.calls))
-	}
+
+	t.Run("a repeat click on a held handle is refused and the link survives", func(t *testing.T) {
+		t.Parallel()
+		h, userID, index := verifyHarness(t)
+		subject := h.tokens.subjectID
+		h.user = rebuiltUser(t, userID.String(),
+			&contract.UserRegistered{
+				UserID: userID.String(), SubjectID: subject, EmailIndex: index,
+				RegisteredAt: testNow.Add(-time.Hour),
+			},
+			&contract.EmailVerified{SubjectID: subject, Index: index, VerifiedAt: testNow},
+			&contract.UsernameAssigned{
+				SubjectID: subject, Username: testUsername, AssignedAt: testNow,
+			},
+		)
+		h.usernameClaim = rebuiltUsernameReservation(t, &contract.UsernameReserved{
+			Username: testUsername, SubjectID: subject, ReservedAt: testNow,
+		})
+
+		_, err := h.build().VerifyEmail(context.Background(), VerifyEmailCommand{
+			Username: testUsername,
+			Token:    "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
+		})
+		if errs.ReasonOf(err) != errs.Conflict {
+			t.Fatalf("reason %s, want %s (%v)", errs.ReasonOf(err), errs.Conflict, err)
+		}
+		// THE assertion. The refusal happens before Consume, so the link is still
+		// live and the person can follow it again with a different handle. Burning
+		// it here would strand somebody whose only fault was choosing a handle
+		// between the form and the click.
+		if h.tokens.calls != 0 {
+			t.Errorf("the token store was called %d times; a handle refusal must not "+
+				"spend the link", h.tokens.calls)
+		}
+		if len(h.appender.calls) != 0 {
+			t.Errorf("%d appends for a refused verification", len(h.appender.calls))
+		}
+	})
 }
 
 func TestVerifyEmailRefusalsAreIndistinguishable(t *testing.T) {
@@ -2303,7 +2868,8 @@ func TestVerifyEmailRefusalsAreIndistinguishable(t *testing.T) {
 			tc.arrange(h)
 
 			_, err := h.build().VerifyEmail(context.Background(), VerifyEmailCommand{
-				Token: "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
+				Username: testUsername,
+				Token:    "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
 			})
 			if err == nil {
 				t.Fatal("an invalid token was accepted")
@@ -2338,7 +2904,8 @@ func TestVerifyEmailRefusesALapsedClaim(t *testing.T) {
 	})
 
 	_, err := h.build().VerifyEmail(context.Background(), VerifyEmailCommand{
-		Token: "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
+		Username: testUsername,
+		Token:    "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
 	})
 	if err == nil {
 		t.Fatal("a lapsed reservation was confirmed")
@@ -2362,7 +2929,8 @@ func TestVerifyEmailRefusesAClaimHeldByAnotherAccount(t *testing.T) {
 	})
 
 	if _, err := h.build().VerifyEmail(context.Background(), VerifyEmailCommand{
-		Token: "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
+		Username: testUsername,
+		Token:    "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
 	}); err == nil {
 		t.Fatal("a token confirmed an address reserved by another account")
 	}
@@ -2375,13 +2943,34 @@ func TestVerifyEmailRefusesEmptyInput(t *testing.T) {
 	t.Parallel()
 
 	cases := map[string]VerifyEmailCommand{
-		"no token":           {Password: testPassword, IdempotencyKey: "cmd-verify"},
-		"no idempotency key": {Token: "the-emailed-secret", Password: testPassword},
+		"no token": {
+			Password: testPassword, Username: testUsername, IdempotencyKey: "cmd-verify",
+		},
+		"no idempotency key": {
+			Token: "the-emailed-secret", Password: testPassword, Username: testUsername,
+		},
 		// The password is as required as the token now. Without this case a
 		// handler that accepted an empty one would verify the address and set a
 		// credential nothing can ever present — an account permanently locked out
 		// of itself, created by a click that reported success.
-		"no password": {Token: "the-emailed-secret", IdempotencyKey: "cmd-verify"},
+		"no password": {
+			Token: "the-emailed-secret", Username: testUsername, IdempotencyKey: "cmd-verify",
+		},
+		// The username is as required as the password, and for a reason of its own:
+		// a handle is MANDATORY (ADR-051), so a handler that accepted an empty one
+		// would verify an address and activate an account that can never be named
+		// to anybody — and there is no SetUsername call to repair it with.
+		"no username": {
+			Token: "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
+		},
+		// A handle that fails normalization is refused on the same terms and for
+		// the same reason it is refused at the wire: it is a function of the
+		// caller's own bytes and a public rule, so it costs nothing and must not
+		// cost the link.
+		"a reserved username": {
+			Token: "the-emailed-secret", Password: testPassword,
+			Username: "admin", IdempotencyKey: "cmd-verify",
+		},
 	}
 	for name, cmd := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -2447,7 +3036,8 @@ func TestVerifyEmailPropagatesPortFailures(t *testing.T) {
 			tc.arrange(h)
 
 			_, err := h.build().VerifyEmail(context.Background(), VerifyEmailCommand{
-				Token: "the-emailed-secret", Password: testPassword,
+				Username: testUsername,
+				Token:    "the-emailed-secret", Password: testPassword,
 				IdempotencyKey: "cmd-verify",
 			})
 			if err == nil {
@@ -2475,7 +3065,8 @@ func TestVerifyEmailSetsTheFirstPasswordThroughStoreFirst(t *testing.T) {
 	h, userID, _ := verifyHarness(t)
 
 	got, err := h.build().VerifyEmail(context.Background(), VerifyEmailCommand{
-		Token: "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
+		Username: testUsername,
+		Token:    "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
 	})
 	if err != nil {
 		t.Fatalf("VerifyEmail: %v", err)
@@ -2513,7 +3104,7 @@ func TestVerifyEmailSetsTheFirstPasswordThroughStoreFirst(t *testing.T) {
 	// but it is asserted because the ORDER is what a reader of the log needs in
 	// order to see that the proof came first.
 	if diff := fmt.Sprint(eventTypesOf(user)); diff !=
-		"[identity.EmailVerified.v1 identity.PasswordSet.v1]" {
+		"[identity.EmailVerified.v1 identity.PasswordSet.v1 identity.UsernameAssigned.v1]" {
 		t.Fatalf("user events %s, want the proof and then the credential", diff)
 	}
 	set, ok := user.Events[1].Event.(*contract.PasswordSet)
@@ -2543,7 +3134,8 @@ func TestVerifyEmailStoresTheVerifierBeforeTheAppend(t *testing.T) {
 	h.appender.err = errors.New("kurrentdb unreachable")
 
 	if _, err := h.build().VerifyEmail(context.Background(), VerifyEmailCommand{
-		Token: "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
+		Username: testUsername,
+		Token:    "the-emailed-secret", Password: testPassword, IdempotencyKey: "cmd-verify",
 	}); err == nil {
 		t.Fatal("a failed append reported success")
 	}
@@ -2629,6 +3221,8 @@ func identitySchemas() *eventsourcing.UpcasterRegistry {
 		&contract.EmailVerificationRequested{}, &contract.EmailVerified{},
 		&contract.PasswordSet{}, &contract.UserActivated{},
 		&contract.TotpEnrollmentStarted{}, &contract.TotpEnabled{},
+		&contract.UserDeactivated{}, &contract.UserReactivated{},
+		&contract.UserDeletionRequested{}, &contract.SessionRevoked{},
 	} {
 		r.Register(e.EventType(), 1)
 	}

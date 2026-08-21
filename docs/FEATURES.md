@@ -107,6 +107,13 @@ Authentication only. Never authorization.
 
 ### Registration & credentials — P1
 - Email + password registration; email verification with expiring token
+- **Public username — BUILT, and MANDATORY.** A handle claimed at `VerifyEmail`,
+  in the same atomic append as the proof and the first password. Uniqueness is a
+  reservation stream named by the handle itself, not a projection index; erasure
+  DELETES it and tombstones it forever, because it is stored in the clear and key
+  destruction does nothing to a published value. It is NOT a login identifier.
+  `CheckUsernameAvailability` is public and is an enumeration oracle by design
+  (ADR-051, identity.md §4.6).
 - argon2id hashing, tuned params, rehash-on-login when params change
 - Password change, reset via single-use token
 - Breached-password check (k-anonymity range query), reuse prevention
@@ -130,14 +137,27 @@ Authentication only. Never authorization.
 - API keys and service accounts — scoped, expiring, rotatable, last-used tracked
 
 ### Account lifecycle — P1
-- Deactivate, reactivate, lock
-- Deletion request → hands off to `compliance` for erasure
+- **Deactivate — BUILT.** `DeactivateAccount`, AAL2, self-scoped. The account and
+  every session on it are switched off in ONE atomic append; the caller's own
+  session is revoked with the rest.
+- **Reactivate — BUILT, and it is not an RPC.** A completed sign-in reactivates,
+  in the same atomic append as the authentication that earned it. An RPC would
+  need a session a deactivated account cannot obtain (identity.md §1.1).
+- **Lock (suspend) — deliberately unreachable.** `domain.User.Suspend` is built
+  and tested. Every caller of `IdentityService` is the holder acting on their own
+  account, so an RPC could only be a self-suspension with no route back out; it
+  waits for the `operator` module.
+- **Deletion request — the event only.** `RequestAccountDeletion` appends
+  `UserDeletionRequested` with a 30-day deadline and stops. `compliance` does not
+  exist, `AccountDeletionWorkflow` is not built, there is no cancellation command,
+  and nothing consumes the event (identity.md §1.1).
 
 **Read models:** `user_view`, `session_view`, `credential_meta`, `mfa_status`
 
 **Publishes:** `UserRegistered`, `EmailVerified`, `UserAuthenticated`,
 `AuthenticationFailed`, `SessionRevoked`, `PasswordChanged`, `MfaEnabled`,
-`UserDeactivated`, `UserDeletionRequested`
+`UserDeactivated`, `UserReactivated`, `UserSuspended`, `UserDeletionRequested`,
+`UsernameReserved`, `UsernameAssigned`, `UsernameTombstoned`
 
 **Does not own:** membership of an org or workspace (`organization` / `workspace`), any permission
 decision (`access`), consent records (`compliance`), notification delivery
@@ -431,6 +451,68 @@ Everything else publishes facts; this domain decides how a human hears about it.
 
 **Does not own:** the facts it announces. It subscribes; it never asks a domain
 to notify.
+
+---
+
+# 7b. profile — how a person is presented
+
+> **Refined to depth: [domains/profile.md](domains/profile.md).** The two-call
+> avatar upload and why the key prefix is the authorization, the sparse-versus-
+> cleared contract at all three layers, and why every vault field lives only in
+> the vault.
+
+Presentation, never identity. It answers *how a person is shown to other people
+and spoken to by the system* — display name, locale, timezone, avatar — and
+nothing about who they are: no credential, no session, no lifecycle state, and
+deliberately not the username, which stays in identity (ADR-051).
+
+**Its own module, not part of identity**, for the reason ADR-020 split
+`organization` from `workspace`: every attribute added to identity widens the
+aggregate that guards authentication, and identity grows toward *proof* while
+profile grows toward *presentation*. The dependency is one-directional and
+thinner than workspace→organization — profile is keyed by the `SubjectID`
+pseudonym and imports nothing from identity, which never learns it exists.
+
+**Aggregates:** `Profile` — one stream per person, `profile-<subject id>`
+
+### Attributes — P1 · BUILT
+- Display name, locale and timezone. **Values live in the PII vault and nowhere
+  else** — `internal/platform/pii` declares all three personal data, and
+  `internal/platform/notify` resolves exactly those three from the vault before
+  every message it sends. The projection stores only the fact that each is set.
+- **One event with a sparse payload**, `profile.ProfileUpdated.v1`. A nil pointer
+  means UNCHANGED; `Cleared` means EMPTIED. Adding an attribute later is a proto
+  field, a pointer field and a column — no new event type, no catalogue entry, no
+  schema bump and no upcaster.
+- A vault field cannot be CLEARED, only replaced, and the refusal says why:
+  crypto-shredding destroys a subject's key and cannot delete one field, and
+  `pii.Validate` refuses an empty value so a row cannot mean "present but blank".
+
+### Avatars — P1 · BUILT
+- **No image ever touches an event, a database row or a request body.**
+  `CreateAvatarUpload` mints a signed POST policy; the browser uploads straight to
+  SeaweedFS; `UpdateProfile` records the object key after a HEAD verifies what was
+  actually stored. There is no bytes field in `chronos.profile.v1`.
+- The policy pins bucket, exact key, `content-length-range` (enforced by the store
+  — the reason it is a POST rather than a presigned PUT), `Content-Type` and an
+  expiry.
+- The confirm call accepts a client-supplied key safely because **the key's prefix
+  is derived from the caller's own pseudonym**: no token, no table, no secret. The
+  prefix check runs before the store is contacted, so the endpoint is not an
+  existence oracle for the bucket.
+- Objects are immutable — every grant is a new key, so a replaced avatar is a new
+  object and a new event (ADR-013). SVG is refused: it executes script.
+- Downloads are freshly signed per read and never stored.
+
+**Read models:** `profile_view` — pseudonym, three set-flags, the avatar
+reference. No `org_id` and no RLS, the same shape as `user_view`: a profile is
+global to a person, and isolation is by pseudonym.
+
+**Publishes:** `ProfileUpdated`
+
+**Does not own:** the username (identity, ADR-051), erasure (compliance), or the
+lifecycle of stored objects — reclaiming abandoned uploads is a sweep against the
+bucket with `profile_view` as its reference list, never a request handler.
 
 ---
 

@@ -45,7 +45,37 @@ type EmailReservation struct {
 	held      bool
 	verified  bool
 	expiresAt time.Time
+
+	// noticedAt is when this address was last made to send a
+	// duplicate-registration notice, oldest first.
+	//
+	// It is the ONLY state on this aggregate that exists to bound an outbound
+	// message rather than to decide who owns an address, and it lives here rather
+	// than in a cache for one reason: the notice is triggered by an
+	// UNAUTHENTICATED caller and it WRITES TO THE LOG. A ceiling that fails open
+	// — which the shared Valkey mail ceiling deliberately does, see
+	// app.ResendVerification.spend — is a ceiling that stops bounding anything
+	// during exactly the outage an attacker would wait for, and what is unbounded
+	// here is not only mail to a stranger's mailbox but appends to a stream. This
+	// one is derived from the log itself, so it cannot be degraded, cannot be
+	// flushed, and rebuilds with the aggregate.
+	//
+	// Capped at retainedNotices. Nothing reads further back than the daily
+	// ceiling, and an address under sustained attack must not grow an unbounded
+	// slice in memory every time its aggregate is loaded.
+	noticedAt []time.Time
 }
+
+// retainedNotices is how many duplicate-registration timestamps the aggregate
+// keeps.
+//
+// Comfortably above any ceiling app.Registration applies, because the two are
+// deliberately not the same number: the policy is the application's and may
+// change, while this is the window of history the aggregate can answer questions
+// about. Set it below the daily ceiling and NoticesSince silently under-counts,
+// which reads as "the ceiling was never reached" — the failure direction that
+// sends the mail.
+const retainedNotices = 32
 
 // NewReservation returns an empty reservation for the repository to rebuild
 // into.
@@ -56,6 +86,25 @@ func (r *EmailReservation) SubjectID() string          { return r.subjectID }
 func (r *EmailReservation) Held() bool                 { return r.held }
 func (r *EmailReservation) Verified() bool             { return r.verified }
 func (r *EmailReservation) ExpiresAt() time.Time       { return r.expiresAt }
+
+// NoticesSince counts the duplicate-registration notices recorded at or after t.
+//
+// The COUNT and not the times, because the only question anybody asks of it is
+// whether a ceiling has been reached, and handing out the timestamps would invite
+// a second caller to compute a different answer from the same data.
+//
+// It looks back at most retainedNotices entries. A window longer than that is
+// answered from what is retained rather than refused, and the doc on
+// retainedNotices says why that bound is set where it is.
+func (r *EmailReservation) NoticesSince(t time.Time) int {
+	n := 0
+	for _, at := range r.noticedAt {
+		if !at.Before(t) {
+			n++
+		}
+	}
+	return n
+}
 
 // Available reports whether the address can be claimed at this instant.
 //
@@ -99,6 +148,16 @@ func (r *EmailReservation) Apply(e eventsourcing.Event) {
 		r.verified = false
 		r.subjectID = ""
 		r.expiresAt = time.Time{}
+		// The notice history is deliberately NOT cleared. It bounds how much mail
+		// one ADDRESS can be made to emit, and releasing a claim is something an
+		// attacker can cause — a lapse is a timer they only have to wait for — so
+		// clearing here would hand them a fresh budget for the price of patience.
+
+	case *contract.DuplicateRegistrationAttempted:
+		r.noticedAt = append(r.noticedAt, ev.AttemptedAt)
+		if len(r.noticedAt) > retainedNotices {
+			r.noticedAt = r.noticedAt[len(r.noticedAt)-retainedNotices:]
+		}
 	}
 }
 
@@ -156,6 +215,82 @@ func (r *EmailReservation) Reserve(
 		ReservedAt: now.UTC(),
 	})
 	return nil
+}
+
+// Ceilings on the duplicate-registration notice, per address.
+//
+// They MIRROR cmd/api's mailAddressRules — three an hour, ten a day — and the
+// duplication is deliberate rather than an oversight to be factored out. That
+// rule is a Valkey counter shared by every class of triggered mail, and it FAILS
+// OPEN by design (app.ResendVerification.spend argues why, and the argument is
+// right: failing closed would turn a cache blip into permanent account loss).
+// These two numbers are the floor underneath it — derived from the log, so they
+// hold while Valkey is down, while it is flushed, and while nothing has wired the
+// shared ceiling at all.
+//
+// Keep them equal to mailAddressRules. If the shared rule is ever loosened, the
+// symptom of forgetting this pair is that the loosening does not take effect for
+// this one message, which is the harmless direction. Tightening the shared rule
+// without tightening these leaves the mail bounded by the LOOSER of the two,
+// which is not.
+const (
+	// MaxDuplicateNoticesPerHour caps hourly notices for one address.
+	MaxDuplicateNoticesPerHour = 3
+
+	// MaxDuplicateNoticesPerDay caps daily notices for one address. Three an
+	// hour unbounded is 72 a day, which is a flood rather than an annoyance.
+	MaxDuplicateNoticesPerDay = 10
+)
+
+// NoticeDuplicateRegistration records that somebody tried to register with this
+// address while it was already claimed, and reports whether anything was
+// recorded.
+//
+// It returns a bool rather than an error, and the difference is the whole point:
+// every refusal below is a NON-EVENT, not a failure. Register must answer the
+// same empty response whether this recorded something or nothing, so a caller
+// that had to distinguish "no notice was warranted" from "the command failed"
+// would be a caller with a branch that can leak onto the wire.
+//
+// # Refused for an UNVERIFIED claim
+//
+// Nobody has proven they can read mail at this address. Sending here would be
+// unsolicited mail to a person who never asked for anything (NOTIFICATIONS §5),
+// aimed at an address a stranger typed — which is the very act being reported.
+// The pending registrant is not stranded by the silence: they hold a live
+// verification link and ResendEmailVerification issues another (identity.md
+// §12.1).
+//
+// # Refused above the ceiling
+//
+// The caller is unauthenticated and can repeat at will, so without a bound this
+// endpoint mails a stranger's mailbox as often as it is asked to AND appends to
+// their address's stream every time. Both halves matter; the second is why the
+// bound is here, in state rebuilt from the log, rather than only in the shared
+// counter that fails open.
+//
+// # Why this lives on the aggregate and not in the use case
+//
+// Because it cannot then be forgotten. The use case decides WHEN a registration
+// was refused; this decides whether an address may say so again, and it is the
+// only place that knows how often it already has.
+func (r *EmailReservation) NoticeDuplicateRegistration(now time.Time) bool {
+	if !r.held || !r.verified {
+		return false
+	}
+	now = now.UTC()
+	if r.NoticesSince(now.Add(-time.Hour)) >= MaxDuplicateNoticesPerHour {
+		return false
+	}
+	if r.NoticesSince(now.Add(-24*time.Hour)) >= MaxDuplicateNoticesPerDay {
+		return false
+	}
+	eventsourcing.Record(r, &contract.DuplicateRegistrationAttempted{
+		Index:       r.index,
+		SubjectID:   r.subjectID,
+		AttemptedAt: now,
+	})
+	return true
 }
 
 // Confirm makes the claim permanent, after the address has been proven.

@@ -11,6 +11,61 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const AssignUsername = `-- name: AssignUsername :exec
+UPDATE user_view SET username = $2 WHERE subject_id = $1
+`
+
+type AssignUsernameParams struct {
+	SubjectID string
+	Username  pgtype.Text
+}
+
+// Applied from identity.UsernameAssigned: this account's public handle.
+//
+// An UPDATE rather than an upsert, for RecordDeletionRequest's reason: the event
+// can only follow a UserRegistered on the same stream, so the row exists whenever
+// this runs during an ordinary replay or a rebuild from zero. Inventing a row
+// would invent an account with an empty user id and no address.
+//
+// Idempotent by assignment rather than by a guard: the value written is the same
+// on every replay, because an account is assigned exactly one handle and
+// domain.User refuses a second (ADR-051, there is no username-change flow).
+//
+// It deliberately does NOT filter on `username IS NULL`. Doing so would make a
+// replay silently skip the write after an erasure had NULLed the column — and a
+// rebuild from position zero would then restore the handle of an erased account,
+// which is precisely the data erasure removed. The erasure's own event comes
+// LATER in the log than this one, so a rebuild replays assign-then-clear and
+// lands on cleared. A guard here would break that ordering property.
+func (q *Queries) AssignUsername(ctx context.Context, arg AssignUsernameParams) error {
+	_, err := q.db.Exec(ctx, AssignUsername, arg.SubjectID, arg.Username)
+	return err
+}
+
+const ClearUsername = `-- name: ClearUsername :exec
+UPDATE user_view SET username = NULL WHERE username = $1
+`
+
+// Applied from identity.UsernameTombstoned: erase the handle from the account
+// that held it.
+//
+// This is the ONE statement in identity that deletes personal data from a
+// projection rather than letting a destroyed key make it unreadable. A handle is
+// cleartext by design (ADR-051), so crypto-shredding does nothing to it and the
+// value has to go.
+//
+// Keyed by the HANDLE and not by a subject, because the tombstone event carries
+// no subject and must not: a permanent record linking a person to an erasure
+// request is the opposite of what the request asked for. The handle is unique
+// among non-NULL rows (migration 00016), so it names at most one row.
+//
+// Matching no row is correct and expected — after the first application there is
+// nothing left to clear, and a rebuild replays the tombstone every time.
+func (q *Queries) ClearUsername(ctx context.Context, username pgtype.Text) error {
+	_, err := q.db.Exec(ctx, ClearUsername, username)
+	return err
+}
+
 const CountRecentFailures = `-- name: CountRecentFailures :one
 SELECT count(*) FROM login_history_view
 WHERE email_index = $1 AND succeeded = false AND occurred_at > $2
@@ -203,6 +258,19 @@ type GetUserByEmailIndexRow struct {
 // address can resolve to the SUPERSEDED account. Matching the partial unique
 // index of migration 00014 is what makes "exactly one" true by construction
 // instead of by the absence of a lapse in the test data.
+// The deletion columns are deliberately NOT selected here. This is the LOGIN
+// lookup, it runs on every authentication attempt, and an outstanding erasure
+// request changes nothing about whether an identifier resolves — the account
+// keeps working until compliance acts on it. GetUserBySubject carries them,
+// because that is the account screen.
+//
+// `username` is NOT selected here either, and that omission is load-bearing
+// rather than tidy. A public handle is NOT a login identifier (ADR-051): making
+// it one hands an attacker an enumerable, harvestable target list — every
+// visible @handle becomes a login to spray — and turns the per-authenticator
+// lockout into a denial of service aimed at anyone whose handle can be read.
+// There is deliberately no GetUserByUsername in this file. Adding one would be
+// the whole of that change, so its absence is where the property is kept.
 func (q *Queries) GetUserByEmailIndex(ctx context.Context, emailIndex string) (GetUserByEmailIndexRow, error) {
 	row := q.db.QueryRow(ctx, GetUserByEmailIndex, emailIndex)
 	var i GetUserByEmailIndexRow
@@ -221,23 +289,34 @@ func (q *Queries) GetUserByEmailIndex(ctx context.Context, emailIndex string) (G
 }
 
 const GetUserBySubject = `-- name: GetUserBySubject :one
-SELECT subject_id, user_id, email_index, state, email_verified,
-       registered_at, activated_at, deactivated_at, suspended_at
+SELECT subject_id, user_id, email_index, state, email_verified, username,
+       registered_at, activated_at, deactivated_at, suspended_at,
+       deletion_requested_at, deletion_scheduled_for
 FROM user_view WHERE subject_id = $1
 `
 
 type GetUserBySubjectRow struct {
-	SubjectID     string
-	UserID        string
-	EmailIndex    string
-	State         string
-	EmailVerified bool
-	RegisteredAt  pgtype.Timestamptz
-	ActivatedAt   pgtype.Timestamptz
-	DeactivatedAt pgtype.Timestamptz
-	SuspendedAt   pgtype.Timestamptz
+	SubjectID            string
+	UserID               string
+	EmailIndex           string
+	State                string
+	EmailVerified        bool
+	Username             pgtype.Text
+	RegisteredAt         pgtype.Timestamptz
+	ActivatedAt          pgtype.Timestamptz
+	DeactivatedAt        pgtype.Timestamptz
+	SuspendedAt          pgtype.Timestamptz
+	DeletionRequestedAt  pgtype.Timestamptz
+	DeletionScheduledFor pgtype.Timestamptz
 }
 
+// The account screen.
+//
+// `username` IS selected here, and it is the only user-supplied text any query
+// in this file returns. That is not an oversight in the no-personal-data rule —
+// it is ADR-051's stated exception: a handle is published by design, so a screen
+// that could not show a person their own handle would be hiding the one piece of
+// their identity that is not secret.
 func (q *Queries) GetUserBySubject(ctx context.Context, subjectID string) (GetUserBySubjectRow, error) {
 	row := q.db.QueryRow(ctx, GetUserBySubject, subjectID)
 	var i GetUserBySubjectRow
@@ -247,10 +326,13 @@ func (q *Queries) GetUserBySubject(ctx context.Context, subjectID string) (GetUs
 		&i.EmailIndex,
 		&i.State,
 		&i.EmailVerified,
+		&i.Username,
 		&i.RegisteredAt,
 		&i.ActivatedAt,
 		&i.DeactivatedAt,
 		&i.SuspendedAt,
+		&i.DeletionRequestedAt,
+		&i.DeletionScheduledFor,
 	)
 	return i, err
 }
@@ -463,6 +545,38 @@ func (q *Queries) MarkEmailVerified(ctx context.Context, arg MarkEmailVerifiedPa
 	return err
 }
 
+const RecordDeletionRequest = `-- name: RecordDeletionRequest :exec
+UPDATE user_view
+SET deletion_requested_at  = $2,
+    deletion_scheduled_for = $3
+WHERE subject_id = $1 AND deletion_requested_at IS NULL
+`
+
+type RecordDeletionRequestParams struct {
+	SubjectID            string
+	DeletionRequestedAt  pgtype.Timestamptz
+	DeletionScheduledFor pgtype.Timestamptz
+}
+
+// Applied from UserDeletionRequested.
+//
+// An UPDATE rather than an upsert, unlike SetUserState. The event can only
+// follow a UserRegistered on the same stream, so the row exists whenever this
+// runs during an ordinary replay or a rebuild from zero; there is no ordering in
+// which it does not. Inventing a row here would be inventing an account with an
+// empty user id and no address, which the state projection's upsert has to do
+// for its own reasons and this one does not.
+//
+// `deletion_requested_at IS NULL` is what makes it idempotent AND what makes the
+// FIRST deadline the one that stands. A replay must not move a date that has
+// already been mailed to somebody (NOTIFICATIONS.md §4), and the aggregate
+// refuses a second request for the same reason — this is the same rule stated
+// where the projector can be replayed independently of it.
+func (q *Queries) RecordDeletionRequest(ctx context.Context, arg RecordDeletionRequestParams) error {
+	_, err := q.db.Exec(ctx, RecordDeletionRequest, arg.SubjectID, arg.DeletionRequestedAt, arg.DeletionScheduledFor)
+	return err
+}
+
 const RecordLoginAttempt = `-- name: RecordLoginAttempt :exec
 INSERT INTO login_history_view (
     subject_id, email_index, succeeded, reason, methods, aal, device_id, occurred_at
@@ -630,7 +744,7 @@ func (q *Queries) SweepSessionTokens(ctx context.Context) (int64, error) {
 
 const TouchSession = `-- name: TouchSession :exec
 UPDATE session_token t
-SET last_seen_at = now(),
+SET last_seen_at = $3::timestamptz,
     idle_expires_at = LEAST($2::timestamptz, v.absolute_expires_at)
 FROM session_view v
 WHERE t.session_id = $1 AND v.session_id = t.session_id AND v.revoked_at IS NULL
@@ -639,6 +753,7 @@ WHERE t.session_id = $1 AND v.session_id = t.session_id AND v.revoked_at IS NULL
 type TouchSessionParams struct {
 	SessionID string
 	Column2   pgtype.Timestamptz
+	Column3   pgtype.Timestamptz
 }
 
 // Push the idle deadline forward.
@@ -652,8 +767,18 @@ type TouchSessionParams struct {
 // deadline past the absolute one and the join's absolute check becomes the only
 // thing ending it — which works, and quietly means the idle deadline stopped
 // existing.
+//
+// `last_seen_at` is a PARAMETER, not `now()`. The database's clock is not this
+// system's clock: every other timestamp on a session — `created_at`, both
+// deadlines — comes from the injected clock ADR-054 makes movable, and a
+// statement-side `now()` reads the PostgreSQL wall clock instead. The two agree
+// in production and diverge the moment the clock is moved, which produced a
+// session reporting a `lastSeenAt` twenty-eight seconds BEFORE its own
+// `createdAt`. Reading one row's timestamps off two clocks is a bug whatever the
+// offset; taking the value from the caller keeps a session's whole lifetime on
+// one clock.
 func (q *Queries) TouchSession(ctx context.Context, arg TouchSessionParams) error {
-	_, err := q.db.Exec(ctx, TouchSession, arg.SessionID, arg.Column2)
+	_, err := q.db.Exec(ctx, TouchSession, arg.SessionID, arg.Column2, arg.Column3)
 	return err
 }
 

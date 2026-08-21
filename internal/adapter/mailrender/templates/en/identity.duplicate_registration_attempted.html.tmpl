@@ -1,0 +1,23 @@
+{{define "title"}}Someone tried to sign up with your email address{{end}}
+{{define "content"}}
+{{/*
+  Nothing in this message may describe the account beyond the single fact that
+  it exists. No handle, no creation date, no account state, no second-factor
+  status. Whoever typed the address is unauthenticated, so nothing about THEM
+  appears either — no address, no location, no device — and the event this
+  renders from deliberately carries none of it (ADR-055, ADR-002).
+*/}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 14px;">On <strong>{{datetime .OccurredAt}}</strong>, somebody tried to create a Chronos
+  account with this email address. No new account was created: this address already has one.</p>
+<p style="margin:0 0 14px;">If that was you, you do not need to sign up again — sign in instead.</p>
+<p style="margin:0 0 20px;">
+  <a href="{{url "/sign-in"}}" style="display:inline-block;background:#1a1d21;color:#ffffff;text-decoration:none;padding:11px 20px;border-radius:6px;font-size:14px;font-weight:500;">Sign in</a>
+</p>
+<p style="margin:0 0 20px;">Forgotten your password? <a href="{{url "/forgot-password"}}" style="color:#3b5bdb;">Set a new one</a>.</p>
+<p style="margin:0 0 14px;">If it was not you, you can ignore this message. Nothing changed: no account was
+  created, your password was not altered, and nobody was told anything about your account. Whoever typed
+  your address saw exactly what they would have seen if this address had no account at all.</p>
+<p style="margin:0;color:#6b7280;font-size:13px;">We send this at most a few times an hour for one address,
+  so repeated attempts will not fill your inbox.</p>
+{{end}}

@@ -287,6 +287,7 @@ func TestRebuildPreservesCredentials(t *testing.T) {
 	if _, err := h.client.VerifyEmail(ctx, write(&identityv1.VerifyEmailRequest{
 		Token:    h.mintVerificationToken(t, registered.subjectID),
 		Password: password,
+		Username: h.freshUsername("rebuild"),
 	})); err != nil {
 		t.Fatalf("VerifyEmail: %v\n%s", err, h.serverLogs())
 	}
@@ -307,7 +308,16 @@ func TestRebuildPreservesCredentials(t *testing.T) {
 	// it — which is exactly what happened the first time this ran.
 	h.cancelProjectors()
 	<-h.projectorsDone
-	defer h.startProjectors()
+	defer func() {
+		// Restarting them is not optional and it is not best-effort: every later
+		// test in this package resolves its own registration through these
+		// projections, and a restart that came up as a standby would leave them
+		// reading rows this process does not advance. startProjectors blocks until
+		// the three leases are held and reports it when they are not.
+		if err := h.startProjectors(); err != nil {
+			t.Fatalf("the projectors could not be restarted after the rebuild: %v", err)
+		}
+	}()
 
 	// identity_user and identity_reservation only. `identity_session.Reset`
 	// deliberately refuses: session_view and user_view are tied by a foreign key
@@ -506,15 +516,39 @@ func (hh *harness) credentialFingerprints(t *testing.T, subjectID string) map[st
 func (hh *harness) rebuild(t *testing.T, view projection.Projection, index string) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	done := make(chan error, 1)
 	go func() { done <- projection.NewRunner(view, hh.projectionDeps()).Rebuild(ctx) }()
+
+	// Stop the runner and WAIT for it, on every exit path including the three
+	// t.Fatal calls below.
+	//
+	// A bare `defer cancel()` was not enough, and the difference is not cosmetic.
+	// t.Fatal is runtime.Goexit, so the deferred cancel ran and this function
+	// returned while the rebuild goroutine was still draining — still holding
+	// this projection's advisory lease and still writing rows into a table it had
+	// just truncated. The caller's `defer h.startProjectors()` then raced it: the
+	// live projectors came up as STANDBYS, silently, and every later test in the
+	// package asserted against a projection nobody in this process was advancing.
+	// See harness.awaitLeases, which is the second half of this fix and the half
+	// that makes the condition audible rather than merely rarer.
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(60 * time.Second):
+			t.Errorf("the rebuild of %s did not stop within 60s of being cancelled; it may "+
+				"still hold that projection's lease", view.Name())
+		}
+	}()
 
 	deadline := time.After(5 * time.Minute)
 	for {
 		select {
 		case err := <-done:
+			// Put it back so the deferred wait above does not block on a channel
+			// that has already been drained.
+			done <- err
 			t.Fatalf("the rebuild of %s stopped early: %v", view.Name(), err)
 		case <-deadline:
 			t.Fatalf("the rebuild of %s never restored the row for this run", view.Name())
@@ -523,12 +557,6 @@ func (hh *harness) rebuild(t *testing.T, view projection.Projection, index strin
 				continue
 			}
 			cp := hh.checkpoint(t, view.Name())
-			cancel()
-			select {
-			case <-done:
-			case <-time.After(60 * time.Second):
-				t.Fatalf("the rebuild of %s did not stop when cancelled", view.Name())
-			}
 			t.Logf("rebuilt %s: %d events applied, checkpoint at commit %d",
 				view.Name(), cp.EventsProcessed, cp.Position.Commit)
 			return

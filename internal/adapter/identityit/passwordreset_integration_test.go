@@ -4,8 +4,13 @@ package identityit_test
 
 import (
 	"context"
+	"errors"
+	"io"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/kurrent-io/KurrentDB-Client-Go/kurrentdb"
 
 	connectrpc "connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
@@ -148,6 +153,7 @@ func TestAResetRequestIsIndistinguishableAcrossAccountStates(t *testing.T) {
 	if _, err := h.client.VerifyEmail(ctx, write(&identityv1.VerifyEmailRequest{
 		Token:    h.mintVerificationToken(t, resettable.subjectID),
 		Password: "the-original-passphrase",
+		Username: h.freshUsername("resettable"),
 	})); err != nil {
 		t.Fatalf("VerifyEmail: %v\n%s", err, h.serverLogs())
 	}
@@ -242,6 +248,7 @@ func TestACompletedResetVoidsEverythingAndKeepsTheSecondFactor(t *testing.T) {
 	if _, err := h.client.VerifyEmail(ctx, write(&identityv1.VerifyEmailRequest{
 		Token:    h.mintVerificationToken(t, account.subjectID),
 		Password: oldPassword,
+		Username: h.freshUsername("resete2e"),
 	})); err != nil {
 		t.Fatalf("VerifyEmail: %v\n%s", err, h.serverLogs())
 	}
@@ -315,6 +322,7 @@ func TestACompletedResetVoidsEverythingAndKeepsTheSecondFactor(t *testing.T) {
 	if _, err := h.client.VerifyEmail(ctx, write(&identityv1.VerifyEmailRequest{
 		Token:    stray,
 		Password: "yet-another-passphrase",
+		Username: h.freshUsername("stray"),
 	})); err == nil {
 		t.Error("a verification link outstanding at the moment of the reset still works; " +
 			"§4.5 requires a reset to void every outstanding token of every purpose")
@@ -548,4 +556,136 @@ func TestTheResetSchemaIsEnforcedBeforeTheHandler(t *testing.T) {
 	} else if code := connectrpc.CodeOf(err); code != connectrpc.CodeInvalidArgument {
 		t.Errorf("a malformed address was refused with %v, want invalid_argument", code)
 	}
+}
+
+// TestTwoConcurrentResetsOverRealInfrastructure proves the property its unit
+// counterpart cannot.
+//
+// `app.TestTwoConcurrentResetsProduceExactlyOnePasswordChange` used to assert
+// that exactly one of two concurrent resets wins, and it was 60% flaky — because
+// the mechanism that decides the winner is the expected-revision precondition on
+// the account stream, and the unit suite's fake appender ignores `Expected`
+// entirely and succeeds for every call. The assertion was made against a fake
+// with no optimistic concurrency in it, so it passed only when the interleaving
+// happened to let the winner's token sweep beat the loser's consume.
+//
+// Here the append goes to a real KurrentDB, so the precondition is real. Two
+// live reset links — one an attacker triggered, one the victim did — race, and
+// the assertion is made against the EVENT LOG rather than a projection, for the
+// reason ADR-054 records: a unique index in a read model can conceal a duplicate
+// while killing the projector, and the test that guarded it passed throughout.
+func TestTwoConcurrentResetsOverRealInfrastructure(t *testing.T) {
+	ctx := context.Background()
+	email := h.freshEmail("reset-race")
+	const oldPassword = "correct-horse-battery-staple-51"
+
+	index := h.emailIndex(t, email)
+	account := h.registerThroughTheKernel(t, email)
+	if _, err := h.client.VerifyEmail(ctx, write(&identityv1.VerifyEmailRequest{
+		Token:    h.mintVerificationToken(t, account.subjectID),
+		Password: oldPassword,
+		Username: h.freshUsername("resetrace"),
+	})); err != nil {
+		t.Fatalf("VerifyEmail: %v\n%s", err, h.serverLogs())
+	}
+	h.awaitVerified(t, index)
+
+	// The log position BEFORE the race, so the count below sees only this test's
+	// appends and cannot be perturbed by anything another test wrote.
+	from := h.logTail(t)
+
+	// Two links, minted before either is redeemed, exactly as two independent
+	// RequestPasswordReset calls would leave the account.
+	first := h.mintResetToken(t, account.subjectID)
+	second := h.mintResetToken(t, account.subjectID)
+
+	type outcome struct {
+		password string
+		err      error
+	}
+	results := make(chan outcome, 2)
+	var start sync.WaitGroup
+	start.Add(1)
+	for i, pair := range []struct{ token, password string }{
+		{first, "race-first-passphrase-2026"},
+		{second, "race-second-passphrase-2026"},
+	} {
+		go func(i int, token, password string) {
+			start.Wait()
+			_, err := h.client.ResetPassword(ctx, write(&identityv1.ResetPasswordRequest{
+				Token:    token,
+				Password: password,
+			}))
+			results <- outcome{password: password, err: err}
+		}(i, pair.token, pair.password)
+	}
+	start.Done()
+
+	var winners []string
+	var refused int
+	for range 2 {
+		got := <-results
+		if got.err == nil {
+			winners = append(winners, got.password)
+			continue
+		}
+		refused++
+		t.Logf("one reset was refused: code=%v", connectrpc.CodeOf(got.err))
+	}
+	t.Logf("winners=%d refused=%d", len(winners), refused)
+
+	// THE assertion, against the log. Two PasswordChanged events for one account
+	// from two concurrent resets means the loser overwrote the winner, and the
+	// password that ends up on the account was decided by scheduling rather than
+	// by the person holding the link.
+	changes := h.passwordChangesFor(t, account.userID, from)
+	if changes != 1 {
+		t.Fatalf("the log carries %d PasswordChanged events for two concurrent resets, "+
+			"want exactly 1; %d call(s) succeeded and %d were refused",
+			changes, len(winners), refused)
+	}
+	if len(winners) != 1 {
+		t.Errorf("%d resets reported success while the log recorded one change; a caller "+
+			"was told its password was set when another reset's password is what stands",
+			len(winners))
+	}
+}
+
+// passwordChangesFor counts PasswordChanged events for one account in $all since
+// `from`.
+//
+// $all rather than the account's own stream, and rather than any projection, for
+// the reason accountsRegisteredFor gives: the log is consistent the moment the
+// append returns, and it cannot filter a duplicate out of sight.
+func (hh *harness) passwordChangesFor(
+	t *testing.T, userID string, from kurrentdb.AllPosition,
+) int {
+	t.Helper()
+	rs, err := hh.kurrent.ReadAll(context.Background(), kurrentdb.ReadAllOptions{
+		Direction: kurrentdb.Forwards, From: from,
+	}, ^uint64(0))
+	if err != nil {
+		t.Fatalf("reading $all: %v", err)
+	}
+	defer rs.Close()
+
+	changed := new(contract.PasswordChanged)
+	want := "user-" + userID
+	count := 0
+	for {
+		ev, err := rs.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("reading $all: %v", err)
+		}
+		if ev.Event == nil || ev.Event.EventType != changed.EventType() {
+			continue
+		}
+		if ev.Event.StreamID == want {
+			count++
+		}
+	}
+	return count
 }

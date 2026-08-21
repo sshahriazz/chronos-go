@@ -7,7 +7,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -81,9 +84,14 @@ func TestIdentitySliceEndToEnd(t *testing.T) {
 	// does it through the production minter and the production TokenStore port.
 	plaintext := h.mintVerificationToken(t, account.subjectID)
 
+	// The public handle is claimed HERE, in the same request as the proof and the
+	// first password (ADR-051). It is mandatory: a request without one is refused
+	// by protovalidate before this handler runs.
+	username := h.freshUsername("scenario")
 	verified, err := h.client.VerifyEmail(ctx, write(&identityv1.VerifyEmailRequest{
 		Token:    plaintext,
 		Password: password,
+		Username: username,
 	}))
 	if err != nil {
 		t.Fatalf("VerifyEmail: %v\n%s", err, h.serverLogs())
@@ -101,7 +109,7 @@ func TestIdentitySliceEndToEnd(t *testing.T) {
 	// makes an intercepted link worthless after it has been followed once, and
 	// it lives in one SQL statement (DELETE ... RETURNING) rather than in Go.
 	if _, err := h.client.VerifyEmail(ctx, write(&identityv1.VerifyEmailRequest{
-		Token: plaintext, Password: password,
+		Token: plaintext, Password: password, Username: h.freshUsername("replay"),
 	})); err == nil {
 		t.Error("a spent verification token was accepted a second time")
 	} else {
@@ -113,7 +121,26 @@ func TestIdentitySliceEndToEnd(t *testing.T) {
 	// A verified account with no factor mints one AAL1 session and uses it to
 	// enrol. That the session cannot enrol a SECOND factor once this one is
 	// confirmed is asserted by TestFirstFactorBootstrapClosesBehindItself.
-	_, secret := h.bootstrapFirstFactor(t, email, password)
+	//
+	// # This test, and only this test, waits out its step boundaries
+	//
+	// Every other test in the package pushes the server's clock forward instead
+	// (ADR-054), which is what took the suite from four minutes to one. This one
+	// keeps the wall clock, and it was chosen rather than a new test written for
+	// the purpose because it is the package's END-TO-END proof: one account
+	// driven from "does not exist" to "authenticated, then revoked" through the
+	// deployed interceptor chain. If any test in this repository has to be true
+	// of the server AS DEPLOYED — where no control exists and thirty seconds is
+	// thirty seconds — it is this one.
+	//
+	// The property it keeps alive is narrow and would otherwise be asserted
+	// nowhere: real elapsed seconds roll a TOTP step over on the real server.
+	// Convert this last caller and the whole suite would still pass on a build
+	// where TOTP verification had quietly stopped following the wall clock.
+	//
+	// It costs one real boundary — the second of the two codes below — because
+	// the replay guard forces the two onto different steps.
+	_, secret := h.bootstrapFirstFactorWith(t, email, password, (*harness).freshCodeByWaiting)
 
 	activated := h.awaitState(t, index, "active")
 	t.Logf("after TOTP confirmation the account is %q", activated)
@@ -167,7 +194,7 @@ func TestIdentitySliceEndToEnd(t *testing.T) {
 	full, err := h.client.Authenticate(ctx, write(&identityv1.AuthenticateRequest{
 		Identifier: email,
 		Password:   password,
-		Code:       h.freshCode(t, secret),
+		Code:       h.freshCodeByWaiting(t, secret),
 		DeviceId:   "dev_" + h.suffix,
 	}))
 	if err != nil {
@@ -180,7 +207,7 @@ func TestIdentitySliceEndToEnd(t *testing.T) {
 	created, err := h.client.CreateSession(ctx, write(&identityv1.CreateSessionRequest{
 		Identifier: email,
 		Password:   password,
-		Code:       h.freshCode(t, secret),
+		Code:       h.freshCodeByWaiting(t, secret),
 		DeviceId:   "dev_" + h.suffix,
 	}))
 	if err != nil {
@@ -301,7 +328,7 @@ func TestFirstFactorBootstrapClosesBehindItself(t *testing.T) {
 
 	plaintext := h.mintVerificationToken(t, account.subjectID)
 	if _, err := h.client.VerifyEmail(ctx, write(&identityv1.VerifyEmailRequest{
-		Token: plaintext, Password: password,
+		Token: plaintext, Password: password, Username: h.freshUsername("bootstrap"),
 	})); err != nil {
 		t.Fatalf("VerifyEmail: %v\n%s", err, h.serverLogs())
 	}
@@ -314,9 +341,7 @@ func TestFirstFactorBootstrapClosesBehindItself(t *testing.T) {
 	// to enrol another. This is the stolen-password attack, and it is refused
 	// because the account no longer reports bootstrap enrolment — not because
 	// the session was revoked or downgraded.
-	_, again := h.client.EnrollTotp(ctx, writeAuth(&identityv1.EnrollTotpRequest{
-		AccountName: email,
-	}, bearer))
+	_, again := h.client.EnrollTotp(ctx, writeAuth(&identityv1.EnrollTotpRequest{}, bearer))
 	if again == nil {
 		t.Fatal("an AAL1 bootstrap session enrolled a SECOND factor after the first was " +
 			"confirmed; the carve-out is not one-way and a stolen password is enough to " +
@@ -402,10 +427,70 @@ type accountRow struct {
 	userID    string
 	state     string
 	verified  bool
+
+	// username is the public handle, in the clear, and empty until the account is
+	// verified (ADR-051).
+	//
+	// It is a FIELD on this struct rather than something a test queries when it
+	// happens to care, and that placement is load-bearing:
+	// TestRebuildPreservesCredentials compares the whole row before and after a
+	// rebuild with `after != before`, so the handle is automatically part of
+	// "the rebuild reconstructed the account identically". A handle that a
+	// rebuild dropped, resurrected or rewrote would fail there without anybody
+	// having to remember to check it.
+	username string
 }
 
 func (hh *harness) freshEmail(tag string) string {
 	return fmt.Sprintf("%s-%s-%d@identityit.example.com", tag, hh.suffix, time.Now().UnixNano())
+}
+
+// usernameSeq makes every handle this run mints distinct from every other,
+// including two minted from concurrent goroutines in the same microsecond.
+//
+// A COUNTER and not a timestamp, and that is a bug fix rather than a preference.
+// The first version derived the handle from time.Now().UnixNano(); on macOS the
+// wall clock's granularity is coarser than a nanosecond, so two goroutines
+// starting together read the same value and minted the SAME handle — and the
+// second account's verification was then correctly refused with "that username
+// is not available", which is the property under test failing a test that had
+// nothing to do with it.
+var usernameSeq atomic.Uint64
+
+// freshUsername mints a handle no other test and no earlier run can collide
+// with.
+//
+// It has to be unique across RUNS, and that is a stronger requirement than
+// freshEmail's. Test isolation elsewhere in this package comes from the
+// blind-index key: every run hashes its addresses into a private index space, so
+// a leftover row from an earlier run cannot collide. A handle has NO keyed
+// derivation — the stream is named by the handle in the clear (ADR-051) — and a
+// handle is claimed FOREVER, so a reused one contends with a claim an earlier
+// run left in KurrentDB and can never be freed. Hence the per-run suffix AND the
+// per-call counter.
+//
+// The shape obeys domain.NormalizeUsername exactly: ASCII lowercase, digits and
+// underscores, starting with a letter, no hyphen (a dash in a stream key is
+// refused, because KurrentDB derives a category from everything before the
+// first one), and comfortably inside the 30-byte ceiling by construction rather
+// than by truncation — truncating is what threw the uniqueness away before.
+func (hh *harness) freshUsername(tag string) string {
+	label := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r + ('a' - 'A')
+		default:
+			return -1
+		}
+	}, tag)
+	if len(label) > 8 {
+		label = label[:8]
+	}
+	// "u" leads so the handle always starts with a letter whatever the tag was.
+	// 1 + 8 + 1 + 8 + 6 = 24 bytes at most.
+	return fmt.Sprintf("u%s_%s%06x", label, hh.suffix[:8], usernameSeq.Add(1))
 }
 
 func (hh *harness) emailIndex(t *testing.T, email string) string {
@@ -465,10 +550,14 @@ func (hh *harness) awaitAccount(t *testing.T, index string) accountRow {
 			// without this clause would return whichever row the planner
 			// reached first — so a test could silently follow the SUPERSEDED
 			// account through every step after this one.
+			// COALESCE because the column is NULL until the handle is claimed and
+			// again after an erasure. Both are "no handle" from a test's point of
+			// view, and a scan error there would be a failure about the schema
+			// rather than about the account.
 			err := q.QueryRow(ctx, `
-				SELECT subject_id, user_id, state, email_verified
+				SELECT subject_id, user_id, state, email_verified, coalesce(username, '')
 				FROM user_view WHERE email_index = $1 AND email_released_at IS NULL`, index).
-				Scan(&row.subjectID, &row.userID, &row.state, &row.verified)
+				Scan(&row.subjectID, &row.userID, &row.state, &row.verified, &row.username)
 			if err != nil && strings.Contains(err.Error(), "no rows") {
 				return nil
 			}
@@ -486,24 +575,35 @@ func (hh *harness) awaitAccount(t *testing.T, index string) accountRow {
 	}
 }
 
-// awaitVerified waits for the projector to record that the address was proven.
+// awaitVerified waits for the projector to record that the address was proven
+// AND that the public handle was claimed.
 //
 // Separate from awaitState because the state does not move on verification any
 // more than it did before — an account with a proven address and no second
 // factor is still Pending — so "wait for active" would time out and "read once"
 // would race the projector.
+//
+// It waits for BOTH facts because they arrive from one atomic append but reach
+// the projection as two rows of work: EmailVerified is applied before
+// UsernameAssigned, so a caller that stopped at `verified` could observe the
+// account in a half-projected state that never exists in the log. That is not a
+// theoretical tidiness — TestRebuildPreservesCredentials compares the whole row
+// before and after a rebuild, and a `before` snapshot taken between the two
+// events would report a spurious difference every time the projector happened to
+// be slow.
 func (hh *harness) awaitVerified(t *testing.T, index string) accountRow {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	var row accountRow
 	for time.Now().Before(deadline) {
 		row = hh.awaitAccount(t, index)
-		if row.verified {
+		if row.verified && row.username != "" {
 			return row
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	t.Fatalf("the account for this index is still unverified after 30s: %+v", row)
+	t.Fatalf("the account for this index is still unverified or holds no handle after 30s: %+v",
+		row)
 	return row
 }
 
@@ -549,7 +649,11 @@ func (hh *harness) awaitState(t *testing.T, index, want string) string {
 // is missing, so this helper cannot quietly paper over the gap.
 func (hh *harness) mintVerificationToken(t *testing.T, subjectID string) string {
 	t.Helper()
-	minted, err := token.New().Mint(app.PurposeEmailVerification, time.Now().UTC())
+	// The SERVER's clock, not this process's. The token's expiry is written here
+	// and checked there (identity_token.expires_at > $now), so minting against
+	// wall time while the server runs ahead of it silently shortens the TTL by
+	// however far the suite has travelled.
+	minted, err := token.New().Mint(app.PurposeEmailVerification, hh.serverNow(t))
 	if err != nil {
 		t.Fatalf("minting a verification token: %v", err)
 	}
@@ -572,6 +676,22 @@ func (hh *harness) mintVerificationToken(t *testing.T, subjectID string) string 
 // lets the rest of the scenario claim it exercised the public API rather than
 // the objects behind it.
 func (hh *harness) bootstrapFirstFactor(t *testing.T, email, password string) (string, string) {
+	t.Helper()
+	return hh.bootstrapFirstFactorWith(t, email, password, (*harness).freshCode)
+}
+
+// codeSource is where a ceremony gets its TOTP codes: freshCode, which travels
+// through the step boundary, or freshCodeByWaiting, which sits through it.
+//
+// A parameter rather than a field on the harness, because the harness is shared
+// by every test in the package and a field would make one test's choice of
+// clock discipline everybody else's.
+type codeSource func(*harness, *testing.T, string) string
+
+// bootstrapFirstFactorWith is bootstrapFirstFactor with the code source named.
+func (hh *harness) bootstrapFirstFactorWith(
+	t *testing.T, email, password string, code codeSource,
+) (string, string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -596,9 +716,26 @@ func (hh *harness) bootstrapFirstFactor(t *testing.T, email, password string) (s
 	}
 	t.Logf("bootstrap session: id=%s aal=%v", boot.Msg.GetSessionId(), boot.Msg.GetAssuranceLevel())
 
-	enrolled, err := hh.client.EnrollTotp(ctx, writeAuth(&identityv1.EnrollTotpRequest{
-		AccountName: email,
-	}, bearer))
+	// AWAITED before the bearer is presented, and this is a real race rather than
+	// belt and braces. A session has TWO halves: the token digest, written
+	// authoritatively by CreateSession, and the session_view row, written by the
+	// session PROJECTOR from SessionCreated — and it resolves only when both exist
+	// (migration 00010). So the token this call just returned is unusable for as
+	// long as the projector takes to catch up, and presenting it early is refused
+	// as `unauthenticated: authentication failed`, which reads exactly like a
+	// broken credential.
+	//
+	// It failed that way intermittently under a full-package run and never in
+	// isolation, because the window is a function of how much OTHER traffic the
+	// projector is chewing through. Every event any test appends widens it.
+	//
+	// `signIn` already awaited this; this path did not, and that asymmetry is the
+	// likeliest answer to the flake awaitSessionProjected's own doc records as
+	// OPEN — it measured the window on the sign-in path, which was already
+	// guarded, and every observed failure has been on a token minted HERE.
+	hh.awaitSessionProjected(t, boot.Msg.GetSessionId())
+
+	enrolled, err := hh.client.EnrollTotp(ctx, writeAuth(&identityv1.EnrollTotpRequest{}, bearer))
 	if err != nil {
 		t.Fatalf("EnrollTotp from the bootstrap session: %v\n%s", err, hh.serverLogs())
 	}
@@ -617,7 +754,7 @@ func (hh *harness) bootstrapFirstFactor(t *testing.T, email, password string) (s
 	}
 
 	confirmed, err := hh.client.ConfirmTotp(ctx, writeAuth(&identityv1.ConfirmTotpRequest{
-		Code: hh.freshCode(t, secret),
+		Code: code(hh, t, secret),
 	}, bearer))
 	if err != nil {
 		t.Fatalf("ConfirmTotp from the bootstrap session: %v\n%s", err, hh.serverLogs())
@@ -636,28 +773,157 @@ func (hh *harness) bootstrapFirstFactor(t *testing.T, email, password string) (s
 //
 // The guard is keyed on (credential, step) and fails CLOSED. That is correct
 // and is why it cannot be worked around: the only way to present a second valid
-// code is to wait for a step boundary. Every wait here is real elapsed time,
-// and it is the reason this test takes about a minute.
-var usedSteps = map[int64]bool{}
+// code FOR ONE AUTHENTICATOR is to wait for a step boundary. Every wait here is
+// real elapsed time.
+//
+// # Keyed by (secret, step), not by step alone
+//
+// It was keyed by step alone, which made every account in the package wait for
+// every other account's code — the map said "this step is spent" when what the
+// database records is "this step is spent FOR THIS CREDENTIAL". Two accounts can
+// legitimately use the same step, and `totp_replay`'s primary key
+// (credential_id, step) is the statement of that. The over-broad key cost
+// thirty seconds per unrelated account and pushed this package past the ten
+// minute `go test` timeout once the lifecycle tests were added.
+//
+// The mutex is what makes the map safe for the tests that run with
+// t.Parallel(). Without it two parallel tests racing on the map is a data race
+// the -race detector would report, and the failure it hides is worse: both
+// could take the same step for one secret and the second code would be refused
+// by a guard that is working exactly as designed.
+var (
+	usedStepsMu sync.Mutex
+	usedSteps   = map[string]bool{}
+)
 
+// totpPeriod is RFC 6238's step, in seconds. Not imported from the totp adapter
+// on purpose: a test that derived the period from the code under test would
+// agree with it about a wrong value.
+const totpPeriod = 30
+
+// totpBoundaryMargin is how much of a step must remain for a code to be worth
+// minting. A code generated in the last moment of a step can arrive at the
+// server in the next one.
+const totpBoundaryMargin = 3
+
+// maxStepJumps bounds the loop in freshCode.
+//
+// Two would do — a spent step plus a boundary margin — and this is deliberately
+// not tight. What it is here to prevent is an infinite loop when the control is
+// answering but not moving anything: without it, a clock stuck at one instant
+// turns a failing test into a hung suite with no output.
+const maxStepJumps = 8
+
+// freshCode returns a TOTP code the server will accept, TRAVELLING through the
+// step boundary rather than waiting for it (ADR-054).
+//
+// # What this is buying, and why the cost was unavoidable before
+//
+// The replay guard is keyed on (credential, step) and fails closed. That is
+// correct, it is the whole reason a stolen code is not reusable, and it means
+// there is no way to get a SECOND valid code for one authenticator inside one
+// thirty-second step. So a test needing two codes needs two steps, and a step
+// is thirty seconds of the server's clock.
+//
+// It used to be thirty seconds of WALL clock, and that single fact was most of
+// this package's four-minute runtime — fourteen call sites, several tests idle
+// for a minute each. Nothing about RFC 6238 requires the wait. It was required
+// because the server's clock was time.Now() and nothing could move it.
+//
+// So this asks the server what time it is, and when the step it lands in is
+// already spent it pushes the server's clock into the next one. The server
+// experiences a step boundary; the suite does not experience thirty seconds.
+//
+// # Why the whole loop holds the lock
+//
+// The map is shared, the advance is global, and parallel tests use both. The
+// original released the mutex around each sleep because a sleep is long; an
+// advance is a millisecond of loopback HTTP, so holding it costs nothing and
+// removes the interleaving where two tests read the same step, both advance,
+// and the clock jumps twice as far as either needed.
+//
+// # What it does NOT do
+//
+// It never rewinds. The control refuses a negative advance and the guard would
+// refuse the replay anyway; the two are independent, and verifyClockControl
+// asserts the first of them once per run.
 func (hh *harness) freshCode(t *testing.T, secret string) string {
 	t.Helper()
-	for {
-		now := time.Now().UTC()
-		step := now.Unix() / 30
-		if !usedSteps[step] {
-			// Not right at the boundary: a code generated in the last moment of a
-			// step can arrive at the server in the next one.
-			if remaining := 30 - (now.Unix() % 30); remaining < 3 {
-				time.Sleep(time.Duration(remaining+1) * time.Second)
-				continue
-			}
-			usedSteps[step] = true
+	usedStepsMu.Lock()
+	defer usedStepsMu.Unlock()
+
+	now := hh.serverNow(t)
+	for range maxStepJumps {
+		step := now.Unix() / totpPeriod
+		key := secret + ":" + strconv.FormatInt(step, 10)
+		remaining := totpPeriod - (now.Unix() % totpPeriod)
+
+		if !usedSteps[key] && remaining >= totpBoundaryMargin {
+			usedSteps[key] = true
 			code, err := totp.GenerateCode(secret, now)
 			if err != nil {
 				t.Fatalf("generating a TOTP code: %v", err)
 			}
 			return code
+		}
+		now = hh.advanceServerClock(t, time.Duration(remaining+1)*time.Second)
+	}
+	t.Fatalf("no unspent TOTP step after %d advances; the clock control is answering but "+
+		"the server's clock is not moving, so every step it reports is the same one",
+		maxStepJumps)
+	return ""
+}
+
+// freshCodeByWaiting is freshCode with the time travel taken out: it SLEEPS
+// through the step boundary in real seconds.
+//
+// # Why one caller has to keep doing this
+//
+// Because the fast path proves a property about a server whose clock a test can
+// move, and production does not have one. If every code in this package came
+// from an advanced clock, then "thirty real seconds roll the step over on the
+// deployed server" would be asserted nowhere, and the day the offset clock is
+// wired in a way that quietly decouples TOTP verification from wall time — a
+// second clock built somewhere in the graph, a handler reading time.Now
+// directly — every test here would still pass.
+//
+// It reads the server's clock rather than its own for one subtle reason: the
+// offset is shared by the whole process, so a parallel test may have moved it.
+// The offset is a CONSTANT added to a real clock, so sleeping n real seconds
+// still advances the server by exactly n seconds — which is the property under
+// test. Computing the step from the test's own time.Now would instead mint a
+// code for a step the server has already left.
+//
+// TestIdentitySliceEndToEnd is the only caller; see the comment there.
+func (hh *harness) freshCodeByWaiting(t *testing.T, secret string) string {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Minute)
+	for {
+		now := hh.serverNow(t)
+		step := now.Unix() / totpPeriod
+		key := secret + ":" + strconv.FormatInt(step, 10)
+
+		usedStepsMu.Lock()
+		spent := usedSteps[key]
+		if !spent {
+			if remaining := totpPeriod - (now.Unix() % totpPeriod); remaining < totpBoundaryMargin {
+				usedStepsMu.Unlock()
+				time.Sleep(time.Duration(remaining+1) * time.Second)
+				continue
+			}
+			usedSteps[key] = true
+			usedStepsMu.Unlock()
+			code, err := totp.GenerateCode(secret, now)
+			if err != nil {
+				t.Fatalf("generating a TOTP code: %v", err)
+			}
+			return code
+		}
+		usedStepsMu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("waited three minutes for an unspent TOTP step: real time is not " +
+				"advancing the server's clock, which it must, because the offset clock " +
+				"is an offset FROM the wall clock and not a replacement for it")
 		}
 		time.Sleep(time.Second)
 	}
@@ -710,6 +976,37 @@ func (hh *harness) liveSessionCount(t *testing.T, subjectID string) int {
 			subjectID).Scan(&n)
 	})
 	return n
+}
+
+// awaitLiveSessions polls session_view until it holds `want` live sessions.
+//
+// It exists because awaiting the ACCOUNT state proves nothing about the SESSION
+// projection: they are two projectors with two checkpoints, and a revocation
+// that has already reached user_view may still be in flight for session_view.
+// TestADeactivationLeavesNoLiveSession asserted one after awaiting the other and
+// failed intermittently — more often as the package grew, because every event any
+// other test appends widens the window the session projector has to chew through.
+//
+// A poll rather than a longer wait: the correct outcome is reached in
+// milliseconds on a quiet stack and the deadline only pays for a busy one.
+// A predicate rather than a number, because both questions asked of it are real:
+// "none survived" is exact, and "at least two exist" is a floor a fan-out test
+// needs before it can prove anything.
+func (hh *harness) awaitLiveSessions(
+	t *testing.T, subjectID string, ok func(int) bool, want string,
+) int {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	var got int
+	for time.Now().Before(deadline) {
+		got = hh.liveSessionCount(t, subjectID)
+		if ok(got) {
+			return got
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("session_view holds %d live session(s) after 30s, want %s", got, want)
+	return got
 }
 
 func (hh *harness) tokenRows(t *testing.T, subjectID string) int {

@@ -74,6 +74,19 @@ type User struct {
 	state         State
 	emailVerified bool
 
+	// username is the account's public handle (ADR-051), in the clear.
+	//
+	// It is held on the AGGREGATE and not read from user_view when a decision
+	// needs it, for the reason every other decision in this module is taken from
+	// the log: erasure must tombstone the handle it destroys, that is a write, and
+	// a write decided from an eventually consistent read can be decided twice with
+	// two different answers — here, twice with two different handles.
+	//
+	// Empty until the address is proven. A handle is claimed in the same request
+	// as the verification and the first password (identity.md §4.6), so an account
+	// carrying no handle is exactly an account nobody can sign into.
+	username string
+
 	// everSecondFactor records that this account has, at some point in its
 	// history, held a PROVEN second factor. It is set by Apply and never cleared
 	// by anything, which is the whole property: `methods` is a picture of the
@@ -96,6 +109,19 @@ type User struct {
 	// and a decision made from an eventually-consistent read can be made twice.
 	recoveryRemaining  int
 	recoveryCredential ids.CredentialID
+
+	// deletionRequested records that an erasure request is outstanding. Held so
+	// RequestDeletion is idempotent — a person who clicks the button twice must
+	// not put two deadlines in the log, because the mail NOTIFICATIONS §4 sends
+	// names a date and two dates for one account is a support ticket.
+	//
+	// It is deliberately NOT a State. The lifecycle in identity.md §1 is
+	// pending -> active -> deactivated -> suspended -> erased, and a request is
+	// none of those: the account keeps every capability it had until compliance
+	// acts on it, so a state that read "deleted" would make every gate in the
+	// system disagree with what the account can actually do.
+	deletionRequested   bool
+	deletionScheduledAt time.Time
 }
 
 // New returns an empty User for the repository to rebuild into.
@@ -106,7 +132,18 @@ func (u *User) SubjectID() string               { return u.subjectID }
 func (u *User) EmailIndex() contract.EmailIndex { return u.emailIndex }
 func (u *User) State() State                    { return u.state }
 func (u *User) EmailVerified() bool             { return u.emailVerified }
-func (u *User) RecoveryCodesRemaining() int     { return u.recoveryRemaining }
+
+func (u *User) RecoveryCodesRemaining() int { return u.recoveryRemaining }
+
+// Username is the account's public handle, empty until the address is proven.
+func (u *User) Username() string { return u.username }
+
+// DeletionRequested reports whether an erasure request is outstanding, and when
+// it falls due. A zero time with a true flag is impossible: both are set by the
+// one event.
+func (u *User) DeletionRequested() (time.Time, bool) {
+	return u.deletionScheduledAt, u.deletionRequested
+}
 
 // Method returns one enrolled method.
 func (u *User) Method(id ids.CredentialID) (Method, bool) {
@@ -203,6 +240,9 @@ func (u *User) Apply(e eventsourcing.Event) {
 		u.emailVerified = true
 		u.emailIndex = ev.Index
 
+	case *contract.UsernameAssigned:
+		u.username = ev.Username
+
 	case *contract.UserActivated:
 		u.state = StateActive
 		// Activation is only ever recorded once a real second factor is proven
@@ -221,6 +261,13 @@ func (u *User) Apply(e eventsourcing.Event) {
 
 	case *contract.UserSuspended:
 		u.state = StateSuspended
+
+	case *contract.UserDeletionRequested:
+		// No state change, deliberately — see the field's comment. A rebuild that
+		// replays this reaches the same answer as the live aggregate because
+		// nothing else writes either field.
+		u.deletionRequested = true
+		u.deletionScheduledAt = ev.ScheduledFor
 
 	case *contract.PasswordSet:
 		u.enable(ev.CredentialID, contract.MethodPassword, ev.SetAt)
@@ -386,6 +433,67 @@ func (u *User) SetPassword(credentialID ids.CredentialID, at time.Time) error {
 		SetAt:        at.UTC(),
 	})
 	u.maybeActivate(at)
+	return nil
+}
+
+// AssignUsername records the account's public handle.
+//
+// # The address must be PROVEN first, and the ordering is the same control
+// SetPassword is written under
+//
+// A handle is claimed in the same request as the verification and the first
+// password (identity.md §4.6). Refusing one on an unverified account is what
+// makes that true of every route rather than of one call site: a handle claimed
+// by whoever typed an address they may not control is a squat that costs an
+// attacker nothing, and the 48h reservation lease that bounds an address squat
+// does not exist for handles — a handle is claimed permanently.
+//
+// Stated in the AGGREGATE and not only in the use case, for the reason
+// SetPassword is: the use case is one call site, and a second path to a first
+// handle — an import, an admin tool, a future federated link — inherits the rule
+// by construction instead of having to remember it.
+//
+// # One handle per account, forever
+//
+// A second, DIFFERENT handle is refused rather than recorded. There is no
+// username-change flow (identity.md §4.6), and a change is not merely an
+// unimplemented feature here: releasing a handle back into circulation is the
+// failure ADR-051's tombstone exists to prevent, so a change must burn the old
+// handle rather than free it. Recording a second assignment without that would
+// leave the first handle claimed on its own stream by an account that no longer
+// answers to it, and the two would disagree with nothing to reconcile them.
+//
+// Re-assigning the SAME handle records nothing and is not an error: a
+// verification link clicked twice must not fail.
+//
+// # The value is taken as given
+//
+// Normalization and reserved-name screening are NormalizeUsername's, and they
+// are not repeated here. What is checked is that the value is non-empty — a
+// handle is mandatory, and an empty one recorded on the account would satisfy
+// "has a username" while naming nobody.
+func (u *User) AssignUsername(username string, at time.Time) error {
+	if err := u.mutable(); err != nil {
+		return err
+	}
+	if !u.emailVerified {
+		return errs.Conflictf(
+			"this account has not proven its address; a username may not be claimed before verification")
+	}
+	if username == "" {
+		return errs.ValidationFailedf("a username is required")
+	}
+	if u.username == username {
+		return nil // already ours; records nothing
+	}
+	if u.username != "" {
+		return errs.Conflictf("this account already has a username")
+	}
+	eventsourcing.Record(u, &contract.UsernameAssigned{
+		SubjectID:  u.subjectID,
+		Username:   username,
+		AssignedAt: at.UTC(),
+	})
 	return nil
 }
 
@@ -687,6 +795,105 @@ func (u *User) Suspend(actorID, reason string, at time.Time) error {
 	return nil
 }
 
+// RequestDeletion records that the holder has asked for the account to be
+// erased, and when that becomes due.
+//
+// # It changes nothing else, and that is the point
+//
+// The account keeps its state, its credentials and its sessions. Erasure is
+// `compliance`'s work and that module does not exist; an aggregate that switched
+// the account off here would be asserting that a handoff happened when the other
+// side of it has never been built, and the person would be locked out of an
+// account nothing is going to delete.
+//
+// Deactivating first is a product decision that belongs to whoever calls this,
+// not to the aggregate: `Deactivate` is a separate command and can be issued in
+// the same append.
+//
+// # Idempotent, because the deadline is communicated
+//
+// A second request records nothing and keeps the FIRST deadline. The alternative
+// lets anyone holding the session push the deadline out indefinitely, and it
+// makes the mail NOTIFICATIONS §4 sends ("deletion scheduled for <date>") name a
+// date that a later mail contradicts.
+//
+// A suspended account is refused by mutable(): a suspension is administrative,
+// and letting its subject start a clock that ends in erasure would let them
+// destroy the evidence the suspension exists to preserve.
+func (u *User) RequestDeletion(actorID string, scheduledFor, at time.Time) error {
+	if err := u.mutable(); err != nil {
+		return err
+	}
+	if u.deletionRequested {
+		return nil
+	}
+	switch {
+	case actorID == "":
+		return errs.ValidationFailedf("an actor id is required")
+	case scheduledFor.Before(at):
+		// A deadline already in the past would be due the moment it was written.
+		// Refused here rather than clamped, because a clamp hides a caller whose
+		// grace period is misconfigured to zero.
+		return errs.ValidationFailedf("a deletion deadline may not be in the past")
+	}
+	eventsourcing.Record(u, &contract.UserDeletionRequested{
+		SubjectID:    u.subjectID,
+		ActorID:      actorID,
+		ScheduledFor: scheduledFor.UTC(),
+		RequestedAt:  at.UTC(),
+	})
+	return nil
+}
+
+// NeedsReactivation reports that this account is deactivated and that a
+// completed authentication is entitled to switch it back on.
+//
+// # Why reactivation is not an RPC
+//
+// Deactivation is holder-reversible by design (identity.md §1). CanAuthenticate
+// refuses a deactivated account, and every authenticated RPC needs a session, so
+// a `Reactivate` RPC would have exactly one precondition — a session — that its
+// own subject cannot obtain. "Reversible" would be a word in a document with no
+// code behind it. That is the same shape as the first-enrolment deadlock
+// (NeedsFirstSecondFactor), and it is closed the same way: by admitting ONE more
+// state into the authentication, narrowly, rather than by relaxing a rule.
+//
+// # Why the account is not left holding a bounded session instead
+//
+// The enrolment carve-out mints an AAL1 session whose authority is bounded by
+// the declared assurance floors. That mechanism cannot be reused here, because
+// the bound it provides is a level and this account's problem is a STATE — an
+// AAL2 session on a deactivated account passes every floor in the system.
+// Nothing in the request pipeline reads the account's state (the authenticator's
+// query joins user_view only to read the enrolment column), so a deactivated
+// account holding any session is a deactivated account with full API access.
+//
+// So the reactivation happens INSIDE the ceremony, in the same atomic append
+// that records the successful authentication, and no session for a deactivated
+// account is ever minted. The window in which the two disagree does not exist
+// rather than being small.
+//
+// # What it does not relax
+//
+// The account must present every factor it has, exactly as an active account
+// must: this predicate is consulted after the credentials verified, not instead
+// of verifying them. So an attacker holding only the password cannot reactivate
+// an account any more than they could sign into it — and the reversal is mailed
+// to the holder as a Security-class alert (NOTIFICATIONS §4,
+// `identity.account_reactivated`), which is the control that makes a reversal
+// the holder did not perform visible to them.
+//
+// The address must be proven, for NeedsFirstSecondFactor's reason: an account
+// that deactivated before proving its address has nothing establishing that the
+// person signing in reads that mailbox.
+//
+// Suspended is not here and must never be. Suspension is administrative and
+// identity.md §1 says the holder may never reverse it; Reactivate refuses it
+// again, so a caller that reached this predicate wrongly still cannot undo one.
+func (u *User) NeedsReactivation() bool {
+	return u.state == StateDeactivated && u.emailVerified
+}
+
 // ---------------------------------------------------------------------------
 // Authentication
 // ---------------------------------------------------------------------------
@@ -774,6 +981,18 @@ func (u *User) CanAuthenticate() (contract.FailureReason, bool) {
 		}
 		return contract.ReasonIncomplete, false
 	case StateDeactivated:
+		if u.NeedsReactivation() {
+			// Admitted so the ceremony can RUN, not so it can end in a session for
+			// a deactivated account. Every factor the account holds is still
+			// demanded below, and the caller that admits this state is required to
+			// record UserReactivated in the same atomic append as the successful
+			// authentication — see NeedsReactivation for why the reversal cannot be
+			// an RPC and cannot be a bounded session.
+			return "", true
+		}
+		// Deactivated with an unproven address. There is no mailbox this account
+		// has ever demonstrated control of, so there is nobody a reactivation could
+		// be attributed to.
 		return contract.ReasonDeactivated, false
 	case StateSuspended:
 		return contract.ReasonSuspended, false

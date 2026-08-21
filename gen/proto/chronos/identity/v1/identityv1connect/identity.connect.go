@@ -99,6 +99,9 @@ const (
 	// IdentityServiceResendEmailVerificationProcedure is the fully-qualified name of the
 	// IdentityService's ResendEmailVerification RPC.
 	IdentityServiceResendEmailVerificationProcedure = "/chronos.identity.v1.IdentityService/ResendEmailVerification"
+	// IdentityServiceCheckUsernameAvailabilityProcedure is the fully-qualified name of the
+	// IdentityService's CheckUsernameAvailability RPC.
+	IdentityServiceCheckUsernameAvailabilityProcedure = "/chronos.identity.v1.IdentityService/CheckUsernameAvailability"
 	// IdentityServiceRequestPasswordResetProcedure is the fully-qualified name of the IdentityService's
 	// RequestPasswordReset RPC.
 	IdentityServiceRequestPasswordResetProcedure = "/chronos.identity.v1.IdentityService/RequestPasswordReset"
@@ -137,6 +140,12 @@ const (
 	// IdentityServiceRevokeAllSessionsProcedure is the fully-qualified name of the IdentityService's
 	// RevokeAllSessions RPC.
 	IdentityServiceRevokeAllSessionsProcedure = "/chronos.identity.v1.IdentityService/RevokeAllSessions"
+	// IdentityServiceDeactivateAccountProcedure is the fully-qualified name of the IdentityService's
+	// DeactivateAccount RPC.
+	IdentityServiceDeactivateAccountProcedure = "/chronos.identity.v1.IdentityService/DeactivateAccount"
+	// IdentityServiceRequestAccountDeletionProcedure is the fully-qualified name of the
+	// IdentityService's RequestAccountDeletion RPC.
+	IdentityServiceRequestAccountDeletionProcedure = "/chronos.identity.v1.IdentityService/RequestAccountDeletion"
 )
 
 // IdentityServiceClient is a client for the chronos.identity.v1.IdentityService service.
@@ -180,6 +189,44 @@ type IdentityServiceClient interface {
 	// A WRITE: the successful path appends EmailVerificationRequested to the
 	// account's stream, and the verification reactor does the rest.
 	ResendEmailVerification(context.Context, *connect.Request[v1.ResendEmailVerificationRequest]) (*connect.Response[v1.ResendEmailVerificationResponse], error)
+	// CheckUsernameAvailability reports whether a public handle can be claimed.
+	//
+	// Public: it is reached from the signup form, by a browser that has never
+	// authenticated and by definition has no account.
+	//
+	// # It IS an enumeration oracle, and that is the intended behaviour
+	//
+	// A caller can learn that @alice is taken. That is not a leak, because a handle
+	// is PUBLISHED — publication is its entire purpose (ADR-051) — and the same
+	// fact is readable from any page that renders a mention, from a profile URL,
+	// and from the person themselves. Every other public RPC in this service is
+	// shaped to make its two outcomes indistinguishable; this one is shaped to make
+	// them distinguishable, and the difference is not an oversight in the schema.
+	//
+	// Do NOT "fix" this into an undifferentiated response. The resulting endpoint
+	// would answer no question at all, the signup form could not tell a person
+	// their handle was taken until after they had spent a verification link they
+	// cannot get back, and the information would remain freely available everywhere
+	// else in the product.
+	//
+	// The ONE thing it must not distinguish is a tombstoned handle from a taken
+	// one; see CheckUsernameAvailabilityResponse for why that single merge is a
+	// privacy control rather than the same tidiness.
+	//
+	// # The answer is advisory
+	//
+	// It reads the handle's reservation stream at an instant. Uniqueness is
+	// enforced at the moment of the WRITE by an atomic append with a precondition
+	// (ADR-044, ADR-051), so a handle reported free may be taken by the time
+	// VerifyEmail claims it — any check-then-claim is racy by construction. The
+	// point of this call is that a person finds out at the FORM rather than after
+	// clicking a link.
+	//
+	// A READ: it appends nothing, mints nothing and sends no mail. It is rate
+	// limited per caller regardless — "an attacker may learn whether @alice exists"
+	// is not the same permission as "an attacker may read a stream from the event
+	// store as fast as they can open sockets".
+	CheckUsernameAvailability(context.Context, *connect.Request[v1.CheckUsernameAvailabilityRequest]) (*connect.Response[v1.CheckUsernameAvailabilityResponse], error)
 	// RequestPasswordReset sends a reset link to the address a registered account
 	// holds.
 	//
@@ -333,6 +380,63 @@ type IdentityServiceClient interface {
 	// account-wide version, so the denial of service an attacker could inflict
 	// with it is total.
 	RevokeAllSessions(context.Context, *connect.Request[v1.RevokeAllSessionsRequest]) (*connect.Response[v1.RevokeAllSessionsResponse], error)
+	// DeactivateAccount switches the caller's own account off, and ends every
+	// session on it in the same atomic append.
+	//
+	// # Reversible, and how
+	//
+	// Deactivation is the holder's own switch and the holder undoes it by SIGNING
+	// IN again with every factor the account has — the successful authentication
+	// records the reactivation in the same append as itself, so the account is on
+	// again before the new session exists. There is deliberately no
+	// `ReactivateAccount` RPC: it would need a session, a session needs an
+	// authentication, and an authentication refuses a deactivated account, so its
+	// only precondition would be one its own subject can never satisfy. See
+	// `identity.md` §1.
+	//
+	// Suspension is the administrative counterpart and is NOT here. It is not
+	// reversible by the holder, every method on this service is reached by the
+	// holder acting on their own account, and there is no operator surface in this
+	// repository yet — so an RPC for it could only be a self-suspension, which
+	// makes the account unreachable by every route this module has.
+	//
+	// # AAL2
+	//
+	// On RevokeAllSessions' argument: the sign-out is total, so the denial of
+	// service an attacker holding a stolen password could inflict with it is total.
+	// No `bootstrap_min_aal`, deliberately — an account still enrolling its first
+	// factor has nothing to switch off, and the exemption exists for enrolment
+	// alone.
+	DeactivateAccount(context.Context, *connect.Request[v1.DeactivateAccountRequest]) (*connect.Response[v1.DeactivateAccountResponse], error)
+	// RequestAccountDeletion asks for the caller's own account to be erased, and
+	// starts the grace period.
+	//
+	// # Nothing acts on it yet
+	//
+	// The request is appended to the account's stream and that is the whole
+	// behaviour. Erasure is the compliance domain's work — destroy the key, and the
+	// personal data becomes unreadable everywhere at once — and that module does not
+	// exist. Neither does the workflow that runs the grace period, the mail that
+	// names the date, nor a command to cancel. The account keeps working.
+	//
+	// This is stated on the RPC rather than only in a design document because a
+	// client that reads "deletion requested" as "account gone" will build a screen
+	// that lies to the person using it.
+	//
+	// # AAL2, plus a typed confirmation
+	//
+	// identity.md §2 lists account deletion among the operations that require
+	// step-up. The step-up proves WHO is asking; the `confirmation` field is what
+	// makes it hard to ask by accident, which matters here and nowhere else in this
+	// service, because nothing in this module undoes it.
+	//
+	// # It does not sign anybody out
+	//
+	// Every other destructive call here voids sessions. This one deliberately does
+	// not: the grace period exists so the person can change their mind, and signing
+	// them out of an account that still works teaches them the request took effect
+	// immediately, which it did not.
+	RequestAccountDeletion(context.Context, *connect.Request[v1.RequestAccountDeletionRequest]) (*connect.Response[v1.RequestAccountDeletionResponse], error)
 }
 
 // NewIdentityServiceClient constructs a client for the chronos.identity.v1.IdentityService service.
@@ -362,6 +466,12 @@ func NewIdentityServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			httpClient,
 			baseURL+IdentityServiceResendEmailVerificationProcedure,
 			connect.WithSchema(identityServiceMethods.ByName("ResendEmailVerification")),
+			connect.WithClientOptions(opts...),
+		),
+		checkUsernameAvailability: connect.NewClient[v1.CheckUsernameAvailabilityRequest, v1.CheckUsernameAvailabilityResponse](
+			httpClient,
+			baseURL+IdentityServiceCheckUsernameAvailabilityProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("CheckUsernameAvailability")),
 			connect.WithClientOptions(opts...),
 		),
 		requestPasswordReset: connect.NewClient[v1.RequestPasswordResetRequest, v1.RequestPasswordResetResponse](
@@ -446,27 +556,42 @@ func NewIdentityServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(identityServiceMethods.ByName("RevokeAllSessions")),
 			connect.WithClientOptions(opts...),
 		),
+		deactivateAccount: connect.NewClient[v1.DeactivateAccountRequest, v1.DeactivateAccountResponse](
+			httpClient,
+			baseURL+IdentityServiceDeactivateAccountProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("DeactivateAccount")),
+			connect.WithClientOptions(opts...),
+		),
+		requestAccountDeletion: connect.NewClient[v1.RequestAccountDeletionRequest, v1.RequestAccountDeletionResponse](
+			httpClient,
+			baseURL+IdentityServiceRequestAccountDeletionProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("RequestAccountDeletion")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // identityServiceClient implements IdentityServiceClient.
 type identityServiceClient struct {
-	register                *connect.Client[v1.RegisterRequest, v1.RegisterResponse]
-	verifyEmail             *connect.Client[v1.VerifyEmailRequest, v1.VerifyEmailResponse]
-	resendEmailVerification *connect.Client[v1.ResendEmailVerificationRequest, v1.ResendEmailVerificationResponse]
-	requestPasswordReset    *connect.Client[v1.RequestPasswordResetRequest, v1.RequestPasswordResetResponse]
-	resetPassword           *connect.Client[v1.ResetPasswordRequest, v1.ResetPasswordResponse]
-	authenticate            *connect.Client[v1.AuthenticateRequest, v1.AuthenticateResponse]
-	createSession           *connect.Client[v1.CreateSessionRequest, v1.CreateSessionResponse]
-	getUser                 *connect.Client[v1.GetUserRequest, v1.GetUserResponse]
-	listSessions            *connect.Client[v1.ListSessionsRequest, v1.ListSessionsResponse]
-	listMethods             *connect.Client[v1.ListMethodsRequest, v1.ListMethodsResponse]
-	listLoginHistory        *connect.Client[v1.ListLoginHistoryRequest, v1.ListLoginHistoryResponse]
-	enrollTotp              *connect.Client[v1.EnrollTotpRequest, v1.EnrollTotpResponse]
-	confirmTotp             *connect.Client[v1.ConfirmTotpRequest, v1.ConfirmTotpResponse]
-	generateRecoveryCodes   *connect.Client[v1.GenerateRecoveryCodesRequest, v1.GenerateRecoveryCodesResponse]
-	revokeSession           *connect.Client[v1.RevokeSessionRequest, v1.RevokeSessionResponse]
-	revokeAllSessions       *connect.Client[v1.RevokeAllSessionsRequest, v1.RevokeAllSessionsResponse]
+	register                  *connect.Client[v1.RegisterRequest, v1.RegisterResponse]
+	verifyEmail               *connect.Client[v1.VerifyEmailRequest, v1.VerifyEmailResponse]
+	resendEmailVerification   *connect.Client[v1.ResendEmailVerificationRequest, v1.ResendEmailVerificationResponse]
+	checkUsernameAvailability *connect.Client[v1.CheckUsernameAvailabilityRequest, v1.CheckUsernameAvailabilityResponse]
+	requestPasswordReset      *connect.Client[v1.RequestPasswordResetRequest, v1.RequestPasswordResetResponse]
+	resetPassword             *connect.Client[v1.ResetPasswordRequest, v1.ResetPasswordResponse]
+	authenticate              *connect.Client[v1.AuthenticateRequest, v1.AuthenticateResponse]
+	createSession             *connect.Client[v1.CreateSessionRequest, v1.CreateSessionResponse]
+	getUser                   *connect.Client[v1.GetUserRequest, v1.GetUserResponse]
+	listSessions              *connect.Client[v1.ListSessionsRequest, v1.ListSessionsResponse]
+	listMethods               *connect.Client[v1.ListMethodsRequest, v1.ListMethodsResponse]
+	listLoginHistory          *connect.Client[v1.ListLoginHistoryRequest, v1.ListLoginHistoryResponse]
+	enrollTotp                *connect.Client[v1.EnrollTotpRequest, v1.EnrollTotpResponse]
+	confirmTotp               *connect.Client[v1.ConfirmTotpRequest, v1.ConfirmTotpResponse]
+	generateRecoveryCodes     *connect.Client[v1.GenerateRecoveryCodesRequest, v1.GenerateRecoveryCodesResponse]
+	revokeSession             *connect.Client[v1.RevokeSessionRequest, v1.RevokeSessionResponse]
+	revokeAllSessions         *connect.Client[v1.RevokeAllSessionsRequest, v1.RevokeAllSessionsResponse]
+	deactivateAccount         *connect.Client[v1.DeactivateAccountRequest, v1.DeactivateAccountResponse]
+	requestAccountDeletion    *connect.Client[v1.RequestAccountDeletionRequest, v1.RequestAccountDeletionResponse]
 }
 
 // Register calls chronos.identity.v1.IdentityService.Register.
@@ -482,6 +607,11 @@ func (c *identityServiceClient) VerifyEmail(ctx context.Context, req *connect.Re
 // ResendEmailVerification calls chronos.identity.v1.IdentityService.ResendEmailVerification.
 func (c *identityServiceClient) ResendEmailVerification(ctx context.Context, req *connect.Request[v1.ResendEmailVerificationRequest]) (*connect.Response[v1.ResendEmailVerificationResponse], error) {
 	return c.resendEmailVerification.CallUnary(ctx, req)
+}
+
+// CheckUsernameAvailability calls chronos.identity.v1.IdentityService.CheckUsernameAvailability.
+func (c *identityServiceClient) CheckUsernameAvailability(ctx context.Context, req *connect.Request[v1.CheckUsernameAvailabilityRequest]) (*connect.Response[v1.CheckUsernameAvailabilityResponse], error) {
+	return c.checkUsernameAvailability.CallUnary(ctx, req)
 }
 
 // RequestPasswordReset calls chronos.identity.v1.IdentityService.RequestPasswordReset.
@@ -549,6 +679,16 @@ func (c *identityServiceClient) RevokeAllSessions(ctx context.Context, req *conn
 	return c.revokeAllSessions.CallUnary(ctx, req)
 }
 
+// DeactivateAccount calls chronos.identity.v1.IdentityService.DeactivateAccount.
+func (c *identityServiceClient) DeactivateAccount(ctx context.Context, req *connect.Request[v1.DeactivateAccountRequest]) (*connect.Response[v1.DeactivateAccountResponse], error) {
+	return c.deactivateAccount.CallUnary(ctx, req)
+}
+
+// RequestAccountDeletion calls chronos.identity.v1.IdentityService.RequestAccountDeletion.
+func (c *identityServiceClient) RequestAccountDeletion(ctx context.Context, req *connect.Request[v1.RequestAccountDeletionRequest]) (*connect.Response[v1.RequestAccountDeletionResponse], error) {
+	return c.requestAccountDeletion.CallUnary(ctx, req)
+}
+
 // IdentityServiceHandler is an implementation of the chronos.identity.v1.IdentityService service.
 type IdentityServiceHandler interface {
 	// Register claims an address and creates the account that claims it.
@@ -590,6 +730,44 @@ type IdentityServiceHandler interface {
 	// A WRITE: the successful path appends EmailVerificationRequested to the
 	// account's stream, and the verification reactor does the rest.
 	ResendEmailVerification(context.Context, *connect.Request[v1.ResendEmailVerificationRequest]) (*connect.Response[v1.ResendEmailVerificationResponse], error)
+	// CheckUsernameAvailability reports whether a public handle can be claimed.
+	//
+	// Public: it is reached from the signup form, by a browser that has never
+	// authenticated and by definition has no account.
+	//
+	// # It IS an enumeration oracle, and that is the intended behaviour
+	//
+	// A caller can learn that @alice is taken. That is not a leak, because a handle
+	// is PUBLISHED — publication is its entire purpose (ADR-051) — and the same
+	// fact is readable from any page that renders a mention, from a profile URL,
+	// and from the person themselves. Every other public RPC in this service is
+	// shaped to make its two outcomes indistinguishable; this one is shaped to make
+	// them distinguishable, and the difference is not an oversight in the schema.
+	//
+	// Do NOT "fix" this into an undifferentiated response. The resulting endpoint
+	// would answer no question at all, the signup form could not tell a person
+	// their handle was taken until after they had spent a verification link they
+	// cannot get back, and the information would remain freely available everywhere
+	// else in the product.
+	//
+	// The ONE thing it must not distinguish is a tombstoned handle from a taken
+	// one; see CheckUsernameAvailabilityResponse for why that single merge is a
+	// privacy control rather than the same tidiness.
+	//
+	// # The answer is advisory
+	//
+	// It reads the handle's reservation stream at an instant. Uniqueness is
+	// enforced at the moment of the WRITE by an atomic append with a precondition
+	// (ADR-044, ADR-051), so a handle reported free may be taken by the time
+	// VerifyEmail claims it — any check-then-claim is racy by construction. The
+	// point of this call is that a person finds out at the FORM rather than after
+	// clicking a link.
+	//
+	// A READ: it appends nothing, mints nothing and sends no mail. It is rate
+	// limited per caller regardless — "an attacker may learn whether @alice exists"
+	// is not the same permission as "an attacker may read a stream from the event
+	// store as fast as they can open sockets".
+	CheckUsernameAvailability(context.Context, *connect.Request[v1.CheckUsernameAvailabilityRequest]) (*connect.Response[v1.CheckUsernameAvailabilityResponse], error)
 	// RequestPasswordReset sends a reset link to the address a registered account
 	// holds.
 	//
@@ -743,6 +921,63 @@ type IdentityServiceHandler interface {
 	// account-wide version, so the denial of service an attacker could inflict
 	// with it is total.
 	RevokeAllSessions(context.Context, *connect.Request[v1.RevokeAllSessionsRequest]) (*connect.Response[v1.RevokeAllSessionsResponse], error)
+	// DeactivateAccount switches the caller's own account off, and ends every
+	// session on it in the same atomic append.
+	//
+	// # Reversible, and how
+	//
+	// Deactivation is the holder's own switch and the holder undoes it by SIGNING
+	// IN again with every factor the account has — the successful authentication
+	// records the reactivation in the same append as itself, so the account is on
+	// again before the new session exists. There is deliberately no
+	// `ReactivateAccount` RPC: it would need a session, a session needs an
+	// authentication, and an authentication refuses a deactivated account, so its
+	// only precondition would be one its own subject can never satisfy. See
+	// `identity.md` §1.
+	//
+	// Suspension is the administrative counterpart and is NOT here. It is not
+	// reversible by the holder, every method on this service is reached by the
+	// holder acting on their own account, and there is no operator surface in this
+	// repository yet — so an RPC for it could only be a self-suspension, which
+	// makes the account unreachable by every route this module has.
+	//
+	// # AAL2
+	//
+	// On RevokeAllSessions' argument: the sign-out is total, so the denial of
+	// service an attacker holding a stolen password could inflict with it is total.
+	// No `bootstrap_min_aal`, deliberately — an account still enrolling its first
+	// factor has nothing to switch off, and the exemption exists for enrolment
+	// alone.
+	DeactivateAccount(context.Context, *connect.Request[v1.DeactivateAccountRequest]) (*connect.Response[v1.DeactivateAccountResponse], error)
+	// RequestAccountDeletion asks for the caller's own account to be erased, and
+	// starts the grace period.
+	//
+	// # Nothing acts on it yet
+	//
+	// The request is appended to the account's stream and that is the whole
+	// behaviour. Erasure is the compliance domain's work — destroy the key, and the
+	// personal data becomes unreadable everywhere at once — and that module does not
+	// exist. Neither does the workflow that runs the grace period, the mail that
+	// names the date, nor a command to cancel. The account keeps working.
+	//
+	// This is stated on the RPC rather than only in a design document because a
+	// client that reads "deletion requested" as "account gone" will build a screen
+	// that lies to the person using it.
+	//
+	// # AAL2, plus a typed confirmation
+	//
+	// identity.md §2 lists account deletion among the operations that require
+	// step-up. The step-up proves WHO is asking; the `confirmation` field is what
+	// makes it hard to ask by accident, which matters here and nowhere else in this
+	// service, because nothing in this module undoes it.
+	//
+	// # It does not sign anybody out
+	//
+	// Every other destructive call here voids sessions. This one deliberately does
+	// not: the grace period exists so the person can change their mind, and signing
+	// them out of an account that still works teaches them the request took effect
+	// immediately, which it did not.
+	RequestAccountDeletion(context.Context, *connect.Request[v1.RequestAccountDeletionRequest]) (*connect.Response[v1.RequestAccountDeletionResponse], error)
 }
 
 // NewIdentityServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -768,6 +1003,12 @@ func NewIdentityServiceHandler(svc IdentityServiceHandler, opts ...connect.Handl
 		IdentityServiceResendEmailVerificationProcedure,
 		svc.ResendEmailVerification,
 		connect.WithSchema(identityServiceMethods.ByName("ResendEmailVerification")),
+		connect.WithHandlerOptions(opts...),
+	)
+	identityServiceCheckUsernameAvailabilityHandler := connect.NewUnaryHandler(
+		IdentityServiceCheckUsernameAvailabilityProcedure,
+		svc.CheckUsernameAvailability,
+		connect.WithSchema(identityServiceMethods.ByName("CheckUsernameAvailability")),
 		connect.WithHandlerOptions(opts...),
 	)
 	identityServiceRequestPasswordResetHandler := connect.NewUnaryHandler(
@@ -852,6 +1093,18 @@ func NewIdentityServiceHandler(svc IdentityServiceHandler, opts ...connect.Handl
 		connect.WithSchema(identityServiceMethods.ByName("RevokeAllSessions")),
 		connect.WithHandlerOptions(opts...),
 	)
+	identityServiceDeactivateAccountHandler := connect.NewUnaryHandler(
+		IdentityServiceDeactivateAccountProcedure,
+		svc.DeactivateAccount,
+		connect.WithSchema(identityServiceMethods.ByName("DeactivateAccount")),
+		connect.WithHandlerOptions(opts...),
+	)
+	identityServiceRequestAccountDeletionHandler := connect.NewUnaryHandler(
+		IdentityServiceRequestAccountDeletionProcedure,
+		svc.RequestAccountDeletion,
+		connect.WithSchema(identityServiceMethods.ByName("RequestAccountDeletion")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/chronos.identity.v1.IdentityService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case IdentityServiceRegisterProcedure:
@@ -860,6 +1113,8 @@ func NewIdentityServiceHandler(svc IdentityServiceHandler, opts ...connect.Handl
 			identityServiceVerifyEmailHandler.ServeHTTP(w, r)
 		case IdentityServiceResendEmailVerificationProcedure:
 			identityServiceResendEmailVerificationHandler.ServeHTTP(w, r)
+		case IdentityServiceCheckUsernameAvailabilityProcedure:
+			identityServiceCheckUsernameAvailabilityHandler.ServeHTTP(w, r)
 		case IdentityServiceRequestPasswordResetProcedure:
 			identityServiceRequestPasswordResetHandler.ServeHTTP(w, r)
 		case IdentityServiceResetPasswordProcedure:
@@ -886,6 +1141,10 @@ func NewIdentityServiceHandler(svc IdentityServiceHandler, opts ...connect.Handl
 			identityServiceRevokeSessionHandler.ServeHTTP(w, r)
 		case IdentityServiceRevokeAllSessionsProcedure:
 			identityServiceRevokeAllSessionsHandler.ServeHTTP(w, r)
+		case IdentityServiceDeactivateAccountProcedure:
+			identityServiceDeactivateAccountHandler.ServeHTTP(w, r)
+		case IdentityServiceRequestAccountDeletionProcedure:
+			identityServiceRequestAccountDeletionHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -905,6 +1164,10 @@ func (UnimplementedIdentityServiceHandler) VerifyEmail(context.Context, *connect
 
 func (UnimplementedIdentityServiceHandler) ResendEmailVerification(context.Context, *connect.Request[v1.ResendEmailVerificationRequest]) (*connect.Response[v1.ResendEmailVerificationResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.ResendEmailVerification is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) CheckUsernameAvailability(context.Context, *connect.Request[v1.CheckUsernameAvailabilityRequest]) (*connect.Response[v1.CheckUsernameAvailabilityResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.CheckUsernameAvailability is not implemented"))
 }
 
 func (UnimplementedIdentityServiceHandler) RequestPasswordReset(context.Context, *connect.Request[v1.RequestPasswordResetRequest]) (*connect.Response[v1.RequestPasswordResetResponse], error) {
@@ -957,4 +1220,12 @@ func (UnimplementedIdentityServiceHandler) RevokeSession(context.Context, *conne
 
 func (UnimplementedIdentityServiceHandler) RevokeAllSessions(context.Context, *connect.Request[v1.RevokeAllSessionsRequest]) (*connect.Response[v1.RevokeAllSessionsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.RevokeAllSessions is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) DeactivateAccount(context.Context, *connect.Request[v1.DeactivateAccountRequest]) (*connect.Response[v1.DeactivateAccountResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.DeactivateAccount is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) RequestAccountDeletion(context.Context, *connect.Request[v1.RequestAccountDeletionRequest]) (*connect.Response[v1.RequestAccountDeletionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.RequestAccountDeletion is not implemented"))
 }

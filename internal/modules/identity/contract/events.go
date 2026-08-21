@@ -86,6 +86,64 @@ type EmailReleased struct {
 
 func (*EmailReleased) EventType() string { return "identity.EmailReleased.v1" }
 
+// DuplicateRegistrationAttempted records that somebody tried to register with an
+// address a VERIFIED account already holds.
+//
+// # Why this event exists at all
+//
+// Register is deliberately indistinguishable: the already-claimed branch and the
+// success branch return the same empty response, because a CONFLICT on the wire
+// answers "does an account exist for this address?" exactly (identity.md §11,
+// ADR-036). That property is correct and this event does not weaken it — nothing
+// here reaches the caller.
+//
+// What it fixes is the other half. Until this event, the taken branch sent
+// NOTHING anywhere: the screen said "check your email", no mail was ever sent,
+// and the person who actually owns the mailbox — the returning user, who is who
+// hits that branch most often — was left at a dead end with no way to learn that
+// the account they were trying to create already exists. The answer cannot go on
+// the wire, so it goes to the MAILBOX, which is the one channel that proves
+// ownership of the address before disclosing anything about it.
+//
+// # Only for a VERIFIED claim
+//
+// The reservation aggregate refuses to record this while the claim is unverified
+// (domain.EmailReservation.NoticeDuplicateRegistration). Mailing an address whose
+// claim nobody has proven is unsolicited mail to a person who never asked for it
+// and never proved they can read it (NOTIFICATIONS §5) — and the pending
+// registrant already holds a verification link and a resend path.
+//
+// # What it carries, and what it must never carry
+//
+// The pseudonym of the account that HOLDS the address, so the notification
+// kernel resolves the mailbox from the vault at delivery time (ADR-002). Not the
+// address. Not the caller's IP, not their user agent, and nothing else about
+// whoever typed the address: an event is permanent and replicated, and the party
+// this records is by definition unauthenticated, so anything attributed to them
+// would be attacker-controlled text living forever in the log.
+//
+// AttemptedAt is load-bearing rather than decorative — it is what the reservation
+// aggregate counts to bound how often one address can be made to receive this
+// message. See domain.EmailReservation.NoticesSince.
+type DuplicateRegistrationAttempted struct {
+	// Index is the keyed HMAC of the address, and also names the stream this
+	// lands on. Present for the same reason EmailReserved carries it: a reader
+	// does not parse stream names.
+	Index EmailIndex
+
+	// SubjectID is the account that holds the claim — the person who is told.
+	// It is NOT whoever made the attempt, who is unauthenticated and unnamed.
+	SubjectID string
+
+	// AttemptedAt is when the refused registration arrived, UTC. The per-address
+	// ceiling is computed from these, so it is state rather than commentary.
+	AttemptedAt time.Time
+}
+
+func (*DuplicateRegistrationAttempted) EventType() string {
+	return "identity.DuplicateRegistrationAttempted.v1"
+}
+
 // ---------------------------------------------------------------------------
 // Account lifecycle
 // ---------------------------------------------------------------------------
@@ -204,6 +262,48 @@ type UserSuspended struct {
 }
 
 func (*UserSuspended) EventType() string { return "identity.UserSuspended.v1" }
+
+// UserDeletionRequested records that the account holder has asked for the
+// account to be erased.
+//
+// It is a REQUEST and nothing more. Erasure is `compliance`'s work (ADR-002:
+// destroy the key), and that module does not exist yet — so nothing consumes
+// this event today and the account keeps working until something does. Saying
+// so in the type is deliberate: an event named `UserDeleted` would read as a
+// completed fact, and a projection built against that reading would hide an
+// account that is still fully usable.
+//
+// # Why the deadline is in the event
+//
+// `ScheduledFor` is the end of the grace period, computed by the application
+// layer from its own policy and frozen here. A consumer that recomputed it from
+// `RequestedAt` plus whatever the grace period is TODAY would move every
+// outstanding deadline whenever the policy changed — including backwards, past
+// deadlines that have already been communicated to the person by mail
+// (NOTIFICATIONS.md §4: "Deletion scheduled for *date* — cancel").
+//
+// # No personal data, as everywhere else
+//
+// A pseudonym, an actor and two timestamps. Nothing here says which address is
+// being deleted, and nothing needs to: the vault resolves the subject at send
+// time (ADR-002).
+type UserDeletionRequested struct {
+	SubjectID string
+
+	// ActorID is who asked, and is normally the SubjectID. It differs when an
+	// operator raises a deletion on the holder's behalf — a DSAR arriving by
+	// post, for instance — and the difference decides who the mail goes to
+	// (NOTIFICATIONS §4).
+	ActorID string
+
+	// ScheduledFor is when erasure becomes due: the end of the grace period
+	// during which the request can still be withdrawn.
+	ScheduledFor time.Time
+
+	RequestedAt time.Time
+}
+
+func (*UserDeletionRequested) EventType() string { return "identity.UserDeletionRequested.v1" }
 
 // ---------------------------------------------------------------------------
 // Password
@@ -591,3 +691,107 @@ type DeviceRegistered struct {
 }
 
 func (*DeviceRegistered) EventType() string { return "identity.DeviceRegistered.v1" }
+
+// ---------------------------------------------------------------------------
+// Username reservation
+//
+// The public handle (ADR-051). Three events, and the split mirrors the email
+// trio one section above for the same reason: the CLAIM is a fact about a handle
+// and lives on the handle's own stream, while the ASSIGNMENT is a fact about an
+// account and lives on the account's stream. One event cannot be appended to two
+// streams, and collapsing them would leave an account believing it holds a
+// handle no reservation records, or a reservation held by an account that does
+// not know it.
+//
+// Unlike the email trio there is no lease, no expiry and no release. A handle is
+// claimed by an account that has just PROVEN its address (identity.md §4.6), so
+// there is no unverified claim to lapse — and the one terminal transition,
+// UsernameTombstoned, is permanent by design.
+//
+// These are the first events in this module whose payload is CLEARTEXT text a
+// person chose. That is the deliberate exception ADR-051 records: a handle is
+// published by design, so a vault that could shred it would protect nothing
+// while every copy that matters sits in somebody else's inbox.
+// ---------------------------------------------------------------------------
+
+// UsernameReserved claims a public handle for an account.
+//
+// This is the uniqueness mechanism, and it is an APPEND rather than a unique
+// index for exactly the reason EmailReserved is: uniqueness has to hold at the
+// moment of the write, in the log, not eventually in a projection. Two
+// simultaneous claims for one handle contend on one stream and one of them loses
+// its ENTIRE append.
+//
+// The stream is named by the handle ITSELF, not by a keyed HMAC. ADR-048 hides
+// an email because an email is secret and a stream name is unshreddable; hiding
+// a handle would buy nothing — it is published on purpose — and would cost the
+// ability to read the log while debugging.
+type UsernameReserved struct {
+	// Username is the normalized handle. It is also what names the stream, so it
+	// is present here for the projector, which does not parse stream names.
+	Username string
+
+	// SubjectID is the account that now holds the handle. Permanently: nothing
+	// releases a handle back into circulation.
+	SubjectID string
+
+	ReservedAt time.Time
+}
+
+func (*UsernameReserved) EventType() string { return "identity.UsernameReserved.v1" }
+
+// UsernameAssigned records that an ACCOUNT has a handle.
+//
+// Separate from UsernameReserved because the two live on different streams, and
+// present at all because the aggregate that decides an account's future must be
+// able to answer "what is this account's handle?" from the account's OWN log. A
+// projection cannot serve that: erasure must tombstone the handle it is
+// destroying, that decision is a write, and a write decided from an eventually
+// consistent read can be decided twice with two different answers.
+type UsernameAssigned struct {
+	SubjectID string
+
+	// Username is the normalized handle, in the clear. See the section comment.
+	Username string
+
+	AssignedAt time.Time
+}
+
+func (*UsernameAssigned) EventType() string { return "identity.UsernameAssigned.v1" }
+
+// UsernameTombstoned burns a handle forever.
+//
+// Recorded when an account is erased. Erasure elsewhere in this system is the
+// destruction of a key (ADR-002), and key destruction does nothing to a value
+// that was published — so a handle has to be DELETED from the projection, and
+// deletion alone is not enough.
+//
+// # Why the handle may never be reissued
+//
+// Because every old mention, link and cached reference would silently re-point
+// at a stranger. An erasure request is a privacy action taken to protect
+// somebody; reissuing their handle would turn it into an impersonation vector
+// aimed at that same person, arriving through the control they used to defend
+// themselves.
+//
+// # Why retaining it after an erasure is lawful, and how that is made true
+//
+// It is data kept after an erasure request, so it needs a justification rather
+// than a convention. Two: it protects THIRD PARTIES — readers of old content,
+// who would otherwise be deceived — rather than the controller, and it retains
+// NO PERSONAL DATA.
+//
+// The second half is carried by the type. There is no SubjectID field, no actor
+// and no field naming the account, and the absence is the enforcement: a
+// tombstone is a reservation with no owner, and nothing here can be joined back
+// to the person who held it.
+type UsernameTombstoned struct {
+	// Username is the handle being burned. Cleartext, and the only field that
+	// could be: it is what the reservation stream is named after, so hiding it
+	// here would hide it from the projector and from nobody else.
+	Username string
+
+	TombstonedAt time.Time
+}
+
+func (*UsernameTombstoned) EventType() string { return "identity.UsernameTombstoned.v1" }

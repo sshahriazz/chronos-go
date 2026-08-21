@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -772,10 +773,28 @@ func TestEveryRefusalIsIdentical(t *testing.T) {
 			reason: contract.ReasonIncomplete,
 		},
 		{
-			name: "deactivated account",
+			// Deactivated AND UNVERIFIED. A deactivated account whose address is
+			// PROVEN is admitted now, because the login is how the holder reverses
+			// their own deactivation (domain.User.NeedsReactivation) — see
+			// TestADeactivatedAccountIsReactivatedByACompletedLogin. This is the case
+			// ReasonDeactivated continues to describe, and it stays in this table
+			// because it is still a state whose refusal must be indistinguishable.
+			name: "deactivated account that never proved its address",
 			arrange: func(h *authHarness) {
-				mustDo(h.t, h.user.Deactivate(h.subjectID, testNow))
-				h.user.ClearUncommitted()
+				u := eventsourcing.NewAggregate(domain.New)
+				mustDo(h.t, u.Register(h.userID, h.subjectID, h.index, testNow))
+				// Applied as a raw EVENT, for the reason the unverified case in
+				// TestOnlyAVerifiedNeverEnrolledAccountAuthenticatesOnOneFactor gives:
+				// the decision is refused on an unproven address, and the state is
+				// still reachable by replay.
+				u.Apply(&contract.PasswordSet{
+					SubjectID:    h.subjectID,
+					CredentialID: h.credID.String(),
+					SetAt:        testNow,
+				})
+				mustDo(h.t, u.Deactivate(h.subjectID, testNow))
+				u.ClearUncommitted()
+				h.user = u
 			},
 			cmd:    AuthenticateCommand{Password: testPassword, Code: authCode},
 			reason: contract.ReasonDeactivated,
@@ -897,6 +916,99 @@ func TestEveryRefusalIsIdentical(t *testing.T) {
 			if failed.Index != h.index {
 				t.Errorf("the event carries index %q, want %q — the stuffing signal is the "+
 					"index", failed.Index, h.index)
+			}
+		})
+	}
+}
+
+// The refusals that happen BEFORE any account is looked at must give the same
+// answer as the ones that happen after.
+//
+// # Why these need their own test
+//
+// TestEveryRefusalIsIdentical cannot hold them. Every case in that table reaches
+// the credential path, so it asserts one password verification and one
+// AuthenticationFailed event — and these two branches deliberately do neither.
+// An empty password and an unparseable identifier are refused before the
+// ceiling, before the blind index is consulted for an account, and before any
+// hashing, precisely so that an unauthenticated caller cannot make the server
+// work; appending an event for them would be an unbounded write to the log that
+// an attacker chooses the volume of (see Authenticate's "What is deliberately
+// not here").
+//
+// So the cost assertions do not apply, and the WIRE assertion is the whole
+// property: ADR-036 requires one answer for every authentication failure, and a
+// branch that returns a validation message instead announces that this refusal
+// was decided by a different rule from the others. That is the thin end of the
+// erosion the uniform refusal exists to prevent — errRefused is a function
+// rather than a value for the same reason.
+//
+// Both branches SURVIVED the S1-29 mutation pass: replacing errRefused() with a
+// ValidationFailed message in either one left every test in the repository
+// green. This is the test that kills them.
+func TestTheRefusalsBeforeAnyAccountLookupAreAlsoIdentical(t *testing.T) {
+	// The reference is the same one TestEveryRefusalIsIdentical uses: an
+	// ordinary wrong password, which is the answer every failure must give.
+	reference := func() error {
+		h := newAuthHarness(t)
+		_, err := h.login(AuthenticateCommand{Password: "wrong", Code: authCode})
+		return err
+	}()
+
+	cases := []struct {
+		name string
+		cmd  AuthenticateCommand
+	}{
+		{
+			// No password at all. Refused before the ceiling; nothing about the
+			// account is consulted, and the answer must still be the account's.
+			name: "no password was sent",
+			cmd:  AuthenticateCommand{Password: "", Code: authCode},
+		},
+		{
+			// An identifier this system will not normalize. "That is not a valid
+			// address" and "that address has no account" are two answers, and a
+			// caller who can tell them apart has learned which strings this build
+			// considers addressable — which is a property of the normalizer, and
+			// the normalizer is the thing standing between a typed string and an
+			// account lookup.
+			name: "the identifier is not an address this system accepts",
+			cmd: AuthenticateCommand{
+				Identifier: "not-an-address", Password: testPassword, Code: authCode,
+			},
+		},
+		{
+			name: "the identifier is empty",
+			cmd: AuthenticateCommand{
+				Identifier: " ", Password: testPassword, Code: authCode,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newAuthHarness(t)
+
+			_, err := h.login(tc.cmd)
+			if err == nil {
+				t.Fatal("the attempt was accepted")
+			}
+			if err.Error() != reference.Error() {
+				t.Errorf("refusal is %q, want %q — a refusal decided before the account "+
+					"lookup must read exactly like one decided after it (ADR-036)",
+					err.Error(), reference.Error())
+			}
+			if errs.ReasonOf(err) != errs.ReasonOf(reference) {
+				t.Errorf("refusal reason is %s, want %s; a distinguishable errs.Reason is a "+
+					"distinguishable Connect code on the wire",
+					errs.ReasonOf(err), errs.ReasonOf(reference))
+			}
+			// The other half of why these branches exist: they cost nothing. A
+			// branch that started hashing here would let an unauthenticated caller
+			// spend Argon2id evaluations on input it chooses.
+			if h.hasher.verifies != 0 {
+				t.Errorf("verified %d times, want 0: this refusal is decided from the "+
+					"request alone and must not reach the hasher", h.hasher.verifies)
 			}
 		})
 	}
@@ -1637,10 +1749,22 @@ func TestOnlyAVerifiedNeverEnrolledAccountAuthenticatesOnOneFactor(t *testing.T)
 			},
 		},
 		{
-			name: "the account is deactivated",
+			// Deactivated AND UNVERIFIED. A verified deactivated account does not
+			// belong in this table at all: it is not admitted on one factor either —
+			// it is CHALLENGED for the second one, exactly as an active account is —
+			// and that is asserted by TestADeactivatedAccountStillOwesItsSecondFactor.
+			name: "the account is deactivated and never proved its address",
 			account: func(t *testing.T, h *authHarness) {
-				mustDo(t, h.user.Deactivate(h.subjectID, testNow))
-				h.user.ClearUncommitted()
+				u := eventsourcing.NewAggregate(domain.New)
+				mustDo(t, u.Register(h.userID, h.subjectID, h.index, testNow))
+				u.Apply(&contract.PasswordSet{
+					SubjectID:    h.subjectID,
+					CredentialID: h.credID.String(),
+					SetAt:        testNow,
+				})
+				mustDo(t, u.Deactivate(h.subjectID, testNow))
+				u.ClearUncommitted()
+				h.user = u
 				delete(h.secrets.rows, h.subjectID)
 			},
 		},
@@ -1802,6 +1926,180 @@ func TestAFailedTokenWriteIsReported(t *testing.T) {
 	}); err == nil {
 		t.Fatal("a session with no token was reported as a success; the caller would hold " +
 			"a token that resolves to nothing")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Reactivation — the way back into a deactivated account
+// ---------------------------------------------------------------------------
+
+// deactivated switches the harness account off, leaving it verified.
+func (h *authHarness) deactivated(t *testing.T) {
+	t.Helper()
+	mustDo(t, h.user.Deactivate(h.subjectID, testNow))
+	h.user.ClearUncommitted()
+	h.appender.calls = nil
+	h.journal = nil
+	*h.appender.journal = nil
+}
+
+// A deactivated account is CHALLENGED for its second factor, exactly as an
+// active one is.
+//
+// The carve-out admits the ceremony; it does not shorten it. Without this, a
+// stolen password alone would be enough to bring an account back — which is
+// strictly worse than an ordinary login, because the account's owner switched it
+// off on purpose.
+func TestADeactivatedAccountStillOwesItsSecondFactor(t *testing.T) {
+	h := newAuthHarness(t)
+	h.deactivated(t)
+
+	res, err := h.login(AuthenticateCommand{Password: testPassword})
+	if err != nil {
+		t.Fatalf("a password-only attempt on a deactivated account: %v", err)
+	}
+	if !res.SecondFactorRequired {
+		t.Fatal("a deactivated account completed a login on a password alone; the holder's " +
+			"own second factor is what stops a stolen password from undoing their " +
+			"deactivation")
+	}
+	if res.Proof.SubjectID() != "" {
+		t.Error("a challenged attempt produced a usable proof")
+	}
+	for _, e := range h.appender.events() {
+		if _, ok := e.(*contract.UserReactivated); ok {
+			t.Fatal("an incomplete ceremony reactivated the account")
+		}
+	}
+	if h.user.State() != domain.StateDeactivated {
+		t.Errorf("state is %s after a challenge, want deactivated", h.user.State())
+	}
+}
+
+// A COMPLETED login reactivates, and the reactivation rides the same atomic
+// append as the successful authentication.
+//
+// This is the property that makes "deactivation is reversible by the holder"
+// (identity.md §1) true rather than documented. Ask what it would do if the
+// feature were deleted: restore CanAuthenticate's blanket refusal and this fails
+// at the first line, with no route back into the account anywhere in the module.
+//
+// The single-append assertion is the second half and is not cosmetic. Two appends
+// have an order, and both orders are wrong: recording the success first leaves a
+// Proof for an account the log still says is off — and CreateSession does not
+// re-read the account, so that Proof mints an ordinary session on a deactivated
+// account. Recording the reactivation first switches an account on with no
+// authentication behind it in the log.
+func TestADeactivatedAccountIsReactivatedByACompletedLogin(t *testing.T) {
+	h := newAuthHarness(t)
+	h.deactivated(t)
+
+	res, err := h.login(AuthenticateCommand{Password: testPassword, Code: authCode})
+	if err != nil {
+		t.Fatalf("a completed login on a deactivated account: %v\nthe account is then "+
+			"unreachable by every route this module has", err)
+	}
+	if res.Proof.AAL() != contract.AAL2 {
+		t.Errorf("the reactivating login reached AAL%d, want AAL2", res.Proof.AAL())
+	}
+	if h.user.State() != domain.StateActive {
+		t.Fatalf("state after a completed login is %s, want active", h.user.State())
+	}
+
+	if len(h.appender.calls) != 1 {
+		t.Fatalf("the reactivating login wrote %d appends, want exactly 1 — split in two, "+
+			"one order mints a session for a deactivated account and the other switches an "+
+			"account on with no authentication behind it", len(h.appender.calls))
+	}
+	call := h.appender.calls[0]
+	if len(call) != 2 {
+		t.Fatalf("the append names %d streams, want 2 (the account and the attempt journal)",
+			len(call))
+	}
+
+	var reactivated, succeeded bool
+	for _, stream := range call {
+		for _, e := range stream.Events {
+			switch e.Event.(type) {
+			case *contract.UserReactivated:
+				reactivated = true
+				if stream.Expected == eventsourcing.AnyRevision() {
+					t.Error("the account entry expects any revision; two concurrent logins " +
+						"would then both reactivate, and a deactivation racing a login would " +
+						"be overwritten without a conflict")
+				}
+			case *contract.AuthenticationSucceeded:
+				succeeded = true
+			}
+		}
+	}
+	if !reactivated || !succeeded {
+		t.Fatalf("the append carries reactivated=%v succeeded=%v, want both", reactivated, succeeded)
+	}
+
+	// The two streams derive their event ids from the same caller key, so a shared
+	// namespace would make one of them collide with the other and be collapsed by
+	// the store — silently.
+	seen := map[string]bool{}
+	for _, stream := range call {
+		for _, e := range stream.Events {
+			if seen[e.ID.String()] {
+				t.Fatalf("two events in one append share the id %s; the store collapses by "+
+					"id, so one of them would silently not be written", e.ID)
+			}
+			seen[e.ID.String()] = true
+		}
+	}
+}
+
+// A reactivating login that loses the race for the account stream writes NOTHING
+// and mints no proof.
+//
+// The append is atomic, so the authentication journal entry is rolled back with
+// the reactivation. Reporting success here would hand back a Proof for an account
+// the log still says is deactivated.
+func TestAReactivatingLoginThatLosesTheRaceMintsNoProof(t *testing.T) {
+	h := newAuthHarness(t)
+	h.deactivated(t)
+	h.appender.err = fmt.Errorf("%w: another write won", eventsourcing.ErrWrongExpectedRevision)
+
+	res, err := h.login(AuthenticateCommand{Password: testPassword, Code: authCode})
+	if err == nil {
+		t.Fatal("a reactivating login whose append was refused reported success")
+	}
+	if res.Proof.SubjectID() != "" {
+		t.Error("a failed reactivating login produced a usable proof")
+	}
+	if _, err := h.auth.CreateSession(context.Background(), CreateSessionCommand{
+		Proof: res.Proof, IdempotencyKey: "idem-session",
+	}); err == nil {
+		t.Fatal("a session was minted from the proof of a login that never landed")
+	}
+}
+
+// An ACTIVE account writes nothing to its own stream on a successful login.
+//
+// The reactivation path must not become "every login touches the account". An
+// event per successful login makes the account stream grow with TRAFFIC rather
+// than with state, which is exactly why identity.md §13 refuses to record
+// ApiKeyUsed — and the cost is paid at rebuild time, when it is least affordable.
+func TestAnOrdinaryLoginDoesNotWriteToTheAccountStream(t *testing.T) {
+	h := newAuthHarness(t)
+	h.appender.calls = nil
+
+	if _, err := h.login(AuthenticateCommand{Password: testPassword, Code: authCode}); err != nil {
+		t.Fatalf("an ordinary login: %v", err)
+	}
+	for _, call := range h.appender.calls {
+		if len(call) != 1 {
+			t.Fatalf("an ordinary login wrote to %d streams in one append; only the attempt "+
+				"journal should be touched", len(call))
+		}
+	}
+	for _, e := range h.appender.events() {
+		if _, ok := e.(*contract.UserReactivated); ok {
+			t.Fatal("an ordinary login recorded a reactivation")
+		}
 	}
 }
 
@@ -2969,4 +3267,79 @@ func assertDistinctEventIDs(t *testing.T, h *authHarness, from, wantEvents int) 
 		t.Fatalf("the command appended %d events, want %d — this test proves nothing if the "+
 			"second append did not happen", total, wantEvents)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// The public handle is NOT a login identifier (ADR-051)
+// ---------------------------------------------------------------------------
+
+// TestAUsernameIsNotALoginIdentifier is a security property, not a mapping
+// detail, and it is asserted from three directions because any ONE of them could
+// be removed on its own and leave the other two looking like coverage.
+//
+// Why it matters. A public handle is half of a credential pair that is published
+// on purpose. Accepting one here would hand an attacker an enumerable,
+// harvestable target list — every visible @handle becomes a login to spray — and
+// would turn the per-authenticator lockout ceiling into a denial-of-service tool
+// aimed at anyone whose handle can be read. The email identifier is private
+// today, and that privacy is doing real work alongside ADR-036's undifferentiated
+// refusal.
+//
+// Systems that permit both (GitHub, most social products) pay for it with
+// substantial secondary defence. That is a reasonable trade for a product whose
+// users expect it; it is not a trade to make by accident because the field
+// happened to exist.
+func TestAUsernameIsNotALoginIdentifier(t *testing.T) {
+	t.Parallel()
+
+	// 1. A well-formed handle is not a well-formed identifier. Authenticate's very
+	//    first step is NormalizeEmail, so a handle cannot even be reduced to the
+	//    blind index every lookup afterwards is keyed by.
+	t.Run("a handle cannot be normalized into an identifier", func(t *testing.T) {
+		t.Parallel()
+		for _, handle := range []string{"ada_lovelace", "abc", "grace_hopper"} {
+			if _, err := domain.NormalizeUsername(handle); err != nil {
+				t.Fatalf("%q is not a valid handle, so this case proves nothing: %v", handle, err)
+			}
+			if got, err := domain.NormalizeEmail(handle); err == nil {
+				t.Errorf("the handle %q normalized to the identifier %q; the login path "+
+					"would then derive a blind index for it and look an account up", handle, got)
+			}
+		}
+	})
+
+	// 2. The command carries no field for one. A second field beside Identifier is
+	//    how "we also accept handles" would arrive, and it would arrive quietly.
+	t.Run("AuthenticateCommand has no username field", func(t *testing.T) {
+		t.Parallel()
+		for _, f := range reflect.VisibleFields(reflect.TypeFor[AuthenticateCommand]()) {
+			if strings.Contains(strings.ToLower(f.Name), "username") ||
+				strings.Contains(strings.ToLower(f.Name), "handle") {
+				t.Errorf("AuthenticateCommand has field %q. A public handle is half a "+
+					"credential pair published on purpose; accepting one for login turns "+
+					"every visible @handle into a login to spray (ADR-051)", f.Name)
+			}
+		}
+		for _, f := range reflect.VisibleFields(reflect.TypeFor[CreateSessionCommand]()) {
+			if strings.Contains(strings.ToLower(f.Name), "username") ||
+				strings.Contains(strings.ToLower(f.Name), "handle") {
+				t.Errorf("CreateSessionCommand has field %q; see above", f.Name)
+			}
+		}
+	})
+
+	// 3. There is no lookup to reach one with. AccountDirectory answers exactly one
+	//    question — which account claims this blind index — and a second method
+	//    would be the whole of the change this test exists to prevent.
+	t.Run("AccountDirectory offers no lookup by username", func(t *testing.T) {
+		t.Parallel()
+		typ := reflect.TypeFor[AccountDirectory]()
+		if typ.NumMethod() != 1 {
+			t.Fatalf("AccountDirectory has %d methods, want exactly 1 — the login path "+
+				"must have one way to resolve an identifier", typ.NumMethod())
+		}
+		if name := typ.Method(0).Name; name != "AccountByEmailIndex" {
+			t.Errorf("the login lookup is %q, want AccountByEmailIndex", name)
+		}
+	})
 }

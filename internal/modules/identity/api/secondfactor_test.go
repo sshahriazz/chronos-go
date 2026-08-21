@@ -34,9 +34,7 @@ func TestEverySecondFactorCallResolvesTheCallersOwnAccount(t *testing.T) {
 	h := newHarness(t)
 	ctx := t.Context()
 
-	if _, err := h.client.EnrollTotp(ctx, withKey(&identityv1.EnrollTotpRequest{
-		AccountName: "ada@example.com",
-	}, "idem-2fa-1")); err != nil {
+	if _, err := h.client.EnrollTotp(ctx, withKey(&identityv1.EnrollTotpRequest{}, "idem-2fa-1")); err != nil {
 		t.Fatalf("EnrollTotp: %v", err)
 	}
 	if _, err := h.client.ConfirmTotp(ctx, withKey(&identityv1.ConfirmTotpRequest{
@@ -92,9 +90,7 @@ func TestAnUnresolvableCallerIsNotFoundAndReachesNoCommand(t *testing.T) {
 		return ids.UserID{}, app.ErrNoSuchSubject
 	}
 
-	_, err := h.client.EnrollTotp(t.Context(), withKey(&identityv1.EnrollTotpRequest{
-		AccountName: "ada@example.com",
-	}, "idem-2fa-4"))
+	_, err := h.client.EnrollTotp(t.Context(), withKey(&identityv1.EnrollTotpRequest{}, "idem-2fa-4"))
 	requireCode(t, err, connect.CodeNotFound)
 
 	if got := len(h.secondFactor.enrolled()); got != 0 {
@@ -116,9 +112,7 @@ func TestADirectoryThatCannotAnswerIsInternalAndReachesNoCommand(t *testing.T) {
 		return ids.UserID{}, errors.New("dial tcp 127.0.0.1:5432: connection refused")
 	}
 
-	_, err := h.client.EnrollTotp(t.Context(), withKey(&identityv1.EnrollTotpRequest{
-		AccountName: "ada@example.com",
-	}, "idem-2fa-5"))
+	_, err := h.client.EnrollTotp(t.Context(), withKey(&identityv1.EnrollTotpRequest{}, "idem-2fa-5"))
 	requireCode(t, err, connect.CodeInternal)
 
 	// And it says nothing: the address of the read model is not the caller's
@@ -141,9 +135,6 @@ func TestEnrollTotp(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
 		h.secondFactor.enrollFn = func(cmd app.EnrollTotpCommand) (app.EnrollTotpResult, error) {
-			if cmd.AccountName != "ada@example.com" {
-				t.Errorf("account_name = %q", cmd.AccountName)
-			}
 			if cmd.IdempotencyKey != "idem-enrol" {
 				t.Errorf("idempotency key = %q", cmd.IdempotencyKey)
 			}
@@ -155,9 +146,7 @@ func TestEnrollTotp(t *testing.T) {
 			}, nil
 		}
 
-		resp, err := h.client.EnrollTotp(t.Context(), withKey(&identityv1.EnrollTotpRequest{
-			AccountName: "ada@example.com",
-		}, "idem-enrol"))
+		resp, err := h.client.EnrollTotp(t.Context(), withKey(&identityv1.EnrollTotpRequest{}, "idem-enrol"))
 		if err != nil {
 			t.Fatalf("EnrollTotp: %v", err)
 		}
@@ -197,9 +186,7 @@ func TestEnrollTotp(t *testing.T) {
 		}
 
 		ctx := t.Context()
-		if _, err := h.client.EnrollTotp(ctx, withKey(&identityv1.EnrollTotpRequest{
-			AccountName: "ada@example.com",
-		}, "idem-enrol-2")); err != nil {
+		if _, err := h.client.EnrollTotp(ctx, withKey(&identityv1.EnrollTotpRequest{}, "idem-enrol-2")); err != nil {
 			t.Fatalf("EnrollTotp: %v", err)
 		}
 

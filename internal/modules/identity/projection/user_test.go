@@ -37,6 +37,28 @@ func TestUserProjectionHandlesEveryEventThatChangesAnAccountRow(t *testing.T) {
 		&contract.UserDeactivated{},
 		&contract.UserReactivated{},
 		&contract.UserSuspended{},
+
+		// Not a state transition — the account keeps working until `compliance`
+		// acts, and that module does not exist. Projected anyway, because this row
+		// is the only place the request is visible until then AND because an event
+		// nothing projects is an event whose REPLAY is never exercised: the first
+		// rebuild after the consumer lands is the worst moment to discover it
+		// stops the projector.
+		&contract.UserDeletionRequested{},
+
+		// The public handle (ADR-051), and the pair is the same trap EmailReleased
+		// is, twice over. UsernameAssigned arrives on the ACCOUNT's stream;
+		// UsernameTombstoned arrives on the HANDLE's own, so nothing about reading
+		// user.go's other handlers suggests it belongs here.
+		//
+		// Missing the assignment leaves every account nameless in the read model
+		// while the log says otherwise. Missing the TOMBSTONE is worse and is
+		// silent: `user_view.username` is the ONE cleartext personal-data column in
+		// this system, erasure DELETES it rather than shredding a key, and a
+		// projector that ignored the tombstone would keep an erased person's handle
+		// published — and would republish it on every rebuild.
+		&contract.UsernameAssigned{},
+		&contract.UsernameTombstoned{},
 	} {
 		t.Run(e.EventType(), func(t *testing.T) {
 			if !p.Handles(e.EventType()) {
@@ -55,6 +77,29 @@ func TestUserProjectionHandlesEveryEventThatChangesAnAccountRow(t *testing.T) {
 	}
 	if len(f.EventTypePrefixes) != 1 || f.EventTypePrefixes[0] != "identity." {
 		t.Fatalf("the filter is %+v; EmailReleased is written to a reservation_email- "+
-			"stream, so anything narrower than the shared event-type prefix drops it", f)
+			"stream and UsernameTombstoned to a reservation_username- one, so anything "+
+			"narrower than the shared event-type prefix drops them", f)
+	}
+}
+
+// The account projection must NOT handle the handle's CLAIM.
+//
+// UsernameReserved and UsernameAssigned are two facts about one moment, on two
+// streams, and only the second one names an account. Projecting the claim here
+// as well would mean writing user_view from an event whose subject is the
+// claimant of a NAME rather than the holder of an account — the same value
+// today, and two different things the moment a username-change flow exists,
+// where the old handle's stream is released by an account that no longer
+// answers to it.
+//
+// Stated as a test rather than as a comment because the wrong version is the
+// tempting one: UsernameReserved carries both the handle and a subject, so it
+// looks like it would do the job on its own.
+func TestTheAccountProjectionIgnoresTheHandlesOwnClaim(t *testing.T) {
+	p := projection.NewUser(nil)
+	if e := (&contract.UsernameReserved{}); p.Handles(e.EventType()) {
+		t.Errorf("the account projection handles %s. The account's handle comes from "+
+			"UsernameAssigned, on the account's own stream; the claim is a fact about "+
+			"the NAME and belongs to the reservation aggregate", e.EventType())
 	}
 }

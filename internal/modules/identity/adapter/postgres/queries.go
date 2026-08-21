@@ -72,14 +72,18 @@ func (r *ReadModel) Account(ctx context.Context, subjectID string) (app.AccountV
 		var (
 			subject, userID, emailIndex, state string
 			emailVerified                      bool
+			username                           pgtype.Text
 			registeredAt                       pgtype.Timestamptz
 			activatedAt                        pgtype.Timestamptz
 			deactivatedAt                      pgtype.Timestamptz
 			suspendedAt                        pgtype.Timestamptz
+			deletionRequestedAt                pgtype.Timestamptz
+			deletionScheduledFor               pgtype.Timestamptz
 		)
 		scanErr := q.QueryRow(ctx, identitydb.GetUserBySubject, subjectID).Scan(
-			&subject, &userID, &emailIndex, &state, &emailVerified,
-			&registeredAt, &activatedAt, &deactivatedAt, &suspendedAt)
+			&subject, &userID, &emailIndex, &state, &emailVerified, &username,
+			&registeredAt, &activatedAt, &deactivatedAt, &suspendedAt,
+			&deletionRequestedAt, &deletionScheduledFor)
 		if errors.Is(scanErr, pgx.ErrNoRows) {
 			return app.ErrNoSuchSubject
 		}
@@ -113,10 +117,30 @@ func (r *ReadModel) Account(ctx context.Context, subjectID string) (app.AccountV
 			UserID:        id,
 			State:         lifecycle,
 			EmailVerified: emailVerified,
+
+			// The one user-supplied string this read side returns, and the one
+			// deliberate exception to "no personal data leaves the adapter"
+			// (ADR-051). A handle is published by design, so a screen that could not
+			// show a person their own handle would be hiding the only part of their
+			// identity that is not secret.
+			//
+			// NULL becomes "", which is the true statement about the two rows that
+			// can hold it: an account that has not verified yet, and an account whose
+			// handle was erased. Neither has a handle to show.
+			Username: username.String,
+
 			RegisteredAt:  utc(registeredAt),
 			ActivatedAt:   utc(activatedAt),
 			DeactivatedAt: utc(deactivatedAt),
 			SuspendedAt:   utc(suspendedAt),
+
+			// Two columns rather than one boolean. "When did they ask" is the audit
+			// question and "when does it fall due" is the operational one, and the
+			// second is the date the person was mailed — deriving it here from the
+			// first plus the CURRENT grace period would move a deadline that has
+			// already been communicated.
+			DeletionRequestedAt:  utc(deletionRequestedAt),
+			DeletionScheduledFor: utc(deletionScheduledFor),
 		}
 		return nil
 	})

@@ -5,6 +5,7 @@ syntax = "proto3";
 // (ADR-010).
 package chronos.system.v1;
 
+import "buf/validate/validate.proto";
 import "chronos/options/v1/options.proto";
 import "gnostic/openapi/v3/annotations.proto";
 import "google/protobuf/timestamp.proto";
@@ -44,7 +45,17 @@ enum Criticality {
 // currently behaving.
 message Dependency {
   // Stable identifier, e.g. "postgres" or "openfga". Safe to switch on.
-  string name = 1;
+  //
+  // "Safe to switch on" is what the pattern makes true: lower snake, so a client
+  // matching on it is matching on an identifier rather than on prose that could
+  // acquire a capital or a space.
+  string name = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "postgres"}},
+    (buf.validate.field).string = {
+      max_len: 64
+      pattern: "^[a-z][a-z0-9_]*$"
+    }
+  ];
 
   // Current observed state.
   Health health = 2;
@@ -54,17 +65,39 @@ message Dependency {
 
   // Operator-facing detail, such as a connection error. Never contains
   // credentials or personal data.
-  string detail = 4;
+  string detail = 4 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "connect: connection refused"}},
+    (buf.validate.field).string = {
+      max_len: 512
+      pattern: "^[^\\r\\n]*$"
+    }
+  ];
 
   // Client-facing description of what is unavailable while this dependency is
   // not up, so a UI can explain itself rather than showing a generic error.
-  string impact = 5;
+  string impact = 5 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "Live updates stop; reloading a page still shows current data."}},
+    (buf.validate.field).string = {
+      max_len: 512
+      pattern: "^[^\\r\\n]*$"
+    }
+  ];
 
   // When this dependency was last probed, in UTC (ADR-008).
   google.protobuf.Timestamp last_checked_at = 6;
 
   // Observed latency of the most recent probe, in milliseconds.
-  int64 latency_ms = 7;
+  //
+  // The ceiling is one hour, which no probe can approach: every probe runs under
+  // a context deadline far shorter than that. It is stated because a duration
+  // published without one describes a field a client must treat as arbitrary.
+  int64 latency_ms = 7 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "3"}},
+    (buf.validate.field).int64 = {
+      gte: 0
+      lte: 3600000
+    }
+  ];
 }
 
 // GetStatusRequest is empty: the response describes the server, not a resource.
@@ -80,17 +113,40 @@ message GetStatusResponse {
   bool fully_operational = 2;
 
   // One entry per registered dependency, in registration order.
-  repeated Dependency dependencies = 3;
+  //
+  // The registry is a compile-time list, so the ceiling is a statement about this
+  // binary rather than about a request: nine components today (CLAUDE.md's
+  // architecture table), with room to double.
+  repeated Dependency dependencies = 3 [(buf.validate.field).repeated.max_items = 32];
 
   // Build version of the running binary.
-  string version = 4;
+  //
+  // Bounded but NOT pinned to semantic versioning: a development build carries
+  // whatever `git describe` produced, and a document that promised `x.y.z` would
+  // be wrong on every machine that is not a release runner.
+  string version = 4 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "1.4.0"}},
+    (buf.validate.field).string = {
+      max_len: 64
+      pattern: "^[A-Za-z0-9._+-]*$"
+    }
+  ];
 
   // When this process started, in UTC.
   google.protobuf.Timestamp started_at = 5;
 
   // The server's presentation timezone. Storage is always UTC (ADR-008); this
   // is exposed so a misconfigured deployment is visible.
-  string timezone = 6;
+  //
+  // An IANA zone name, with the same grammar `chronos.profile.v1` holds a
+  // person's timezone to.
+  string timezone = 6 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "UTC"}},
+    (buf.validate.field).string = {
+      max_len: 64
+      pattern: "^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+.-]+)*$"
+    }
+  ];
 }
 
 // SystemService reports server and dependency state.

@@ -86,3 +86,32 @@ type PushSent struct {
 }
 
 func (*PushSent) EventType() string { return "notification.PushSent.v1" }
+
+// ChannelPreferenceSet records that one person turned one channel on or off for
+// one organization.
+//
+// One event per CHANNEL, never one per settings screen. A screen that saved a
+// whole snapshot would make "did they turn email off, or did email simply not
+// appear in that save?" unanswerable from the log, and the answer matters: the
+// absence of a preference means ENABLED, so the two readings differ.
+//
+// It deliberately carries no class and no template. A preference names a
+// channel, and that is what stops a preference from ever naming
+// Security — the class whose message is the only thing standing between a
+// silent account takeover and a detected one (NOTIFICATIONS §3). The dispatcher
+// checks class before it consults any preference, so this event cannot reach a
+// security alert even if one were forged.
+//
+// OrgID is on the payload as well as in the envelope because preferences are per
+// person PER ORGANIZATION: one stream carries a person's changes across every
+// organization they belong to, and a projector rebuilding from position zero
+// must be able to scope each row from the event alone.
+type ChannelPreferenceSet struct {
+	SubjectID string
+	OrgID     string
+	Channel   string
+	Enabled   bool
+	ChangedAt time.Time
+}
+
+func (*ChannelPreferenceSet) EventType() string { return "notification.ChannelPreferenceSet.v1" }

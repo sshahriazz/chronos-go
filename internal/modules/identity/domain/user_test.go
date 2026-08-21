@@ -360,8 +360,19 @@ func TestEveryUnusableStateHasItsOwnRefusalReason(t *testing.T) {
 		t.Fatalf("the incomplete fixture is %s, not pending", incomplete.State())
 	}
 
-	deactivated := active(t)
+	// Deactivated AND UNVERIFIED. A deactivated account whose address IS proven is
+	// admitted now — the login is how identity.md §1's holder-reversible promise is
+	// kept, and NeedsReactivation is what says so (see
+	// TestAVerifiedDeactivatedAccountMayAuthenticateToReactivate). This fixture is
+	// the case ReasonDeactivated continues to describe: an account switched off
+	// before it ever proved a mailbox, so there is nobody a reactivation could be
+	// attributed to.
+	deactivated := registered(t)
 	mustNil(t, deactivated.Deactivate("subj_1", at))
+	if deactivated.EmailVerified() {
+		t.Fatal("the deactivated fixture proved its address; it must not, or this case " +
+			"is testing the reactivation path instead of the refusal")
+	}
 
 	suspended := active(t)
 	mustNil(t, suspended.Suspend("op_1", "abuse", at))
@@ -387,6 +398,177 @@ func TestEveryUnusableStateHasItsOwnRefusalReason(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Deactivation, and the way back
+// ---------------------------------------------------------------------------
+
+// A verified deactivated account may authenticate, and that is the only way it
+// can ever come back.
+//
+// This is the property the whole reactivation design exists for, and it is the
+// one that would silently not exist. identity.md §1 says deactivation is
+// reversible by the holder; CanAuthenticate refused a deactivated account, every
+// authenticated RPC needs a session, and a session needs an authentication — so
+// "reversible" was a word with no code behind it, exactly as the first-enrolment
+// deadlock was before NeedsFirstSecondFactor.
+//
+// Ask what this test would do if the feature were deleted: restore the blanket
+// `return ReasonDeactivated, false` and it fails on the first assertion.
+func TestAVerifiedDeactivatedAccountMayAuthenticateToReactivate(t *testing.T) {
+	u := active(t)
+	mustNil(t, u.Deactivate("subj_1", at))
+
+	if !u.NeedsReactivation() {
+		t.Fatal("a verified deactivated account does not report that it needs reactivation")
+	}
+	reason, ok := u.CanAuthenticate()
+	if !ok {
+		t.Fatalf("a verified deactivated account was refused authentication with %q; there is "+
+			"then no route back into it, and deactivation is permanent rather than "+
+			"reversible", reason)
+	}
+
+	// And the reversal itself is the decision the login is required to record in
+	// the same append. Without it the ceremony would end in a session for an
+	// account the log still says is off.
+	mustNil(t, u.Reactivate("subj_1", at.Add(time.Minute)))
+	if u.State() != domain.StateActive {
+		t.Fatalf("state after reactivation is %s, want active", u.State())
+	}
+	if u.NeedsReactivation() {
+		t.Error("an account still reports that it needs reactivation after being reactivated")
+	}
+}
+
+// A SUSPENDED account is not admitted, and the holder cannot undo one.
+//
+// The whole difference between the two states. If the carve-out above ever
+// widens to "not active", this fails.
+func TestASuspendedAccountIsNeitherAdmittedNorReversibleByItsHolder(t *testing.T) {
+	u := active(t)
+	mustNil(t, u.Suspend("op_1", "abuse", at))
+
+	if u.NeedsReactivation() {
+		t.Fatal("a suspended account reports that it needs reactivation; the holder would " +
+			"then undo an administrative suspension by signing in")
+	}
+	if reason, ok := u.CanAuthenticate(); ok || reason != contract.ReasonSuspended {
+		t.Fatalf("a suspended account authenticates (%v) or refuses with %q, want a refusal "+
+			"with %q", ok, reason, contract.ReasonSuspended)
+	}
+	if err := u.Reactivate("subj_1", at); err == nil {
+		t.Fatal("the holder reactivated a suspended account")
+	}
+}
+
+// A deactivated account that never proved its address stays refused.
+//
+// The carve-out is keyed on a PROVEN mailbox, for NeedsFirstSecondFactor's
+// reason: nothing otherwise establishes that the person signing in is the person
+// the address belongs to.
+func TestADeactivatedAccountWithAnUnprovenAddressStaysRefused(t *testing.T) {
+	u := registered(t)
+	mustNil(t, u.Deactivate("subj_1", at))
+
+	if u.NeedsReactivation() {
+		t.Fatal("a deactivated account with an unproven address reports that it needs " +
+			"reactivation")
+	}
+	if _, ok := u.CanAuthenticate(); ok {
+		t.Fatal("a deactivated account with an unproven address was allowed to authenticate")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The deletion request
+// ---------------------------------------------------------------------------
+
+// A deletion request records one event, changes no state, and is idempotent.
+func TestRequestDeletion(t *testing.T) {
+	due := at.Add(30 * 24 * time.Hour)
+
+	t.Run("it records the request and leaves the account alone", func(t *testing.T) {
+		u := active(t)
+		u.ClearUncommitted()
+		mustNil(t, u.RequestDeletion("subj_1", due, at))
+
+		events := u.Uncommitted()
+		if len(events) != 1 {
+			t.Fatalf("a deletion request recorded %d events, want exactly 1: %#v", len(events), events)
+		}
+		e, ok := events[0].(*contract.UserDeletionRequested)
+		if !ok {
+			t.Fatalf("a deletion request recorded %T", events[0])
+		}
+		if !e.ScheduledFor.Equal(due) {
+			t.Errorf("the deadline is %s, want %s", e.ScheduledFor, due)
+		}
+		if e.ActorID != "subj_1" || e.SubjectID != u.SubjectID() {
+			t.Errorf("actor=%q subject=%q, want subj_1 / %q", e.ActorID, e.SubjectID, u.SubjectID())
+		}
+
+		// The state does NOT move. Nothing consumes the request yet, so an account
+		// that stopped working here would be broken by a request nobody is going to
+		// act on.
+		if u.State() != domain.StateActive {
+			t.Errorf("state after a deletion request is %s, want active — the account still "+
+				"works, because nothing has erased it", u.State())
+		}
+		if scheduled, requested := u.DeletionRequested(); !requested || !scheduled.Equal(due) {
+			t.Errorf("DeletionRequested() = (%s, %v), want (%s, true)", scheduled, requested, due)
+		}
+	})
+
+	t.Run("a second request records nothing and keeps the first deadline", func(t *testing.T) {
+		u := active(t)
+		mustNil(t, u.RequestDeletion("subj_1", due, at))
+		u.ClearUncommitted()
+
+		later := due.Add(365 * 24 * time.Hour)
+		mustNil(t, u.RequestDeletion("subj_1", later, at.Add(time.Hour)))
+		if got := u.Uncommitted(); len(got) != 0 {
+			t.Fatalf("a repeated deletion request recorded %d event(s); anyone holding the "+
+				"session could then push the deadline out forever, and every mail naming a "+
+				"date would be contradicted by the next", len(got))
+		}
+		if scheduled, _ := u.DeletionRequested(); !scheduled.Equal(due) {
+			t.Errorf("the deadline moved to %s; the first one (%s) is the date the holder "+
+				"was mailed", scheduled, due)
+		}
+	})
+
+	t.Run("a suspended account may not start the clock", func(t *testing.T) {
+		u := active(t)
+		mustNil(t, u.Suspend("op_1", "abuse", at))
+		if err := u.RequestDeletion("subj_1", due, at); err == nil {
+			t.Fatal("a suspended account requested its own erasure; the subject of a " +
+				"suspension would then destroy the evidence it exists to preserve")
+		}
+	})
+
+	t.Run("a deadline in the past is refused", func(t *testing.T) {
+		u := active(t)
+		if err := u.RequestDeletion("subj_1", at.Add(-time.Second), at); err == nil {
+			t.Fatal("a deletion deadline already in the past was accepted")
+		}
+	})
+
+	t.Run("a rebuild reaches the same answer", func(t *testing.T) {
+		u := active(t)
+		mustNil(t, u.RequestDeletion("subj_1", due, at))
+
+		rebuilt := eventsourcing.NewAggregate(domain.New)
+		rebuilt.Apply(&contract.UserDeletionRequested{
+			SubjectID: "subj_1", ActorID: "subj_1", ScheduledFor: due, RequestedAt: at,
+		})
+		scheduled, requested := rebuilt.DeletionRequested()
+		if !requested || !scheduled.Equal(due) {
+			t.Fatalf("replaying the event gives (%s, %v), want (%s, true) — the projection "+
+				"and the aggregate would then disagree after a rebuild", scheduled, requested, due)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -1172,4 +1354,129 @@ func mustNil(t *testing.T, err error) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// The public handle
+// ---------------------------------------------------------------------------
+
+// A handle may not be claimed before the address it belongs to is proven.
+//
+// This is the aggregate's half of the squatting defence, and it is written under
+// the same rule SetPassword is: the use case is one call site, the aggregate is
+// the boundary, and a second route to a first handle — an import, an admin tool,
+// a future federated link — inherits the rule by construction rather than by
+// somebody remembering it.
+//
+// Why it matters more here than for an address. An unverified ADDRESS claim
+// lapses after 48 hours, so squatting one is a bounded denial of service. A
+// handle is claimed PERMANENTLY and, once tombstoned, can never be reissued even
+// in principle — so a handle claimed by whoever typed an address they do not
+// control is gone for good.
+func TestAUsernameMayNotBeClaimedBeforeTheAddressIsProven(t *testing.T) {
+	t.Parallel()
+	u := registered(t)
+
+	err := u.AssignUsername("ada_lovelace", at)
+	if errs.ReasonOf(err) != errs.Conflict {
+		t.Fatalf("reason %s, want %s (%v)", errs.ReasonOf(err), errs.Conflict, err)
+	}
+	if n := countEvents[*contract.UsernameAssigned](u); n != 0 {
+		t.Errorf("%d handles recorded on an unproven account", n)
+	}
+	if got := u.Username(); got != "" {
+		t.Errorf("the account reports handle %q", got)
+	}
+}
+
+// TestAssignUsername covers the rules that apply once the address IS proven.
+func TestAssignUsername(t *testing.T) {
+	t.Parallel()
+
+	verified := func(t *testing.T) *domain.User {
+		t.Helper()
+		u := registered(t)
+		mustNil(t, u.VerifyEmail("idx_1", at))
+		return u
+	}
+
+	t.Run("a proven account claims its handle", func(t *testing.T) {
+		t.Parallel()
+		u := verified(t)
+		mustNil(t, u.AssignUsername("ada_lovelace", at))
+		if got := u.Username(); got != "ada_lovelace" {
+			t.Fatalf("handle %q, want ada_lovelace", got)
+		}
+		if n := countEvents[*contract.UsernameAssigned](u); n != 1 {
+			t.Errorf("%d UsernameAssigned events, want 1", n)
+		}
+	})
+
+	t.Run("re-assigning the same handle records nothing", func(t *testing.T) {
+		t.Parallel()
+		u := verified(t)
+		mustNil(t, u.AssignUsername("ada_lovelace", at))
+		mustNil(t, u.AssignUsername("ada_lovelace", at))
+		if n := countEvents[*contract.UsernameAssigned](u); n != 1 {
+			t.Errorf("%d UsernameAssigned events for one handle, want 1 — a link "+
+				"followed twice must not append a second assignment", n)
+		}
+	})
+
+	t.Run("a second, different handle is refused", func(t *testing.T) {
+		t.Parallel()
+		u := verified(t)
+		mustNil(t, u.AssignUsername("ada_lovelace", at))
+
+		err := u.AssignUsername("grace_hopper", at)
+		if errs.ReasonOf(err) != errs.Conflict {
+			t.Fatalf("reason %s, want %s (%v)", errs.ReasonOf(err), errs.Conflict, err)
+		}
+		// There is no username-change flow, and a change is not merely
+		// unimplemented: releasing a handle back into circulation is the failure
+		// ADR-051's tombstone exists to prevent. A second assignment recorded here
+		// would strand the FIRST handle claimed on its own stream by an account
+		// that no longer answers to it, with nothing able to reconcile the two.
+		if got := u.Username(); got != "ada_lovelace" {
+			t.Errorf("handle %q, want the original ada_lovelace", got)
+		}
+	})
+
+	t.Run("an empty handle is refused", func(t *testing.T) {
+		t.Parallel()
+		u := verified(t)
+		if got := errs.ReasonOf(u.AssignUsername("", at)); got != errs.ValidationFailed {
+			t.Fatalf("reason %s, want %s", got, errs.ValidationFailed)
+		}
+	})
+
+	t.Run("a suspended account may not claim one", func(t *testing.T) {
+		t.Parallel()
+		u := verified(t)
+		mustNil(t, u.Suspend("op_1", "fraud", at))
+		if got := errs.ReasonOf(u.AssignUsername("ada_lovelace", at)); got != errs.AccessDenied {
+			t.Fatalf("reason %s, want %s", got, errs.AccessDenied)
+		}
+	})
+
+	t.Run("replaying the assignment reproduces the handle", func(t *testing.T) {
+		t.Parallel()
+		live := verified(t)
+		mustNil(t, live.AssignUsername("ada_lovelace", at))
+
+		rebuilt := eventsourcing.NewAggregate(domain.New)
+		for _, e := range live.Uncommitted() {
+			rebuilt.Apply(e)
+		}
+		if live.Username() != rebuilt.Username() {
+			t.Errorf("username: live %q, rebuilt %q", live.Username(), rebuilt.Username())
+		}
+		// The property the whole design rests on, stated for this field: erasure
+		// tombstones the handle the AGGREGATE reports, so an Apply that disagreed
+		// with the decide method would tombstone the wrong name — permanently, and
+		// for somebody else.
+		if rebuilt.Username() != "ada_lovelace" {
+			t.Errorf("the rebuilt account reports handle %q", rebuilt.Username())
+		}
+	})
 }

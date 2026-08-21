@@ -97,6 +97,7 @@ func TestPreHijackByUnverifiedRegistrationIsRefused(t *testing.T) {
 	if _, err := h.client.VerifyEmail(ctx, write(&identityv1.VerifyEmailRequest{
 		Token:    plaintext,
 		Password: victimPassword,
+		Username: h.freshUsername("prehijack"),
 	})); err != nil {
 		t.Fatalf("VerifyEmail: %v\n%s", err, h.serverLogs())
 	}

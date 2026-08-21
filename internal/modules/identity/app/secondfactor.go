@@ -258,16 +258,6 @@ func NewSecondFactor(deps SecondFactorDeps) (*SecondFactor, error) {
 type EnrollTotpCommand struct {
 	UserID ids.UserID
 
-	// AccountName is what the user sees under the issuer in their authenticator
-	// app, normally their own address. It is PERSONAL DATA: it is placed in the
-	// provisioning URI, which is rendered to the enrolling user's screen, and it
-	// reaches no event, no log line and no error message from here.
-	//
-	// It is supplied by the caller rather than read from the vault because the
-	// vault port is write-only by design (see SubjectVault) — a port that could
-	// read is a port through which an address reaches a log.
-	AccountName string
-
 	// IdempotencyKey makes a retried request derive the same event ids, which the
 	// store collapses instead of duplicating.
 	IdempotencyKey string
@@ -330,10 +320,6 @@ func (s *SecondFactor) EnrollTotp(
 		return EnrollTotpResult{}, errs.ValidationFailedf("an idempotency key is required")
 	case cmd.UserID.IsZero():
 		return EnrollTotpResult{}, errs.ValidationFailedf("a user id is required")
-	case strings.TrimSpace(cmd.AccountName) == "":
-		// The authenticator app shows this under the issuer. An empty one produces
-		// an unlabelled entry, which is how people delete the wrong credential.
-		return EnrollTotpResult{}, errs.ValidationFailedf("an account name is required")
 	}
 
 	user, err := s.users.Load(ctx, cmd.UserID.String())
@@ -351,7 +337,35 @@ func (s *SecondFactor) EnrollTotp(
 		return EnrollTotpResult{}, err
 	}
 
-	enrollment, err := s.enroll(cmd.AccountName)
+	// The authenticator label is the account's own PUBLIC HANDLE, derived here
+	// rather than accepted from the caller (ADR-051).
+	//
+	// Two reasons, and the first is ADR-002. This string is embedded verbatim in
+	// the otpauth:// URI, rendered into a QR code, and then stored PERMANENTLY by
+	// the authenticator app — synced to the holder's cloud backup and shown on
+	// their lock screen. It used to be their email address, which put personal
+	// data in the one place this system can never reach to erase it. A handle is
+	// public by design (ADR-051), so a public label carries it correctly, and
+	// recognisability is not lost — being recognisable is what the handle is for.
+	//
+	// The second is that a caller-supplied label is a caller-controlled string in
+	// a QR code. A session holder could enrol with the label "security@chronos.io"
+	// and produce an entry indistinguishable from an official one in their own
+	// authenticator — small, but free to remove, and it disappears entirely once
+	// the server decides the label.
+	//
+	// RFC 6238's Key URI format puts this after the issuer as
+	// `otpauth://totp/Chronos:<handle>`.
+	label := user.Username()
+	if label == "" {
+		// Unreachable through the API — a handle is mandatory at VerifyEmail and an
+		// account cannot reach AAL2 without one — but an unlabelled authenticator
+		// entry is how people delete the wrong credential, so it refuses rather
+		// than enrolling something nameless.
+		return EnrollTotpResult{}, errs.Internalf(
+			"the account has no username to label the authenticator with")
+	}
+	enrollment, err := s.enroll(label)
 	if err != nil {
 		return EnrollTotpResult{}, fmt.Errorf("generating a shared secret: %w", err)
 	}

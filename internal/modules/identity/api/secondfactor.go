@@ -36,9 +36,11 @@ func (s *Service) EnrollTotp(
 	if err != nil {
 		return nil, fail(err)
 	}
+	// The authenticator label is NOT taken from the request. The server derives it
+	// from the account's own public handle (ADR-051) — see EnrollTotp. The wire
+	// field is reserved rather than read.
 	result, err := s.secondFactor.EnrollTotp(ctx, app.EnrollTotpCommand{
 		UserID:         userID,
-		AccountName:    req.Msg.GetAccountName(),
 		IdempotencyKey: key,
 	})
 	if err != nil {

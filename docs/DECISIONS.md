@@ -3194,6 +3194,65 @@ substantial secondary defence. That is a reasonable trade for a product whose
 users expect it; it is not a trade to make by accident because the field happened
 to exist.
 
+### What the implementation settled — the handle is claimed at `VerifyEmail`
+
+**Date:** 2026-08-20 · **Status:** Accepted · **Implements** identity.md §4.6
+
+This ADR fixes what a username *is*. Building it forced the one question it does
+not answer: **where in the signup flow the handle is claimed.** The answer is
+`VerifyEmail`, beside the password, and `RegisterRequest` must never gain a
+username field.
+
+Two arguments, and the second is on its own sufficient.
+
+**It would reopen the account-existence oracle.** `RegisterResponse` is empty
+precisely so "the address was free" and "the address was taken" are one answer
+(identity.md §11). A handle on the same request destroys that: send a victim's
+address paired with a freshly-invented handle, then ask the public availability
+RPC about the handle. Taken means the registration went through, which means the
+address was free. One extra unauthenticated call and the leak is back — through a
+FIELD rather than through a message, which is the version nobody reviews for. The
+obvious repair — claim the handle even when the address is taken — is worse: it
+strands handles on behalf of accounts that do not exist, and makes an
+unauthenticated endpoint an unbounded handle-burning vector.
+
+**It would be squattable for free, and permanently.** An unverified address claim
+lapses after `DefaultReservationLease`, which is the entire bound on the squat
+IDENTITY-REVIEW C8 leaves open. A handle has no lease: it is claimed permanently
+and, once tombstoned, cannot be reissued even in principle. A handle at `Register`
+therefore lets a script sweep every desirable name using addresses it never
+proves, and every name taken is gone for good. Claiming at `VerifyEmail` prices
+each squatted handle at one mailbox the attacker actually controls.
+
+A third placement — a separate `SetUsername` before activation — was rejected for
+a different reason: it creates the one state "mandatory" cannot survive, an
+account that is verified, has a password, can authenticate and has no handle.
+Closing that window needs a session restricted to a single endpoint, which is a
+large mechanism bought to solve a problem `VerifyEmail` does not have. At
+`VerifyEmail` the handle-less window is exactly the window in which the account
+can do nothing at all.
+
+**Consequences, both of which are paid rather than waved through:**
+
+- A handle cannot be confirmed available until the link is clicked. That is why
+  `CheckUsernameAvailability` is public, and why a taken handle is refused BEFORE
+  the token is consumed — so a person who loses the race keeps their link.
+- The refusal is deliberately specific, which no other refusal in this module is
+  (ADR-036). A handle is public and its availability is served by an RPC whose
+  purpose is to answer exactly this; a vague refusal would tell the person nothing
+  and tell an attacker nothing they could not already read. The one distinction NOT
+  drawn is between "taken" and "tombstoned" — that is a fact about a person, and
+  the tombstone exists to protect that person.
+- There is no lease, no sweep and no release path, because the claim is only ever
+  made by an account that has already proven its mailbox. The only terminal
+  transition is the tombstone.
+
+The tombstone's PRODUCER does not exist: erasure is `compliance`'s work and that
+module is not built, exactly as `UserDeletionRequested` has no consumer. The
+mechanism is — the aggregate transition, the event, the projector's deletion of
+`user_view.username`, and the refusal every future claim inherits — and the
+refusal is the half that is live and tested today.
+
 ## ADR-052 — `user_view.email_index` is unique among CURRENT holders, not among all rows
 
 **Date:** 2026-08-20 · **Status:** Accepted
@@ -3435,3 +3494,473 @@ unlimited would mean "nobody".
 - `PasswordResetRequested` is appended and, today, consumed by nothing. The
   reset-mail issuer is the missing component the verification reactor was before
   `cmd/worker` grew one, and until it exists a reset link is never delivered.
+
+---
+
+## ADR-054 — The server's clock is movable in local, and only forward
+
+**Date:** 2026-08-21 · **Status:** Accepted · **Supersedes nothing** · **Affects** `internal/platform/clock`, `internal/platform/config`, `cmd/api`, `internal/adapter/identityit`
+
+### Context
+
+Almost every rule identity enforces is derived from a clock: TOTP time steps,
+session idle and absolute deadlines, verification and reset token expiry,
+attempt ceilings, authenticator lockouts. A test that has to cross one of those
+boundaries has two options — wait, or move the server's clock — and until now
+there was only one option, because the server's clock was `time.Now()`.
+
+The cost was measured rather than estimated. `internal/adapter/identityit` ran
+in **244 seconds**, and most of that was spent asleep. RFC 6238's step is thirty
+seconds of wall clock and the replay guard is keyed on `(credential, step)` and
+fails closed, so a test needing a SECOND valid code for one authenticator cannot
+have one until the step rolls over. Fourteen call sites did that by sleeping;
+individual tests ran 30–90 seconds and were almost entirely idle.
+
+Nothing about the protocol requires the wait. It was required because nothing
+could move the clock.
+
+### Decision 1 — a forward-only offset clock, `clock.Offset`
+
+`clock.Offset` wraps a base `clock.Clock` with an atomic nanosecond offset.
+`Advance(d)` refuses `d <= 0` with `clock.ErrNotForward`.
+
+Forward-only is the whole security argument, and it is worth separating the two
+cases because they are not symmetric:
+
+- **Forward is time PASSING.** A token expires, a lockout elapses, a TOTP step
+  rolls over, a rate-limit window closes. Every one of those is a rule enforced
+  EARLIER, never skipped. There is nothing an attacker gains by making their own
+  credentials expire sooner.
+- **Backward is skipping the rules.** It un-expires an expired verification
+  token, restores a lockout that had already elapsed, and re-enters a TOTP step
+  whose code somebody has already observed. A clock that rewinds is a general
+  "ignore this check" switch wearing a clock's clothes.
+
+So the type has no rewind — not behind a flag, not behind a second variable.
+The refusal is a sentinel error rather than a bare `false` because a caller that
+swallows it has re-opened the hole.
+
+It is an OFFSET rather than a fixed instant, deliberately: it tracks a moving
+base, so real elapsed seconds still advance it. That is what lets one test go on
+waiting out a real boundary while the rest travel (Decision 5).
+
+### Decision 2 — the replay guard is unaffected, in both directions
+
+`totp_replay` is `INSERT … ON CONFLICT (credential_id, step) DO NOTHING` in
+Postgres, and `Verify` claims the step only after the code matches. Three
+consequences, none of which the clock can change:
+
+- Advancing past a step cannot un-spend it. The row is keyed on the step, not on
+  any notion of "now".
+- There is no way back to a spent step, because the clock does not go back.
+- `expires_at` is derived from the STEP (`(step+Skew+1)*Period`), while the
+  retention sweep compares it against SQL `now()`. An app clock running ahead of
+  the database therefore makes claims live LONGER, never shorter. The guard gets
+  strictly stronger under time travel, which is the correct direction for the one
+  control here that fails closed.
+
+### Decision 3 — three independent locks keep it out of production
+
+1. **`CLOCK_CONTROL_ENABLED` defaults to false.** No listener is bound, no route
+   is registered, and `newClock` returns `clock.System{}` with a nil movable
+   clock — so a default build holds nothing to reach, rather than holding a
+   control nobody happens to call.
+2. **`cmd/api` REFUSES TO BOOT with it enabled outside local.** `config.validate`
+   adds the problem, `config.Load` returns the error, and `run` returns it before
+   a socket is bound or a dependency dialled. Not a warning and not a degraded
+   mode: the process exits non-zero. `startClockControl` re-checks the
+   environment itself, and the duplication is deliberate — the two guards fail
+   for different reasons and either can be deleted by somebody who has just
+   satisfied the other.
+3. **Loopback only, in every environment including local.** `CLOCK_CONTROL_ADDR`
+   is validated as a loopback host at startup, and `requireLoopback` refuses a
+   non-loopback `RemoteAddr` in code. A clock a stranger can move is not made
+   acceptable by the machine being a laptop.
+
+It is a SEPARATE listener, never a route on the API mux, for exactly the reason
+`obs.StartProfiling` gives: the ADR-021 enforcement gates are Connect
+interceptors that run inside a Connect handler, so a "protected" plain-HTTP
+route on the tenant mux would in fact be unprotected, and nothing in the
+codebase would report the difference.
+
+**Why not a build tag.** A tag would remove the code from the production binary
+entirely, which is stronger — and it would do it by making the binary the tests
+exercise a DIFFERENT binary from the one that ships.
+`internal/adapter/identityit` exists precisely because this repository keeps
+finding code that was built, tested and wired into nothing; it compiles and runs
+`cmd/api` itself so that every interceptor, gate and adapter under test is the
+production one. A tag reintroduces the gap that package was written to close,
+and it makes lock 2 — the refusal to boot, the property most worth testing —
+untestable, because the refusing code would not be in the binary.
+
+### Decision 4 — ONE clock per process
+
+`dependencies.clock` is the only clock `cmd/api` has, and `dependencies.movableClock`
+points at the SAME object when the control is on. `buildIdentity` reads
+`d.clock` rather than constructing `clock.System{}` of its own.
+
+Two clocks would be worse than none: the control would move a clock some rules
+follow and others do not, so a test could travel past a TOTP step while the
+session deadline it also depends on stayed put — and the disagreement would
+surface as an unrelated flake somewhere else entirely. Only the control listener
+receives the concrete `*clock.Offset`; every collaborator takes `clock.Clock`,
+which has no way to move time.
+
+### Decision 5 — one test still waits out a real boundary
+
+`TestIdentitySliceEndToEnd` keeps the wall clock, through
+`freshCodeByWaiting`. It was chosen rather than a new test written for the
+purpose because it is the package's end-to-end proof — one account driven from
+"does not exist" to "authenticated, then revoked" through the deployed
+interceptor chain. If any test here has to be true of the server AS DEPLOYED,
+where no control exists and thirty seconds is thirty seconds, it is that one.
+
+The property it keeps alive would otherwise be asserted nowhere: real elapsed
+seconds roll a TOTP step over on the real server. Convert that last caller and
+the whole suite would still pass on a build where TOTP verification had quietly
+stopped following the wall clock.
+
+### Consequences
+
+- `internal/adapter/identityit` went from **244.2s to 114.8s and 103.1s** on two
+  runs on the same machine against the same stack, with no test deleted, skipped
+  or weakened. 31 tests before, 31 after. The floor is now `TestIdentitySliceEndToEnd` at 49s, which is
+  the wall-clock test of Decision 5 and is meant to cost what it costs.
+- The worst individual offenders collapsed:
+  `TestACompletedResetVoidsEverythingAndKeepsTheSecondFactor` 87.4s → 9.2s,
+  `TestADeactivationRacingALoginDoesNotTear` 40.5s → 2.8s,
+  `TestADeactivatedAccountCanGetBackIn` 40.5s → 3.9s.
+- The drift the suite accumulates is not new. An advance replaces a sleep of the
+  same length, and a sleep advanced the clock for every parallel test too —
+  offsetting is the same global movement without the wall-clock cost.
+- The harness mints its out-of-band verification tokens against the SERVER's
+  clock (`harness.serverNow`) rather than its own. A token minted against wall
+  time while the server runs ahead of it has a silently shortened TTL.
+- A one-step advance is INSIDE the acceptance window. `Skew = 1`, so a code
+  minted 31 seconds ahead of the server still validates. Measured by mutation: a
+  build where `buildIdentity` reads its own `clock.System{}` instead of
+  `d.clock` still passes any test that draws a single code, and is caught only
+  once the offset exceeds one step —
+  `TestACompletedResetVoidsEverythingAndKeepsTheSecondFactor`, which draws
+  three. The wiring's detector is therefore the integration suite, not a unit
+  test, which is the same reason `identityit` exists at all.
+- `identityit` asserts once per run that the control refuses a negative advance.
+  It is the only place in the suite that tries, and it is what makes "forward
+  only" a checked property of the running server rather than of a unit test.
+
+---
+
+## ADR-055 — An already-claimed address is answered to the MAILBOX, and there is no email-availability RPC
+
+**Date:** 2026-08-21 · **Status:** Accepted · **Extends ADR-036 · Constrains identity.md §11**
+
+### The problem, which was not the indistinguishability
+
+`Register` is deliberately indistinguishable. A free address and a claimed one
+produce the same empty `RegisterResponse`, and the integration suite compares the
+two as marshalled bytes so that a field added later cannot quietly carry the
+difference. That property is correct and is not up for revision: a `CONFLICT` on
+the wire answers "does an account exist for this address?" precisely, which is
+the oracle identity.md §11 names among the four flows that leak account existence
+when written naively.
+
+What was wrong was the other half. The taken branch returned
+`RegisterResult{}, nil` and sent **nothing, anywhere**. The screen said "check
+your email"; no mail was ever sent. So the person who actually owns the mailbox —
+the returning user, who is who hits that branch most often — was shown a promise
+and then left at a dead end, with no route back to the account they already had.
+
+An indistinguishable design is only usable if the answer reaches somebody. It
+cannot reach the caller. It can reach the **mailbox**, which is the one channel
+that proves ownership of the address before disclosing anything about it.
+
+### Decision
+
+> **When a registration is refused because a VERIFIED account already holds the
+> address, identity appends `identity.DuplicateRegistrationAttempted.v1` to that
+> address's reservation stream, and the notification catalogue mails the holder.
+> Nothing about it reaches the caller. And there is NO RPC that answers whether
+> an address is registered.**
+
+The two halves are one decision. The question "is this address taken?" has
+exactly one answer channel, and it is the mailbox.
+
+### Where the disclosure line sits
+
+The message is delivered TO the address. Reading it already requires controlling
+the address, which is the same proof the verification link demands, so telling
+the reader that an account exists here discloses nothing they could not establish
+by asking for a password reset. That is the **intended** disclosure and it is the
+whole point of the message.
+
+Everything beyond that single fact is refused, because none of it is needed to
+get back into the account and all of it would be new to whoever can read the
+mailbox — including anyone who has already compromised it:
+
+| Told | Not told |
+| --- | --- |
+| An account exists for this address | The username or handle on it |
+| Where to sign in | When it was created, or its state (active, deactivated, suspended) |
+| Where to set a new password | Whether a password or a second factor is set |
+| The time of the attempt | Anything about who made the attempt |
+
+The last row is a security constraint rather than a courtesy. Whoever typed the
+address is **unauthenticated**, so their IP, their client string and anything
+else they control would be attacker-chosen text repeated into a victim's inbox
+and stored forever in the log. The event carries none of it, and
+`Metadata.ActorID` is deliberately left EMPTY — the default (actor equals
+subject) would record in a permanent audit trail that the account holder tried to
+register their own address, which is the one reading of the event that is
+certainly false.
+
+### Only for a verified claim
+
+An unverified claim gets nothing. Nobody has proven they can read mail at that
+address, so sending there is unsolicited mail to a person who never asked for
+anything (NOTIFICATIONS §5) — at an address a stranger typed, which is the very
+act being reported. The pending registrant is not stranded by the silence: they
+hold a live verification link and `ResendEmailVerification` issues another
+(identity.md §12.1).
+
+### Two ceilings, and why one is not enough
+
+An unauthenticated caller can repeat this request at will, and the notice both
+mails a stranger's mailbox AND appends to their address's stream. Unbounded, it
+is a mail bomb and a storage-amplification vector at once.
+
+1. **The shared triggered-mail ceiling** — the same Valkey counter, keys and
+   numbers `ResendEmailVerification` and `RequestPasswordReset` spend from
+   (`mailAddressRules`: 3/hour, 10/day; `mailCallerRules`: 20/hour, 100/day).
+   Sharing is required rather than convenient: NOTIFICATIONS §4 asks for "an
+   hourly ceiling per address across ALL classes", and a budget of this message's
+   own would let an attacker alternate between `Register` and
+   `RequestPasswordReset` and double the mail one victim receives.
+2. **The address's own reservation stream** — `MaxDuplicateNoticesPerHour` and
+   `MaxDuplicateNoticesPerDay` on `domain.EmailReservation`, counted from
+   `DuplicateRegistrationAttempted` events already on the stream.
+
+The second exists because the first **fails open** by design, and that design is
+right: failing closed would turn a cache blip into permanent account loss for
+everyone who registered during it (`app.ResendVerification.spend`). But a control
+that fails open is a control that stops bounding anything during exactly the
+outage an attacker would wait for — and here what goes unbounded is not only mail
+but appends to the log. The aggregate ceiling is derived from the log, so it
+cannot be degraded, cannot be flushed, and rebuilds with the aggregate. It is the
+floor; the shared counter is the class-agnostic budget on top of it.
+
+**The shared ceiling is spent on BOTH registration paths**, not only the refused
+one, and the symmetry is a security property. Spending only when the address
+turns out to be taken makes the ceiling itself the oracle: a prober exhausts an
+address's budget through `Register`, then reads the answer off a later
+`ResendEmailVerification` for the same address being refused. Both paths mail the
+address — the free one sends a verification link — so both paying is also simply
+correct.
+
+**A refusal suppresses the notice and never the registration.** A `RATE_LIMITED`
+that only the taken branch can produce is the same oracle wearing a different
+hat, and it would additionally let an attacker stop somebody claiming an address
+by probing it three times an hour.
+
+### Why there is no `CheckEmailAvailability`
+
+`CheckUsernameAvailability` exists and is fine. The two look symmetrical and are
+not, and the asymmetry is the whole argument:
+
+| | Username | Email address |
+| --- | --- | --- |
+| Published by design? | **Yes** (ADR-051) — `@alice` in a mention, `/u/alice` in a URL | **No** — it is personal data, held in the vault behind a blind index (ADR-012) |
+| Is "taken" already knowable? | Yes, from any profile page | No |
+| In a projection in the clear? | Yes, deliberately | Never (compliance.md §1) |
+| An availability check discloses | Nothing new | Exactly the account-existence fact §11 exists to deny |
+
+`CheckUsernameAvailability` is an enumeration oracle **by design**, and its rate
+limit is stated in `cmd/api/identity.go` as a resource control that is explicitly
+*not* an information control. An email-availability RPC would be an information
+control that fails: it would hand any caller, unauthenticated, a precise and
+unlimited answer to the question that registration, login, reset and invitation
+are all shaped to refuse — and it would do it faster and more cheaply than any of
+the four.
+
+The product pressure that asks for one is real: a signup form wants to say "you
+already have an account" before the user submits. That answer now arrives, and it
+arrives in the mailbox. The form's honest text is "if that address can be
+registered, we have sent it a link", which is true on both branches.
+
+**This is not reopened by adding an authenticated variant either.** An endpoint
+that answers only for a session's own address answers a question the holder can
+already answer; one that answers for any address is the same oracle with a login
+in front of it, and a login is cheap.
+
+### Consequences
+
+- The refused branch now writes at most one event per attempt, bounded by both
+  ceilings. It still writes no vault row, no token and no account for a probe.
+- The residual TIMING difference between the two branches is unchanged in kind
+  and slightly narrowed in size: the taken branch now performs a ceiling check
+  and one append where it used to return immediately, while the free branch still
+  writes the vault, a token digest and a two-stream append. `RegisterResult`'s
+  doc states the delta rather than claiming it is closed.
+- `cmd/worker`'s catalogue gains an entry; without it the completeness guard
+  fails the build, which is the mechanism working.
+
+---
+
+## ADR-056 — `profile` is its own module, its values live only in the vault, and an avatar is a two-call upload the server never sees the bytes of
+
+**Date:** 2026-08-21 · **Status:** Accepted · **Refines** ADR-002, ADR-013,
+ADR-020 · **Affects** `proto/chronos/profile/v1`, `internal/modules/profile`,
+`cmd/migrate/migrations/00017_profile.sql`
+
+### Context
+
+`GetUser` returns eleven fields and every one is lifecycle state or the public
+handle. There is no display name, no avatar, no locale and no timezone anywhere
+in this system that a person can set.
+
+Meanwhile `internal/platform/notify` has always resolved `Name`, `Locale` and
+`Timezone` from the PII vault immediately before every message it sends, and the
+mail templates consume them. Those three concepts exist, are read on every
+delivery, and nothing could write them.
+
+### Decision 1 — a separate module, not more fields on identity
+
+Identity's aggregate guards authentication. Every attribute added to it widens
+the thing standing between an attacker and an account, and a display name is not
+a credential — it is a label rendered next to somebody's words.
+
+This is ADR-020's split applied again, and the same test decides it: the two
+concerns grow in different directions. Identity grows toward *proof* — passkeys,
+step-up, device binding, federation. Profile grows toward *presentation* —
+pronouns, a job title, a pronunciation clip. Fused, a BCP-47 tag validator would
+sit beside the TOTP replay guard, and the module becomes the place everything
+lands because everything is a little bit about a person.
+
+The dependency is thinner than workspace→organization: **profile is keyed by the
+`SubjectID` pseudonym and imports nothing from identity at all.** Identity never
+learns this module exists. A cycle here is not a risk; there is no edge to make
+one from.
+
+**The username stays in identity.** It has a reservation aggregate, a tombstone
+that outlives the account and an erasure rule of its own (ADR-051). It is an
+identity concern that happens to be human-readable, and duplicating it here would
+give one value two owners.
+
+### Decision 2 — the display name, the locale and the timezone live ONLY in the vault
+
+All three are personal data, and `internal/platform/pii` says so in its own
+words — including for locale and timezone, which read as preferences and are
+not: combined with other fields they narrow down who somebody is.
+
+So the event records THAT each changed and never WHAT it changed to, and
+`profile_view` stores a boolean per field rather than a value. Three properties
+follow, and each is a rule this system already had rather than a new one:
+
+- **Erasure stays a key deletion.** One operation makes all three unreadable,
+  with no projection to update and no event to rewrite (ADR-002).
+- **There is one answer, not two.** `notify` resolves these three from the vault
+  before every send. A projection copy would be a second answer, and the one a
+  person actually reads in their inbox would be the vault's.
+- **No projection gains a personal-data column** (compliance.md §1). The username
+  remains the single deliberate exception in this system.
+
+**This is a deliberate narrowing of the brief this module was built from**, which
+listed locale and timezone as non-personal columns of the projection. They are
+not non-personal by this repository's own classification, and the governing
+sentence of the same brief — "personal data goes to the PII vault, not the
+projection" — is what settled it. The avatar reference IS in the projection, as
+specified: an object key is a random name under a digest prefix and identifies
+bytes rather than a person.
+
+**The consequence, stated rather than discovered:** a vault-held field cannot be
+CLEARED. Crypto-shredding destroys a subject's key and cannot delete one field,
+and `pii.Validate` refuses an empty value precisely so a row cannot mean "present
+but blank". So clearing is REFUSED with that reason rather than silently ignored,
+and the event's shape already expresses `Cleared` for all four fields — the day
+`pii.Vault` gains a per-field delete, the name follows with no event change.
+
+### Decision 3 — one event with a sparse payload
+
+`profile.ProfileUpdated.v1` is the only stored type this module will have. Every
+optional field is a pointer.
+
+**A nil pointer means UNCHANGED. `Cleared` means EMPTIED.** They are different
+requests, and a shape that cannot tell them apart turns a settings screen which
+renders one field into one that silently erases the other three.
+
+The distinction is carried in the same shape at all three layers: `optional` on
+the wire, a pointer on the event, a nullable parameter and `COALESCE($n, current)`
+in the SQL. **The SQL is where it is load-bearing** — dropping one `COALESCE`
+compiles, passes every unit test, and makes every partial save destroy data. The
+integration suite mutates exactly that, and a `CHECK` constraint requiring the
+avatar's three columns to move together turns the same mistake on one of them
+from silent loss into a stopped projector.
+
+The payoff is that adding "pronouns" costs a proto field, a pointer field and a
+column: **no new event type, no notification-catalogue entry, no schema bump and
+no upcaster**, because the payload's shape does not change when a field is added
+to it and an older payload decodes with that pointer nil — which already means
+"not mentioned".
+
+### Decision 4 — an avatar is a reference, uploaded in two calls, and the prefix is the authorization
+
+`CreateAvatarUpload` mints a signed POST policy; the browser uploads straight to
+SeaweedFS; `UpdateProfile` records the object key after a HEAD verifies what was
+actually stored. **No image touches an event, a database row or a request body,**
+and there is no bytes field anywhere in `chronos.profile.v1`.
+
+POST rather than a presigned PUT, because a POST policy's `content-length-range`
+is enforced BY THE STORAGE SERVICE before a byte is written; a PUT can only be
+checked afterwards, by which time the bytes are stored.
+
+The second call receives a key the CLIENT chose to send, and the control is not
+that the key is unguessable. **The key's prefix is a digest of the caller's own
+pseudonym.** `GrantUpload` only ever signs a policy for a key the server chose
+under the caller's prefix, and the confirm call recomputes the same prefix from
+the same session-derived pseudonym — so there is no key a caller can name outside
+their own namespace that will be accepted, even one they legitimately hold. The
+check runs BEFORE the object store is contacted; reversed, the endpoint would be
+an existence oracle for the whole bucket.
+
+Three alternatives were considered:
+
+- **A server-side table of outstanding grants.** A write to PostgreSQL from a
+  request handler, which this system does not do (ADR-019), plus its own expiry
+  sweep.
+- **An HMAC-signed grant token handed back by the client.** It works, and it
+  introduces key material to configure, rotate and keep out of logs — to buy a
+  property the prefix already gives.
+- **A key derived from the subject with no random part.** Re-uploading would
+  OVERWRITE the stored object, and objects here are immutable: a new version is a
+  new key plus a new event (ADR-013).
+
+The content type and size recorded in the event are the STORE's answer, never the
+uploader's claim. SVG is refused outright: it is a document format that executes
+script, and serving one from an origin a session cookie is scoped to is stored
+cross-site scripting.
+
+### Consequences
+
+- `profile_view` carries no `org_id` and no row-level security, the same shape as
+  `user_view`: a profile is global to a person, and isolation is by pseudonym —
+  every statement is filtered by a subject the authn gate supplies and no request
+  can name.
+- Concurrency is the stream's. Two tabs saving at once collide on the revision and
+  one is told `CONFLICT`. It is proved against the EVENT LOG rather than the
+  projection (ADR-052), and the test fails if no writer was ever told `CONFLICT`
+  — an append with `AnyRevision` would produce the right count while silently
+  losing decisions.
+- The vault is written BEFORE the event is appended. If the append fails the two
+  converge on retry; reversed, the log would assert a change the vault never
+  received and every email would render the old name while the history said
+  otherwise.
+- `cmd/worker`'s catalogue gains an entry, Security class to the subject. Until it
+  does, the completeness guard fails the build — which is the mechanism working.
+  Security rather than Activity because the name and picture are how colleagues
+  recognise a person: an attacker holding a session who changes them is
+  impersonating the holder to everyone the holder works with, and a preference
+  must not be able to switch that alert off.
+- **Object lifecycle is left unbuilt and named as such.** Reclaiming abandoned
+  uploads and the objects of erased subjects is a sweep against the bucket with
+  `profile_view` as its reference list (CONVENTIONS §1.5, a Temporal Schedule) —
+  not something a request handler does inline, where a failure would either fail a
+  save that already succeeded or leak an object silently.

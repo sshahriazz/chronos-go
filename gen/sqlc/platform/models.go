@@ -103,6 +103,19 @@ type PiiValue struct {
 	UpdatedAt  pgtype.Timestamptz
 }
 
+// Profile projection. No personal data: pseudonym, set-flags and an opaque avatar object key only.
+type ProfileView struct {
+	SubjectID         string
+	DisplayNameSet    bool
+	LocaleSet         bool
+	TimezoneSet       bool
+	AvatarObjectKey   string
+	AvatarContentType string
+	AvatarSizeBytes   int64
+	UpdatedAt         pgtype.Timestamptz
+	CreatedAt         pgtype.Timestamptz
+}
+
 // One row per projector. Written in the same transaction as projected rows.
 type ProjectionCheckpoint struct {
 	Name            string
@@ -205,4 +218,10 @@ type UserView struct {
 	SuspendedAt   pgtype.Timestamptz
 	// When this account stopped holding email_index. NULL means it still holds it.
 	EmailReleasedAt pgtype.Timestamptz
+	// When the holder asked for erasure. NULL means never. Not a lifecycle state: the account still works.
+	DeletionRequestedAt pgtype.Timestamptz
+	// When erasure falls due, copied from the event. Never recomputed from the current grace period.
+	DeletionScheduledFor pgtype.Timestamptz
+	// Public handle, CLEARTEXT and deliberately so (ADR-051). NULL means never claimed, or erased. The one personal-data column in a projection; erasure DELETES it and tombstones the handle.
+	Username pgtype.Text
 }

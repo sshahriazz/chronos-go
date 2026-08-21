@@ -359,6 +359,47 @@ type queryCall struct {
 	size      int
 }
 
+// fakeLifecycle records the two lifecycle commands.
+//
+// It records the COMMAND, not just that it was called, because the property
+// every test here asserts is which subject the handler named — and the handler is
+// required to take it from the principal and from nowhere else.
+type fakeLifecycle struct {
+	mu sync.Mutex
+
+	deactivateFn func(app.DeactivateAccountCommand) (app.DeactivateAccountResult, error)
+	deletionFn   func(app.RequestAccountDeletionCommand) (app.RequestAccountDeletionResult, error)
+
+	deactivateCmds []app.DeactivateAccountCommand
+	deletionCmds   []app.RequestAccountDeletionCommand
+}
+
+func (f *fakeLifecycle) Deactivate(
+	_ context.Context, cmd app.DeactivateAccountCommand,
+) (app.DeactivateAccountResult, error) {
+	f.mu.Lock()
+	f.deactivateCmds = append(f.deactivateCmds, cmd)
+	fn := f.deactivateFn
+	f.mu.Unlock()
+	if fn == nil {
+		return app.DeactivateAccountResult{}, nil
+	}
+	return fn(cmd)
+}
+
+func (f *fakeLifecycle) RequestDeletion(
+	_ context.Context, cmd app.RequestAccountDeletionCommand,
+) (app.RequestAccountDeletionResult, error) {
+	f.mu.Lock()
+	f.deletionCmds = append(f.deletionCmds, cmd)
+	fn := f.deletionFn
+	f.mu.Unlock()
+	if fn == nil {
+		return app.RequestAccountDeletionResult{}, nil
+	}
+	return fn(cmd)
+}
+
 type fakeQueries struct {
 	mu sync.Mutex
 
@@ -519,6 +560,39 @@ func (m *memStore) Release(_ context.Context, s cqrs.Scope) error {
 	return nil
 }
 
+// fakeUsernames records what CheckUsernameAvailability asked the app layer for.
+//
+// The COMMANDS are kept rather than a call count, for fakeResets' reason: the
+// assertions worth making about this handler are that the raw handle reached the
+// app layer unchanged — normalization is the app layer's, not the transport's —
+// and that the caller scope was derived from the connection rather than from a
+// field the caller could choose.
+type fakeUsernames struct {
+	mu sync.Mutex
+
+	checkFn func(app.CheckUsernameCommand) (app.CheckUsernameResult, error)
+	checked []app.CheckUsernameCommand
+}
+
+func (f *fakeUsernames) Check(
+	_ context.Context, cmd app.CheckUsernameCommand,
+) (app.CheckUsernameResult, error) {
+	f.mu.Lock()
+	f.checked = append(f.checked, cmd)
+	fn := f.checkFn
+	f.mu.Unlock()
+	if fn == nil {
+		return app.CheckUsernameResult{}, nil
+	}
+	return fn(cmd)
+}
+
+func (f *fakeUsernames) checks() []app.CheckUsernameCommand {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]app.CheckUsernameCommand(nil), f.checked...)
+}
+
 // ---------------------------------------------------------------------------
 // The harness
 // ---------------------------------------------------------------------------
@@ -528,8 +602,10 @@ type harness struct {
 	registration *fakeRegistration
 	resender     *fakeResender
 	resets       *fakeResets
+	usernames    *fakeUsernames
 	authn        *fakeAuthentication
 	secondFactor *fakeSecondFactor
+	lifecycle    *fakeLifecycle
 	queries      *fakeQueries
 	directory    *fakeDirectory
 }
@@ -569,8 +645,10 @@ func newHarness(t *testing.T, opts ...options) *harness {
 		registration: &fakeRegistration{},
 		resender:     &fakeResender{},
 		resets:       &fakeResets{},
+		usernames:    &fakeUsernames{},
 		authn:        &fakeAuthentication{},
 		secondFactor: &fakeSecondFactor{},
+		lifecycle:    &fakeLifecycle{},
 		queries:      &fakeQueries{},
 		directory:    &fakeDirectory{},
 	}
@@ -587,8 +665,10 @@ func newHarness(t *testing.T, opts ...options) *harness {
 		Registration:   h.registration,
 		Resender:       h.resender,
 		Resets:         h.resets,
+		Usernames:      h.usernames,
 		Authentication: h.authn,
 		SecondFactor:   h.secondFactor,
+		Lifecycle:      h.lifecycle,
 		Queries:        h.queries,
 		Directory:      h.directory,
 		CallerScope:    callerScope,
@@ -678,8 +758,10 @@ func TestNewRefusesAPartiallyWiredHandler(t *testing.T) {
 			Registration:   &fakeRegistration{},
 			Resender:       &fakeResender{},
 			Resets:         &fakeResets{},
+			Usernames:      &fakeUsernames{},
 			Authentication: &fakeAuthentication{},
 			SecondFactor:   &fakeSecondFactor{},
+			Lifecycle:      &fakeLifecycle{},
 			Queries:        &fakeQueries{},
 			Directory:      &fakeDirectory{},
 		}
@@ -689,10 +771,16 @@ func TestNewRefusesAPartiallyWiredHandler(t *testing.T) {
 		"no registration service":   func(d *api.Deps) { d.Registration = nil },
 		"no verification resender":  func(d *api.Deps) { d.Resender = nil },
 		"no password-reset service": func(d *api.Deps) { d.Resets = nil },
-		"no authentication service": func(d *api.Deps) { d.Authentication = nil },
-		"no second-factor service":  func(d *api.Deps) { d.SecondFactor = nil },
-		"no read side":              func(d *api.Deps) { d.Queries = nil },
-		"no user directory":         func(d *api.Deps) { d.Directory = nil },
+		// A nil here panics the ONE endpoint that lets a person find out their
+		// handle is taken before they spend a verification link they cannot get
+		// back, so its absence would read as a bug in verification rather than in
+		// wiring.
+		"no username availability service": func(d *api.Deps) { d.Usernames = nil },
+		"no authentication service":        func(d *api.Deps) { d.Authentication = nil },
+		"no second-factor service":         func(d *api.Deps) { d.SecondFactor = nil },
+		"no lifecycle service":             func(d *api.Deps) { d.Lifecycle = nil },
+		"no read side":                     func(d *api.Deps) { d.Queries = nil },
+		"no user directory":                func(d *api.Deps) { d.Directory = nil },
 	}
 	for name, remove := range tests {
 		t.Run(name, func(t *testing.T) {

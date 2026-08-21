@@ -36,9 +36,17 @@ func TestRegister(t *testing.T) {
 		// No password. RegisterRequest has no field for one and RegisterCommand has
 		// no member for one, so a handler that reintroduced a credential at
 		// registration would have to change both (IDENTITY-REVIEW C8).
+		//
+		// CallerScope comes from the TRANSPORT — the connection's peer address,
+		// plus X-Forwarded-For only as deep as API_TRUSTED_PROXY_HOPS allows — so
+		// a caller cannot choose their own rate-limit bucket by editing a field.
+		// It is asserted rather than ignored because an empty scope collapses every
+		// caller into one bucket, which turns the per-caller triggered-mail ceiling
+		// into a global one with no runtime symptom at all.
 		want := app.RegisterCommand{
 			Email:          "ada@example.com",
 			IdempotencyKey: "idem-register-1",
+			CallerScope:    "127.0.0.1",
 		}
 		if cmds[0] != want {
 			t.Fatalf("command = %+v, want %+v", cmds[0], want)
@@ -952,4 +960,185 @@ func TestResetPassword(t *testing.T) {
 				"mailbox by a browser that has never authenticated", err)
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// CheckUsernameAvailability
+// ---------------------------------------------------------------------------
+
+// TestCheckUsernameAvailability is the one public endpoint in this service whose
+// two outcomes are DELIBERATELY distinguishable.
+//
+// Every other public handler here drops what it learned, because an address is
+// secret and a distinguishable answer is an account-existence oracle. A handle is
+// not secret — publication is its entire purpose (ADR-051) — so this handler
+// returns the answer, and this test is where that difference is written down so
+// nobody "harmonises" it later.
+func TestCheckUsernameAvailability(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the answer reaches the wire, both ways", func(t *testing.T) {
+		t.Parallel()
+		for _, available := range []bool{true, false} {
+			t.Run(map[bool]string{true: "available", false: "taken"}[available],
+				func(t *testing.T) {
+					t.Parallel()
+					h := newHarness(t)
+					h.usernames.checkFn = func(app.CheckUsernameCommand) (app.CheckUsernameResult, error) {
+						return app.CheckUsernameResult{
+							Available: available, Username: "ada_lovelace",
+						}, nil
+					}
+
+					resp, err := h.client.CheckUsernameAvailability(t.Context(),
+						connect.NewRequest(&identityv1.CheckUsernameAvailabilityRequest{
+							Username: "Ada_Lovelace",
+						}))
+					if err != nil {
+						t.Fatalf("CheckUsernameAvailability: %v", err)
+					}
+					if resp.Msg.GetAvailable() != available {
+						t.Errorf("available=%v, want %v — the two outcomes must stay "+
+							"distinguishable here, or the signup form cannot tell a person "+
+							"their handle is taken until after they have spent a link",
+							resp.Msg.GetAvailable(), available)
+					}
+					// The CANONICAL form, not what was typed. A client that echoed the
+					// input would show somebody @Ada_Lovelace for a handle that will be
+					// claimed as @ada_lovelace.
+					if got := resp.Msg.GetUsername(); got != "ada_lovelace" {
+						t.Errorf("username %q, want the normalized ada_lovelace", got)
+					}
+				})
+		}
+	})
+
+	// Normalization belongs to the app layer, and the transport must not do any of
+	// it. A handler that trimmed or folded here would be a SECOND definition of
+	// the canonical form, and the two would disagree the first time either changed
+	// — which for a value that names a permanent stream is unrecoverable.
+	t.Run("the raw handle reaches the app layer unchanged", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+
+		if _, err := h.client.CheckUsernameAvailability(t.Context(),
+			connect.NewRequest(&identityv1.CheckUsernameAvailabilityRequest{
+				Username: "Ada_Lovelace",
+			})); err != nil {
+			t.Fatalf("CheckUsernameAvailability: %v", err)
+		}
+		cmds := h.usernames.checks()
+		if len(cmds) != 1 {
+			t.Fatalf("app.Check called %d times, want 1", len(cmds))
+		}
+		if cmds[0].Username != "Ada_Lovelace" {
+			t.Errorf("the app layer received %q, want the raw input", cmds[0].Username)
+		}
+	})
+
+	// The response carries exactly two fields, and this is the type-level half of
+	// the "no reason field" rule. Taken, reserved and tombstoned are one answer,
+	// and the third is the one that matters: it would announce that the account
+	// behind a handle was erased.
+	t.Run("the response has no field that could name a reason", func(t *testing.T) {
+		t.Parallel()
+		fields := (&identityv1.CheckUsernameAvailabilityResponse{}).
+			ProtoReflect().Descriptor().Fields()
+		allowed := map[string]bool{"available": true, "username": true}
+		for i := range fields.Len() {
+			name := string(fields.Get(i).Name())
+			if !allowed[name] {
+				t.Errorf("CheckUsernameAvailabilityResponse grew the field %q. Taken, "+
+					"reserved and tombstoned must stay ONE answer: 'this handle belonged "+
+					"to an erased account' is a fact about a person, and the tombstone "+
+					"exists to protect that person (ADR-051)", name)
+			}
+		}
+	})
+
+	// The caller scope comes from the connection, exactly as the resend's does.
+	// A ceiling keyed on a field the caller can choose is not a ceiling.
+	t.Run("the caller scope comes from the transport, not from a field", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+
+		req := connect.NewRequest(&identityv1.CheckUsernameAvailabilityRequest{
+			Username: "ada_lovelace",
+		})
+		req.Header().Set("X-Forwarded-For", "192.0.2.111, 198.51.100.222")
+		if _, err := h.client.CheckUsernameAvailability(t.Context(), req); err != nil {
+			t.Fatalf("CheckUsernameAvailability: %v", err)
+		}
+
+		cmds := h.usernames.checks()
+		if len(cmds) != 1 {
+			t.Fatalf("app.Check called %d times, want 1", len(cmds))
+		}
+		if cmds[0].CallerScope == "" {
+			t.Fatal("no caller scope was derived; every request would then share one bucket")
+		}
+		for _, spoofed := range []string{"192.0.2.111", "198.51.100.222"} {
+			if strings.Contains(cmds[0].CallerScope, spoofed) {
+				t.Errorf("caller scope %q was taken from X-Forwarded-For with the default "+
+					"trust boundary of zero hops", cmds[0].CallerScope)
+			}
+		}
+	})
+
+	// It is a READ, and it needs no idempotency key: it appends nothing, mints
+	// nothing and spends nothing, so there is no second application for a key to
+	// collapse. Every mutating RPC in this service refuses a request without one,
+	// and this test says why this one does not.
+	t.Run("no idempotency key is required", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+
+		if _, err := h.client.CheckUsernameAvailability(t.Context(),
+			connect.NewRequest(&identityv1.CheckUsernameAvailabilityRequest{
+				Username: "ada_lovelace",
+			})); err != nil {
+			t.Fatalf("a read was refused for want of an idempotency key: %v", err)
+		}
+	})
+
+	// An app-layer refusal is rendered by the shared mapping and by nothing else,
+	// which is what keeps this handler from acquiring a switch.
+	t.Run("a rate-limited check is rendered by the shared mapping", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.usernames.checkFn = func(app.CheckUsernameCommand) (app.CheckUsernameResult, error) {
+			return app.CheckUsernameResult{}, errs.RateLimitedf("too many username checks")
+		}
+
+		_, err := h.client.CheckUsernameAvailability(t.Context(),
+			connect.NewRequest(&identityv1.CheckUsernameAvailabilityRequest{
+				Username: "ada_lovelace",
+			}))
+		requireCode(t, err, connect.CodeResourceExhausted)
+	})
+}
+
+// TestCheckUsernameAvailabilityIsPublicAndAREAD pins the policy annotations.
+//
+// Public because the population that needs it — somebody choosing a handle at
+// the signup form — has no account by definition. READ because it appends
+// nothing: classing it as a WRITE would block it once an org is suspended, which
+// makes no sense for a call that creates nothing and belongs to no org.
+func TestCheckUsernameAvailabilityIsPublicAndARead(t *testing.T) {
+	t.Parallel()
+
+	method := identityv1.File_chronos_identity_v1_identity_proto.
+		Services().ByName("IdentityService").Methods().ByName("CheckUsernameAvailability")
+	if method == nil {
+		t.Fatal("CheckUsernameAvailability is not declared on IdentityService")
+	}
+	opts := method.Options()
+	if !proto.GetExtension(opts, optionsv1.E_Public).(bool) {
+		t.Error("CheckUsernameAvailability is not public; the people who need it have " +
+			"no account, so requiring one would make the endpoint serve nobody")
+	}
+	if got := proto.GetExtension(opts, optionsv1.E_Operation).(optionsv1.OperationClass); got !=
+		optionsv1.OperationClass_OPERATION_CLASS_READ {
+		t.Errorf("operation class %s, want READ — it appends nothing and mints nothing", got)
+	}
 }

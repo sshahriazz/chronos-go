@@ -349,3 +349,205 @@ func TestReplayingAReservationReproducesItsState(t *testing.T) {
 			"confirmation, so every verified address frees itself once its original lease passes")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The duplicate-registration notice (ADR-055)
+// ---------------------------------------------------------------------------
+
+func verifiedReservation(t *testing.T, subject string) *domain.EmailReservation {
+	t.Helper()
+	r := heldReservation(t, subject)
+	if err := r.Confirm(subject, at.Add(time.Minute)); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+	r.ClearUncommitted()
+	return r
+}
+
+// The notice may only be recorded for a claim somebody has PROVEN.
+//
+// An unverified claim means nobody has shown they can read mail at the address.
+// Mailing there is unsolicited mail to a person who never asked for anything
+// (NOTIFICATIONS §5), aimed at an address a stranger typed — which is the very
+// act being reported.
+func TestNoNoticeIsRecordedForAnUnprovenClaim(t *testing.T) {
+	t.Parallel()
+
+	free := eventsourcing.NewAggregate(domain.NewReservation)
+	unproven := heldReservation(t, "subj_first")
+	unproven.ClearUncommitted()
+
+	for name, r := range map[string]*domain.EmailReservation{
+		"never claimed":     free,
+		"claimed, unproven": unproven,
+	} {
+		if r.NoticeDuplicateRegistration(at.Add(time.Hour)) {
+			t.Errorf("%s: a notice was recorded", name)
+		}
+		if got := len(r.Uncommitted()); got != 0 {
+			t.Errorf("%s: %d events recorded", name, got)
+		}
+	}
+}
+
+// The recorded fact, in full. It names the address's index and the pseudonym of
+// the account that HOLDS it — never the address, and never anything about
+// whoever made the attempt, who is unauthenticated (ADR-002).
+func TestANoticeNamesTheHolderAndNobodyElse(t *testing.T) {
+	t.Parallel()
+
+	r := verifiedReservation(t, "subj_owner")
+	now := at.Add(time.Hour)
+
+	if !r.NoticeDuplicateRegistration(now) {
+		t.Fatal("a verified claim recorded no notice")
+	}
+	pending := r.Uncommitted()
+	if len(pending) != 1 {
+		t.Fatalf("%d events recorded, want 1", len(pending))
+	}
+	notice, ok := pending[0].(*contract.DuplicateRegistrationAttempted)
+	if !ok {
+		t.Fatalf("recorded %T", pending[0])
+	}
+	switch {
+	case notice.Index != idxA:
+		t.Errorf("index is %q, want %q", notice.Index, idxA)
+	case notice.SubjectID != "subj_owner":
+		t.Errorf("subject is %q; the notice must name the HOLDER", notice.SubjectID)
+	case !notice.AttemptedAt.Equal(now):
+		t.Errorf("attempted at %s, want %s", notice.AttemptedAt, now)
+	case notice.AttemptedAt.Location() != time.UTC:
+		t.Errorf("attempted at is in %s; all times are UTC (ADR-008)", notice.AttemptedAt.Location())
+	}
+}
+
+// The per-address ceiling, which is what stops an unauthenticated caller turning
+// this endpoint into a mail bomb AND into an unbounded append to somebody else's
+// stream.
+//
+// Asserted at the boundary in both directions: the last permitted notice must be
+// recorded and the next must not, because a ceiling that is off by one in the
+// permissive direction reads exactly like one that works.
+func TestTheNoticeCeilingIsPerAddressAndPerWindow(t *testing.T) {
+	t.Parallel()
+
+	t.Run("hourly", func(t *testing.T) {
+		t.Parallel()
+		r := verifiedReservation(t, "subj_owner")
+		now := at.Add(time.Hour)
+
+		for i := range domain.MaxDuplicateNoticesPerHour {
+			if !r.NoticeDuplicateRegistration(now.Add(time.Duration(i) * time.Minute)) {
+				t.Fatalf("notice %d of %d was refused", i+1, domain.MaxDuplicateNoticesPerHour)
+			}
+		}
+		if r.NoticeDuplicateRegistration(now.Add(time.Duration(domain.MaxDuplicateNoticesPerHour) * time.Minute)) {
+			t.Errorf("a %dth notice was recorded within the hour",
+				domain.MaxDuplicateNoticesPerHour+1)
+		}
+		// And the window really is a window: an hour later the budget is back.
+		if !r.NoticeDuplicateRegistration(now.Add(2 * time.Hour)) {
+			t.Error("the hourly budget never recovered; the ceiling is a permanent lock")
+		}
+	})
+
+	t.Run("daily", func(t *testing.T) {
+		t.Parallel()
+		r := verifiedReservation(t, "subj_owner")
+		now := at.Add(time.Hour)
+
+		// Spread across the day so the hourly rule never binds, and the only rule
+		// that can refuse the last one is the daily one.
+		for i := range domain.MaxDuplicateNoticesPerDay {
+			if !r.NoticeDuplicateRegistration(now.Add(time.Duration(i) * time.Hour)) {
+				t.Fatalf("notice %d of %d was refused", i+1, domain.MaxDuplicateNoticesPerDay)
+			}
+		}
+		over := now.Add(time.Duration(domain.MaxDuplicateNoticesPerDay) * time.Hour)
+		if r.NoticeDuplicateRegistration(over) {
+			t.Errorf("a %dth notice was recorded within the day",
+				domain.MaxDuplicateNoticesPerDay+1)
+		}
+		if !r.NoticeDuplicateRegistration(now.Add(25 * time.Hour)) {
+			t.Error("the daily budget never recovered")
+		}
+	})
+}
+
+// The ceiling survives a rebuild, which is the whole reason it lives on the
+// aggregate instead of in a cache: it is derived from the log, so it cannot be
+// degraded by an unreachable Valkey or reset by a FLUSHALL.
+func TestTheNoticeCeilingIsRebuiltFromTheLog(t *testing.T) {
+	t.Parallel()
+
+	now := at.Add(time.Hour)
+	events := []eventsourcing.Event{
+		&contract.EmailReserved{Index: idxA, SubjectID: "subj_owner", ExpiresAt: at.Add(lease), ReservedAt: at},
+		&contract.EmailReservationConfirmed{Index: idxA, SubjectID: "subj_owner", ConfirmedAt: at},
+	}
+	for i := range domain.MaxDuplicateNoticesPerHour {
+		events = append(events, &contract.DuplicateRegistrationAttempted{
+			Index: idxA, SubjectID: "subj_owner",
+			AttemptedAt: now.Add(time.Duration(i) * time.Minute),
+		})
+	}
+
+	rebuilt := eventsourcing.NewAggregate(domain.NewReservation)
+	for _, e := range events {
+		rebuilt.Apply(e)
+	}
+	if rebuilt.NoticeDuplicateRegistration(now.Add(4 * time.Minute)) {
+		t.Error("a rebuilt reservation had a fresh budget; the ceiling does not survive a reload, " +
+			"so restarting the process — or simply loading the aggregate again — resets it")
+	}
+}
+
+// Releasing the claim must NOT hand back a fresh notice budget.
+//
+// A lapse is something an attacker only has to wait for, so clearing the history
+// on release would sell the whole ceiling for the price of patience.
+func TestReleasingTheAddressDoesNotRefreshTheNoticeBudget(t *testing.T) {
+	t.Parallel()
+
+	r := verifiedReservation(t, "subj_owner")
+	now := at.Add(time.Hour)
+	for i := range domain.MaxDuplicateNoticesPerHour {
+		if !r.NoticeDuplicateRegistration(now.Add(time.Duration(i) * time.Minute)) {
+			t.Fatalf("notice %d was refused", i+1)
+		}
+	}
+	r.Apply(&contract.EmailReleased{Index: idxA, SubjectID: "subj_owner", Reason: domain.ReleaseChanged})
+	r.Apply(&contract.EmailReserved{
+		Index: idxA, SubjectID: "subj_next", ExpiresAt: now.Add(lease), ReservedAt: now,
+	})
+	r.Apply(&contract.EmailReservationConfirmed{Index: idxA, SubjectID: "subj_next", ConfirmedAt: now})
+
+	if r.NoticeDuplicateRegistration(now.Add(4 * time.Minute)) {
+		t.Error("re-claiming the address reset its notice budget")
+	}
+}
+
+// The retained history is bounded. An address under sustained attack must not
+// grow an unbounded slice every time its aggregate is loaded.
+func TestTheNoticeHistoryIsBounded(t *testing.T) {
+	t.Parallel()
+
+	r := verifiedReservation(t, "subj_owner")
+	for i := range 500 {
+		r.Apply(&contract.DuplicateRegistrationAttempted{
+			Index: idxA, SubjectID: "subj_owner",
+			AttemptedAt: at.Add(time.Duration(i) * time.Minute),
+		})
+	}
+	// Everything ever applied is inside this window, so an unbounded history
+	// would answer 500.
+	if got := r.NoticesSince(at.Add(-time.Hour)); got > 64 {
+		t.Errorf("the aggregate retained %d notices; the history is unbounded", got)
+	}
+	// And it still refuses, which is what makes the bound safe: pruning must
+	// never look like "the ceiling was never reached".
+	if r.NoticeDuplicateRegistration(at.Add(500 * time.Minute)) {
+		t.Error("a pruned history reported budget it does not have")
+	}
+}
