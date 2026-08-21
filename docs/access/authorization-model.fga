@@ -1,0 +1,15 @@
+# Authorization model — GENERATED, do not edit.
+#
+# Assembled from the fragments each module declares. Run `make authz-model`.
+# The deployed model is built from those fragments, never parsed from this file;
+# this is the artifact a reviewer reads before a model deploy.
+#
+# Deploy ordering is not negotiable (access.md §10):
+#   1. deploy the model      (additive only)
+#   2. deploy code pinning the new model id
+#   3. deploy code writing the new tuples
+
+model
+  schema 1.1
+
+type user

@@ -397,7 +397,7 @@ fmt-check: ## Fail if anything is unformatted — CI must VERIFY, never rewrite
 	@echo "  formatting OK"
 
 .PHONY: check
-check: fmt-check proto-lint proto-breaking api-validate proto-thirdparty-check migrate-check sqlc-check sql-check lint vet-integration test ## Everything CI runs
+check: fmt-check proto-lint proto-breaking api-validate authz-check proto-thirdparty-check migrate-check sqlc-check sql-check lint vet-integration test ## Everything CI runs
 
 .PHONY: vet-integration
 vet-integration: ## Type-check the integration-tagged tests without running them
@@ -414,6 +414,34 @@ vet-integration: ## Type-check the integration-tagged tests without running them
 	@# `test-integration`.
 	@go vet -tags=integration ./...
 	@echo "  integration-tagged tests compile"
+
+.PHONY: authz-model
+authz-model: ## Render the authorization model from the module fragments
+	@# The DEPLOYED model is built from the fragments directly; this artifact is
+	@# what a reviewer reads before a model deploy, which access.md §10 calls the
+	@# highest-blast-radius deploy in the system. A diff of Go struct literals
+	@# spread across modules is not something anyone can judge.
+	@go run ./internal/tools/genauthzmodel
+
+.PHONY: authz-deploy
+authz-deploy: ## Provision the OpenFGA store and deploy the model, printing the ids to pin
+	@# NOT part of `make check` and never run by the server. A process that
+	@# provisions its own authorization store answers every check against whatever
+	@# store it just created — point it at the wrong endpoint and it makes an EMPTY
+	@# one, then denies everything while reporting itself healthy.
+	@#
+	@# .env is sourced for OPENFGA_PRESHARED_KEY, the same way test-integration
+	@# does, and guarded on the file existing so an environment that supplies the
+	@# variables some other way still works.
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	go run ./internal/tools/deployauthzmodel
+
+.PHONY: authz-check
+authz-check: ## Fail if the rendered model has fallen behind the fragments
+	@# Two copies of one fact drift, and this drift is silent in the worst
+	@# direction: the file that gets REVIEWED stops describing the model that gets
+	@# DEPLOYED. Same guard `api-validate` puts on the OpenAPI document.
+	@go run ./internal/tools/genauthzmodel -check
 
 .PHONY: api-validate
 api-validate: ## Validate the generated OpenAPI spec is complete and non-empty
