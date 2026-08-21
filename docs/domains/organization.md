@@ -29,6 +29,21 @@ Dependency direction is fixed: **`workspace → organization`, never the reverse
 The org is deliberately **thin on data and heavy on authority**. It holds few
 fields; what it holds decides what the entire tenant may do.
 
+### One customer, one organization
+
+**A subject OWNS at most one organization.** The org is the tenant and the
+commercial boundary, and a customer contract is not something one person holds
+several of. `CreateOrganization` refuses a subject who already owns one.
+
+This was decided long before it was written here, and its absence cost a round
+of re-litigation: the line above implies it, and an implication is not a rule a
+handler can enforce or a reviewer can check.
+
+It constrains OWNERSHIP only. A person may be a **member** of many
+organizations — the seat model depends on it, since a seat is per person per
+organization (workspace.md §2) and is released only when they leave that
+organization entirely.
+
 ---
 
 ## 2. Aggregates
