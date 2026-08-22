@@ -174,12 +174,37 @@ Trial caps: **3 workspaces, 5 seats**.
       before taking the new one leaves the person holding neither.
       Seats are reserved in the USE CASE, not gate 4: gate 4 reserves
       unconditionally, and the rule is conditional.
-- [ ] The member RPCs (`AddWorkspaceMember` / `RemoveWorkspaceMember`) that
-      drive the seat logic — until they exist, `Seats` has no caller
-- [ ] Revocation tombstones (ADR-045) — still nothing revokes yet
+- [x] The member RPCs — `AddWorkspaceMember`, `RemoveWorkspaceMember` and
+      `ChangeWorkspaceMemberRole`. `Seats` now has a caller, and the seat rule is
+      proved through the RPC as well as in isolation.
+- [x] **Revocation tombstones (ADR-045) now have a writer.** The machinery was
+      complete — the Guard consults them, the confirming writer clears them — and
+      nothing had ever laid one, so every revocation waited on projector lag. A
+      removal and a demotion lay one now, after the append and before returning,
+      and the access projector's delete is what confirms it.
+- [x] **`resource_id_field` works.** It had been declared in the schema and
+      published in the OpenAPI document since the option existed, while the gate
+      returned `ErrGateUnavailable` for every method that used one. These are the
+      first three RPCs that could ever have carried it.
+- [x] **The creator is a real member.** `WorkspaceCreated` named the first admin
+      and nothing carried that into the membership category, so the creator had
+      no Membership aggregate: removing them was a no-op that returned 200,
+      changing their role was NOT_FOUND, and their membership consumed no seat.
+      Creation is now one atomic append of the workspace and their `MemberJoined`.
+- [x] **`org_member_index` moved to the workspace module.** Membership comes from
+      organization events AND from workspace joins; one table has one writer, and
+      `workspace -> organization` is the only permitted direction (ADR-020), so
+      the projection has to live on the workspace side. Without the join handler
+      a person added to a workspace could authenticate and then do nothing —
+      gate 1 refuses to resolve an organization they demonstrably belong to.
+- [x] **The access projector was skipping every membership event.** Its filter
+      named `workspace-` and `organization-`; memberships live in their own
+      category. A grant that never lands DENIES, which is what a healthy
+      authorization graph looks like from the outside.
+- [x] `entitlement.ReserveFor` / `ReleaseFor` implemented — `Seats` declared the
+      port and nothing satisfied it, so the seat rule could not have run.
 
 ## Then
-- [ ] **Slice 4** — workspace + membership
 - [ ] **Slice 5** — invitations
 - [ ] **Slice 6** — teams
 - [ ] **Billing** — Stripe, per [BILLING-PLAN.md](BILLING-PLAN.md). Additive

@@ -7,6 +7,7 @@ import (
 
 	entitlementdb "github.com/chronos/chronos-go/gen/sqlc/entitlement"
 	"github.com/chronos/chronos-go/internal/modules/entitlement/app"
+	"github.com/chronos/chronos-go/internal/modules/entitlement/domain"
 	"github.com/chronos/chronos-go/internal/platform/db"
 )
 
@@ -102,6 +103,28 @@ func (r *Reservations) Release(ctx context.Context, reservationID string) error 
 		_, err := q.Exec(ctx, entitlementdb.ReleaseQuotaReservation, reservationID)
 		return err
 	})
+}
+
+// ReleaseFor returns whatever a subject holds of a limit, committed or not.
+//
+// Committed rows INCLUDED, which is the difference from Release: a committed
+// reservation is usage, and usage going away is exactly what a departure is. A
+// version that spared committed rows would release only seats whose holder left
+// within the reservation TTL, which is to say almost none of them.
+func (r *Reservations) ReleaseFor(
+	ctx context.Context, orgID string, key domain.LimitKey, subjectRef string,
+) (bool, error) {
+	var released bool
+	err := r.tx.InTenantTx(ctx, func(ctx context.Context, q db.Querier) error {
+		rows, err := q.Exec(ctx, entitlementdb.ReleaseQuotaForSubject,
+			orgID, string(key), subjectRef)
+		if err != nil {
+			return err
+		}
+		released = rows > 0
+		return nil
+	})
+	return released, err
 }
 
 // Sweep deletes reservations that lapsed without being committed.

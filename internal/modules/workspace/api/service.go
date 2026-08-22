@@ -23,23 +23,41 @@ type Creation interface {
 	Create(ctx context.Context, cmd app.CreateCommand) (app.CreateResult, error)
 }
 
+// Membership is workspace's member write side, narrowed to what this layer
+// calls.
+type Membership interface {
+	Add(ctx context.Context, cmd app.AddMemberCommand) (app.AddMemberResult, error)
+	Remove(ctx context.Context, cmd app.RemoveMemberCommand) (app.RemoveMemberResult, error)
+	ChangeRole(ctx context.Context, cmd app.ChangeRoleCommand) (app.ChangeRoleResult, error)
+}
+
 // Service serves WorkspaceService.
 type Service struct {
 	workspacev1connect.UnimplementedWorkspaceServiceHandler
 
 	creation Creation
+	members  Membership
 }
 
 // Deps is what Service needs.
 type Deps struct {
 	Creation Creation
+	Members  Membership
 }
 
 func New(d Deps) (*Service, error) {
-	if d.Creation == nil {
+	switch {
+	case d.Creation == nil:
 		return nil, fmt.Errorf("workspace: a creation use case is required")
+	case d.Members == nil:
+		// Required, not optional. An embedded UnimplementedWorkspaceServiceHandler
+		// means a nil here would compile and serve UNIMPLEMENTED at request time
+		// instead of failing the boot — and three RPCs that answer UNIMPLEMENTED
+		// look like a deployment that is merely behind.
+		return nil, fmt.Errorf("workspace: a membership use case is required; without one " +
+			"the member RPCs answer UNIMPLEMENTED and no seat is ever counted")
 	}
-	return &Service{creation: d.Creation}, nil
+	return &Service{creation: d.Creation, members: d.Members}, nil
 }
 
 // CreateWorkspace opens a workspace in the caller's organization.

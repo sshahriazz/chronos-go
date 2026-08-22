@@ -149,6 +149,7 @@ import (
 	"github.com/chronos/chronos-go/internal/modules/profile"
 	profileprojection "github.com/chronos/chronos-go/internal/modules/profile/projection"
 	"github.com/chronos/chronos-go/internal/modules/workspace"
+	workspaceprojection "github.com/chronos/chronos-go/internal/modules/workspace/projection"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/db"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
@@ -520,7 +521,8 @@ func (hh *harness) startProjectors() {
 		// Organization's two: gate 3 reads the first on every request, and gate 1
 		// verifies membership against the second.
 		organizationprojection.NewStatus(hh.codec),
-		organizationprojection.NewMembers(hh.codec),
+		workspaceprojection.NewOrgMembers(hh.codec),
+		workspaceprojection.NewMembers(hh.codec),
 		identityprojection.NewUser(hh.codec),
 		identityprojection.NewSession(hh.codec),
 		identityprojection.NewReservation(hh.codec),

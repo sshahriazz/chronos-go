@@ -84,6 +84,188 @@ message CreateWorkspaceResponse {
   ];
 }
 
+// AddWorkspaceMemberRequest puts an existing account into a workspace.
+//
+// It names a SUBJECT, never an address. A pseudonym is the only way an account
+// appears on this wire (ADR-002), and adding by email would need the caller to
+// know one — which is what invitations are for, and they are a different call.
+message AddWorkspaceMemberRequest {
+  // Which workspace. Read by the authz gate, which asks for `admin` on THIS
+  // object rather than on the organization: an org admin inherits it through the
+  // `parent` edge, and a workspace admin who is not an org admin does not.
+  string workspace_id = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 29
+    },
+    (buf.validate.field).string = {
+      max_len: 29
+      pattern: "^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Who joins, by pseudonym.
+  string subject_id = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "subj_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 31
+    },
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // The role they join with: `admin`, `member` or `guest`.
+  //
+  // `admin` and `member` draw on the member seat pool; `guest` draws on the
+  // separate guest pool (ADR-027). Which pool is consulted is decided from this
+  // value, so it is bounded by an enumeration rather than by a length.
+  string role = 3 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "member"}
+      max_length: 16
+    },
+    (buf.validate.field).string = {
+      max_len: 16
+      in: [
+        "admin",
+        "member",
+        "guest"
+      ]
+    }
+  ];
+}
+
+// AddWorkspaceMemberResponse reports what the join cost.
+message AddWorkspaceMemberResponse {
+  // The role as recorded.
+  string role = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "member"}
+      max_length: 16
+    },
+    (buf.validate.field).string = {
+      max_len: 16
+      in: [
+        "admin",
+        "member",
+        "guest"
+      ]
+    }
+  ];
+
+  // Whether this join took a seat from the organization's pool.
+  //
+  // False is the ordinary answer for somebody already in the organization: a
+  // seat is per person per organization, so their second workspace is free
+  // (workspace.md §2). Published because a caller adding people in bulk
+  // otherwise has no way to see which of them were billable.
+  bool seat_consumed = 2;
+}
+
+// RemoveWorkspaceMemberRequest takes an account out of a workspace.
+message RemoveWorkspaceMemberRequest {
+  // Which workspace.
+  string workspace_id = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 29
+    },
+    (buf.validate.field).string = {
+      max_len: 29
+      pattern: "^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Who leaves, by pseudonym.
+  string subject_id = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "subj_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 31
+    },
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
+// RemoveWorkspaceMemberResponse reports what the removal returned.
+message RemoveWorkspaceMemberResponse {
+  // Whether a seat went back to the pool.
+  //
+  // False when the person is still in another workspace of the same
+  // organization, which is the half of the seat rule that leaks revenue if
+  // inverted: releasing on every removal hands back a seat the person still
+  // holds.
+  bool seat_released = 1;
+}
+
+// ChangeWorkspaceMemberRoleRequest promotes or demotes an existing member.
+message ChangeWorkspaceMemberRoleRequest {
+  // Which workspace.
+  string workspace_id = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 29
+    },
+    (buf.validate.field).string = {
+      max_len: 29
+      pattern: "^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Whose role changes, by pseudonym.
+  string subject_id = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "subj_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 31
+    },
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // The role to move to.
+  string role = 3 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "admin"}
+      max_length: 16
+    },
+    (buf.validate.field).string = {
+      max_len: 16
+      in: [
+        "admin",
+        "member",
+        "guest"
+      ]
+    }
+  ];
+}
+
+// ChangeWorkspaceMemberRoleResponse reports the role now held.
+message ChangeWorkspaceMemberRoleResponse {
+  // The role as recorded. Equal to the requested one on success, and equal to
+  // the previous one when the request asked for the role already held — which
+  // is a no-op rather than a conflict.
+  string role = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "admin"}
+      max_length: 16
+    },
+    (buf.validate.field).string = {
+      max_len: 16
+      in: [
+        "admin",
+        "member",
+        "guest"
+      ]
+    }
+  ];
+}
+
 // WorkspaceService is the collaboration surface.
 service WorkspaceService {
   // CreateWorkspace opens a workspace in the caller's organization.
@@ -109,6 +291,124 @@ service WorkspaceService {
     // A MUTATION, so it carries an Idempotency-Key. The header is described
     // once, in proto/openapi.base.yaml's components, and every operation that
     // requires it references that one description.
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // AddWorkspaceMember puts an existing account into a workspace.
+  //
+  // # `admin` on the WORKSPACE, not on the organization
+  //
+  // The authz gate reads `workspace_id` from the request and asks about that
+  // object. An org admin still passes, through the `parent` edge that
+  // `CreateWorkspace` writes (organization.md §5.1) — but a workspace admin who
+  // administers nothing else passes too, which is the point of the edge.
+  //
+  // # GROW, because it may consume a seat
+  //
+  // May, not will. A seat is per person per ORGANIZATION, so somebody joining
+  // their second workspace consumes nothing (workspace.md §2). That is why this
+  // method declares no `(chronos.options.v1.entitlement)`: gate 4 reserves
+  // unconditionally, and reserving here would take a seat from somebody who
+  // already holds one, every time they joined another workspace. The reservation
+  // is conditional and therefore belongs in the handler, which is the only place
+  // that can ask "is this person already in this organization".
+  //
+  // The response reports `seat_consumed` so a caller adding people in bulk can
+  // see which of them were billable.
+  rpc AddWorkspaceMember(AddWorkspaceMemberRequest) returns (AddWorkspaceMemberResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "admin"
+      resource_type: "workspace"
+      resource_id_field: "workspace_id"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_GROW;
+
+    // A MUTATION, so it carries an Idempotency-Key.
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // RemoveWorkspaceMember takes an account out of a workspace.
+  //
+  // # WRITE, not GROW
+  //
+  // Removal returns capacity rather than taking it, so gating it at GROW would
+  // stop a past-due organization from reducing what it owes — which is the
+  // opposite of what organization.md §5.2 is for.
+  //
+  // # The last admin cannot be removed
+  //
+  // A workspace with no admin is unadministrable and no event can fix it from
+  // the outside, so the aggregate refuses rather than recording it. The refusal
+  // is FAILED_PRECONDITION: the request is well formed and the caller is
+  // permitted, and the state is what says no.
+  //
+  // The seat goes back only when this was the person's LAST membership in the
+  // organization. `seat_released` reports which happened.
+  rpc RemoveWorkspaceMember(RemoveWorkspaceMemberRequest) returns (RemoveWorkspaceMemberResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "admin"
+      resource_type: "workspace"
+      resource_id_field: "workspace_id"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    // A MUTATION, so it carries an Idempotency-Key.
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // ChangeWorkspaceMemberRole promotes or demotes an existing member.
+  //
+  // # GROW, because a promotion can cross seat pools
+  //
+  // Guest seats and member seats are independent limits (ADR-027), so moving
+  // somebody from `guest` to `member` releases one and takes the other. The new
+  // seat is taken BEFORE the old one is returned, so a promotion into a full
+  // pool fails visibly instead of leaving the person holding neither.
+  //
+  // A change within one pool — `member` to `admin` — costs nothing and is still
+  // GROW, because the class is a property of the method and not of the argument.
+  rpc ChangeWorkspaceMemberRole(ChangeWorkspaceMemberRoleRequest) returns (ChangeWorkspaceMemberRoleResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "admin"
+      resource_type: "workspace"
+      resource_id_field: "workspace_id"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_GROW;
+
+    // A MUTATION, so it carries an Idempotency-Key.
     option (gnostic.openapi.v3.operation) = {
       parameters: [
         {

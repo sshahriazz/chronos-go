@@ -53,6 +53,15 @@ const (
 	// WorkspaceServiceCreateWorkspaceProcedure is the fully-qualified name of the WorkspaceService's
 	// CreateWorkspace RPC.
 	WorkspaceServiceCreateWorkspaceProcedure = "/chronos.workspace.v1.WorkspaceService/CreateWorkspace"
+	// WorkspaceServiceAddWorkspaceMemberProcedure is the fully-qualified name of the WorkspaceService's
+	// AddWorkspaceMember RPC.
+	WorkspaceServiceAddWorkspaceMemberProcedure = "/chronos.workspace.v1.WorkspaceService/AddWorkspaceMember"
+	// WorkspaceServiceRemoveWorkspaceMemberProcedure is the fully-qualified name of the
+	// WorkspaceService's RemoveWorkspaceMember RPC.
+	WorkspaceServiceRemoveWorkspaceMemberProcedure = "/chronos.workspace.v1.WorkspaceService/RemoveWorkspaceMember"
+	// WorkspaceServiceChangeWorkspaceMemberRoleProcedure is the fully-qualified name of the
+	// WorkspaceService's ChangeWorkspaceMemberRole RPC.
+	WorkspaceServiceChangeWorkspaceMemberRoleProcedure = "/chronos.workspace.v1.WorkspaceService/ChangeWorkspaceMemberRole"
 )
 
 // WorkspaceServiceClient is a client for the chronos.workspace.v1.WorkspaceService service.
@@ -70,6 +79,58 @@ type WorkspaceServiceClient interface {
 	// is refused here while its existing workspaces keep working, which is
 	// organization.md §5.2's rule that growth stops before work does.
 	CreateWorkspace(context.Context, *connect.Request[v1.CreateWorkspaceRequest]) (*connect.Response[v1.CreateWorkspaceResponse], error)
+	// AddWorkspaceMember puts an existing account into a workspace.
+	//
+	// # `admin` on the WORKSPACE, not on the organization
+	//
+	// The authz gate reads `workspace_id` from the request and asks about that
+	// object. An org admin still passes, through the `parent` edge that
+	// `CreateWorkspace` writes (organization.md §5.1) — but a workspace admin who
+	// administers nothing else passes too, which is the point of the edge.
+	//
+	// # GROW, because it may consume a seat
+	//
+	// May, not will. A seat is per person per ORGANIZATION, so somebody joining
+	// their second workspace consumes nothing (workspace.md §2). That is why this
+	// method declares no `(chronos.options.v1.entitlement)`: gate 4 reserves
+	// unconditionally, and reserving here would take a seat from somebody who
+	// already holds one, every time they joined another workspace. The reservation
+	// is conditional and therefore belongs in the handler, which is the only place
+	// that can ask "is this person already in this organization".
+	//
+	// The response reports `seat_consumed` so a caller adding people in bulk can
+	// see which of them were billable.
+	AddWorkspaceMember(context.Context, *connect.Request[v1.AddWorkspaceMemberRequest]) (*connect.Response[v1.AddWorkspaceMemberResponse], error)
+	// RemoveWorkspaceMember takes an account out of a workspace.
+	//
+	// # WRITE, not GROW
+	//
+	// Removal returns capacity rather than taking it, so gating it at GROW would
+	// stop a past-due organization from reducing what it owes — which is the
+	// opposite of what organization.md §5.2 is for.
+	//
+	// # The last admin cannot be removed
+	//
+	// A workspace with no admin is unadministrable and no event can fix it from
+	// the outside, so the aggregate refuses rather than recording it. The refusal
+	// is FAILED_PRECONDITION: the request is well formed and the caller is
+	// permitted, and the state is what says no.
+	//
+	// The seat goes back only when this was the person's LAST membership in the
+	// organization. `seat_released` reports which happened.
+	RemoveWorkspaceMember(context.Context, *connect.Request[v1.RemoveWorkspaceMemberRequest]) (*connect.Response[v1.RemoveWorkspaceMemberResponse], error)
+	// ChangeWorkspaceMemberRole promotes or demotes an existing member.
+	//
+	// # GROW, because a promotion can cross seat pools
+	//
+	// Guest seats and member seats are independent limits (ADR-027), so moving
+	// somebody from `guest` to `member` releases one and takes the other. The new
+	// seat is taken BEFORE the old one is returned, so a promotion into a full
+	// pool fails visibly instead of leaving the person holding neither.
+	//
+	// A change within one pool — `member` to `admin` — costs nothing and is still
+	// GROW, because the class is a property of the method and not of the argument.
+	ChangeWorkspaceMemberRole(context.Context, *connect.Request[v1.ChangeWorkspaceMemberRoleRequest]) (*connect.Response[v1.ChangeWorkspaceMemberRoleResponse], error)
 }
 
 // NewWorkspaceServiceClient constructs a client for the chronos.workspace.v1.WorkspaceService
@@ -89,17 +150,53 @@ func NewWorkspaceServiceClient(httpClient connect.HTTPClient, baseURL string, op
 			connect.WithSchema(workspaceServiceMethods.ByName("CreateWorkspace")),
 			connect.WithClientOptions(opts...),
 		),
+		addWorkspaceMember: connect.NewClient[v1.AddWorkspaceMemberRequest, v1.AddWorkspaceMemberResponse](
+			httpClient,
+			baseURL+WorkspaceServiceAddWorkspaceMemberProcedure,
+			connect.WithSchema(workspaceServiceMethods.ByName("AddWorkspaceMember")),
+			connect.WithClientOptions(opts...),
+		),
+		removeWorkspaceMember: connect.NewClient[v1.RemoveWorkspaceMemberRequest, v1.RemoveWorkspaceMemberResponse](
+			httpClient,
+			baseURL+WorkspaceServiceRemoveWorkspaceMemberProcedure,
+			connect.WithSchema(workspaceServiceMethods.ByName("RemoveWorkspaceMember")),
+			connect.WithClientOptions(opts...),
+		),
+		changeWorkspaceMemberRole: connect.NewClient[v1.ChangeWorkspaceMemberRoleRequest, v1.ChangeWorkspaceMemberRoleResponse](
+			httpClient,
+			baseURL+WorkspaceServiceChangeWorkspaceMemberRoleProcedure,
+			connect.WithSchema(workspaceServiceMethods.ByName("ChangeWorkspaceMemberRole")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // workspaceServiceClient implements WorkspaceServiceClient.
 type workspaceServiceClient struct {
-	createWorkspace *connect.Client[v1.CreateWorkspaceRequest, v1.CreateWorkspaceResponse]
+	createWorkspace           *connect.Client[v1.CreateWorkspaceRequest, v1.CreateWorkspaceResponse]
+	addWorkspaceMember        *connect.Client[v1.AddWorkspaceMemberRequest, v1.AddWorkspaceMemberResponse]
+	removeWorkspaceMember     *connect.Client[v1.RemoveWorkspaceMemberRequest, v1.RemoveWorkspaceMemberResponse]
+	changeWorkspaceMemberRole *connect.Client[v1.ChangeWorkspaceMemberRoleRequest, v1.ChangeWorkspaceMemberRoleResponse]
 }
 
 // CreateWorkspace calls chronos.workspace.v1.WorkspaceService.CreateWorkspace.
 func (c *workspaceServiceClient) CreateWorkspace(ctx context.Context, req *connect.Request[v1.CreateWorkspaceRequest]) (*connect.Response[v1.CreateWorkspaceResponse], error) {
 	return c.createWorkspace.CallUnary(ctx, req)
+}
+
+// AddWorkspaceMember calls chronos.workspace.v1.WorkspaceService.AddWorkspaceMember.
+func (c *workspaceServiceClient) AddWorkspaceMember(ctx context.Context, req *connect.Request[v1.AddWorkspaceMemberRequest]) (*connect.Response[v1.AddWorkspaceMemberResponse], error) {
+	return c.addWorkspaceMember.CallUnary(ctx, req)
+}
+
+// RemoveWorkspaceMember calls chronos.workspace.v1.WorkspaceService.RemoveWorkspaceMember.
+func (c *workspaceServiceClient) RemoveWorkspaceMember(ctx context.Context, req *connect.Request[v1.RemoveWorkspaceMemberRequest]) (*connect.Response[v1.RemoveWorkspaceMemberResponse], error) {
+	return c.removeWorkspaceMember.CallUnary(ctx, req)
+}
+
+// ChangeWorkspaceMemberRole calls chronos.workspace.v1.WorkspaceService.ChangeWorkspaceMemberRole.
+func (c *workspaceServiceClient) ChangeWorkspaceMemberRole(ctx context.Context, req *connect.Request[v1.ChangeWorkspaceMemberRoleRequest]) (*connect.Response[v1.ChangeWorkspaceMemberRoleResponse], error) {
+	return c.changeWorkspaceMemberRole.CallUnary(ctx, req)
 }
 
 // WorkspaceServiceHandler is an implementation of the chronos.workspace.v1.WorkspaceService
@@ -118,6 +215,58 @@ type WorkspaceServiceHandler interface {
 	// is refused here while its existing workspaces keep working, which is
 	// organization.md §5.2's rule that growth stops before work does.
 	CreateWorkspace(context.Context, *connect.Request[v1.CreateWorkspaceRequest]) (*connect.Response[v1.CreateWorkspaceResponse], error)
+	// AddWorkspaceMember puts an existing account into a workspace.
+	//
+	// # `admin` on the WORKSPACE, not on the organization
+	//
+	// The authz gate reads `workspace_id` from the request and asks about that
+	// object. An org admin still passes, through the `parent` edge that
+	// `CreateWorkspace` writes (organization.md §5.1) — but a workspace admin who
+	// administers nothing else passes too, which is the point of the edge.
+	//
+	// # GROW, because it may consume a seat
+	//
+	// May, not will. A seat is per person per ORGANIZATION, so somebody joining
+	// their second workspace consumes nothing (workspace.md §2). That is why this
+	// method declares no `(chronos.options.v1.entitlement)`: gate 4 reserves
+	// unconditionally, and reserving here would take a seat from somebody who
+	// already holds one, every time they joined another workspace. The reservation
+	// is conditional and therefore belongs in the handler, which is the only place
+	// that can ask "is this person already in this organization".
+	//
+	// The response reports `seat_consumed` so a caller adding people in bulk can
+	// see which of them were billable.
+	AddWorkspaceMember(context.Context, *connect.Request[v1.AddWorkspaceMemberRequest]) (*connect.Response[v1.AddWorkspaceMemberResponse], error)
+	// RemoveWorkspaceMember takes an account out of a workspace.
+	//
+	// # WRITE, not GROW
+	//
+	// Removal returns capacity rather than taking it, so gating it at GROW would
+	// stop a past-due organization from reducing what it owes — which is the
+	// opposite of what organization.md §5.2 is for.
+	//
+	// # The last admin cannot be removed
+	//
+	// A workspace with no admin is unadministrable and no event can fix it from
+	// the outside, so the aggregate refuses rather than recording it. The refusal
+	// is FAILED_PRECONDITION: the request is well formed and the caller is
+	// permitted, and the state is what says no.
+	//
+	// The seat goes back only when this was the person's LAST membership in the
+	// organization. `seat_released` reports which happened.
+	RemoveWorkspaceMember(context.Context, *connect.Request[v1.RemoveWorkspaceMemberRequest]) (*connect.Response[v1.RemoveWorkspaceMemberResponse], error)
+	// ChangeWorkspaceMemberRole promotes or demotes an existing member.
+	//
+	// # GROW, because a promotion can cross seat pools
+	//
+	// Guest seats and member seats are independent limits (ADR-027), so moving
+	// somebody from `guest` to `member` releases one and takes the other. The new
+	// seat is taken BEFORE the old one is returned, so a promotion into a full
+	// pool fails visibly instead of leaving the person holding neither.
+	//
+	// A change within one pool — `member` to `admin` — costs nothing and is still
+	// GROW, because the class is a property of the method and not of the argument.
+	ChangeWorkspaceMemberRole(context.Context, *connect.Request[v1.ChangeWorkspaceMemberRoleRequest]) (*connect.Response[v1.ChangeWorkspaceMemberRoleResponse], error)
 }
 
 // NewWorkspaceServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -133,10 +282,34 @@ func NewWorkspaceServiceHandler(svc WorkspaceServiceHandler, opts ...connect.Han
 		connect.WithSchema(workspaceServiceMethods.ByName("CreateWorkspace")),
 		connect.WithHandlerOptions(opts...),
 	)
+	workspaceServiceAddWorkspaceMemberHandler := connect.NewUnaryHandler(
+		WorkspaceServiceAddWorkspaceMemberProcedure,
+		svc.AddWorkspaceMember,
+		connect.WithSchema(workspaceServiceMethods.ByName("AddWorkspaceMember")),
+		connect.WithHandlerOptions(opts...),
+	)
+	workspaceServiceRemoveWorkspaceMemberHandler := connect.NewUnaryHandler(
+		WorkspaceServiceRemoveWorkspaceMemberProcedure,
+		svc.RemoveWorkspaceMember,
+		connect.WithSchema(workspaceServiceMethods.ByName("RemoveWorkspaceMember")),
+		connect.WithHandlerOptions(opts...),
+	)
+	workspaceServiceChangeWorkspaceMemberRoleHandler := connect.NewUnaryHandler(
+		WorkspaceServiceChangeWorkspaceMemberRoleProcedure,
+		svc.ChangeWorkspaceMemberRole,
+		connect.WithSchema(workspaceServiceMethods.ByName("ChangeWorkspaceMemberRole")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/chronos.workspace.v1.WorkspaceService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case WorkspaceServiceCreateWorkspaceProcedure:
 			workspaceServiceCreateWorkspaceHandler.ServeHTTP(w, r)
+		case WorkspaceServiceAddWorkspaceMemberProcedure:
+			workspaceServiceAddWorkspaceMemberHandler.ServeHTTP(w, r)
+		case WorkspaceServiceRemoveWorkspaceMemberProcedure:
+			workspaceServiceRemoveWorkspaceMemberHandler.ServeHTTP(w, r)
+		case WorkspaceServiceChangeWorkspaceMemberRoleProcedure:
+			workspaceServiceChangeWorkspaceMemberRoleHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -148,4 +321,16 @@ type UnimplementedWorkspaceServiceHandler struct{}
 
 func (UnimplementedWorkspaceServiceHandler) CreateWorkspace(context.Context, *connect.Request[v1.CreateWorkspaceRequest]) (*connect.Response[v1.CreateWorkspaceResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.CreateWorkspace is not implemented"))
+}
+
+func (UnimplementedWorkspaceServiceHandler) AddWorkspaceMember(context.Context, *connect.Request[v1.AddWorkspaceMemberRequest]) (*connect.Response[v1.AddWorkspaceMemberResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.AddWorkspaceMember is not implemented"))
+}
+
+func (UnimplementedWorkspaceServiceHandler) RemoveWorkspaceMember(context.Context, *connect.Request[v1.RemoveWorkspaceMemberRequest]) (*connect.Response[v1.RemoveWorkspaceMemberResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.RemoveWorkspaceMember is not implemented"))
+}
+
+func (UnimplementedWorkspaceServiceHandler) ChangeWorkspaceMemberRole(context.Context, *connect.Request[v1.ChangeWorkspaceMemberRoleRequest]) (*connect.Response[v1.ChangeWorkspaceMemberRoleResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.ChangeWorkspaceMemberRole is not implemented"))
 }

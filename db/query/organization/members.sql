@@ -1,17 +1,11 @@
--- Queries for the organization membership index.
-
--- name: UpsertOrgMember :exec
--- Upsert, because a projector replays: the same event WILL arrive twice.
+-- Read queries for the organization membership index.
 --
--- joined_at is untouched on conflict — a replay must not move when somebody
--- joined — but the ROLE is updated, because a promotion is a real change and
--- the projection has to reflect it.
-INSERT INTO org_member_index (org_id, subject_id, role, joined_at)
-VALUES ($1, $2, $3, $4)
-ON CONFLICT (org_id, subject_id) DO UPDATE SET role = EXCLUDED.role;
-
--- name: RemoveOrgMember :exec
-DELETE FROM org_member_index WHERE org_id = $1 AND subject_id = $2;
+-- The WRITES live in db/query/workspace/members.sql, with the projection that
+-- issues them. A table has exactly one writer (CONVENTIONS §8), and that writer
+-- is the workspace module: organization grants membership through its own
+-- events, workspace grants it by a join, and `workspace -> organization` is the
+-- only direction the dependency may run (ADR-020) — so the module that can see
+-- both sets of events is workspace, and the projection has to live there.
 
 -- name: OrgMembership :one
 -- Does this person belong to this organization, and as what?
@@ -29,6 +23,3 @@ SELECT role FROM org_member_index WHERE org_id = $1 AND subject_id = $2;
 SELECT org_id, role FROM org_member_index
 WHERE subject_id = $1
 ORDER BY joined_at, org_id;
-
--- name: TruncateOrgMembers :exec
-TRUNCATE TABLE org_member_index;

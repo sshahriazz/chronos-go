@@ -3388,6 +3388,132 @@ components:
         - HEALTH_DEGRADED
         - HEALTH_DOWN
       description: Health is a dependency's current state.
+    chronos.workspace.v1.AddWorkspaceMemberRequest:
+      type: object
+      properties:
+        workspaceId:
+          type: string
+          examples:
+            - ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: workspace_id
+          maxLength: 29
+          pattern: ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            Which workspace. Read by the authz gate, which asks for `admin` on THIS
+             object rather than on the organization: an org admin inherits it through the
+             `parent` edge, and a workspace admin who is not an org admin does not.
+        subjectId:
+          type: string
+          examples:
+            - subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: subject_id
+          maxLength: 31
+          pattern: ^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: Who joins, by pseudonym.
+        role:
+          type: string
+          examples:
+            - member
+          title: role
+          maxLength: 16
+          enum:
+            - admin
+            - member
+            - guest
+          description: |-
+            The role they join with: `admin`, `member` or `guest`.
+
+             `admin` and `member` draw on the member seat pool; `guest` draws on the
+             separate guest pool (ADR-027). Which pool is consulted is decided from this
+             value, so it is bounded by an enumeration rather than by a length.
+      title: AddWorkspaceMemberRequest
+      additionalProperties: false
+      description: |-
+        AddWorkspaceMemberRequest puts an existing account into a workspace.
+
+         It names a SUBJECT, never an address. A pseudonym is the only way an account
+         appears on this wire (ADR-002), and adding by email would need the caller to
+         know one — which is what invitations are for, and they are a different call.
+    chronos.workspace.v1.AddWorkspaceMemberResponse:
+      type: object
+      properties:
+        role:
+          type: string
+          examples:
+            - member
+          title: role
+          maxLength: 16
+          enum:
+            - admin
+            - member
+            - guest
+          description: The role as recorded.
+        seatConsumed:
+          type: boolean
+          title: seat_consumed
+          description: |-
+            Whether this join took a seat from the organization's pool.
+
+             False is the ordinary answer for somebody already in the organization: a
+             seat is per person per organization, so their second workspace is free
+             (workspace.md §2). Published because a caller adding people in bulk
+             otherwise has no way to see which of them were billable.
+      title: AddWorkspaceMemberResponse
+      additionalProperties: false
+      description: AddWorkspaceMemberResponse reports what the join cost.
+    chronos.workspace.v1.ChangeWorkspaceMemberRoleRequest:
+      type: object
+      properties:
+        workspaceId:
+          type: string
+          examples:
+            - ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: workspace_id
+          maxLength: 29
+          pattern: ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: Which workspace.
+        subjectId:
+          type: string
+          examples:
+            - subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: subject_id
+          maxLength: 31
+          pattern: ^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: Whose role changes, by pseudonym.
+        role:
+          type: string
+          examples:
+            - admin
+          title: role
+          maxLength: 16
+          enum:
+            - admin
+            - member
+            - guest
+          description: The role to move to.
+      title: ChangeWorkspaceMemberRoleRequest
+      additionalProperties: false
+      description: ChangeWorkspaceMemberRoleRequest promotes or demotes an existing member.
+    chronos.workspace.v1.ChangeWorkspaceMemberRoleResponse:
+      type: object
+      properties:
+        role:
+          type: string
+          examples:
+            - admin
+          title: role
+          maxLength: 16
+          enum:
+            - admin
+            - member
+            - guest
+          description: |-
+            The role as recorded. Equal to the requested one on success, and equal to
+             the previous one when the request asked for the role already held — which
+             is a no-op rather than a conflict.
+      title: ChangeWorkspaceMemberRoleResponse
+      additionalProperties: false
+      description: ChangeWorkspaceMemberRoleResponse reports the role now held.
     chronos.workspace.v1.CreateWorkspaceRequest:
       type: object
       properties:
@@ -3441,6 +3567,44 @@ components:
       title: CreateWorkspaceResponse
       additionalProperties: false
       description: CreateWorkspaceResponse names what was created.
+    chronos.workspace.v1.RemoveWorkspaceMemberRequest:
+      type: object
+      properties:
+        workspaceId:
+          type: string
+          examples:
+            - ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: workspace_id
+          maxLength: 29
+          pattern: ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: Which workspace.
+        subjectId:
+          type: string
+          examples:
+            - subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: subject_id
+          maxLength: 31
+          pattern: ^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: Who leaves, by pseudonym.
+      title: RemoveWorkspaceMemberRequest
+      additionalProperties: false
+      description: RemoveWorkspaceMemberRequest takes an account out of a workspace.
+    chronos.workspace.v1.RemoveWorkspaceMemberResponse:
+      type: object
+      properties:
+        seatReleased:
+          type: boolean
+          title: seat_released
+          description: |-
+            Whether a seat went back to the pool.
+
+             False when the person is still in another workspace of the same
+             organization, which is the half of the seat rule that leaks revenue if
+             inverted: releasing on every removal hands back a seat the person still
+             holds.
+      title: RemoveWorkspaceMemberResponse
+      additionalProperties: false
+      description: RemoveWorkspaceMemberResponse reports what the removal returned.
     compression:
       title: compression
       type: string
@@ -6436,6 +6600,130 @@ paths:
                     lastCheckedAt: '2026-08-14T11:04:55Z'
                     latencyMs: '1004'
       security: []
+  /chronos.workspace.v1.WorkspaceService/AddWorkspaceMember:
+    post:
+      tags:
+        - WorkspaceService
+      summary: AddWorkspaceMember puts an existing account into a workspace.
+      description: |-
+        # `admin` on the WORKSPACE, not on the organization
+
+         The authz gate reads `workspace_id` from the request and asks about that
+         object. An org admin still passes, through the `parent` edge that
+         `CreateWorkspace` writes (organization.md §5.1) — but a workspace admin who
+         administers nothing else passes too, which is the point of the edge.
+
+         # GROW, because it may consume a seat
+
+         May, not will. A seat is per person per ORGANIZATION, so somebody joining
+         their second workspace consumes nothing (workspace.md §2). That is why this
+         method declares no `(chronos.options.v1.entitlement)`: gate 4 reserves
+         unconditionally, and reserving here would take a seat from somebody who
+         already holds one, every time they joined another workspace. The reservation
+         is conditional and therefore belongs in the handler, which is the only place
+         that can ask "is this person already in this organization".
+
+         The response reports `seat_consumed` so a caller adding people in bulk can
+         see which of them were billable.
+      operationId: WorkspaceService_AddWorkspaceMember
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.workspace.v1.AddWorkspaceMemberRequest'
+            example:
+              workspaceId: ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              subjectId: subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              role: member
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.workspace.v1.AddWorkspaceMemberResponse'
+  /chronos.workspace.v1.WorkspaceService/ChangeWorkspaceMemberRole:
+    post:
+      tags:
+        - WorkspaceService
+      summary: ChangeWorkspaceMemberRole promotes or demotes an existing member.
+      description: |-
+        # GROW, because a promotion can cross seat pools
+
+         Guest seats and member seats are independent limits (ADR-027), so moving
+         somebody from `guest` to `member` releases one and takes the other. The new
+         seat is taken BEFORE the old one is returned, so a promotion into a full
+         pool fails visibly instead of leaving the person holding neither.
+
+         A change within one pool — `member` to `admin` — costs nothing and is still
+         GROW, because the class is a property of the method and not of the argument.
+      operationId: WorkspaceService_ChangeWorkspaceMemberRole
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.workspace.v1.ChangeWorkspaceMemberRoleRequest'
+            example:
+              workspaceId: ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              subjectId: subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              role: admin
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.workspace.v1.ChangeWorkspaceMemberRoleResponse'
   /chronos.workspace.v1.WorkspaceService/CreateWorkspace:
     post:
       tags:
@@ -6492,6 +6780,68 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.workspace.v1.CreateWorkspaceResponse'
+  /chronos.workspace.v1.WorkspaceService/RemoveWorkspaceMember:
+    post:
+      tags:
+        - WorkspaceService
+      summary: RemoveWorkspaceMember takes an account out of a workspace.
+      description: |-
+        # WRITE, not GROW
+
+         Removal returns capacity rather than taking it, so gating it at GROW would
+         stop a past-due organization from reducing what it owes — which is the
+         opposite of what organization.md §5.2 is for.
+
+         # The last admin cannot be removed
+
+         A workspace with no admin is unadministrable and no event can fix it from
+         the outside, so the aggregate refuses rather than recording it. The refusal
+         is FAILED_PRECONDITION: the request is well formed and the caller is
+         permitted, and the state is what says no.
+
+         The seat goes back only when this was the person's LAST membership in the
+         organization. `seat_released` reports which happened.
+      operationId: WorkspaceService_RemoveWorkspaceMember
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.workspace.v1.RemoveWorkspaceMemberRequest'
+            example:
+              workspaceId: ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              subjectId: subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.workspace.v1.RemoveWorkspaceMemberResponse'
 tags:
   - name: IdentityService
     description: |-

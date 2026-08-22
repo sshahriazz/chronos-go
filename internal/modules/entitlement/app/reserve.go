@@ -49,6 +49,15 @@ type Store interface {
 
 	// Release returns a held reservation. A committed one is untouched.
 	Release(ctx context.Context, reservationID string) error
+
+	// ReleaseFor returns whatever a named subject holds of a limit, committed
+	// or not, and reports whether it found anything.
+	//
+	// Identified by SUBJECT rather than by reservation id, because a seat is
+	// held for as long as the person is in the organization — days or years —
+	// and by then no caller still has the id that claimed it. The subject is the
+	// identity of the holding, which is why subject_ref is on the row.
+	ReleaseFor(ctx context.Context, orgID string, key domain.LimitKey, subjectRef string) (bool, error)
 }
 
 // Plans resolves the allowance an organization is entitled to.
@@ -166,4 +175,45 @@ func (r *Reserver) Commit(ctx context.Context, reservationID string) error {
 // TTL, which is exactly what the TTL is for.
 func (r *Reserver) Release(ctx context.Context, reservationID string) error {
 	return r.store.Release(ctx, reservationID)
+}
+
+// ReserveFor claims one unit and returns just its id.
+//
+// A convenience over Reserve for the callers that reserve CONDITIONALLY — the
+// seat rule, where whether to reserve at all is decided by the caller — and that
+// therefore have no use for the rest of the Reservation. Same protocol, same
+// lock, same allowance.
+func (r *Reserver) ReserveFor(
+	ctx context.Context, orgID, limitKey, subjectRef string,
+) (string, error) {
+	reservation, err := r.Reserve(ctx, orgID, domain.LimitKey(limitKey), subjectRef)
+	if err != nil {
+		return "", err
+	}
+	return reservation.ID, nil
+}
+
+// ReleaseFor returns the unit a named subject holds.
+//
+// # Why a missing row is an ERROR and not a no-op
+//
+// This is the seat rule's release path, and the two ways it can be wrong are not
+// symmetric. Releasing a unit that was never taken inflates the allowance by one
+// every time it happens, and nothing ever notices — the pool simply grows. So
+// "there was nothing to release" is reported rather than swallowed: it means the
+// caller's model of who holds what disagrees with the store, and the answer is
+// to find out why, not to carry on.
+func (r *Reserver) ReleaseFor(ctx context.Context, orgID, limitKey, subjectRef string) error {
+	if orgID == "" || subjectRef == "" {
+		return fmt.Errorf("entitlement: releasing %q needs both an organization and a subject",
+			limitKey)
+	}
+	released, err := r.store.ReleaseFor(ctx, orgID, domain.LimitKey(limitKey), subjectRef)
+	if err != nil {
+		return fmt.Errorf("entitlement: releasing %s for %s: %w", limitKey, subjectRef, err)
+	}
+	if !released {
+		return fmt.Errorf("entitlement: %s held no %s to release", subjectRef, limitKey)
+	}
+	return nil
 }

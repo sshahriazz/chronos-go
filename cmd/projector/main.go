@@ -34,6 +34,7 @@ import (
 	"github.com/chronos/chronos-go/internal/modules/profile"
 	profileprojection "github.com/chronos/chronos-go/internal/modules/profile/projection"
 	"github.com/chronos/chronos-go/internal/modules/workspace"
+	workspaceprojection "github.com/chronos/chronos-go/internal/modules/workspace/projection"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/config"
 	"github.com/chronos/chronos-go/internal/platform/obs"
@@ -256,7 +257,14 @@ func projections(codec *eventcodec.JSON) []projection.Projection {
 		profileprojection.NewProfile(codec),
 
 		organizationprojection.NewStatus(codec),
-		organizationprojection.NewMembers(codec),
+
+		// Both membership projections belong to WORKSPACE, including the one
+		// that builds `org_member_index`: belonging to an organization comes
+		// from organization events AND from workspace joins, one table has one
+		// writer, and `workspace -> organization` is the only direction the
+		// dependency may run (ADR-020).
+		workspaceprojection.NewOrgMembers(codec),
+		workspaceprojection.NewMembers(codec),
 
 		identityprojection.NewUser(codec),
 		identityprojection.NewSession(codec),

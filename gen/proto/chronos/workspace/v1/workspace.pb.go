@@ -156,6 +156,358 @@ func (x *CreateWorkspaceResponse) GetStatus() string {
 	return ""
 }
 
+// AddWorkspaceMemberRequest puts an existing account into a workspace.
+//
+// It names a SUBJECT, never an address. A pseudonym is the only way an account
+// appears on this wire (ADR-002), and adding by email would need the caller to
+// know one — which is what invitations are for, and they are a different call.
+type AddWorkspaceMemberRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Which workspace. Read by the authz gate, which asks for `admin` on THIS
+	// object rather than on the organization: an org admin inherits it through the
+	// `parent` edge, and a workspace admin who is not an org admin does not.
+	WorkspaceId string `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	// Who joins, by pseudonym.
+	SubjectId string `protobuf:"bytes,2,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
+	// The role they join with: `admin`, `member` or `guest`.
+	//
+	// `admin` and `member` draw on the member seat pool; `guest` draws on the
+	// separate guest pool (ADR-027). Which pool is consulted is decided from this
+	// value, so it is bounded by an enumeration rather than by a length.
+	Role          string `protobuf:"bytes,3,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AddWorkspaceMemberRequest) Reset() {
+	*x = AddWorkspaceMemberRequest{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddWorkspaceMemberRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddWorkspaceMemberRequest) ProtoMessage() {}
+
+func (x *AddWorkspaceMemberRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddWorkspaceMemberRequest.ProtoReflect.Descriptor instead.
+func (*AddWorkspaceMemberRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *AddWorkspaceMemberRequest) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
+}
+
+func (x *AddWorkspaceMemberRequest) GetSubjectId() string {
+	if x != nil {
+		return x.SubjectId
+	}
+	return ""
+}
+
+func (x *AddWorkspaceMemberRequest) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+// AddWorkspaceMemberResponse reports what the join cost.
+type AddWorkspaceMemberResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The role as recorded.
+	Role string `protobuf:"bytes,1,opt,name=role,proto3" json:"role,omitempty"`
+	// Whether this join took a seat from the organization's pool.
+	//
+	// False is the ordinary answer for somebody already in the organization: a
+	// seat is per person per organization, so their second workspace is free
+	// (workspace.md §2). Published because a caller adding people in bulk
+	// otherwise has no way to see which of them were billable.
+	SeatConsumed  bool `protobuf:"varint,2,opt,name=seat_consumed,json=seatConsumed,proto3" json:"seat_consumed,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AddWorkspaceMemberResponse) Reset() {
+	*x = AddWorkspaceMemberResponse{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddWorkspaceMemberResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddWorkspaceMemberResponse) ProtoMessage() {}
+
+func (x *AddWorkspaceMemberResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddWorkspaceMemberResponse.ProtoReflect.Descriptor instead.
+func (*AddWorkspaceMemberResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *AddWorkspaceMemberResponse) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *AddWorkspaceMemberResponse) GetSeatConsumed() bool {
+	if x != nil {
+		return x.SeatConsumed
+	}
+	return false
+}
+
+// RemoveWorkspaceMemberRequest takes an account out of a workspace.
+type RemoveWorkspaceMemberRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Which workspace.
+	WorkspaceId string `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	// Who leaves, by pseudonym.
+	SubjectId     string `protobuf:"bytes,2,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoveWorkspaceMemberRequest) Reset() {
+	*x = RemoveWorkspaceMemberRequest{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoveWorkspaceMemberRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoveWorkspaceMemberRequest) ProtoMessage() {}
+
+func (x *RemoveWorkspaceMemberRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoveWorkspaceMemberRequest.ProtoReflect.Descriptor instead.
+func (*RemoveWorkspaceMemberRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *RemoveWorkspaceMemberRequest) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
+}
+
+func (x *RemoveWorkspaceMemberRequest) GetSubjectId() string {
+	if x != nil {
+		return x.SubjectId
+	}
+	return ""
+}
+
+// RemoveWorkspaceMemberResponse reports what the removal returned.
+type RemoveWorkspaceMemberResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Whether a seat went back to the pool.
+	//
+	// False when the person is still in another workspace of the same
+	// organization, which is the half of the seat rule that leaks revenue if
+	// inverted: releasing on every removal hands back a seat the person still
+	// holds.
+	SeatReleased  bool `protobuf:"varint,1,opt,name=seat_released,json=seatReleased,proto3" json:"seat_released,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoveWorkspaceMemberResponse) Reset() {
+	*x = RemoveWorkspaceMemberResponse{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoveWorkspaceMemberResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoveWorkspaceMemberResponse) ProtoMessage() {}
+
+func (x *RemoveWorkspaceMemberResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoveWorkspaceMemberResponse.ProtoReflect.Descriptor instead.
+func (*RemoveWorkspaceMemberResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *RemoveWorkspaceMemberResponse) GetSeatReleased() bool {
+	if x != nil {
+		return x.SeatReleased
+	}
+	return false
+}
+
+// ChangeWorkspaceMemberRoleRequest promotes or demotes an existing member.
+type ChangeWorkspaceMemberRoleRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Which workspace.
+	WorkspaceId string `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	// Whose role changes, by pseudonym.
+	SubjectId string `protobuf:"bytes,2,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
+	// The role to move to.
+	Role          string `protobuf:"bytes,3,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChangeWorkspaceMemberRoleRequest) Reset() {
+	*x = ChangeWorkspaceMemberRoleRequest{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChangeWorkspaceMemberRoleRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChangeWorkspaceMemberRoleRequest) ProtoMessage() {}
+
+func (x *ChangeWorkspaceMemberRoleRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChangeWorkspaceMemberRoleRequest.ProtoReflect.Descriptor instead.
+func (*ChangeWorkspaceMemberRoleRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *ChangeWorkspaceMemberRoleRequest) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
+}
+
+func (x *ChangeWorkspaceMemberRoleRequest) GetSubjectId() string {
+	if x != nil {
+		return x.SubjectId
+	}
+	return ""
+}
+
+func (x *ChangeWorkspaceMemberRoleRequest) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+// ChangeWorkspaceMemberRoleResponse reports the role now held.
+type ChangeWorkspaceMemberRoleResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The role as recorded. Equal to the requested one on success, and equal to
+	// the previous one when the request asked for the role already held — which
+	// is a no-op rather than a conflict.
+	Role          string `protobuf:"bytes,1,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChangeWorkspaceMemberRoleResponse) Reset() {
+	*x = ChangeWorkspaceMemberRoleResponse{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChangeWorkspaceMemberRoleResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChangeWorkspaceMemberRoleResponse) ProtoMessage() {}
+
+func (x *ChangeWorkspaceMemberRoleResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChangeWorkspaceMemberRoleResponse.ProtoReflect.Descriptor instead.
+func (*ChangeWorkspaceMemberRoleResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *ChangeWorkspaceMemberRoleResponse) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
 var File_chronos_workspace_v1_workspace_proto protoreflect.FileDescriptor
 
 const file_chronos_workspace_v1_workspace_proto_rawDesc = "" +
@@ -166,13 +518,49 @@ const file_chronos_workspace_v1_workspace_proto_rawDesc = "" +
 	"\x17CreateWorkspaceResponse\x12r\n" +
 	"\fworkspace_id\x18\x01 \x01(\tBO\xbaG#:\x1f\x12\x1dws_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1d\xbaH&r$\x18\x1d2 ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\vworkspaceId\x12J\n" +
 	"\x04name\x18\x02 \x01(\tB6\xbaG\x1f:\r\x12\vEngineeringxP\x8a\x01\v^\\S(.*\\S)?$\xbaH\x11r\x0f\x18P2\v^\\S(.*\\S)?$R\x04name\x12I\n" +
-	"\x06status\x18\x03 \x01(\tB1\xbaG\f:\b\x12\x06activex\x10\xbaH\x1fr\x1d\x18\x10R\x06activeR\barchivedR\adeletedR\x06status2\x82\x02\n" +
+	"\x06status\x18\x03 \x01(\tB1\xbaG\f:\b\x12\x06activex\x10\xbaH\x1fr\x1d\x18\x10R\x06activeR\barchivedR\adeletedR\x06status\"\xc5\x02\n" +
+	"\x19AddWorkspaceMemberRequest\x12r\n" +
+	"\fworkspace_id\x18\x01 \x01(\tBO\xbaG#:\x1f\x12\x1dws_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1d\xbaH&r$\x18\x1d2 ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\vworkspaceId\x12r\n" +
+	"\n" +
+	"subject_id\x18\x02 \x01(\tBS\xbaG%:!\x12\x1fsubj_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\xbaH(r&\x18\x1f2\"^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\tsubjectId\x12@\n" +
+	"\x04role\x18\x03 \x01(\tB,\xbaG\f:\b\x12\x06memberx\x10\xbaH\x1ar\x18\x18\x10R\x05adminR\x06memberR\x05guestR\x04role\"\x83\x01\n" +
+	"\x1aAddWorkspaceMemberResponse\x12@\n" +
+	"\x04role\x18\x01 \x01(\tB,\xbaG\f:\b\x12\x06memberx\x10\xbaH\x1ar\x18\x18\x10R\x05adminR\x06memberR\x05guestR\x04role\x12#\n" +
+	"\rseat_consumed\x18\x02 \x01(\bR\fseatConsumed\"\x86\x02\n" +
+	"\x1cRemoveWorkspaceMemberRequest\x12r\n" +
+	"\fworkspace_id\x18\x01 \x01(\tBO\xbaG#:\x1f\x12\x1dws_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1d\xbaH&r$\x18\x1d2 ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\vworkspaceId\x12r\n" +
+	"\n" +
+	"subject_id\x18\x02 \x01(\tBS\xbaG%:!\x12\x1fsubj_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\xbaH(r&\x18\x1f2\"^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\tsubjectId\"D\n" +
+	"\x1dRemoveWorkspaceMemberResponse\x12#\n" +
+	"\rseat_released\x18\x01 \x01(\bR\fseatReleased\"\xcb\x02\n" +
+	" ChangeWorkspaceMemberRoleRequest\x12r\n" +
+	"\fworkspace_id\x18\x01 \x01(\tBO\xbaG#:\x1f\x12\x1dws_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1d\xbaH&r$\x18\x1d2 ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\vworkspaceId\x12r\n" +
+	"\n" +
+	"subject_id\x18\x02 \x01(\tBS\xbaG%:!\x12\x1fsubj_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\xbaH(r&\x18\x1f2\"^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\tsubjectId\x12?\n" +
+	"\x04role\x18\x03 \x01(\tB+\xbaG\v:\a\x12\x05adminx\x10\xbaH\x1ar\x18\x18\x10R\x05adminR\x06memberR\x05guestR\x04role\"d\n" +
+	"!ChangeWorkspaceMemberRoleResponse\x12?\n" +
+	"\x04role\x18\x01 \x01(\tB+\xbaG\v:\a\x12\x05adminx\x10\xbaH\x1ar\x18\x18\x10R\x05adminR\x06memberR\x05guestR\x04role2\xf0\a\n" +
 	"\x10WorkspaceService\x12\xed\x01\n" +
 	"\x0fCreateWorkspace\x12,.chronos.workspace.v1.CreateWorkspaceRequest\x1a-.chronos.workspace.v1.CreateWorkspaceResponse\"}\xbaGI2G\n" +
 	"E\n" +
 	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
 	"$#/components/schemas/idempotency-key\xca\xf3\x18\x15\n" +
-	"\x05admin\x12\forganization\xd0\xf3\x18\x03\xda\xf3\x18\x10workspaces.countB\xe6\x01\n" +
+	"\x05admin\x12\forganization\xd0\xf3\x18\x03\xda\xf3\x18\x10workspaces.count\x12\xed\x01\n" +
+	"\x12AddWorkspaceMember\x12/.chronos.workspace.v1.AddWorkspaceMemberRequest\x1a0.chronos.workspace.v1.AddWorkspaceMemberResponse\"t\xbaGI2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-key\xca\xf3\x18 \n" +
+	"\x05admin\x12\tworkspace\x1a\fworkspace_id\xd0\xf3\x18\x03\x12\xf6\x01\n" +
+	"\x15RemoveWorkspaceMember\x122.chronos.workspace.v1.RemoveWorkspaceMemberRequest\x1a3.chronos.workspace.v1.RemoveWorkspaceMemberResponse\"t\xbaGI2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-key\xca\xf3\x18 \n" +
+	"\x05admin\x12\tworkspace\x1a\fworkspace_id\xd0\xf3\x18\x02\x12\x82\x02\n" +
+	"\x19ChangeWorkspaceMemberRole\x126.chronos.workspace.v1.ChangeWorkspaceMemberRoleRequest\x1a7.chronos.workspace.v1.ChangeWorkspaceMemberRoleResponse\"t\xbaGI2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-key\xca\xf3\x18 \n" +
+	"\x05admin\x12\tworkspace\x1a\fworkspace_id\xd0\xf3\x18\x03B\xe6\x01\n" +
 	"\x18com.chronos.workspace.v1B\x0eWorkspaceProtoP\x01ZHgithub.com/chronos/chronos-go/gen/proto/chronos/workspace/v1;workspacev1\xa2\x02\x03CWX\xaa\x02\x14Chronos.Workspace.V1\xca\x02\x14Chronos\\Workspace\\V1\xe2\x02 Chronos\\Workspace\\V1\\GPBMetadata\xea\x02\x16Chronos::Workspace::V1b\x06proto3"
 
 var (
@@ -187,16 +575,28 @@ func file_chronos_workspace_v1_workspace_proto_rawDescGZIP() []byte {
 	return file_chronos_workspace_v1_workspace_proto_rawDescData
 }
 
-var file_chronos_workspace_v1_workspace_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_chronos_workspace_v1_workspace_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_chronos_workspace_v1_workspace_proto_goTypes = []any{
-	(*CreateWorkspaceRequest)(nil),  // 0: chronos.workspace.v1.CreateWorkspaceRequest
-	(*CreateWorkspaceResponse)(nil), // 1: chronos.workspace.v1.CreateWorkspaceResponse
+	(*CreateWorkspaceRequest)(nil),            // 0: chronos.workspace.v1.CreateWorkspaceRequest
+	(*CreateWorkspaceResponse)(nil),           // 1: chronos.workspace.v1.CreateWorkspaceResponse
+	(*AddWorkspaceMemberRequest)(nil),         // 2: chronos.workspace.v1.AddWorkspaceMemberRequest
+	(*AddWorkspaceMemberResponse)(nil),        // 3: chronos.workspace.v1.AddWorkspaceMemberResponse
+	(*RemoveWorkspaceMemberRequest)(nil),      // 4: chronos.workspace.v1.RemoveWorkspaceMemberRequest
+	(*RemoveWorkspaceMemberResponse)(nil),     // 5: chronos.workspace.v1.RemoveWorkspaceMemberResponse
+	(*ChangeWorkspaceMemberRoleRequest)(nil),  // 6: chronos.workspace.v1.ChangeWorkspaceMemberRoleRequest
+	(*ChangeWorkspaceMemberRoleResponse)(nil), // 7: chronos.workspace.v1.ChangeWorkspaceMemberRoleResponse
 }
 var file_chronos_workspace_v1_workspace_proto_depIdxs = []int32{
 	0, // 0: chronos.workspace.v1.WorkspaceService.CreateWorkspace:input_type -> chronos.workspace.v1.CreateWorkspaceRequest
-	1, // 1: chronos.workspace.v1.WorkspaceService.CreateWorkspace:output_type -> chronos.workspace.v1.CreateWorkspaceResponse
-	1, // [1:2] is the sub-list for method output_type
-	0, // [0:1] is the sub-list for method input_type
+	2, // 1: chronos.workspace.v1.WorkspaceService.AddWorkspaceMember:input_type -> chronos.workspace.v1.AddWorkspaceMemberRequest
+	4, // 2: chronos.workspace.v1.WorkspaceService.RemoveWorkspaceMember:input_type -> chronos.workspace.v1.RemoveWorkspaceMemberRequest
+	6, // 3: chronos.workspace.v1.WorkspaceService.ChangeWorkspaceMemberRole:input_type -> chronos.workspace.v1.ChangeWorkspaceMemberRoleRequest
+	1, // 4: chronos.workspace.v1.WorkspaceService.CreateWorkspace:output_type -> chronos.workspace.v1.CreateWorkspaceResponse
+	3, // 5: chronos.workspace.v1.WorkspaceService.AddWorkspaceMember:output_type -> chronos.workspace.v1.AddWorkspaceMemberResponse
+	5, // 6: chronos.workspace.v1.WorkspaceService.RemoveWorkspaceMember:output_type -> chronos.workspace.v1.RemoveWorkspaceMemberResponse
+	7, // 7: chronos.workspace.v1.WorkspaceService.ChangeWorkspaceMemberRole:output_type -> chronos.workspace.v1.ChangeWorkspaceMemberRoleResponse
+	4, // [4:8] is the sub-list for method output_type
+	0, // [0:4] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name
@@ -213,7 +613,7 @@ func file_chronos_workspace_v1_workspace_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chronos_workspace_v1_workspace_proto_rawDesc), len(file_chronos_workspace_v1_workspace_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

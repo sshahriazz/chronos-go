@@ -31,6 +31,8 @@ import (
 	"github.com/chronos/chronos-go/internal/platform/errs"
 	srvconnect "github.com/chronos/chronos-go/internal/server/connect"
 	"github.com/chronos/chronos-go/internal/server/policy"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // Principal is who is making the request, as the authn gate resolved them.
@@ -393,7 +395,7 @@ func (g *Gates) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
 			return nil, unavailable(GateIdempotency, p)
 		}
 
-		ctx, release, err := g.enforce(ctx, p, req.Header())
+		ctx, release, err := g.enforce(ctx, p, req.Header(), req.Any())
 		if err != nil {
 			return nil, err
 		}
@@ -424,7 +426,7 @@ func (g *Gates) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
 //   - entitlement LAST, immediately before the handler, so a reservation is
 //     never taken for a request a later gate would reject.
 func (g *Gates) enforce(
-	ctx context.Context, p policy.Policy, header Header,
+	ctx context.Context, p policy.Policy, header Header, msg any,
 ) (context.Context, func(), error) {
 	if g.deps.Authn == nil {
 		return ctx, nil, unavailable(GateAuthn, p)
@@ -514,7 +516,7 @@ func (g *Gates) enforce(
 		return ctx, nil, srvconnect.Error(errs.Internalf(
 			"gate 1 resolved no tenant scope, so gate 2 has no object to check").Wrap(err))
 	}
-	resourceID, err := resourceIDFor(p, tenant.OrgID, header)
+	resourceID, err := resourceIDFor(p, tenant.OrgID, msg)
 	if err != nil {
 		return ctx, nil, srvconnect.Error(errs.NotFoundf("not found"))
 	}
@@ -627,7 +629,21 @@ func unavailable(gate Gate, p policy.Policy) error {
 // organization the request is in. Reading its answer is both correct and the
 // only version that cannot drift: a second copy on the principal would have to
 // be kept in step with the scope every query already uses.
-func resourceIDFor(p policy.Policy, orgID string, _ Header) (string, error) {
+//
+// # Reading it from the request
+//
+// A method that names a field is asking about an object the CALLER chose, and
+// the whole point of the gate is that choosing it is not the same as being
+// allowed to touch it. Reading the value is therefore all this does: it never
+// falls back to the organization, because falling back would check a permission
+// the schema did not ask for and answer a different question than the declared
+// one — and it would answer it in the permissive direction, since org `admin`
+// is inherited by every workspace through the `parent` edge.
+//
+// An absent, wrong-typed or empty field is a REFUSAL. The caller sees NOT_FOUND
+// either way (ADR-036), so a missing id and a forbidden id are indistinguishable
+// from outside, which is the property the ladder wants.
+func resourceIDFor(p policy.Policy, orgID string, msg any) (string, error) {
 	if p.ResourceIDField == "" {
 		if orgID == "" {
 			return "", fmt.Errorf("no organization in scope for an org-scoped method; gate 1 " +
@@ -635,8 +651,37 @@ func resourceIDFor(p policy.Policy, orgID string, _ Header) (string, error) {
 		}
 		return orgID, nil
 	}
-	return "", fmt.Errorf("%w: %s reads its resource id from field %q, which is not "+
-		"implemented", ErrGateUnavailable, p.Method, p.ResourceIDField)
+
+	message, ok := msg.(proto.Message)
+	if !ok {
+		return "", fmt.Errorf("%s reads its resource id from field %q, but its request is not "+
+			"a protobuf message", p.Method, p.ResourceIDField)
+	}
+
+	reflected := message.ProtoReflect()
+	field := reflected.Descriptor().Fields().ByName(protoreflect.Name(p.ResourceIDField))
+	if field == nil {
+		// A startup-time fault reaching request time. The policy loader cannot
+		// catch it today — it reads method options, not message descriptors — so
+		// this is where a renamed field surfaces.
+		return "", fmt.Errorf("%s declares resource_id_field %q, which its request message "+
+			"does not have", p.Method, p.ResourceIDField)
+	}
+	if field.Kind() != protoreflect.StringKind {
+		return "", fmt.Errorf("%s declares resource_id_field %q, which is a %s and not a string",
+			p.Method, p.ResourceIDField, field.Kind())
+	}
+
+	id := reflected.Get(field).String()
+	if id == "" {
+		// protovalidate runs AFTER the gates, so an empty id gets here. Refused
+		// rather than passed on: an empty object id is a Check against
+		// `workspace:`, which is a question about no object, and OpenFGA
+		// answering it "no" would be right for the wrong reason.
+		return "", fmt.Errorf("%s named no %s in field %q", p.Method, p.ResourceType,
+			p.ResourceIDField)
+	}
+	return id, nil
 }
 
 // WrapStreamingClient is required by the interceptor interface. This server

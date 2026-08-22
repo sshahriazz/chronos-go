@@ -264,3 +264,12 @@ type UserView struct {
 	// Public handle, CLEARTEXT and deliberately so (ADR-051). NULL means never claimed, or erased. The one personal-data column in a projection; erasure DELETES it and tombstones the handle.
 	Username pgtype.Text
 }
+
+// Membership per (workspace, subject). Counts here decide when a seat is taken and returned.
+type WorkspaceMemberView struct {
+	WorkspaceID string
+	OrgID       string
+	SubjectID   string
+	Role        string
+	JoinedAt    pgtype.Timestamptz
+}

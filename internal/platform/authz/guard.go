@@ -25,6 +25,24 @@ type Tombstones interface {
 	Revoked(ctx context.Context, q Query) (bool, error)
 }
 
+// Revoker LAYS a tombstone, which is the half of the mechanism the Guard never
+// touches.
+//
+// Split from Tombstones for the same reason Revocations is split from it: the
+// hot path may only ever ASK, and an interface it holds that could also write
+// one is an interface a bug on the read path can use to deny everybody. Three
+// interfaces over one store, each naming exactly one verb — ask (Guard), lay
+// (the command that revokes), clear (the projector that confirms).
+//
+// The command handler that removes a grant is what implements the caller side.
+// Being late to revoke is a security failure (access.md §6.1), so the denial has
+// to exist before the projector has seen the event that causes it.
+type Revoker interface {
+	// Revoke denies this exact access from now until a projector confirms the
+	// tuple behind it is gone. Never cleared by a timer (ADR-045).
+	Revoke(ctx context.Context, q Query) error
+}
+
 // Decisions caches POSITIVE decisions only.
 //
 // A deny is never cached: it must be able to become an allow the instant a grant

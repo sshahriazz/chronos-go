@@ -272,6 +272,20 @@ func tombstonesOrNil(a *valkeyadapter.Authz) authz.Tombstones {
 	return a
 }
 
+// revokerOrNil avoids the same trap on the tombstone WRITE side.
+//
+// A nil here is refused by NewMembers rather than tolerated, and that is the
+// point of separating it out: without a revoker, removing somebody from a
+// workspace leaves every permission working until a projector catches up, and
+// being late to revoke is a security failure rather than a delay
+// (access.md §6.1).
+func revokerOrNil(a *valkeyadapter.Authz) authz.Revoker {
+	if a == nil {
+		return nil
+	}
+	return a
+}
+
 // epochsOrNil avoids the same typed-nil trap for the revocation epochs.
 //
 // A nil *Authz inside a non-nil interface passes NewAuthentication's nil check,

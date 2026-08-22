@@ -10,6 +10,7 @@ import (
 	entitlementapi "github.com/chronos/chronos-go/internal/modules/entitlement/api"
 	entitlementapp "github.com/chronos/chronos-go/internal/modules/entitlement/app"
 	entitlementdomain "github.com/chronos/chronos-go/internal/modules/entitlement/domain"
+	workspacepg "github.com/chronos/chronos-go/internal/modules/workspace/adapter/postgres"
 	workspaceapi "github.com/chronos/chronos-go/internal/modules/workspace/api"
 	workspaceapp "github.com/chronos/chronos-go/internal/modules/workspace/app"
 	workspacedomain "github.com/chronos/chronos-go/internal/modules/workspace/domain"
@@ -85,18 +86,75 @@ func (d *dependencies) buildWorkspace(log *slog.Logger) (*workspaceapi.Service, 
 			"back and the cap would never bind")
 	}
 
+	if d.pool == nil {
+		return nil, errors.New("no postgres pool: whether a join consumes a seat is a count " +
+			"of existing memberships, and without it every join would take one")
+	}
+	if d.authzCache == nil {
+		return nil, errors.New("no revocation store: removing a member would leave every " +
+			"permission working until a projector caught up, and being late to revoke is a " +
+			"security failure rather than a delay (access.md §6.1)")
+	}
+
 	repo := eventsourcing.NewRepository[*workspacedomain.Workspace](
 		d.store, d.codec, d.upcasters, workspacedomain.Category, workspacedomain.NewWorkspace)
 
+	// Its OWN repository and its own category. A membership is a separate
+	// aggregate from the workspace it belongs to, so that thousands of joins do
+	// not contend for one stream's revision (workspace.md §1).
+	memberships := eventsourcing.NewRepository[*workspacedomain.Membership](
+		d.store, d.codec, d.upcasters,
+		workspacedomain.MembershipCategory, workspacedomain.NewMembership)
+
+	counter, err := workspacepg.NewMembership(pgadapter.New(d.pool))
+	if err != nil {
+		return nil, fmt.Errorf("workspace membership counter: %w", err)
+	}
+
+	// Seats are reserved HERE and not by gate 4. Gate 4 reserves
+	// unconditionally, and the seat rule is conditional — one seat per person
+	// per organization, however many workspaces they are in (workspace.md §2) —
+	// so declaring `seats.member` on the RPC would charge somebody a second seat
+	// every time they joined another workspace.
+	seats, err := workspaceapp.NewSeats(workspaceapp.SeatsDeps{
+		Reserver: d.reserver,
+		Members:  counter,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("workspace seats: %w", err)
+	}
+
+	// Creation needs the appender, not just the repository: the workspace and
+	// its creator's membership are ONE atomic append. Two appends would leave a
+	// workspace whose own creator is not a member of it — which is the state
+	// this system was in until the member RPCs made it visible.
+	var appender eventsourcing.MultiAppender = d.store
+
 	creation, err := workspaceapp.NewCreation(workspaceapp.CreationDeps{
-		Repo:  repo,
-		Quota: d.reserver,
-		Now:   d.clock.Now,
+		Repo:     repo,
+		Appender: appender,
+		Schemas:  d.upcasters,
+		Quota:    d.reserver,
+		Seats:    seats,
+		Now:      d.clock.Now,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("workspace creation: %w", err)
 	}
 
-	log.Info("workspace service constructed", "quota", "workspaces.count")
-	return workspaceapi.New(workspaceapi.Deps{Creation: creation})
+	members, err := workspaceapp.NewMembers(workspaceapp.MembersDeps{
+		Workspaces:  repo,
+		Memberships: memberships,
+		Seats:       seats,
+		Counter:     counter,
+		Revoker:     revokerOrNil(d.authzCache),
+		Now:         d.clock.Now,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("workspace members: %w", err)
+	}
+
+	log.Info("workspace service constructed",
+		"quota", "workspaces.count", "seats", "member+guest", "revocation", "tombstones")
+	return workspaceapi.New(workspaceapi.Deps{Creation: creation, Members: members})
 }

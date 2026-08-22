@@ -1,0 +1,76 @@
+-- Queries for workspace membership, and for the organization membership index
+-- that workspace membership feeds.
+--
+-- The org_member_index WRITES live here rather than under db/query/organization
+-- because the projection that issues them lives in the workspace module. A
+-- table has exactly one writer (CONVENTIONS §8), and the queries belong with it.
+-- Organization keeps the READS, which is what gate 1 does with the table.
+
+-- name: UpsertWorkspaceMember :exec
+-- Upsert, because a projector replays: the same event WILL arrive twice.
+--
+-- joined_at is untouched on conflict — a replay must not move when somebody
+-- joined — but the role is updated, which is what makes a role change land.
+INSERT INTO workspace_member_view (workspace_id, org_id, subject_id, role, joined_at)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (workspace_id, subject_id) DO UPDATE SET role = EXCLUDED.role;
+
+-- name: SetWorkspaceMemberRole :exec
+UPDATE workspace_member_view SET role = $3
+WHERE workspace_id = $1 AND subject_id = $2;
+
+-- name: DeleteWorkspaceMember :exec
+DELETE FROM workspace_member_view WHERE workspace_id = $1 AND subject_id = $2;
+
+-- name: CountWorkspaceMemberships :one
+-- How many workspaces of this organization is this person in?
+--
+-- Both halves of the seat rule turn on this number (workspace.md §2): zero means
+-- a join consumes a seat, and the count remaining after a removal decides
+-- whether one goes back. A number rather than a boolean, because a boolean
+-- answers only the first question.
+SELECT count(*) FROM workspace_member_view
+WHERE org_id = $1 AND subject_id = $2;
+
+-- name: TruncateWorkspaceMembers :exec
+TRUNCATE TABLE workspace_member_view;
+
+-- name: InsertOrgMemberIfAbsent :exec
+-- Record that a workspace join made somebody an organization member.
+--
+-- DO NOTHING, never DO UPDATE, and that is the whole point of a separate query
+-- from organization's own upsert. A workspace role is not an organization role:
+-- an org OWNER added to a workspace as a guest is still the owner, and an upsert
+-- that wrote `guest` over `owner` would demote them out of their own
+-- organization — silently, and with no event that says so.
+INSERT INTO org_member_index (org_id, subject_id, role, joined_at)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (org_id, subject_id) DO NOTHING;
+
+-- name: RemoveOrgMemberIfWorkspaceOnly :exec
+-- Drop the organization membership a workspace join created.
+--
+-- Only rows this module created. `owner` and `admin` are granted by
+-- organization's own events, and a person who administers the organization
+-- belongs to it whether or not they are in any workspace — deleting their row
+-- because they left their last workspace would lock an owner out of their own
+-- tenant at gate 1.
+DELETE FROM org_member_index
+WHERE org_id = $1 AND subject_id = $2 AND role NOT IN ('owner', 'admin');
+
+-- name: UpsertOrgMember :exec
+-- Organization-granted membership: the owner at creation, admins thereafter.
+--
+-- joined_at is untouched on conflict — a replay must not move when somebody
+-- joined — but the ROLE is updated, because a promotion is a real change and the
+-- projection has to reflect it. This one DOES overwrite, which is correct in the
+-- other direction: an org admin grant outranks the row a workspace join left.
+INSERT INTO org_member_index (org_id, subject_id, role, joined_at)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (org_id, subject_id) DO UPDATE SET role = EXCLUDED.role;
+
+-- name: RemoveOrgMember :exec
+DELETE FROM org_member_index WHERE org_id = $1 AND subject_id = $2;
+
+-- name: TruncateOrgMembers :exec
+TRUNCATE TABLE org_member_index;

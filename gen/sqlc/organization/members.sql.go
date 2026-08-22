@@ -7,11 +7,10 @@ package organizationdb
 
 import (
 	"context"
-
-	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const OrgMembership = `-- name: OrgMembership :one
+
 SELECT role FROM org_member_index WHERE org_id = $1 AND subject_id = $2
 `
 
@@ -20,6 +19,14 @@ type OrgMembershipParams struct {
 	SubjectID string
 }
 
+// Read queries for the organization membership index.
+//
+// The WRITES live in db/query/workspace/members.sql, with the projection that
+// issues them. A table has exactly one writer (CONVENTIONS §8), and that writer
+// is the workspace module: organization grants membership through its own
+// events, workspace grants it by a join, and `workspace -> organization` is the
+// only direction the dependency may run (ADR-020) — so the module that can see
+// both sets of events is workspace, and the projection has to live there.
 // Does this person belong to this organization, and as what?
 //
 // Gate 1's verification. Filtered by subject_id as well as org_id, which is the
@@ -65,57 +72,4 @@ func (q *Queries) OrgsForSubject(ctx context.Context, subjectID string) ([]OrgsF
 		return nil, err
 	}
 	return items, nil
-}
-
-const RemoveOrgMember = `-- name: RemoveOrgMember :exec
-DELETE FROM org_member_index WHERE org_id = $1 AND subject_id = $2
-`
-
-type RemoveOrgMemberParams struct {
-	OrgID     string
-	SubjectID string
-}
-
-func (q *Queries) RemoveOrgMember(ctx context.Context, arg RemoveOrgMemberParams) error {
-	_, err := q.db.Exec(ctx, RemoveOrgMember, arg.OrgID, arg.SubjectID)
-	return err
-}
-
-const TruncateOrgMembers = `-- name: TruncateOrgMembers :exec
-TRUNCATE TABLE org_member_index
-`
-
-func (q *Queries) TruncateOrgMembers(ctx context.Context) error {
-	_, err := q.db.Exec(ctx, TruncateOrgMembers)
-	return err
-}
-
-const UpsertOrgMember = `-- name: UpsertOrgMember :exec
-
-INSERT INTO org_member_index (org_id, subject_id, role, joined_at)
-VALUES ($1, $2, $3, $4)
-ON CONFLICT (org_id, subject_id) DO UPDATE SET role = EXCLUDED.role
-`
-
-type UpsertOrgMemberParams struct {
-	OrgID     string
-	SubjectID string
-	Role      string
-	JoinedAt  pgtype.Timestamptz
-}
-
-// Queries for the organization membership index.
-// Upsert, because a projector replays: the same event WILL arrive twice.
-//
-// joined_at is untouched on conflict — a replay must not move when somebody
-// joined — but the ROLE is updated, because a promotion is a real change and
-// the projection has to reflect it.
-func (q *Queries) UpsertOrgMember(ctx context.Context, arg UpsertOrgMemberParams) error {
-	_, err := q.db.Exec(ctx, UpsertOrgMember,
-		arg.OrgID,
-		arg.SubjectID,
-		arg.Role,
-		arg.JoinedAt,
-	)
-	return err
 }
