@@ -220,7 +220,7 @@ satisfied at the composition root.
       module-private, so workspace may not import it, and copying 200 lines of
       credential-hashing into a second module is the version of this that rots.
       Behaviour unchanged; identity's adapter becomes a thin wrapper.
-- [ ] **5b — the Invitation aggregate.** Pending → Accepted / Revoked / Expired /
+- [x] **5b — the Invitation aggregate.** Pending → Accepted / Revoked / Expired /
       Declined / Undeliverable, as a transition table. Its own stream category,
       for the reason memberships have one.
 - [ ] **5c — Issue.** Seat reserved AT ISSUE and conditionally (workspace.md §5):
