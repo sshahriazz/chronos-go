@@ -74,6 +74,28 @@ WHERE workspace_id = $1
 ORDER BY expires_at, invitation_id
 LIMIT $5;
 
+-- name: ListDueInvitations :many
+-- Which invitations have run out?
+--
+-- The reconciliation sweep's work list. It is the one question about invitations
+-- that cannot be answered from the log without reading every invitation stream
+-- in the system; everything else is decided against the stream, where the answer
+-- is not eventually consistent.
+--
+-- Deliberately NOT scoped to a workspace or an organization, and therefore run
+-- in a SYSTEM transaction: a seat held by a lapsed invitation is held whether or
+-- not anybody is looking at that tenant, and a per-tenant sweep would only ever
+-- free the tenants somebody happened to visit.
+--
+-- Oldest first, so the longest-held seats come back first and a bounded pass
+-- makes progress against the worst of the backlog rather than a random slice of
+-- it.
+SELECT invitation_id, org_id, workspace_id, expires_at
+FROM invitation_view
+WHERE status = 'pending' AND expires_at <= $1
+ORDER BY expires_at, invitation_id
+LIMIT $2;
+
 -- The two queries this table's other indexes exist for — "what did this person
 -- issue" and "is there already an invitation to this address" — are NOT here.
 -- They have no caller until the reactor that revokes a departing inviter's

@@ -102,3 +102,64 @@ func (r *InvitationReads) ListByWorkspace(
 	}
 	return out, nil
 }
+
+// DueReads is the sweep's work list.
+//
+// A SYSTEM transaction, unlike every other read of this table. The sweep asks
+// "which invitations anywhere have run out", and a seat held by a lapsed
+// invitation is held whether or not anybody is looking at that tenant — a
+// tenant-scoped sweep would free only the organizations somebody happened to
+// visit, which is the same as not having one.
+//
+// invitation_view carries row security, so this is precisely the read that the
+// policy would otherwise return nothing for, silently, and the sweep would
+// report a clean system forever.
+type DueReads struct{ system db.SystemTX }
+
+var _ app.DueInvitations = (*DueReads)(nil)
+
+func NewDueReads(system db.SystemTX) (*DueReads, error) {
+	if system == nil {
+		return nil, fmt.Errorf("workspace: a system transaction source is required; the " +
+			"sweep spans every tenant")
+	}
+	return &DueReads{system: system}, nil
+}
+
+// ListDue returns pending invitations whose deadline has passed.
+func (r *DueReads) ListDue(
+	ctx context.Context, deadline time.Time, limit int,
+) ([]app.DueInvitation, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("workspace: a sweep batch of %d would scan nothing", limit)
+	}
+	if limit > math.MaxInt32 {
+		return nil, fmt.Errorf("workspace: a sweep batch of %d does not fit a query limit", limit)
+	}
+
+	var out []app.DueInvitation
+	err := r.system.InSystemTx(ctx, func(ctx context.Context, q db.Querier) error {
+		rows, err := q.Query(ctx, workspacedb.ListDueInvitations,
+			deadline.UTC(), int32(limit)) //nolint:gosec // bounded above
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var due app.DueInvitation
+			var expiresAt time.Time
+			if err := rows.Scan(&due.InvitationID, &due.OrgID,
+				&due.WorkspaceID, &expiresAt); err != nil {
+				return err
+			}
+			due.ExpiresAt = expiresAt.UTC()
+			out = append(out, due)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("workspace: listing due invitations: %w", err)
+	}
+	return out, nil
+}

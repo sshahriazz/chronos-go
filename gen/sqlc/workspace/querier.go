@@ -51,6 +51,22 @@ type Querier interface {
 	// one. It is the same exception identity_token takes.
 	// Record a digest against an invitation, until it expires.
 	IssueInvitationToken(ctx context.Context, arg IssueInvitationTokenParams) error
+	// Which invitations have run out?
+	//
+	// The reconciliation sweep's work list. It is the one question about invitations
+	// that cannot be answered from the log without reading every invitation stream
+	// in the system; everything else is decided against the stream, where the answer
+	// is not eventually consistent.
+	//
+	// Deliberately NOT scoped to a workspace or an organization, and therefore run
+	// in a SYSTEM transaction: a seat held by a lapsed invitation is held whether or
+	// not anybody is looking at that tenant, and a per-tenant sweep would only ever
+	// free the tenants somebody happened to visit.
+	//
+	// Oldest first, so the longest-held seats come back first and a bounded pass
+	// makes progress against the worst of the backlog rather than a random slice of
+	// it.
+	ListDueInvitations(ctx context.Context, arg ListDueInvitationsParams) ([]ListDueInvitationsRow, error)
 	// The admin screen: who is outstanding in this workspace.
 	//
 	// Ordered by expiry so the ones about to lapse are at the top, which is the

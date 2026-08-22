@@ -62,6 +62,13 @@ func scheduledJobs() []scheduledJob {
 				"accumulate without bound in tables PostgreSQL gives no TTL",
 		},
 		{
+			name:     "invitation_sweep",
+			id:       temporaladapter.SweepInvitationsScheduleID,
+			workflow: temporaladapter.SweepInvitationsWorkflow,
+			consequence: "an invitation that ran out is never expired, so the seat it holds " +
+				"stays held and the organization keeps paying for somebody who never arrived",
+		},
+		{
 			name:     "credential_key_reseal",
 			id:       temporaladapter.ResealCredentialKeysScheduleID,
 			workflow: temporaladapter.ResealCredentialKeysWorkflow,

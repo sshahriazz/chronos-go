@@ -131,6 +131,12 @@ type dependencies struct {
 	// Pending for seven days, and tells nobody it exists.
 	invitations *workspaceapp.InvitationIssuer
 
+	// invitationSweep is the RECONCILIATION half of invitation expiry. The
+	// per-invitation workflow makes it timely; this makes it certain — a
+	// workflow that was never started leaves a seat held forever, and nothing
+	// else in the system would ever notice.
+	invitationSweep *workspaceapp.InvitationSweep
+
 	// retention deletes identity rows that can no longer affect a decision:
 	// spent TOTP steps, expired token digests, the secret half of dead sessions,
 	// and two projections past their horizon. Housekeeping rather than a security
@@ -367,6 +373,17 @@ func newDependencies(cfg *config.Config, log *slog.Logger, codec *eventcodec.JSO
 		d.invitations = issuer
 	}
 
+	// The invitation reconciliation. Constructed whether or not durable work is
+	// enabled, so a deployment without Temporal logs why seats are not coming
+	// back rather than logging nothing.
+	if sweep, err := newInvitationSweep(d, log); err != nil {
+		log.Error("the invitation sweep is NOT wired; an invitation whose per-invitation "+
+			"workflow never started holds its seat forever, and no other part of this "+
+			"system reports it", "error", err)
+	} else {
+		d.invitationSweep = sweep
+	}
+
 	// Identity retention. Constructed before the worker for the same reason the
 	// sweep is — the worker registers it — and constructed whether or not durable
 	// work is enabled, so that a deployment without Temporal logs why retention is
@@ -462,6 +479,7 @@ func (d *dependencies) startTemporal(cfg *config.Config, log *slog.Logger) {
 	d.scheduleSweep(log)
 	d.scheduleRetention(log)
 	d.scheduleReseal(log)
+	d.scheduleInvitationSweep(log)
 
 	// After scheduling, not before: a probe asks the server whether the schedule
 	// exists, and asking before the attempt would report a state this process was
@@ -470,7 +488,8 @@ func (d *dependencies) startTemporal(cfg *config.Config, log *slog.Logger) {
 	d.probes = append(d.probes,
 		temporaladapter.SweepReservationsProbe(d.temporal),
 		temporaladapter.PurgeRetentionProbe(d.temporal),
-		temporaladapter.ResealCredentialKeysProbe(d.temporal))
+		temporaladapter.ResealCredentialKeysProbe(d.temporal),
+		temporaladapter.SweepInvitationsProbe(d.temporal))
 }
 
 // newTemporalWorker builds the worker and registers EVERYTHING this binary can
@@ -550,7 +569,26 @@ func (d *dependencies) newTemporalWorker(
 	if err != nil {
 		return nil, nil, fmt.Errorf("registering credential re-sealing: %w", err)
 	}
-	return w, append(names, resealed...), nil
+	names = append(names, resealed...)
+
+	// The invitation sweep, checked the same way and for the same typed-nil
+	// reason: an invitationSweepAdapter wrapping a nil use case is a NON-nil
+	// interface, so NewInvitationActivities' own nil check would pass and the
+	// failure would move to a panic on the first scheduled run.
+	if d.invitationSweep == nil {
+		return nil, nil, errors.New("the invitation sweep was not constructed; registering " +
+			"it would queue runs that panic")
+	}
+	invitations, err := temporaladapter.NewInvitationActivities(
+		invitationSweepAdapter{sweep: d.invitationSweep})
+	if err != nil {
+		return nil, nil, fmt.Errorf("invitation sweep activities: %w", err)
+	}
+	swept2, err := w.RegisterInvitationSweep(invitations)
+	if err != nil {
+		return nil, nil, fmt.Errorf("registering the invitation sweep: %w", err)
+	}
+	return w, append(names, swept2...), nil
 }
 
 // scheduleSweep makes the lapsed-reservation sweep recur.
@@ -579,6 +617,34 @@ func (d *dependencies) scheduleSweep(log *slog.Logger) {
 	default:
 		log.Info("lapsed email-reservation sweep already scheduled",
 			"schedule", temporaladapter.SweepReservationsScheduleID)
+	}
+}
+
+// scheduleInvitationSweep makes the invitation reconciliation recur.
+//
+// Loud but not fatal, like every other dependency failure here (ADR-010). A
+// registered workflow that no schedule ever starts is indistinguishable from a
+// working one: the worker is healthy, the queue is empty, every metric is green,
+// and organizations keep paying for seats held by invitations that ran out weeks
+// ago.
+func (d *dependencies) scheduleInvitationSweep(log *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), scheduleTimeout)
+	defer cancel()
+
+	created, err := temporaladapter.EnsureInvitationSweepSchedule(ctx, d.temporal,
+		temporaladapter.SweepInvitationsInput{}, temporaladapter.DefaultInvitationSweepInterval)
+	switch {
+	case err != nil:
+		log.Error("the invitation sweep is NOT scheduled; lapsed invitations will never be "+
+			"expired and nothing else will report it",
+			"schedule", temporaladapter.SweepInvitationsScheduleID, "error", err)
+	case created:
+		log.Info("invitation sweep scheduled",
+			"schedule", temporaladapter.SweepInvitationsScheduleID,
+			"every", temporaladapter.DefaultInvitationSweepInterval)
+	default:
+		log.Info("invitation sweep already scheduled",
+			"schedule", temporaladapter.SweepInvitationsScheduleID)
 	}
 }
 

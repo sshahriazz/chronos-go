@@ -31,6 +31,66 @@ func (q *Queries) ExtendInvitation(ctx context.Context, arg ExtendInvitationPara
 	return err
 }
 
+const ListDueInvitations = `-- name: ListDueInvitations :many
+SELECT invitation_id, org_id, workspace_id, expires_at
+FROM invitation_view
+WHERE status = 'pending' AND expires_at <= $1
+ORDER BY expires_at, invitation_id
+LIMIT $2
+`
+
+type ListDueInvitationsParams struct {
+	ExpiresAt pgtype.Timestamptz
+	Limit     int32
+}
+
+type ListDueInvitationsRow struct {
+	InvitationID string
+	OrgID        string
+	WorkspaceID  string
+	ExpiresAt    pgtype.Timestamptz
+}
+
+// Which invitations have run out?
+//
+// The reconciliation sweep's work list. It is the one question about invitations
+// that cannot be answered from the log without reading every invitation stream
+// in the system; everything else is decided against the stream, where the answer
+// is not eventually consistent.
+//
+// Deliberately NOT scoped to a workspace or an organization, and therefore run
+// in a SYSTEM transaction: a seat held by a lapsed invitation is held whether or
+// not anybody is looking at that tenant, and a per-tenant sweep would only ever
+// free the tenants somebody happened to visit.
+//
+// Oldest first, so the longest-held seats come back first and a bounded pass
+// makes progress against the worst of the backlog rather than a random slice of
+// it.
+func (q *Queries) ListDueInvitations(ctx context.Context, arg ListDueInvitationsParams) ([]ListDueInvitationsRow, error) {
+	rows, err := q.db.Query(ctx, ListDueInvitations, arg.ExpiresAt, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListDueInvitationsRow{}
+	for rows.Next() {
+		var i ListDueInvitationsRow
+		if err := rows.Scan(
+			&i.InvitationID,
+			&i.OrgID,
+			&i.WorkspaceID,
+			&i.ExpiresAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const ListWorkspaceInvitations = `-- name: ListWorkspaceInvitations :many
 SELECT invitation_id, subject_id, invited_by, role, status, expires_at, issued_at
 FROM invitation_view

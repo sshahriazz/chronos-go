@@ -6,14 +6,22 @@ import (
 	"fmt"
 	"time"
 
+	"log/slog"
+
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
+	temporaladapter "github.com/chronos/chronos-go/internal/adapter/temporal"
+	entitlementpg "github.com/chronos/chronos-go/internal/modules/entitlement/adapter/postgres"
+	entitlementapp "github.com/chronos/chronos-go/internal/modules/entitlement/app"
+	entitlementdomain "github.com/chronos/chronos-go/internal/modules/entitlement/domain"
 	"github.com/chronos/chronos-go/internal/modules/workspace"
 	workspacepg "github.com/chronos/chronos-go/internal/modules/workspace/adapter/postgres"
 	workspaceapp "github.com/chronos/chronos-go/internal/modules/workspace/app"
+	workspacedomain "github.com/chronos/chronos-go/internal/modules/workspace/domain"
 	workspacereactor "github.com/chronos/chronos-go/internal/modules/workspace/reactor"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
+	"github.com/chronos/chronos-go/internal/platform/ids"
 	"github.com/chronos/chronos-go/internal/platform/secret"
 )
 
@@ -131,9 +139,172 @@ func newInvitationMail(d *dependencies) (*workspacereactor.InvitationMail, error
 // newIdentityCodec does: a stored event read back through a version chain needs
 // the registry that was built alongside RegisterSchemas (ADR-029).
 func workspaceCodec() *eventcodec.JSON {
-	upcasters := eventsourcing.NewUpcasterRegistry()
-	workspace.RegisterSchemas(upcasters)
-	codec := eventcodec.NewJSON(upcasters)
+	codec := eventcodec.NewJSON(workspaceUpcasters())
 	workspace.RegisterEvents(codec)
 	return codec
+}
+
+// workspaceUpcasters is the version registry the repository reads through.
+//
+// Separate from the codec because eventsourcing.Repository takes both, and
+// handing it a BARE registry would make a stored event at an older version fail
+// to resolve — visibly, but only for invitations that already exist (ADR-029).
+func workspaceUpcasters() *eventsourcing.UpcasterRegistry {
+	upcasters := eventsourcing.NewUpcasterRegistry()
+	workspace.RegisterSchemas(upcasters)
+	return upcasters
+}
+
+// newInvitationSweep builds the reconciliation, or reports why it could not be.
+//
+// It needs a repository as well as a work list, because the decision is taken
+// against the AGGREGATE and never against the row: a resend moves the deadline
+// after the row was read, and expiring on the row's word would kill a live link
+// and take back a seat that is still needed.
+func newInvitationSweep(d *dependencies, log *slog.Logger) (*workspaceapp.InvitationSweep, error) {
+	if d.pool == nil {
+		return nil, errors.New("no read model: the work list is invitation_view, so nothing " +
+			"can find an invitation that has run out")
+	}
+	if d.store == nil {
+		return nil, errors.New("no event store: expiring appends to the invitation's stream")
+	}
+
+	due, err := workspacepg.NewDueReads(pgadapter.New(d.pool))
+	if err != nil {
+		return nil, err
+	}
+	// The SETTLEMENT half only. Expiring touches the stream, the token store and
+	// the seat pool; issuing needs a blind indexer, an account directory and the
+	// vault, none of which this binary has and none of which a sweep has any
+	// business being able to reach.
+	repo := eventsourcing.NewRepository[*workspacedomain.Invitation](
+		d.store, workspaceCodec(), workspaceUpcasters(),
+		workspacedomain.InvitationCategory, workspacedomain.NewInvitation)
+
+	tokens, err := workspacepg.NewInvitationTokens(pgadapter.New(d.pool))
+	if err != nil {
+		return nil, err
+	}
+	counter, err := workspacepg.NewMembership(pgadapter.New(d.pool))
+	if err != nil {
+		return nil, err
+	}
+	reserver, err := newEntitlementReserver(d)
+	if err != nil {
+		return nil, err
+	}
+	seats, err := workspaceapp.NewSeats(workspaceapp.SeatsDeps{
+		Reserver: reserver, Members: counter,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("workspace seats: %w", err)
+	}
+
+	settlements, err := workspaceapp.NewSettlements(workspaceapp.SettlementsDeps{
+		Repo: repo, Tokens: tokens, Seats: seats, Now: clock.System{}.Now,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("workspace settlements: %w", err)
+	}
+	return workspaceapp.NewInvitationSweep(due, settlements, log)
+}
+
+// invitationSweepAdapter presents workspace's use case as the activity's port.
+//
+// Two structurally identical result types rather than one shared one, for the
+// reason sweepAdapter gives: the alternative is adapter/temporal importing
+// workspace/app, and an adapter that can reach into a use case is an adapter
+// that will eventually make a decision for it.
+type invitationSweepAdapter struct{ sweep *workspaceapp.InvitationSweep }
+
+var _ temporaladapter.InvitationSweeper = invitationSweepAdapter{}
+
+func (a invitationSweepAdapter) SweepOnce(
+	ctx context.Context, now time.Time, limit int,
+) (temporaladapter.InvitationSweepPass, error) {
+	result, err := a.sweep.Run(ctx, now)
+	if err != nil {
+		return temporaladapter.InvitationSweepPass{}, err
+	}
+	_ = limit // the batch is the use case's own bound; see app.DefaultSweepBatch
+	return temporaladapter.InvitationSweepPass{
+		Scanned: result.Scanned,
+		Expired: result.Expired,
+		Stale:   result.Stale,
+		Failed:  result.Failed,
+		More:    result.More,
+	}, nil
+}
+
+// newEntitlementReserver builds the seat pool this binary settles against.
+//
+// The same construction cmd/api makes, and deliberately so: a sweep that
+// released seats through a DIFFERENT reserver would be releasing against a
+// different view of the same pool, and the two would drift in the direction
+// nobody audits. It is built here rather than shared because the two binaries do
+// not share a process — what has to match is the store and the plan, and both
+// are named the same way in both places.
+func newEntitlementReserver(d *dependencies) (workspaceapp.Reserver, error) {
+	catalogue, err := entitlementdomain.NewCatalogue(entitlementdomain.Trial())
+	if err != nil {
+		return nil, fmt.Errorf("entitlement catalogue: %w", err)
+	}
+	plans, err := entitlementapp.NewOrgPlans(catalogue, "trial")
+	if err != nil {
+		return nil, fmt.Errorf("entitlement plans: %w", err)
+	}
+
+	adapter := pgadapter.New(d.pool)
+	store, err := entitlementpg.NewReservations(adapter, adapter)
+	if err != nil {
+		return nil, fmt.Errorf("reservation store: %w", err)
+	}
+
+	reserver, err := entitlementapp.NewReserver(entitlementapp.ReserverDeps{
+		Store: store,
+		Plans: plans,
+		Now:   clock.System{}.Now,
+		NewID: func() string {
+			return ids.New[ids.Event](clock.System{}.Now(), ids.Entropy()).String()
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("reserver: %w", err)
+	}
+	return &workerSeatReserver{inner: reserver}, nil
+}
+
+// workerSeatReserver translates entitlement's already-held signal into
+// workspace's, exactly as cmd/api's seatReserver does.
+//
+// Duplicated rather than shared because the two binaries do not share a package,
+// and because neither module may import the other's app layer (CONVENTIONS §2).
+// A settlement never reserves, so only the release path is exercised here — but
+// the translation is total, so a future caller cannot find half of it.
+type workerSeatReserver struct{ inner *entitlementapp.Reserver }
+
+var _ workspaceapp.Reserver = (*workerSeatReserver)(nil)
+
+func (r *workerSeatReserver) ReserveFor(
+	ctx context.Context, orgID, limitKey, subjectRef string,
+) (string, error) {
+	id, err := r.inner.ReserveFor(ctx, orgID, limitKey, subjectRef)
+	var held entitlementapp.SeatAlreadyHeld
+	if errors.As(err, &held) {
+		return id, workspaceapp.SeatAlreadyHeld{ReservationID: held.ReservationID}
+	}
+	return id, err
+}
+
+func (r *workerSeatReserver) Commit(ctx context.Context, reservationID string) error {
+	return r.inner.Commit(ctx, reservationID)
+}
+
+func (r *workerSeatReserver) Release(ctx context.Context, reservationID string) error {
+	return r.inner.Release(ctx, reservationID)
+}
+
+func (r *workerSeatReserver) ReleaseFor(ctx context.Context, orgID, limitKey, subjectRef string) error {
+	return r.inner.ReleaseFor(ctx, orgID, limitKey, subjectRef)
 }

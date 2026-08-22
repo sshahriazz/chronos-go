@@ -171,6 +171,7 @@ type inviteHarness struct {
 	workspaceID string
 	clock       *testClock
 	issuer      *app.InvitationIssuer
+	settlements *app.Settlements
 }
 
 // testClock is a clock a test can move.
@@ -248,6 +249,16 @@ func newInviteHarness(t *testing.T, o inviteOpts) *inviteHarness {
 		t.Fatalf("NewInvitations: %v", err)
 	}
 
+	// The SETTLEMENT half, built from the same parts the use case builds its own
+	// from. It is what the worker's sweep holds: expiring touches the stream,
+	// the token store and the seat pool and nothing else.
+	settlements, err := app.NewSettlements(app.SettlementsDeps{
+		Repo: repo, Tokens: tokens, Seats: seats, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("NewSettlements: %v", err)
+	}
+
 	// The ISSUER, which is the reactor's half. The use case appends the event
 	// and mints nothing; whoever sends the mail mints the link, because nothing
 	// that survives the request can recover a plaintext from a digest.
@@ -282,6 +293,7 @@ func newInviteHarness(t *testing.T, o inviteOpts) *inviteHarness {
 		invitations: invitations, store: store, tokens: tokens,
 		vault: vault, subjects: subjects, reserver: reserver, counter: counter,
 		memberships: memberships, workspaceID: inviteWS, clock: clock, issuer: issuer,
+		settlements: settlements,
 	}
 }
 

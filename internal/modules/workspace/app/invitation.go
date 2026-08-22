@@ -53,6 +53,10 @@ type Invitations struct {
 	subjects    SubjectMinter
 	seats       *Seats
 	now         func() time.Time
+
+	// settlements is the closing half, shared with the worker's sweep so both
+	// take the decision through one code path.
+	settlements *Settlements
 }
 
 // InvitationsDeps is what Invitations needs.
@@ -117,13 +121,21 @@ func NewInvitations(d InvitationsDeps) (*Invitations, error) {
 	case d.Now == nil:
 		return nil, fmt.Errorf("workspace: a clock is required")
 	}
-	return &Invitations{
+	inv := &Invitations{
 		repo: d.Repo, workspaces: d.Workspaces, memberships: d.Memberships,
 		appender: d.Appender, schemas: d.Schemas,
 		tokens: d.Tokens, indexer: d.Indexer,
 		dir: d.Dir, subs: d.Subs, vault: d.Vault, subjects: d.Subjects,
 		seats: d.Seats, now: d.Now,
-	}, nil
+	}
+	settlements, err := NewSettlements(SettlementsDeps{
+		Repo: d.Repo, Tokens: d.Tokens, Seats: d.Seats, Now: d.Now,
+	})
+	if err != nil {
+		return nil, err
+	}
+	inv.settlements = settlements
+	return inv, nil
 }
 
 // Issue invites an address into a workspace.
@@ -519,6 +531,47 @@ func (i *Invitations) pending(
 	return out
 }
 
+// Settlements is the half of the invitation lifecycle that CLOSES one.
+//
+// Split out because the worker legitimately needs it and cannot build the rest:
+// expiring an invitation touches the stream, the token store and the seat pool
+// and nothing else, while issuing one needs a blind indexer, an account
+// directory and the vault — none of which the worker has, and none of which
+// expiry has any business being able to reach.
+//
+// The narrower type is also the point rather than a side effect. A sweep holding
+// the full use case could issue and accept as well as expire.
+type Settlements struct {
+	repo   *eventsourcing.Repository[*domain.Invitation]
+	tokens InvitationTokenStore
+	seats  *Seats
+	now    func() time.Time
+}
+
+// SettlementsDeps is what Settlements needs.
+type SettlementsDeps struct {
+	Repo   *eventsourcing.Repository[*domain.Invitation]
+	Tokens InvitationTokenStore
+	Seats  *Seats
+	Now    func() time.Time
+}
+
+func NewSettlements(d SettlementsDeps) (*Settlements, error) {
+	switch {
+	case d.Repo == nil:
+		return nil, fmt.Errorf("workspace: an invitation repository is required")
+	case d.Tokens == nil:
+		return nil, fmt.Errorf("workspace: a token store is required; a settlement that " +
+			"could not drop the link would leave one live for an invitation that is closed")
+	case d.Seats == nil:
+		return nil, fmt.Errorf("workspace: seat accounting is required; a settlement that " +
+			"cannot release is a seat held for somebody who will never arrive")
+	case d.Now == nil:
+		return nil, fmt.Errorf("workspace: a clock is required")
+	}
+	return &Settlements{repo: d.Repo, tokens: d.Tokens, seats: d.Seats, now: d.Now}, nil
+}
+
 // RevokeInvitationCommand withdraws an outstanding invitation.
 type RevokeInvitationCommand struct {
 	OrgID       string
@@ -554,7 +607,7 @@ type RevokeInvitationResult struct{ SeatReleased bool }
 func (i *Invitations) Revoke(
 	ctx context.Context, cmd RevokeInvitationCommand,
 ) (RevokeInvitationResult, error) {
-	inv, err := i.settle(ctx, cmd.OrgID, cmd.WorkspaceID, cmd.InvitationID, cmd.IdempotencyKey,
+	inv, err := i.settlements.settle(ctx, cmd.OrgID, cmd.WorkspaceID, cmd.InvitationID, cmd.IdempotencyKey,
 		func(inv *domain.Invitation, now time.Time) error {
 			return inv.Revoke(cmd.RevokedBy, now)
 		})
@@ -604,7 +657,7 @@ func (i *Invitations) Decline(ctx context.Context, cmd DeclineInvitationCommand)
 	// its invitations declined: refusing would hold the seat until expiry for
 	// somebody who has already said no, and the person saying no has no way to
 	// influence whether the organization pays its bill.
-	if _, err := i.settleLoaded(ctx, inv, orgID, inv.WorkspaceID(), cmd.IdempotencyKey,
+	if _, err := i.settlements.settleLoaded(ctx, inv, orgID, inv.WorkspaceID(), cmd.IdempotencyKey,
 		func(inv *domain.Invitation, now time.Time) error { return inv.Decline(now) }); err != nil {
 		// NOT_FOUND for everything, including a settled invitation. An
 		// unauthenticated caller learns nothing from the difference between "you
@@ -662,7 +715,7 @@ func (i *Invitations) Resend(
 	if err != nil {
 		return ResendInvitationResult{}, errs.Internalf("loading the invitation").Wrap(err)
 	}
-	if err := i.belongsHere(inv, cmd.OrgID, cmd.WorkspaceID); err != nil {
+	if err := i.settlements.belongsHere(inv, cmd.OrgID, cmd.WorkspaceID); err != nil {
 		return ResendInvitationResult{}, err
 	}
 
@@ -690,7 +743,7 @@ func (i *Invitations) Resend(
 
 // settle loads an invitation an ADMINISTRATOR named and applies a terminal
 // transition to it.
-func (i *Invitations) settle(
+func (s *Settlements) settle(
 	ctx context.Context, orgID, workspaceID, invitationID, key string,
 	apply func(*domain.Invitation, time.Time) error,
 ) (*domain.Invitation, error) {
@@ -704,25 +757,25 @@ func (i *Invitations) settle(
 			"an Idempotency-Key is required on every mutating request")
 	}
 
-	inv, err := i.repo.Load(ctx, domain.InvitationStreamKey(invitationID))
+	inv, err := s.repo.Load(ctx, domain.InvitationStreamKey(invitationID))
 	if err != nil {
 		return nil, errs.Internalf("loading the invitation").Wrap(err)
 	}
-	if err := i.belongsHere(inv, orgID, workspaceID); err != nil {
+	if err := s.belongsHere(inv, orgID, workspaceID); err != nil {
 		return nil, err
 	}
-	return i.settleLoaded(ctx, inv, orgID, workspaceID, key, apply)
+	return s.settleLoaded(ctx, inv, orgID, workspaceID, key, apply)
 }
 
 // settleLoaded applies a terminal transition and cleans up after it.
 //
 // Append, then kill the links, then return the seat — see Revoke for why that
 // order and not the reverse.
-func (i *Invitations) settleLoaded(
+func (s *Settlements) settleLoaded(
 	ctx context.Context, inv *domain.Invitation, orgID, workspaceID, key string,
 	apply func(*domain.Invitation, time.Time) error,
 ) (*domain.Invitation, error) {
-	now := i.now().UTC()
+	now := s.now().UTC()
 	seatConsumed := inv.SeatConsumed()
 	role := inv.Role()
 	subjectID := inv.SubjectID()
@@ -734,7 +787,7 @@ func (i *Invitations) settleLoaded(
 		return nil, errs.Conflictf("%s", err)
 	}
 
-	if _, err := i.repo.Save(ctx, domain.InvitationStreamKey(inv.InvitationID()), inv, key,
+	if _, err := s.repo.Save(ctx, domain.InvitationStreamKey(inv.InvitationID()), inv, key,
 		eventsourcing.Metadata{OrgID: orgID, WorkspaceID: workspaceID, OccurredAt: now},
 	); err != nil {
 		if errors.Is(err, eventsourcing.ErrWrongExpectedRevision) {
@@ -746,7 +799,7 @@ func (i *Invitations) settleLoaded(
 	// The link dies. After the append, because the append is what makes it
 	// unredeemable — a live digest for a settled invitation is refused by
 	// Accept, so this is defence in depth rather than the control itself.
-	if _, err := i.tokens.RevokeAll(ctx, inv.InvitationID()); err != nil {
+	if _, err := s.tokens.RevokeAll(ctx, inv.InvitationID()); err != nil {
 		return inv, errs.Internalf("the invitation was settled but its link was not " +
 			"dropped; it cannot be redeemed, because acceptance refuses anything that is " +
 			"not pending").Wrap(err)
@@ -755,7 +808,7 @@ func (i *Invitations) settleLoaded(
 	// The seat comes back last, and only if one was taken. Releasing one that
 	// was never taken inflates the allowance every time it happens.
 	if seatConsumed {
-		if _, err := i.seats.ReleaseOnRemoval(ctx, orgID, subjectID, role, 0); err != nil {
+		if _, err := s.seats.ReleaseOnRemoval(ctx, orgID, subjectID, role, 0); err != nil {
 			return inv, errs.Internalf("the invitation was settled but its seat was not " +
 				"returned; the organization is paying for somebody who will not arrive").
 				Wrap(err)
@@ -774,7 +827,7 @@ func (i *Invitations) settleLoaded(
 //
 // NOT_FOUND, never a message that distinguishes "no such invitation" from "not
 // yours": both would confirm an id exists (ADR-036).
-func (i *Invitations) belongsHere(inv *domain.Invitation, orgID, workspaceID string) error {
+func (s *Settlements) belongsHere(inv *domain.Invitation, orgID, workspaceID string) error {
 	if !inv.Exists() || inv.OrgID() != orgID {
 		return errs.NotFoundf("not found")
 	}
@@ -782,4 +835,58 @@ func (i *Invitations) belongsHere(inv *domain.Invitation, orgID, workspaceID str
 		return errs.NotFoundf("not found")
 	}
 	return nil
+}
+
+// Expire closes an invitation whose window has run out and returns its seat.
+//
+// Reports whether it actually expired one. FALSE is a normal answer and not an
+// error: the caller is a sweep working from a projection, and by the time it
+// reaches here the invitation may have been accepted, revoked, declined — or
+// RESENT, which moves the deadline past the one the row was selected on.
+//
+// The domain refuses to expire early, and that refusal is what makes a stale row
+// harmless. This is the layer that turns it into "nothing to do" rather than a
+// failure, because a sweep that counted every lagging row as an error would
+// report a healthy system as broken every time somebody pressed resend.
+//
+// # No subscription check, deliberately
+//
+// Expiry RELEASES a seat. A suspended organization must still get its seats back
+// — refusing here would hold them for as long as the suspension lasts, which
+// bills a customer for invitations that can no longer be accepted by anyone.
+func (s *Settlements) Expire(ctx context.Context, invitationID string) (bool, error) {
+	if invitationID == "" {
+		return false, errs.ValidationFailedf("an invitation is required")
+	}
+
+	inv, err := s.repo.Load(ctx, domain.InvitationStreamKey(invitationID))
+	if err != nil {
+		return false, errs.Internalf("loading the invitation").Wrap(err)
+	}
+	if !inv.Exists() || !inv.Pending() {
+		return false, nil
+	}
+
+	now := s.now().UTC()
+	if !inv.Expired(now) {
+		// Resent since the row was read. Not an error, and emphatically not an
+		// expiry: the link in somebody's inbox is live, and closing the
+		// invitation would kill it and take back a seat that is still needed.
+		return false, nil
+	}
+
+	// A DERIVED idempotency key, so a retried sweep pass produces byte-identical
+	// event ids and the store refuses the redelivery rather than appending a
+	// second expiry — which would release a second seat for one hold.
+	//
+	// Keyed on the DEADLINE rather than on the pass, because two passes closing
+	// the same invitation are the same work while a resend followed by a later
+	// expiry is not.
+	key := "expire:" + invitationID + ":" + inv.ExpiresAt().UTC().Format(time.RFC3339Nano)
+
+	if _, err := s.settleLoaded(ctx, inv, inv.OrgID(), inv.WorkspaceID(), key,
+		func(inv *domain.Invitation, at time.Time) error { return inv.Expire(at) }); err != nil {
+		return false, err
+	}
+	return true, nil
 }
