@@ -77,6 +77,9 @@ const (
 	// WorkspaceServiceDeclineInvitationProcedure is the fully-qualified name of the WorkspaceService's
 	// DeclineInvitation RPC.
 	WorkspaceServiceDeclineInvitationProcedure = "/chronos.workspace.v1.WorkspaceService/DeclineInvitation"
+	// WorkspaceServiceListWorkspaceInvitationsProcedure is the fully-qualified name of the
+	// WorkspaceService's ListWorkspaceInvitations RPC.
+	WorkspaceServiceListWorkspaceInvitationsProcedure = "/chronos.workspace.v1.WorkspaceService/ListWorkspaceInvitations"
 )
 
 // WorkspaceServiceClient is a client for the chronos.workspace.v1.WorkspaceService service.
@@ -243,6 +246,16 @@ type WorkspaceServiceClient interface {
 	// somebody who declined is a decision a human should make deliberately, while
 	// re-inviting after an accidental revocation is routine.
 	DeclineInvitation(context.Context, *connect.Request[v1.DeclineInvitationRequest]) (*connect.Response[v1.DeclineInvitationResponse], error)
+	// ListWorkspaceInvitations returns one page of a workspace's invitations.
+	//
+	// `admin` on the WORKSPACE, because the list names who has been asked to join
+	// and that is not a member's business — an ordinary member seeing pending
+	// invitations learns who the organization is hiring.
+	//
+	// READ, so it is permitted in every organization state including Suspended and
+	// Closed: seeing what is outstanding is exactly what somebody winding an
+	// organization down needs.
+	ListWorkspaceInvitations(context.Context, *connect.Request[v1.ListWorkspaceInvitationsRequest]) (*connect.Response[v1.ListWorkspaceInvitationsResponse], error)
 }
 
 // NewWorkspaceServiceClient constructs a client for the chronos.workspace.v1.WorkspaceService
@@ -310,6 +323,12 @@ func NewWorkspaceServiceClient(httpClient connect.HTTPClient, baseURL string, op
 			connect.WithSchema(workspaceServiceMethods.ByName("DeclineInvitation")),
 			connect.WithClientOptions(opts...),
 		),
+		listWorkspaceInvitations: connect.NewClient[v1.ListWorkspaceInvitationsRequest, v1.ListWorkspaceInvitationsResponse](
+			httpClient,
+			baseURL+WorkspaceServiceListWorkspaceInvitationsProcedure,
+			connect.WithSchema(workspaceServiceMethods.ByName("ListWorkspaceInvitations")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -324,6 +343,7 @@ type workspaceServiceClient struct {
 	revokeInvitation          *connect.Client[v1.RevokeInvitationRequest, v1.RevokeInvitationResponse]
 	resendInvitation          *connect.Client[v1.ResendInvitationRequest, v1.ResendInvitationResponse]
 	declineInvitation         *connect.Client[v1.DeclineInvitationRequest, v1.DeclineInvitationResponse]
+	listWorkspaceInvitations  *connect.Client[v1.ListWorkspaceInvitationsRequest, v1.ListWorkspaceInvitationsResponse]
 }
 
 // CreateWorkspace calls chronos.workspace.v1.WorkspaceService.CreateWorkspace.
@@ -369,6 +389,11 @@ func (c *workspaceServiceClient) ResendInvitation(ctx context.Context, req *conn
 // DeclineInvitation calls chronos.workspace.v1.WorkspaceService.DeclineInvitation.
 func (c *workspaceServiceClient) DeclineInvitation(ctx context.Context, req *connect.Request[v1.DeclineInvitationRequest]) (*connect.Response[v1.DeclineInvitationResponse], error) {
 	return c.declineInvitation.CallUnary(ctx, req)
+}
+
+// ListWorkspaceInvitations calls chronos.workspace.v1.WorkspaceService.ListWorkspaceInvitations.
+func (c *workspaceServiceClient) ListWorkspaceInvitations(ctx context.Context, req *connect.Request[v1.ListWorkspaceInvitationsRequest]) (*connect.Response[v1.ListWorkspaceInvitationsResponse], error) {
+	return c.listWorkspaceInvitations.CallUnary(ctx, req)
 }
 
 // WorkspaceServiceHandler is an implementation of the chronos.workspace.v1.WorkspaceService
@@ -536,6 +561,16 @@ type WorkspaceServiceHandler interface {
 	// somebody who declined is a decision a human should make deliberately, while
 	// re-inviting after an accidental revocation is routine.
 	DeclineInvitation(context.Context, *connect.Request[v1.DeclineInvitationRequest]) (*connect.Response[v1.DeclineInvitationResponse], error)
+	// ListWorkspaceInvitations returns one page of a workspace's invitations.
+	//
+	// `admin` on the WORKSPACE, because the list names who has been asked to join
+	// and that is not a member's business — an ordinary member seeing pending
+	// invitations learns who the organization is hiring.
+	//
+	// READ, so it is permitted in every organization state including Suspended and
+	// Closed: seeing what is outstanding is exactly what somebody winding an
+	// organization down needs.
+	ListWorkspaceInvitations(context.Context, *connect.Request[v1.ListWorkspaceInvitationsRequest]) (*connect.Response[v1.ListWorkspaceInvitationsResponse], error)
 }
 
 // NewWorkspaceServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -599,6 +634,12 @@ func NewWorkspaceServiceHandler(svc WorkspaceServiceHandler, opts ...connect.Han
 		connect.WithSchema(workspaceServiceMethods.ByName("DeclineInvitation")),
 		connect.WithHandlerOptions(opts...),
 	)
+	workspaceServiceListWorkspaceInvitationsHandler := connect.NewUnaryHandler(
+		WorkspaceServiceListWorkspaceInvitationsProcedure,
+		svc.ListWorkspaceInvitations,
+		connect.WithSchema(workspaceServiceMethods.ByName("ListWorkspaceInvitations")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/chronos.workspace.v1.WorkspaceService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case WorkspaceServiceCreateWorkspaceProcedure:
@@ -619,6 +660,8 @@ func NewWorkspaceServiceHandler(svc WorkspaceServiceHandler, opts ...connect.Han
 			workspaceServiceResendInvitationHandler.ServeHTTP(w, r)
 		case WorkspaceServiceDeclineInvitationProcedure:
 			workspaceServiceDeclineInvitationHandler.ServeHTTP(w, r)
+		case WorkspaceServiceListWorkspaceInvitationsProcedure:
+			workspaceServiceListWorkspaceInvitationsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -662,4 +705,8 @@ func (UnimplementedWorkspaceServiceHandler) ResendInvitation(context.Context, *c
 
 func (UnimplementedWorkspaceServiceHandler) DeclineInvitation(context.Context, *connect.Request[v1.DeclineInvitationRequest]) (*connect.Response[v1.DeclineInvitationResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.DeclineInvitation is not implemented"))
+}
+
+func (UnimplementedWorkspaceServiceHandler) ListWorkspaceInvitations(context.Context, *connect.Request[v1.ListWorkspaceInvitationsRequest]) (*connect.Response[v1.ListWorkspaceInvitationsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.ListWorkspaceInvitations is not implemented"))
 }

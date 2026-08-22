@@ -234,7 +234,7 @@ satisfied at the composition root.
       verification rather than sending a second mail.
 - [x] **5e — Revoke, decline, resend.** Resend rotates the token and extends
       expiry; the old token stays dead.
-- [ ] **5f — `invitation_view`** projection, keyed `(workspace_id, status,
+- [x] **5f — `invitation_view`** projection, keyed `(workspace_id, status,
       expires_at)`.
 - [ ] **5g — the invitation mail**, through the notification reactor and a
       Temporal activity, addressed from the vault at send time (ADR-002).
@@ -250,6 +250,18 @@ satisfied at the composition root.
 
 ## Parked
 
+- [ ] `TestTheIdempotencyContractHoldsForEveryAuthenticatedMutation/DeactivateAccount`
+      flake — seen once in a full-package run, passes in isolation and on every
+      re-run. Same family as the one below: deactivation racing the rest of the
+      package. NOT investigated; recorded so a second sighting is a pattern
+      rather than a surprise.
+- [ ] **The integration suite is not repeatably runnable in one day.** Two per-IP
+      buckets exhaust after several full runs — `mail_caller:daily` (a daily mail
+      cap) and `username_check` — and the failures then look like broken
+      features: `RequestPasswordReset`, `ResendEmailVerification` and
+      `TestAnUnknownFieldIsDiscarded` all fail with RATE_LIMITED. The controls
+      are correct; the suite has no way to reset them. Clearing the keys in
+      Valkey is the current workaround.
 - [ ] `TestADeactivatedAccountCanGetBackIn` flake — 0/8 in isolation, so it
       needs concurrency with the rest of its package. Narrowed, not fixed.
 - [ ] `account_name` deprecated field — delete at the first release boundary.

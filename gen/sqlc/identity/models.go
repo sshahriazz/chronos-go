@@ -63,6 +63,21 @@ type InvitationToken struct {
 	ExpiresAt    pgtype.Timestamptz
 }
 
+// Invitations per workspace. Screens and sweeps only; the aggregate is authority.
+type InvitationView struct {
+	InvitationID string
+	WorkspaceID  string
+	OrgID        string
+	SubjectID    string
+	EmailIndex   string
+	InvitedBy    string
+	Role         string
+	Status       string
+	ExpiresAt    pgtype.Timestamptz
+	IssuedAt     pgtype.Timestamptz
+	SettledAt    pgtype.Timestamptz
+}
+
 // Authentication outcomes. subject_id is NULL when the identifier matched no account.
 type LoginHistoryView struct {
 	ID         int64

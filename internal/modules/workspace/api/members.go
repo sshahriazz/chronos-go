@@ -9,6 +9,7 @@ import (
 	workspacev1 "github.com/chronos/chronos-go/gen/proto/chronos/workspace/v1"
 	"github.com/chronos/chronos-go/internal/modules/workspace/app"
 	"github.com/chronos/chronos-go/internal/modules/workspace/contract"
+	"github.com/chronos/chronos-go/internal/modules/workspace/domain"
 	"github.com/chronos/chronos-go/internal/platform/db"
 	"github.com/chronos/chronos-go/internal/platform/errs"
 )
@@ -293,4 +294,42 @@ func (s *Service) DeclineInvitation(
 
 	// EMPTY, and identical whether the token was real, spent or invented.
 	return connect.NewResponse(&workspacev1.DeclineInvitationResponse{}), nil
+}
+
+// ListWorkspaceInvitations returns one page of a workspace's invitations.
+func (s *Service) ListWorkspaceInvitations(
+	ctx context.Context, req *connect.Request[workspacev1.ListWorkspaceInvitationsRequest],
+) (*connect.Response[workspacev1.ListWorkspaceInvitationsResponse], error) {
+	if _, err := db.RequireTenant(ctx); err != nil {
+		return nil, fail(errs.Internalf("no tenant scope reached the workspace handler; " +
+			"gate 1 resolved no organization").Wrap(err))
+	}
+
+	result, err := s.invitationQueries.List(ctx, app.ListInvitationsQuery{
+		WorkspaceID: req.Msg.GetWorkspaceId(),
+		Status:      domain.InvitationStatus(req.Msg.GetStatus()),
+		PageSize:    int(req.Msg.GetPageSize()),
+		PageToken:   req.Msg.GetPageToken(),
+	})
+	if err != nil {
+		return nil, fail(err)
+	}
+
+	out := make([]*workspacev1.WorkspaceInvitation, 0, len(result.Invitations))
+	for _, inv := range result.Invitations {
+		out = append(out, &workspacev1.WorkspaceInvitation{
+			InvitationId: inv.InvitationID,
+			SubjectId:    inv.SubjectID,
+			InvitedBy:    inv.InvitedBy,
+			Role:         string(inv.Role),
+			Status:       string(inv.Status),
+			ExpiresAt:    timestamppb.New(inv.ExpiresAt.UTC()),
+			IssuedAt:     timestamppb.New(inv.IssuedAt.UTC()),
+		})
+	}
+
+	return connect.NewResponse(&workspacev1.ListWorkspaceInvitationsResponse{
+		Invitations:   out,
+		NextPageToken: result.NextPageToken,
+	}), nil
 }

@@ -265,6 +265,7 @@ func projections(codec *eventcodec.JSON) []projection.Projection {
 		// dependency may run (ADR-020).
 		workspaceprojection.NewOrgMembers(codec),
 		workspaceprojection.NewMembers(codec),
+		workspaceprojection.NewInvitations(codec),
 
 		identityprojection.NewUser(codec),
 		identityprojection.NewSession(codec),

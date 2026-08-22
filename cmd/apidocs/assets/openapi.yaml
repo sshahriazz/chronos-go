@@ -3757,6 +3757,89 @@ components:
          it is the person at the address — putting it in this response would hand it to
          the inviter, who could then join as somebody else. It also never echoes the
          address back, so the response cannot be used to confirm what was typed.
+    chronos.workspace.v1.ListWorkspaceInvitationsRequest:
+      type: object
+      properties:
+        workspaceId:
+          type: string
+          examples:
+            - ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: workspace_id
+          maxLength: 29
+          pattern: ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            Which workspace. Read by the authz gate, which asks for `admin` on THIS
+             object — an invitation list names who has been asked to join, which is not
+             a member's business.
+        status:
+          type: string
+          examples:
+            - pending
+          title: status
+          maxLength: 16
+          enum:
+            - ""
+            - pending
+            - accepted
+            - revoked
+            - expired
+            - declined
+            - undeliverable
+          description: |-
+            Which invitations to list. Empty means `pending`, which is what an admin
+             screen almost always wants — settled invitations are history.
+        pageSize:
+          type: integer
+          examples:
+            - "50"
+          title: page_size
+          maximum: 200
+          minimum: 0
+          format: int32
+          description: |-
+            How many to return. Zero takes the default; an oversized request is CLAMPED
+             rather than refused, which is why the maximum is published and not enforced
+             (CONVENTIONS §7.2).
+        pageToken:
+          type: string
+          examples:
+            - PLACEHOLDER-opaque-cursor-from-a-previous-response
+          title: page_token
+          maxLength: 1024
+          pattern: ^[A-Za-z0-9_-]*$
+          description: |-
+            An opaque cursor from a previous response. Empty starts at the beginning.
+
+             Bound to the query that produced it: a token presented against a different
+             list is an ERROR rather than a silent restart, because a client handed page
+             one for a token it believes points into the middle walks the list forever
+             with nothing in the loop looking like a failure.
+      title: ListWorkspaceInvitationsRequest
+      additionalProperties: false
+      description: |-
+        ListWorkspaceInvitationsRequest asks for one page of a workspace's
+         invitations.
+    chronos.workspace.v1.ListWorkspaceInvitationsResponse:
+      type: object
+      properties:
+        invitations:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.workspace.v1.WorkspaceInvitation'
+          title: invitations
+          maxItems: 200
+          description: The page, oldest deadline first — the order somebody chasing them wants.
+        nextPageToken:
+          type: string
+          examples:
+            - PLACEHOLDER-opaque-cursor-for-the-next-page
+          title: next_page_token
+          maxLength: 1024
+          pattern: ^[A-Za-z0-9_-]*$
+          description: Empty on the last page.
+      title: ListWorkspaceInvitationsResponse
+      additionalProperties: false
+      description: ListWorkspaceInvitationsResponse is one page.
     chronos.workspace.v1.RemoveWorkspaceMemberRequest:
       type: object
       properties:
@@ -3873,6 +3956,77 @@ components:
       title: RevokeInvitationResponse
       additionalProperties: false
       description: RevokeInvitationResponse reports what the withdrawal returned.
+    chronos.workspace.v1.WorkspaceInvitation:
+      type: object
+      properties:
+        invitationId:
+          type: string
+          examples:
+            - inv_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: invitation_id
+          maxLength: 30
+          pattern: ^inv_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: The invitation's public id, and what Revoke and Resend name.
+        subjectId:
+          type: string
+          examples:
+            - subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: subject_id
+          maxLength: 31
+          pattern: ^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: The invitee's pseudonym. The address lives in the vault under it.
+        invitedBy:
+          type: string
+          examples:
+            - subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: invited_by
+          maxLength: 31
+          pattern: ^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: Who issued it.
+        role:
+          type: string
+          examples:
+            - member
+          title: role
+          maxLength: 16
+          enum:
+            - admin
+            - member
+            - guest
+          description: The role they would join with.
+        status:
+          type: string
+          examples:
+            - pending
+          title: status
+          maxLength: 16
+          enum:
+            - pending
+            - accepted
+            - revoked
+            - expired
+            - declined
+            - undeliverable
+          description: Where it sits in the lifecycle.
+        expiresAt:
+          title: expires_at
+          description: When the link stops working. Moves on a resend.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+        issuedAt:
+          title: issued_at
+          description: When it was issued.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: WorkspaceInvitation
+      additionalProperties: false
+      description: |-
+        WorkspaceInvitation is one entry in the invitation list.
+
+         It carries the invitee's PSEUDONYM and no address. Rendering the list to a
+         human needs the address, and the vault resolves it at read time under the key
+         erasure destroys — putting it here would make every cached response a place
+         personal data lives (ADR-002).
     compression:
       title: compression
       type: string
@@ -7248,6 +7402,56 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.workspace.v1.InviteToWorkspaceResponse'
+  /chronos.workspace.v1.WorkspaceService/ListWorkspaceInvitations:
+    post:
+      tags:
+        - WorkspaceService
+      summary: ListWorkspaceInvitations returns one page of a workspace's invitations.
+      description: |-
+        `admin` on the WORKSPACE, because the list names who has been asked to join
+         and that is not a member's business — an ordinary member seeing pending
+         invitations learns who the organization is hiring.
+
+         READ, so it is permitted in every organization state including Suspended and
+         Closed: seeing what is outstanding is exactly what somebody winding an
+         organization down needs.
+      operationId: WorkspaceService_ListWorkspaceInvitations
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.workspace.v1.ListWorkspaceInvitationsRequest'
+            example:
+              workspaceId: ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              status: pending
+              pageSize: "50"
+              pageToken: PLACEHOLDER-opaque-cursor-from-a-previous-response
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.workspace.v1.ListWorkspaceInvitationsResponse'
   /chronos.workspace.v1.WorkspaceService/RemoveWorkspaceMember:
     post:
       tags:

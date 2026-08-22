@@ -367,7 +367,23 @@ func (hh *harness) dialInfra(env map[string]string) error {
 		envOr(env, "POSTGRES_HOST", "localhost"), envOr(env, "POSTGRES_PORT", "5432"),
 		env["POSTGRES_DB"])
 
-	pool, err := pgxpool.New(context.Background(), dsn)
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return fmt.Errorf("postgres dsn: %w", err)
+	}
+	// SIZED FROM THE PROJECTION REGISTRY, exactly as cmd/projector sizes its own
+	// and for the same reason: every running projection PINS one connection for
+	// its lifetime to hold its single-writer lease. pgxpool's default is
+	// max(4, NumCPU), so adding a projection eventually consumes every
+	// connection and the harness's own queries then block until their context
+	// expires — which surfaces as "postgres: begin: context deadline exceeded"
+	// during fixture setup, minutes later, naming nothing that went wrong.
+	//
+	// The headroom is for this process's own traffic: the fixtures, the awaits
+	// and the assertions all run against the same pool.
+	cfg.MaxConns = int32(len(projectionRegistry(nil))) + 8
+
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		return fmt.Errorf("postgres pool: %w", err)
 	}
@@ -513,20 +529,7 @@ func (hh *harness) startProjectors() {
 	ctx, cancel := context.WithCancel(context.Background())
 	hh.cancelProjectors = cancel
 
-	views := []projection.Projection{
-		notificationprojection.NewFeed(hh.codec),
-		notificationprojection.NewPushSubscriptions(hh.codec),
-		notificationprojection.NewPreferences(hh.codec),
-		profileprojection.NewProfile(hh.codec),
-		// Organization's two: gate 3 reads the first on every request, and gate 1
-		// verifies membership against the second.
-		organizationprojection.NewStatus(hh.codec),
-		workspaceprojection.NewOrgMembers(hh.codec),
-		workspaceprojection.NewMembers(hh.codec),
-		identityprojection.NewUser(hh.codec),
-		identityprojection.NewSession(hh.codec),
-		identityprojection.NewReservation(hh.codec),
-	}
+	views := projectionRegistry(hh.codec)
 	done := make(chan struct{})
 	hh.projectorsDone = done
 
@@ -1401,4 +1404,37 @@ func freePort() (int, error) {
 	}
 	defer func() { _ = l.Close() }()
 	return l.Addr().(*net.TCPAddr).Port, nil
+}
+
+// projectionRegistry is what this harness runs, in ONE place.
+//
+// Called twice: once to size the connection pool and once to start the runners.
+// Two lists would drift, and the drift is silent until the pool is one short —
+// at which point the symptom is a fixture timing out during setup rather than
+// anything naming the projection that was added.
+//
+// A nil codec is permitted so the pool sizing can count the registry without
+// building one. Every constructor here builds its dispatch table eagerly, so
+// nil is safe only for counting — never for running.
+func projectionRegistry(codec *eventcodec.JSON) []projection.Projection {
+	if codec == nil {
+		codec = eventcodec.NewJSON(eventsourcing.NewUpcasterRegistry())
+	}
+	return []projection.Projection{
+		notificationprojection.NewFeed(codec),
+		notificationprojection.NewPushSubscriptions(codec),
+		notificationprojection.NewPreferences(codec),
+		profileprojection.NewProfile(codec),
+		// Organization's status: gate 3 reads it on every request.
+		organizationprojection.NewStatus(codec),
+		// Workspace owns the membership index gate 1 verifies against, because
+		// belonging comes from organization events AND workspace joins and one
+		// table has one writer (ADR-020).
+		workspaceprojection.NewOrgMembers(codec),
+		workspaceprojection.NewMembers(codec),
+		workspaceprojection.NewInvitations(codec),
+		identityprojection.NewUser(codec),
+		identityprojection.NewSession(codec),
+		identityprojection.NewReservation(codec),
+	}
 }

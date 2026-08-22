@@ -30,6 +30,12 @@ type Querier interface {
 	// answers only the first question.
 	CountWorkspaceMemberships(ctx context.Context, arg CountWorkspaceMembershipsParams) (int64, error)
 	DeleteWorkspaceMember(ctx context.Context, arg DeleteWorkspaceMemberParams) error
+	// A resend moved the deadline.
+	//
+	// The window is the SWEEP'S key, so it has to reflect the current deadline
+	// rather than the original — otherwise a resent invitation is swept at its first
+	// expiry and its seat returned while a live link is still in somebody's inbox.
+	ExtendInvitation(ctx context.Context, arg ExtendInvitationParams) error
 	// Record that a workspace join made somebody an organization member.
 	//
 	// DO NOTHING, never DO UPDATE, and that is the whole point of a separate query
@@ -38,6 +44,12 @@ type Querier interface {
 	// that wrote `guest` over `owner` would demote them out of their own
 	// organization — silently, and with no event that says so.
 	InsertOrgMemberIfAbsent(ctx context.Context, arg InsertOrgMemberIfAbsentParams) error
+	// What did this person issue, and is it still outstanding?
+	//
+	// The reactor that revokes an inviter's invitations when they leave the
+	// organization reads this. Scoped by org, because an inviter removed from ONE
+	// organization keeps whatever they issued in another.
+	InvitationsBySubject(ctx context.Context, arg InvitationsBySubjectParams) ([]InvitationsBySubjectRow, error)
 	// Queries for the invitation link credential.
 	//
 	// This is NOT a projection. See migration 00023 for why a handler writes it: a
@@ -45,6 +57,13 @@ type Querier interface {
 	// one. It is the same exception identity_token takes.
 	// Record a digest against an invitation, until it expires.
 	IssueInvitationToken(ctx context.Context, arg IssueInvitationTokenParams) error
+	// The admin screen: who is outstanding in this workspace.
+	//
+	// Ordered by expiry so the ones about to lapse are at the top, which is the
+	// order somebody chasing them wants. Keyset paging by `(expires_at,
+	// invitation_id)`, because an offset shifts under a concurrent settlement and
+	// silently skips a row.
+	ListWorkspaceInvitations(ctx context.Context, arg ListWorkspaceInvitationsParams) ([]ListWorkspaceInvitationsRow, error)
 	// Read a digest WITHOUT spending it, so the checks that can fail transiently run
 	// first.
 	//
@@ -61,6 +80,12 @@ type Querier interface {
 	// Same expiry treatment as the consume, for the same reason: an expired token
 	// must be indistinguishable from an unknown one.
 	LookupInvitationToken(ctx context.Context, arg LookupInvitationTokenParams) (LookupInvitationTokenRow, error)
+	// Is there already an outstanding invitation to this address here?
+	//
+	// By INDEX, never by address: the address is not in this database. A second
+	// invitation to one address supersedes the first (workspace.md §5) rather than
+	// taking a second seat, and this is what makes that recognisable.
+	PendingInvitationForAddress(ctx context.Context, arg PendingInvitationForAddressParams) (PendingInvitationForAddressRow, error)
 	RemoveOrgMember(ctx context.Context, arg RemoveOrgMemberParams) error
 	// Drop the organization membership a workspace join created.
 	//
@@ -79,11 +104,32 @@ type Querier interface {
 	// whoever holds the mail.
 	RevokeInvitationTokens(ctx context.Context, invitationID string) (int64, error)
 	SetWorkspaceMemberRole(ctx context.Context, arg SetWorkspaceMemberRoleParams) error
+	// A terminal transition.
+	//
+	// Guarded on `status = 'pending'`, which is what makes a replay idempotent: the
+	// second application matches nothing and changes nothing, rather than moving an
+	// accepted invitation to revoked because the log happened to be re-read in a
+	// different order.
+	SettleInvitation(ctx context.Context, arg SettleInvitationParams) error
 	// Retention. A digest is not personal data, but it is evidence that a particular
 	// address was invited, and it has no purpose past its expiry.
 	SweepInvitationTokens(ctx context.Context) (int64, error)
+	TruncateInvitations(ctx context.Context) error
 	TruncateOrgMembers(ctx context.Context) error
 	TruncateWorkspaceMembers(ctx context.Context) error
+	// Queries for invitation_view.
+	//
+	// Screens and sweeps only. Every DECISION on the invitation paths reads the
+	// aggregate: a projection is behind the log by construction, so a decision taken
+	// from one can be taken twice with two different answers — and every decision
+	// there spends a seat or a credential.
+	// Upsert, because a projector replays: the same event WILL arrive twice.
+	//
+	// Nothing is untouched on conflict, unlike the membership upserts. A replayed
+	// issue is byte-identical to the first, so overwriting costs nothing — and an
+	// ON CONFLICT DO NOTHING here would make a rebuild silently skip an invitation
+	// whose row survived a partial truncate.
+	UpsertInvitation(ctx context.Context, arg UpsertInvitationParams) error
 	// Organization-granted membership: the owner at creation, admins thereafter.
 	//
 	// joined_at is untouched on conflict — a replay must not move when somebody

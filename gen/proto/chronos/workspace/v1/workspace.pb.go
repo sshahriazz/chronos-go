@@ -1099,6 +1099,250 @@ func (*DeclineInvitationResponse) Descriptor() ([]byte, []int) {
 	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{17}
 }
 
+// ListWorkspaceInvitationsRequest asks for one page of a workspace's
+// invitations.
+type ListWorkspaceInvitationsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Which workspace. Read by the authz gate, which asks for `admin` on THIS
+	// object — an invitation list names who has been asked to join, which is not
+	// a member's business.
+	WorkspaceId string `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	// Which invitations to list. Empty means `pending`, which is what an admin
+	// screen almost always wants — settled invitations are history.
+	Status string `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
+	// How many to return. Zero takes the default; an oversized request is CLAMPED
+	// rather than refused, which is why the maximum is published and not enforced
+	// (CONVENTIONS §7.2).
+	PageSize int32 `protobuf:"varint,3,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
+	// An opaque cursor from a previous response. Empty starts at the beginning.
+	//
+	// Bound to the query that produced it: a token presented against a different
+	// list is an ERROR rather than a silent restart, because a client handed page
+	// one for a token it believes points into the middle walks the list forever
+	// with nothing in the loop looking like a failure.
+	PageToken     string `protobuf:"bytes,4,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListWorkspaceInvitationsRequest) Reset() {
+	*x = ListWorkspaceInvitationsRequest{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListWorkspaceInvitationsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListWorkspaceInvitationsRequest) ProtoMessage() {}
+
+func (x *ListWorkspaceInvitationsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListWorkspaceInvitationsRequest.ProtoReflect.Descriptor instead.
+func (*ListWorkspaceInvitationsRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *ListWorkspaceInvitationsRequest) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
+}
+
+func (x *ListWorkspaceInvitationsRequest) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *ListWorkspaceInvitationsRequest) GetPageSize() int32 {
+	if x != nil {
+		return x.PageSize
+	}
+	return 0
+}
+
+func (x *ListWorkspaceInvitationsRequest) GetPageToken() string {
+	if x != nil {
+		return x.PageToken
+	}
+	return ""
+}
+
+// WorkspaceInvitation is one entry in the invitation list.
+//
+// It carries the invitee's PSEUDONYM and no address. Rendering the list to a
+// human needs the address, and the vault resolves it at read time under the key
+// erasure destroys — putting it here would make every cached response a place
+// personal data lives (ADR-002).
+type WorkspaceInvitation struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The invitation's public id, and what Revoke and Resend name.
+	InvitationId string `protobuf:"bytes,1,opt,name=invitation_id,json=invitationId,proto3" json:"invitation_id,omitempty"`
+	// The invitee's pseudonym. The address lives in the vault under it.
+	SubjectId string `protobuf:"bytes,2,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
+	// Who issued it.
+	InvitedBy string `protobuf:"bytes,3,opt,name=invited_by,json=invitedBy,proto3" json:"invited_by,omitempty"`
+	// The role they would join with.
+	Role string `protobuf:"bytes,4,opt,name=role,proto3" json:"role,omitempty"`
+	// Where it sits in the lifecycle.
+	Status string `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`
+	// When the link stops working. Moves on a resend.
+	ExpiresAt *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	// When it was issued.
+	IssuedAt      *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkspaceInvitation) Reset() {
+	*x = WorkspaceInvitation{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkspaceInvitation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkspaceInvitation) ProtoMessage() {}
+
+func (x *WorkspaceInvitation) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkspaceInvitation.ProtoReflect.Descriptor instead.
+func (*WorkspaceInvitation) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *WorkspaceInvitation) GetInvitationId() string {
+	if x != nil {
+		return x.InvitationId
+	}
+	return ""
+}
+
+func (x *WorkspaceInvitation) GetSubjectId() string {
+	if x != nil {
+		return x.SubjectId
+	}
+	return ""
+}
+
+func (x *WorkspaceInvitation) GetInvitedBy() string {
+	if x != nil {
+		return x.InvitedBy
+	}
+	return ""
+}
+
+func (x *WorkspaceInvitation) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *WorkspaceInvitation) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *WorkspaceInvitation) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
+func (x *WorkspaceInvitation) GetIssuedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.IssuedAt
+	}
+	return nil
+}
+
+// ListWorkspaceInvitationsResponse is one page.
+type ListWorkspaceInvitationsResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The page, oldest deadline first — the order somebody chasing them wants.
+	Invitations []*WorkspaceInvitation `protobuf:"bytes,1,rep,name=invitations,proto3" json:"invitations,omitempty"`
+	// Empty on the last page.
+	NextPageToken string `protobuf:"bytes,2,opt,name=next_page_token,json=nextPageToken,proto3" json:"next_page_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListWorkspaceInvitationsResponse) Reset() {
+	*x = ListWorkspaceInvitationsResponse{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListWorkspaceInvitationsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListWorkspaceInvitationsResponse) ProtoMessage() {}
+
+func (x *ListWorkspaceInvitationsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListWorkspaceInvitationsResponse.ProtoReflect.Descriptor instead.
+func (*ListWorkspaceInvitationsResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *ListWorkspaceInvitationsResponse) GetInvitations() []*WorkspaceInvitation {
+	if x != nil {
+		return x.Invitations
+	}
+	return nil
+}
+
+func (x *ListWorkspaceInvitationsResponse) GetNextPageToken() string {
+	if x != nil {
+		return x.NextPageToken
+	}
+	return ""
+}
+
 var File_chronos_workspace_v1_workspace_proto protoreflect.FileDescriptor
 
 const file_chronos_workspace_v1_workspace_proto_rawDesc = "" +
@@ -1161,7 +1405,27 @@ const file_chronos_workspace_v1_workspace_proto_rawDesc = "" +
 	"expires_at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"\x83\x01\n" +
 	"\x18DeclineInvitationRequest\x12g\n" +
 	"\x05token\x18\x01 \x01(\tBQ\xbaG1:-\x12+3q2-7wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAx+\xbaH\x1ar\x182\x13^[A-Za-z0-9_-]{43}$\x98\x01+R\x05token\"\x1b\n" +
-	"\x19DeclineInvitationResponse2\xd6\x10\n" +
+	"\x19DeclineInvitationResponse\"\xb2\x03\n" +
+	"\x1fListWorkspaceInvitationsRequest\x12r\n" +
+	"\fworkspace_id\x18\x01 \x01(\tBO\xbaG#:\x1f\x12\x1dws_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1d\xbaH&r$\x18\x1d2 ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\vworkspaceId\x12o\n" +
+	"\x06status\x18\x02 \x01(\tBW\xbaG\r:\t\x12\apendingx\x10\xbaHDrB\x18\x10R\x00R\apendingR\bacceptedR\arevokedR\aexpiredR\bdeclinedR\rundeliverableR\x06status\x126\n" +
+	"\tpage_size\x18\x03 \x01(\x05B\x19\xbaG\x0f:\x04\x12\x0250Y\x00\x00\x00\x00\x00\x00i@\xbaH\x04\x1a\x02(\x00R\bpageSize\x12r\n" +
+	"\n" +
+	"page_token\x18\x04 \x01(\tBS\xbaG6:4\x122PLACEHOLDER-opaque-cursor-from-a-previous-response\xbaH\x17r\x15\x18\x80\b2\x10^[A-Za-z0-9_-]*$R\tpageToken\"\x9a\x05\n" +
+	"\x13WorkspaceInvitation\x12v\n" +
+	"\rinvitation_id\x18\x01 \x01(\tBQ\xbaG$: \x12\x1einv_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1e\xbaH'r%\x18\x1e2!^inv_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\finvitationId\x12r\n" +
+	"\n" +
+	"subject_id\x18\x02 \x01(\tBS\xbaG%:!\x12\x1fsubj_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\xbaH(r&\x18\x1f2\"^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\tsubjectId\x12r\n" +
+	"\n" +
+	"invited_by\x18\x03 \x01(\tBS\xbaG%:!\x12\x1fsubj_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\xbaH(r&\x18\x1f2\"^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\tinvitedBy\x12@\n" +
+	"\x04role\x18\x04 \x01(\tB,\xbaG\f:\b\x12\x06memberx\x10\xbaH\x1ar\x18\x18\x10R\x05adminR\x06memberR\x05guestR\x04role\x12m\n" +
+	"\x06status\x18\x05 \x01(\tBU\xbaG\r:\t\x12\apendingx\x10\xbaHBr@\x18\x10R\apendingR\bacceptedR\arevokedR\aexpiredR\bdeclinedR\rundeliverableR\x06status\x129\n" +
+	"\n" +
+	"expires_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x127\n" +
+	"\tissued_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\bissuedAt\"\xf0\x01\n" +
+	" ListWorkspaceInvitationsResponse\x12V\n" +
+	"\vinvitations\x18\x01 \x03(\v2).chronos.workspace.v1.WorkspaceInvitationB\t\xbaH\x06\x92\x01\x03\x10\xc8\x01R\vinvitations\x12t\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tBL\xbaG/:-\x12+PLACEHOLDER-opaque-cursor-for-the-next-page\xbaH\x17r\x15\x18\x80\b2\x10^[A-Za-z0-9_-]*$R\rnextPageToken2\x8c\x12\n" +
 	"\x10WorkspaceService\x12\xed\x01\n" +
 	"\x0fCreateWorkspace\x12,.chronos.workspace.v1.CreateWorkspaceRequest\x1a-.chronos.workspace.v1.CreateWorkspaceResponse\"}\xbaGI2G\n" +
 	"E\n" +
@@ -1206,7 +1470,9 @@ const file_chronos_workspace_v1_workspace_proto_rawDesc = "" +
 	"\x11DeclineInvitation\x12..chronos.workspace.v1.DeclineInvitationRequest\x1a/.chronos.workspace.v1.DeclineInvitationResponse\"V\xbaGK2G\n" +
 	"E\n" +
 	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
-	"$#/components/schemas/idempotency-keyZ\x00\xd0\xf3\x18\x02\xe8\xf3\x18\x01B\xe6\x01\n" +
+	"$#/components/schemas/idempotency-keyZ\x00\xd0\xf3\x18\x02\xe8\xf3\x18\x01\x12\xb3\x01\n" +
+	"\x18ListWorkspaceInvitations\x125.chronos.workspace.v1.ListWorkspaceInvitationsRequest\x1a6.chronos.workspace.v1.ListWorkspaceInvitationsResponse\"(\xca\xf3\x18 \n" +
+	"\x05admin\x12\tworkspace\x1a\fworkspace_id\xd0\xf3\x18\x01B\xe6\x01\n" +
 	"\x18com.chronos.workspace.v1B\x0eWorkspaceProtoP\x01ZHgithub.com/chronos/chronos-go/gen/proto/chronos/workspace/v1;workspacev1\xa2\x02\x03CWX\xaa\x02\x14Chronos.Workspace.V1\xca\x02\x14Chronos\\Workspace\\V1\xe2\x02 Chronos\\Workspace\\V1\\GPBMetadata\xea\x02\x16Chronos::Workspace::V1b\x06proto3"
 
 var (
@@ -1221,7 +1487,7 @@ func file_chronos_workspace_v1_workspace_proto_rawDescGZIP() []byte {
 	return file_chronos_workspace_v1_workspace_proto_rawDescData
 }
 
-var file_chronos_workspace_v1_workspace_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_chronos_workspace_v1_workspace_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_chronos_workspace_v1_workspace_proto_goTypes = []any{
 	(*CreateWorkspaceRequest)(nil),            // 0: chronos.workspace.v1.CreateWorkspaceRequest
 	(*CreateWorkspaceResponse)(nil),           // 1: chronos.workspace.v1.CreateWorkspaceResponse
@@ -1241,34 +1507,42 @@ var file_chronos_workspace_v1_workspace_proto_goTypes = []any{
 	(*ResendInvitationResponse)(nil),          // 15: chronos.workspace.v1.ResendInvitationResponse
 	(*DeclineInvitationRequest)(nil),          // 16: chronos.workspace.v1.DeclineInvitationRequest
 	(*DeclineInvitationResponse)(nil),         // 17: chronos.workspace.v1.DeclineInvitationResponse
-	(*timestamppb.Timestamp)(nil),             // 18: google.protobuf.Timestamp
+	(*ListWorkspaceInvitationsRequest)(nil),   // 18: chronos.workspace.v1.ListWorkspaceInvitationsRequest
+	(*WorkspaceInvitation)(nil),               // 19: chronos.workspace.v1.WorkspaceInvitation
+	(*ListWorkspaceInvitationsResponse)(nil),  // 20: chronos.workspace.v1.ListWorkspaceInvitationsResponse
+	(*timestamppb.Timestamp)(nil),             // 21: google.protobuf.Timestamp
 }
 var file_chronos_workspace_v1_workspace_proto_depIdxs = []int32{
-	18, // 0: chronos.workspace.v1.InviteToWorkspaceResponse.expires_at:type_name -> google.protobuf.Timestamp
-	18, // 1: chronos.workspace.v1.ResendInvitationResponse.expires_at:type_name -> google.protobuf.Timestamp
-	0,  // 2: chronos.workspace.v1.WorkspaceService.CreateWorkspace:input_type -> chronos.workspace.v1.CreateWorkspaceRequest
-	2,  // 3: chronos.workspace.v1.WorkspaceService.AddWorkspaceMember:input_type -> chronos.workspace.v1.AddWorkspaceMemberRequest
-	4,  // 4: chronos.workspace.v1.WorkspaceService.RemoveWorkspaceMember:input_type -> chronos.workspace.v1.RemoveWorkspaceMemberRequest
-	6,  // 5: chronos.workspace.v1.WorkspaceService.ChangeWorkspaceMemberRole:input_type -> chronos.workspace.v1.ChangeWorkspaceMemberRoleRequest
-	8,  // 6: chronos.workspace.v1.WorkspaceService.InviteToWorkspace:input_type -> chronos.workspace.v1.InviteToWorkspaceRequest
-	10, // 7: chronos.workspace.v1.WorkspaceService.AcceptInvitation:input_type -> chronos.workspace.v1.AcceptInvitationRequest
-	12, // 8: chronos.workspace.v1.WorkspaceService.RevokeInvitation:input_type -> chronos.workspace.v1.RevokeInvitationRequest
-	14, // 9: chronos.workspace.v1.WorkspaceService.ResendInvitation:input_type -> chronos.workspace.v1.ResendInvitationRequest
-	16, // 10: chronos.workspace.v1.WorkspaceService.DeclineInvitation:input_type -> chronos.workspace.v1.DeclineInvitationRequest
-	1,  // 11: chronos.workspace.v1.WorkspaceService.CreateWorkspace:output_type -> chronos.workspace.v1.CreateWorkspaceResponse
-	3,  // 12: chronos.workspace.v1.WorkspaceService.AddWorkspaceMember:output_type -> chronos.workspace.v1.AddWorkspaceMemberResponse
-	5,  // 13: chronos.workspace.v1.WorkspaceService.RemoveWorkspaceMember:output_type -> chronos.workspace.v1.RemoveWorkspaceMemberResponse
-	7,  // 14: chronos.workspace.v1.WorkspaceService.ChangeWorkspaceMemberRole:output_type -> chronos.workspace.v1.ChangeWorkspaceMemberRoleResponse
-	9,  // 15: chronos.workspace.v1.WorkspaceService.InviteToWorkspace:output_type -> chronos.workspace.v1.InviteToWorkspaceResponse
-	11, // 16: chronos.workspace.v1.WorkspaceService.AcceptInvitation:output_type -> chronos.workspace.v1.AcceptInvitationResponse
-	13, // 17: chronos.workspace.v1.WorkspaceService.RevokeInvitation:output_type -> chronos.workspace.v1.RevokeInvitationResponse
-	15, // 18: chronos.workspace.v1.WorkspaceService.ResendInvitation:output_type -> chronos.workspace.v1.ResendInvitationResponse
-	17, // 19: chronos.workspace.v1.WorkspaceService.DeclineInvitation:output_type -> chronos.workspace.v1.DeclineInvitationResponse
-	11, // [11:20] is the sub-list for method output_type
-	2,  // [2:11] is the sub-list for method input_type
-	2,  // [2:2] is the sub-list for extension type_name
-	2,  // [2:2] is the sub-list for extension extendee
-	0,  // [0:2] is the sub-list for field type_name
+	21, // 0: chronos.workspace.v1.InviteToWorkspaceResponse.expires_at:type_name -> google.protobuf.Timestamp
+	21, // 1: chronos.workspace.v1.ResendInvitationResponse.expires_at:type_name -> google.protobuf.Timestamp
+	21, // 2: chronos.workspace.v1.WorkspaceInvitation.expires_at:type_name -> google.protobuf.Timestamp
+	21, // 3: chronos.workspace.v1.WorkspaceInvitation.issued_at:type_name -> google.protobuf.Timestamp
+	19, // 4: chronos.workspace.v1.ListWorkspaceInvitationsResponse.invitations:type_name -> chronos.workspace.v1.WorkspaceInvitation
+	0,  // 5: chronos.workspace.v1.WorkspaceService.CreateWorkspace:input_type -> chronos.workspace.v1.CreateWorkspaceRequest
+	2,  // 6: chronos.workspace.v1.WorkspaceService.AddWorkspaceMember:input_type -> chronos.workspace.v1.AddWorkspaceMemberRequest
+	4,  // 7: chronos.workspace.v1.WorkspaceService.RemoveWorkspaceMember:input_type -> chronos.workspace.v1.RemoveWorkspaceMemberRequest
+	6,  // 8: chronos.workspace.v1.WorkspaceService.ChangeWorkspaceMemberRole:input_type -> chronos.workspace.v1.ChangeWorkspaceMemberRoleRequest
+	8,  // 9: chronos.workspace.v1.WorkspaceService.InviteToWorkspace:input_type -> chronos.workspace.v1.InviteToWorkspaceRequest
+	10, // 10: chronos.workspace.v1.WorkspaceService.AcceptInvitation:input_type -> chronos.workspace.v1.AcceptInvitationRequest
+	12, // 11: chronos.workspace.v1.WorkspaceService.RevokeInvitation:input_type -> chronos.workspace.v1.RevokeInvitationRequest
+	14, // 12: chronos.workspace.v1.WorkspaceService.ResendInvitation:input_type -> chronos.workspace.v1.ResendInvitationRequest
+	16, // 13: chronos.workspace.v1.WorkspaceService.DeclineInvitation:input_type -> chronos.workspace.v1.DeclineInvitationRequest
+	18, // 14: chronos.workspace.v1.WorkspaceService.ListWorkspaceInvitations:input_type -> chronos.workspace.v1.ListWorkspaceInvitationsRequest
+	1,  // 15: chronos.workspace.v1.WorkspaceService.CreateWorkspace:output_type -> chronos.workspace.v1.CreateWorkspaceResponse
+	3,  // 16: chronos.workspace.v1.WorkspaceService.AddWorkspaceMember:output_type -> chronos.workspace.v1.AddWorkspaceMemberResponse
+	5,  // 17: chronos.workspace.v1.WorkspaceService.RemoveWorkspaceMember:output_type -> chronos.workspace.v1.RemoveWorkspaceMemberResponse
+	7,  // 18: chronos.workspace.v1.WorkspaceService.ChangeWorkspaceMemberRole:output_type -> chronos.workspace.v1.ChangeWorkspaceMemberRoleResponse
+	9,  // 19: chronos.workspace.v1.WorkspaceService.InviteToWorkspace:output_type -> chronos.workspace.v1.InviteToWorkspaceResponse
+	11, // 20: chronos.workspace.v1.WorkspaceService.AcceptInvitation:output_type -> chronos.workspace.v1.AcceptInvitationResponse
+	13, // 21: chronos.workspace.v1.WorkspaceService.RevokeInvitation:output_type -> chronos.workspace.v1.RevokeInvitationResponse
+	15, // 22: chronos.workspace.v1.WorkspaceService.ResendInvitation:output_type -> chronos.workspace.v1.ResendInvitationResponse
+	17, // 23: chronos.workspace.v1.WorkspaceService.DeclineInvitation:output_type -> chronos.workspace.v1.DeclineInvitationResponse
+	20, // 24: chronos.workspace.v1.WorkspaceService.ListWorkspaceInvitations:output_type -> chronos.workspace.v1.ListWorkspaceInvitationsResponse
+	15, // [15:25] is the sub-list for method output_type
+	5,  // [5:15] is the sub-list for method input_type
+	5,  // [5:5] is the sub-list for extension type_name
+	5,  // [5:5] is the sub-list for extension extendee
+	0,  // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_chronos_workspace_v1_workspace_proto_init() }
@@ -1282,7 +1556,7 @@ func file_chronos_workspace_v1_workspace_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chronos_workspace_v1_workspace_proto_rawDesc), len(file_chronos_workspace_v1_workspace_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   18,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

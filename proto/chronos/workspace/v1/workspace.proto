@@ -539,6 +539,170 @@ message DeclineInvitationRequest {
 // with an old mail whether the organization still exists.
 message DeclineInvitationResponse {}
 
+// ListWorkspaceInvitationsRequest asks for one page of a workspace's
+// invitations.
+message ListWorkspaceInvitationsRequest {
+  // Which workspace. Read by the authz gate, which asks for `admin` on THIS
+  // object — an invitation list names who has been asked to join, which is not
+  // a member's business.
+  string workspace_id = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 29
+    },
+    (buf.validate.field).string = {
+      max_len: 29
+      pattern: "^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Which invitations to list. Empty means `pending`, which is what an admin
+  // screen almost always wants — settled invitations are history.
+  string status = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "pending"}
+      max_length: 16
+    },
+    (buf.validate.field).string = {
+      max_len: 16
+      in: [
+        "",
+        "pending",
+        "accepted",
+        "revoked",
+        "expired",
+        "declined",
+        "undeliverable"
+      ]
+    }
+  ];
+
+  // How many to return. Zero takes the default; an oversized request is CLAMPED
+  // rather than refused, which is why the maximum is published and not enforced
+  // (CONVENTIONS §7.2).
+  int32 page_size = 3 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "50"}
+      maximum: 200
+    },
+    (buf.validate.field).int32.gte = 0
+  ];
+
+  // An opaque cursor from a previous response. Empty starts at the beginning.
+  //
+  // Bound to the query that produced it: a token presented against a different
+  // list is an ERROR rather than a silent restart, because a client handed page
+  // one for a token it believes points into the middle walks the list forever
+  // with nothing in the loop looking like a failure.
+  string page_token = 4 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-opaque-cursor-from-a-previous-response"}},
+    (buf.validate.field).string = {
+      max_len: 1024
+      pattern: "^[A-Za-z0-9_-]*$"
+    }
+  ];
+}
+
+// WorkspaceInvitation is one entry in the invitation list.
+//
+// It carries the invitee's PSEUDONYM and no address. Rendering the list to a
+// human needs the address, and the vault resolves it at read time under the key
+// erasure destroys — putting it here would make every cached response a place
+// personal data lives (ADR-002).
+message WorkspaceInvitation {
+  // The invitation's public id, and what Revoke and Resend name.
+  string invitation_id = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "inv_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 30
+    },
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^inv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // The invitee's pseudonym. The address lives in the vault under it.
+  string subject_id = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "subj_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 31
+    },
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Who issued it.
+  string invited_by = 3 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "subj_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 31
+    },
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // The role they would join with.
+  string role = 4 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "member"}
+      max_length: 16
+    },
+    (buf.validate.field).string = {
+      max_len: 16
+      in: [
+        "admin",
+        "member",
+        "guest"
+      ]
+    }
+  ];
+
+  // Where it sits in the lifecycle.
+  string status = 5 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "pending"}
+      max_length: 16
+    },
+    (buf.validate.field).string = {
+      max_len: 16
+      in: [
+        "pending",
+        "accepted",
+        "revoked",
+        "expired",
+        "declined",
+        "undeliverable"
+      ]
+    }
+  ];
+
+  // When the link stops working. Moves on a resend.
+  google.protobuf.Timestamp expires_at = 6;
+
+  // When it was issued.
+  google.protobuf.Timestamp issued_at = 7;
+}
+
+// ListWorkspaceInvitationsResponse is one page.
+message ListWorkspaceInvitationsResponse {
+  // The page, oldest deadline first — the order somebody chasing them wants.
+  repeated WorkspaceInvitation invitations = 1 [(buf.validate.field).repeated.max_items = 200];
+
+  // Empty on the last page.
+  string next_page_token = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-opaque-cursor-for-the-next-page"}},
+    (buf.validate.field).string = {
+      max_len: 1024
+      pattern: "^[A-Za-z0-9_-]*$"
+    }
+  ];
+}
+
 // WorkspaceService is the collaboration surface.
 service WorkspaceService {
   // CreateWorkspace opens a workspace in the caller's organization.
@@ -894,5 +1058,23 @@ service WorkspaceService {
         }
       ]
     };
+  }
+
+  // ListWorkspaceInvitations returns one page of a workspace's invitations.
+  //
+  // `admin` on the WORKSPACE, because the list names who has been asked to join
+  // and that is not a member's business — an ordinary member seeing pending
+  // invitations learns who the organization is hiring.
+  //
+  // READ, so it is permitted in every organization state including Suspended and
+  // Closed: seeing what is outstanding is exactly what somebody winding an
+  // organization down needs.
+  rpc ListWorkspaceInvitations(ListWorkspaceInvitationsRequest) returns (ListWorkspaceInvitationsResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "admin"
+      resource_type: "workspace"
+      resource_id_field: "workspace_id"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_READ;
   }
 }

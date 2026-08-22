@@ -217,7 +217,17 @@ func (d *dependencies) buildWorkspace(log *slog.Logger) (*workspaceapi.Service, 
 	log.Info("workspace service constructed",
 		"quota", "workspaces.count", "seats", "member+guest",
 		"revocation", "tombstones", "invitations", workspaceapp.InvitationTTL.String())
+	invitationReads, err := workspacepg.NewInvitationReads(pgadapter.New(d.pool))
+	if err != nil {
+		return nil, fmt.Errorf("invitation reads: %w", err)
+	}
+	invitationQueries, err := workspaceapp.NewInvitationQueries(invitationReads)
+	if err != nil {
+		return nil, fmt.Errorf("invitation queries: %w", err)
+	}
+
 	return workspaceapi.New(workspaceapi.Deps{
-		Creation: creation, Members: members, Invitations: invitations,
+		Creation: creation, Members: members,
+		Invitations: invitations, InvitationQueries: invitationQueries,
 	})
 }

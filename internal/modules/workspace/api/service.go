@@ -41,20 +41,31 @@ type Invitation interface {
 	Decline(ctx context.Context, cmd app.DeclineInvitationCommand) error
 }
 
+// InvitationList is workspace's invitation read side.
+//
+// Separate from Invitation, because it WRITES NOTHING and the split is what makes
+// that structural: a handler holding only this cannot spend a seat or mint a
+// credential however it is called.
+type InvitationList interface {
+	List(ctx context.Context, query app.ListInvitationsQuery) (app.InvitationPage, error)
+}
+
 // Service serves WorkspaceService.
 type Service struct {
 	workspacev1connect.UnimplementedWorkspaceServiceHandler
 
-	creation    Creation
-	members     Membership
-	invitations Invitation
+	creation          Creation
+	members           Membership
+	invitations       Invitation
+	invitationQueries InvitationList
 }
 
 // Deps is what Service needs.
 type Deps struct {
-	Creation    Creation
-	Members     Membership
-	Invitations Invitation
+	Creation          Creation
+	Members           Membership
+	Invitations       Invitation
+	InvitationQueries InvitationList
 }
 
 func New(d Deps) (*Service, error) {
@@ -72,8 +83,15 @@ func New(d Deps) (*Service, error) {
 		return nil, fmt.Errorf("workspace: an invitation use case is required; without one " +
 			"InviteToWorkspace answers UNIMPLEMENTED, which reads as a deployment that is " +
 			"merely behind")
+	case d.InvitationQueries == nil:
+		return nil, fmt.Errorf("workspace: an invitation reader is required; without one " +
+			"the projection is written by a projector and read by nothing, which is a " +
+			"table that can be silently wrong forever")
 	}
-	return &Service{creation: d.Creation, members: d.Members, invitations: d.Invitations}, nil
+	return &Service{
+		creation: d.Creation, members: d.Members,
+		invitations: d.Invitations, invitationQueries: d.InvitationQueries,
+	}, nil
 }
 
 // CreateWorkspace opens a workspace in the caller's organization.

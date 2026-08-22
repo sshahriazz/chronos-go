@@ -639,6 +639,57 @@ func TestInvitingEndToEnd(t *testing.T) {
 		}
 	})
 
+	t.Run("the invitation list is projected and readable", func(t *testing.T) {
+		// The PROJECTION, end to end. Until this ran, invitation_view was written
+		// by a projector and read by nothing — a table that can be silently wrong
+		// forever, which is the shape of failure this repository keeps finding.
+		invitee := h.freshEmail("listed")
+		res, err := h.workspace.InviteToWorkspace(ctx,
+			authed(&workspacev1.InviteToWorkspaceRequest{
+				// A MEMBER seat, not a guest one: the Trial plan grants zero
+				// guest seats, so a guest invitation is refused by gate 4's
+				// catalogue before it ever reaches the projection.
+				WorkspaceId: workspaceID, Email: invitee, Role: "member",
+			}, owner.bearer))
+		if err != nil {
+			t.Fatalf("InviteToWorkspace: %v\n%s", err, h.serverLogs())
+		}
+		invitationID := res.Msg.GetInvitationId()
+
+		listed := h.awaitInvitationListed(t, ctx, workspaceID, invitationID, owner.bearer)
+		if listed.GetRole() != "member" {
+			t.Errorf("listed as %q, want member", listed.GetRole())
+		}
+		if listed.GetStatus() != "pending" {
+			t.Errorf("listed as %q, want pending", listed.GetStatus())
+		}
+		if listed.GetInvitedBy() != owner.subjectID {
+			t.Errorf("listed inviter %s, want %s", listed.GetInvitedBy(), owner.subjectID)
+		}
+		if listed.GetExpiresAt() == nil || listed.GetIssuedAt() == nil {
+			t.Error("the listed invitation carries no timestamps")
+		}
+
+		// NO ADDRESS on the wire. The list names a pseudonym and the vault
+		// resolves it at read time under the key erasure destroys — a response
+		// carrying the address would make every cache a place personal data
+		// lives (ADR-002).
+		if body := listed.String(); strings.Contains(body, "@") ||
+			strings.Contains(body, "listed") {
+			t.Errorf("the listed invitation carries the address: %s", body)
+		}
+
+		// REVOKING moves it out of the pending list, which is what proves the
+		// settlement half of the projection rather than only the insert.
+		if _, err := h.workspace.RevokeInvitation(ctx,
+			authed(&workspacev1.RevokeInvitationRequest{
+				WorkspaceId: workspaceID, InvitationId: invitationID,
+			}, owner.bearer)); err != nil {
+			t.Fatalf("RevokeInvitation: %v\n%s", err, h.serverLogs())
+		}
+		h.awaitInvitationGone(t, ctx, workspaceID, invitationID, owner.bearer)
+	})
+
 	t.Run("a member cannot invite", func(t *testing.T) {
 		_, err := h.workspace.InviteToWorkspace(ctx,
 			authed(&workspacev1.InviteToWorkspaceRequest{
@@ -775,4 +826,64 @@ func (hh *harness) invitationTokenRows(t *testing.T, ctx context.Context, invita
 		t.Fatalf("counting invitation tokens: %v", err)
 	}
 	return n
+}
+
+// awaitInvitationListed blocks until the projection has the invitation.
+func (hh *harness) awaitInvitationListed(
+	t *testing.T, ctx context.Context, workspaceID, invitationID, bearer string,
+) *workspacev1.WorkspaceInvitation {
+	t.Helper()
+
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		res, err := hh.workspace.ListWorkspaceInvitations(ctx,
+			authed(&workspacev1.ListWorkspaceInvitationsRequest{
+				WorkspaceId: workspaceID, Status: "pending", PageSize: 100,
+			}, bearer))
+		if err == nil {
+			for _, inv := range res.Msg.GetInvitations() {
+				if inv.GetInvitationId() == invitationID {
+					return inv
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s is not in the pending list after 60s; the projection is written "+
+				"and read by nothing, so it can be wrong indefinitely (err: %v)",
+				invitationID, err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// awaitInvitationGone blocks until a settled invitation leaves the pending list.
+func (hh *harness) awaitInvitationGone(
+	t *testing.T, ctx context.Context, workspaceID, invitationID, bearer string,
+) {
+	t.Helper()
+
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		res, err := hh.workspace.ListWorkspaceInvitations(ctx,
+			authed(&workspacev1.ListWorkspaceInvitationsRequest{
+				WorkspaceId: workspaceID, Status: "pending", PageSize: 100,
+			}, bearer))
+		if err == nil {
+			var found bool
+			for _, inv := range res.Msg.GetInvitations() {
+				if inv.GetInvitationId() == invitationID {
+					found = true
+				}
+			}
+			if !found {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s is still pending 60s after being revoked; the settlement half of "+
+				"the projection does not run, so every revoked invitation stays on the "+
+				"admin screen forever (err: %v)", invitationID, err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }
