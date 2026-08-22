@@ -168,7 +168,14 @@ Trial caps: **3 workspaces, 5 seats**.
 - [x] **End-to-end proof: 3 workspaces succeed, the 4th is refused** with
       QUOTA_EXCEEDED, through authn -> org-context -> authz -> subscription ->
       entitlement -> idempotency. Raising the cap to 4 fails the test.
-- [ ] Seat accounting: one person per ORGANIZATION, not per membership
+- [x] **Seat accounting: one person per ORGANIZATION, not per membership.**
+      All three rules proved by mutation — reserving per membership overcharges
+      5x, releasing on every removal leaks revenue, and releasing the old pool
+      before taking the new one leaves the person holding neither.
+      Seats are reserved in the USE CASE, not gate 4: gate 4 reserves
+      unconditionally, and the rule is conditional.
+- [ ] The member RPCs (`AddWorkspaceMember` / `RemoveWorkspaceMember`) that
+      drive the seat logic — until they exist, `Seats` has no caller
 - [ ] Revocation tombstones (ADR-045) — still nothing revokes yet
 
 ## Then

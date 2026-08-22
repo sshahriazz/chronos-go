@@ -520,6 +520,25 @@ func identityNotifications(cat *notify.Catalogue) {
 			"lower than a suspension")
 	cat.Silent[workspaceevents.WorkspaceRestored](
 		"the reverse, and the same audience problem")
+	// Membership. These are the ones with a real audience — the person joining
+	// or leaving is a SUBJECT, which notify can already address — and they are
+	// silent only because there is no way in yet: an admin adds an existing
+	// organization member, and telling somebody they were added to a workspace
+	// they can already see is noise. They become `On` with invitations, where
+	// the recipient is somebody who does not yet know the workspace exists.
+	cat.Silent[workspaceevents.MemberJoined](
+		"today this can only add somebody already in the organization, who can already see " +
+			"the workspace list. The message that matters is the INVITATION, which is a " +
+			"different event and does not exist yet")
+	cat.Silent[workspaceevents.MemberRoleChanged](
+		"a change in what somebody may do, which they should hear about — and which becomes " +
+			"Security class alongside identity's own authority changes when the audience is " +
+			"wired")
+	cat.Silent[workspaceevents.MemberRemoved](
+		"losing access silently is how somebody discovers it by being refused. It is also " +
+			"the event whose seat accounting matters most, and the notification and the " +
+			"seat are independent — the seat is returned whether or not any mail is sent")
+
 	cat.Silent[workspaceevents.WorkspaceAdminAdded](
 		"an authority change worth telling the RECIPIENT about, which is a subject notify " +
 			"can already address. It stays silent only because the workspace has no member " +

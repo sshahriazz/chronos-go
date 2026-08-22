@@ -19,6 +19,9 @@ func RegisterEvents(codec *eventcodec.JSON) {
 	eventcodec.Register[contract.WorkspaceRestored](codec)
 	eventcodec.Register[contract.WorkspaceAdminAdded](codec)
 	eventcodec.Register[contract.WorkspaceAdminRemoved](codec)
+	eventcodec.Register[contract.MemberJoined](codec)
+	eventcodec.Register[contract.MemberRoleChanged](codec)
+	eventcodec.Register[contract.MemberRemoved](codec)
 }
 
 // RegisterSchemas declares the current schema version of every workspace event
@@ -41,5 +44,8 @@ func eventTypes() []string {
 		(&contract.WorkspaceRestored{}).EventType(),
 		(&contract.WorkspaceAdminAdded{}).EventType(),
 		(&contract.WorkspaceAdminRemoved{}).EventType(),
+		(&contract.MemberJoined{}).EventType(),
+		(&contract.MemberRoleChanged{}).EventType(),
+		(&contract.MemberRemoved{}).EventType(),
 	}
 }
