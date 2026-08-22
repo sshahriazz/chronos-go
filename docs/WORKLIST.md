@@ -223,7 +223,7 @@ satisfied at the composition root.
 - [x] **5b — the Invitation aggregate.** Pending → Accepted / Revoked / Expired /
       Declined / Undeliverable, as a transition table. Its own stream category,
       for the reason memberships have one.
-- [ ] **5c — Issue.** Seat reserved AT ISSUE and conditionally (workspace.md §5):
+- [x] **5c — Issue.** Seat reserved AT ISSUE and conditionally (workspace.md §5):
       60 pending invitations against 50 seats otherwise all look valid, and the
       51st acceptance fails for somebody who did nothing wrong. Address goes to
       the vault and never into an event; the blind index is what the event
