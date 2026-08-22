@@ -19,10 +19,14 @@ type organization
     define billing_viewer: admin
     define owner: [user]
 
+type team
+  relations
+    define member: [user]
+
 type user
 
 type workspace
   relations
     define admin: [user] or admin from parent
-    define member: [user] or admin
+    define member: [team#member, user] or admin
     define parent: [organization]

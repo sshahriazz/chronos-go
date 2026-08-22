@@ -245,8 +245,44 @@ satisfied at the composition root.
       supersession (one seat per address, and the old link dies) and a departing
       inviters outstanding invitations being revoked.
 
+## Now — Slice 6, teams
+
+workspace.md §6 and access.md §7.5. A team is a GRANTABLE SUBJECT: sharing with
+one costs a single tuple whatever its size, which access.md §4 measured and §6
+confirmed at the latency level too (a check through a 1000-member team costs
+2.1 ms against a direct grant's 2.0 ms).
+
+- [ ] **6a — the Team aggregate and its place in the graph.** Flat, never
+      nested: the engine could model `team#member` referencing another team, and
+      the reason not to is that nesting makes effective membership non-obvious to
+      the people managing it, which is the problem teams exist to solve.
+- [ ] **6b — create, rename, delete, and the projection.**
+- [ ] **6c — membership.** A team member must already be a workspace member;
+      adding a non-member is refused rather than implicitly admitting them.
+      Maintainers manage membership without being workspace admins.
+
+### Deferred, deliberately: the deletion cascade
+
+access.md §7.5 requires deleting a team to cascade to **every grant naming it**,
+because a reused id would silently inherit the deleted team's access.
+
+Half of that is being built: team ids are ULIDs and are never reused, and
+deletion removes the team's own tuples. The CASCADE is not, and the reason is
+that there is nothing to cascade to. A grant naming `team:x#member` is a share,
+sharing needs resources, and feature verticals inside a workspace are explicitly
+out of scope (ADR-006) — so no such tuple can exist yet.
+
+Building the cascade now would also need something that does not exist: the
+adapter has no way to enumerate tuples, and access.md §3 says the enumeration
+should come from **our own grants projection**, which arrives with sharing. A
+cascade written against an OpenFGA `Read` today would be a second, weaker
+implementation to throw away.
+
+So it is written down here rather than half-built: **the cascade lands with the
+first feature that can grant to a team**, and until then the invariant it
+protects is held by ids that are never reused.
+
 ## Then
-- [ ] **Slice 6** — teams
 - [ ] **Billing** — Stripe, per [BILLING-PLAN.md](BILLING-PLAN.md). Additive
       after any of the above.
 

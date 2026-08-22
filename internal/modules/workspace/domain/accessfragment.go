@@ -38,11 +38,54 @@ func AccessFragment() model.Fragment {
 
 				// A member can see the workspace; an admin is one implicitly, so
 				// no membership tuple is needed for them.
+				//
+				// A TEAM's members can hold it too, and that entry is the whole
+				// economics of teams: `{Type: "team", Relation: "member"}` makes
+				// `team:eng#member` a valid subject, so granting to a team of any
+				// size costs ONE tuple. access.md §4 measured it and §6 confirmed
+				// it holds at the latency level as well — a check through a
+				// thousand-member team costs 2.1 ms against a direct grant's
+				// 2.0 ms.
+				//
+				// It is declared here, on workspace, rather than waiting for the
+				// first feature that shares something. A team that cannot be
+				// granted anything is not a grantable subject, and the type would
+				// then have to be added to the model later — which is a model
+				// deploy, not a code change.
 				{
-					Name:    "member",
-					Direct:  []model.TypeRef{{Type: "user"}},
+					Name: "member",
+					Direct: []model.TypeRef{
+						{Type: "user"},
+						{Type: "team", Relation: "member"},
+					},
 					Implies: []string{"admin"},
 				},
+			},
+		}, {
+			// A team is a GRANTABLE SUBJECT and nothing else. It has one
+			// relation, and deliberately: everything a team is for happens on the
+			// other side of a grant, where `team:x#member` appears as the subject.
+			//
+			// # Flat, never nested
+			//
+			// `member` admits users and NOT `{Type: "team", Relation: "member"}`.
+			// The engine would model that happily, and the reason to refuse it is
+			// not technical: nesting makes effective membership non-obvious to the
+			// people managing it — "who is actually in this team" stops being
+			// answerable by looking — and that is the problem teams exist to solve
+			// (workspace.md §6).
+			//
+			// # No `parent` edge to the workspace
+			//
+			// A team is not a container and nothing is stored in it, so there is
+			// nothing for a workspace admin to inherit THROUGH it. Who may manage
+			// a team is decided by its maintainer roster in the aggregate, which
+			// is where workspace.md §6 puts it: maintainers manage membership
+			// without being workspace admins, and an inherited `admin` relation
+			// here would quietly make every workspace admin a maintainer.
+			Name: "team",
+			Relations: []model.Relation{
+				{Name: "member", Direct: []model.TypeRef{{Type: "user"}}},
 			},
 		}},
 	}

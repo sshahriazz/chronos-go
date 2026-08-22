@@ -586,6 +586,44 @@ func identityNotifications(cat *notify.Catalogue) {
 			"personal data, so the message has to name the invitation rather than quote " +
 			"the address, and that template is 5g's")
 
+	// Teams. Every one of these is Silent, and for a reason that is uniform
+	// enough to state once: a team is a GROUPING OF PEOPLE WHO ARE ALREADY HERE.
+	// Joining one grants nothing on its own — a team is a subject that can be
+	// granted things, and until something shares with it, membership changes what
+	// a future grant will reach rather than what anybody can do today.
+	//
+	// That changes the day the first feature shares with a team, and the event to
+	// revisit then is TeamMemberAdded: at that point joining does confer access,
+	// and access.md §6.1's rule that being late to grant is harmless while being
+	// late to revoke is a security failure starts to apply to the pair.
+	cat.Silent[workspaceevents.TeamCreated](
+		"the creator is looking at the screen that created it, and a team with one " +
+			"maintainer and no members grants nobody anything")
+	cat.Silent[workspaceevents.TeamRenamed](
+		"a display name. The access engine knows a team by its id, so a rename is " +
+			"invisible to every tuple naming it and to everybody's permissions")
+	cat.Silent[workspaceevents.TeamMaintainerAdded](
+		"an authority change worth telling the RECIPIENT about — they can now manage a " +
+			"team's membership — and a subject notify can already address. It stays silent " +
+			"only because the wording would say 'you can manage Engineering', which means " +
+			"nothing until managing a team has a visible consequence")
+	cat.Silent[workspaceevents.TeamMaintainerRemoved](
+		"the more important half, and Security class when it lands: losing the ability to " +
+			"manage a team silently is how somebody discovers it by being refused")
+	cat.Silent[workspaceevents.TeamDeleted](
+		"the audience is the team's members, and what they lose is whatever was shared " +
+			"with the team — which is nothing today. It becomes a message when sharing " +
+			"exists, and it is the one that matters most: a deletion revokes access to " +
+			"everything the team could reach, all at once")
+	cat.Silent[workspaceevents.TeamMemberAdded](
+		"joining a team grants nothing yet. When sharing exists this is what tells " +
+			"somebody they have gained access to a body of work, which is the point of " +
+			"teams and worth a message")
+	cat.Silent[workspaceevents.TeamMemberRemoved](
+		"and this is the half that becomes Security class: leaving a team takes away " +
+			"everything that was shared with it, and losing access silently is how somebody " +
+			"discovers it by being refused")
+
 	cat.Silent[workspaceevents.WorkspaceAdminAdded](
 		"an authority change worth telling the RECIPIENT about, which is a subject notify " +
 			"can already address. It stays silent only because the workspace has no member " +

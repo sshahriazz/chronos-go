@@ -355,3 +355,132 @@ type InvitationUndeliverable struct {
 }
 
 func (*InvitationUndeliverable) EventType() string { return "workspace.InvitationUndeliverable.v1" }
+
+// ---------------------------------------------------------------------------
+// Teams (workspace.md §6)
+// ---------------------------------------------------------------------------
+
+// TeamCreated records a team being opened inside a workspace.
+//
+// # Its id is never reused
+//
+// access.md §7.5 makes that load-bearing rather than tidy: grants target
+// `team:x#member`, so a reused id would silently inherit the deleted team's
+// access. The id is a fresh ULID and deletion is terminal, which is what makes
+// reuse impossible rather than merely unlikely.
+type TeamCreated struct {
+	TeamID      string
+	WorkspaceID string
+	OrgID       string
+
+	// Name is a display name and carries no meaning to the access engine, which
+	// knows the team only by its id.
+	Name string
+
+	// CreatedBy becomes the first maintainer, from this event rather than a
+	// second one: a team that existed for even one event with no maintainer
+	// would violate the never-zero rule from birth, and a replay would reproduce
+	// that.
+	CreatedBy string
+
+	CreatedAt time.Time
+}
+
+func (*TeamCreated) EventType() string { return "workspace.TeamCreated.v1" }
+
+// TeamRenamed records a display-name change.
+//
+// It grants and revokes nothing: the access engine knows a team by its id, so a
+// rename is invisible to every tuple naming it.
+type TeamRenamed struct {
+	TeamID      string
+	WorkspaceID string
+	OrgID       string
+	Name        string
+	RenamedAt   time.Time
+}
+
+func (*TeamRenamed) EventType() string { return "workspace.TeamRenamed.v1" }
+
+// TeamMaintainerAdded records somebody gaining the right to manage a team's
+// membership.
+//
+// Maintainers exist so membership can be managed WITHOUT workspace admin
+// (workspace.md §6) — the people who know who belongs in a team are usually not
+// the people who administer the workspace.
+type TeamMaintainerAdded struct {
+	TeamID       string
+	WorkspaceID  string
+	OrgID        string
+	MaintainerID string
+	AddedAt      time.Time
+}
+
+func (*TeamMaintainerAdded) EventType() string { return "workspace.TeamMaintainerAdded.v1" }
+
+// TeamMaintainerRemoved records that right being withdrawn.
+//
+// Never the last one. A team with no maintainer cannot have its membership
+// managed by anybody who is not a workspace admin, and nothing outside the team
+// can appoint one — appointing is itself a maintainer's act.
+type TeamMaintainerRemoved struct {
+	TeamID       string
+	WorkspaceID  string
+	OrgID        string
+	MaintainerID string
+	RemovedAt    time.Time
+}
+
+func (*TeamMaintainerRemoved) EventType() string { return "workspace.TeamMaintainerRemoved.v1" }
+
+// TeamDeleted ends a team.
+//
+// Terminal: a team is never restored, because its ID would come back with it.
+//
+// access.md §7.5 additionally requires deletion to cascade to every grant naming
+// the team. That cascade is NOT implemented, and the reason is that nothing can
+// have granted to a team yet: a grant to `team:x#member` is a share, sharing
+// needs resources, and feature verticals inside a workspace are out of scope
+// (ADR-006). The invariant the cascade protects — that a new team never inherits
+// a dead one's access — is held meanwhile by the id never being reused.
+type TeamDeleted struct {
+	TeamID      string
+	WorkspaceID string
+	OrgID       string
+	DeletedAt   time.Time
+}
+
+func (*TeamDeleted) EventType() string { return "workspace.TeamDeleted.v1" }
+
+// TeamMemberAdded records somebody joining a team.
+//
+// # It consumes no seat
+//
+// A team member must ALREADY be a workspace member (workspace.md §6), so they
+// already hold whatever seat their membership took. A team is a grouping of
+// people who are already here, not a way in — which is why adding a non-member
+// is refused rather than implicitly admitting them.
+type TeamMemberAdded struct {
+	TeamID      string
+	WorkspaceID string
+	OrgID       string
+	SubjectID   string
+	AddedBy     string
+	AddedAt     time.Time
+}
+
+func (*TeamMemberAdded) EventType() string { return "workspace.TeamMemberAdded.v1" }
+
+// TeamMemberRemoved records somebody leaving a team.
+//
+// It releases no seat, for the mirror of the reason a join takes none: they are
+// still a workspace member, and their seat belongs to that membership.
+type TeamMemberRemoved struct {
+	TeamID      string
+	WorkspaceID string
+	OrgID       string
+	SubjectID   string
+	RemovedAt   time.Time
+}
+
+func (*TeamMemberRemoved) EventType() string { return "workspace.TeamMemberRemoved.v1" }
