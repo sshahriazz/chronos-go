@@ -8,10 +8,25 @@
 -- name: UpsertInvitation :exec
 -- Upsert, because a projector replays: the same event WILL arrive twice.
 --
--- Nothing is untouched on conflict, unlike the membership upserts. A replayed
--- issue is byte-identical to the first, so overwriting costs nothing — and an
--- ON CONFLICT DO NOTHING here would make a rebuild silently skip an invitation
--- whose row survived a partial truncate.
+-- # The conflict clause touches only what THIS event owns
+--
+-- `status`, `settled_at` and `expires_at` are all written by LATER events — a
+-- settlement moves the first two, a resend moves the third — so a redelivered
+-- InvitationIssued must not write any of them. The first version of this
+-- statement set `status = 'pending'` and `settled_at = NULL` on conflict, which
+-- resurrects an accepted invitation onto the admin screen and hands the expiry
+-- sweep a settled row to expire. It was safe only because a catch-up
+-- subscription happens to deliver in order, which is not a property this
+-- statement should depend on.
+--
+-- The columns it DOES overwrite are immutable facts about the invitation: which
+-- workspace, which organization, which address, who issued it, and as what. A
+-- replay writes them back identically, and an ON CONFLICT DO NOTHING would
+-- instead make a rebuild silently skip a row that survived a partial truncate.
+--
+-- On a genuine rebuild the INSERT path runs — the table was truncated — so
+-- status, settled_at and expires_at are set correctly there and the later events
+-- move them again, in order.
 INSERT INTO invitation_view (
     invitation_id, workspace_id, org_id, subject_id, email_index,
     invited_by, role, status, expires_at, issued_at
@@ -23,10 +38,7 @@ ON CONFLICT (invitation_id) DO UPDATE SET
     email_index  = EXCLUDED.email_index,
     invited_by   = EXCLUDED.invited_by,
     role         = EXCLUDED.role,
-    status       = EXCLUDED.status,
-    expires_at   = EXCLUDED.expires_at,
-    issued_at    = EXCLUDED.issued_at,
-    settled_at   = NULL;
+    issued_at    = EXCLUDED.issued_at;
 
 -- name: ExtendInvitation :exec
 -- A resend moved the deadline.
@@ -62,26 +74,14 @@ WHERE workspace_id = $1
 ORDER BY expires_at, invitation_id
 LIMIT $5;
 
--- name: InvitationsBySubject :many
--- What did this person issue, and is it still outstanding?
---
--- The reactor that revokes an inviter's invitations when they leave the
--- organization reads this. Scoped by org, because an inviter removed from ONE
--- organization keeps whatever they issued in another.
-SELECT invitation_id, workspace_id
-FROM invitation_view
-WHERE org_id = $1 AND invited_by = $2 AND status = 'pending';
-
--- name: PendingInvitationForAddress :one
--- Is there already an outstanding invitation to this address here?
---
--- By INDEX, never by address: the address is not in this database. A second
--- invitation to one address supersedes the first (workspace.md §5) rather than
--- taking a second seat, and this is what makes that recognisable.
-SELECT invitation_id, workspace_id FROM invitation_view
-WHERE org_id = $1 AND email_index = $2 AND status = 'pending'
-ORDER BY issued_at
-LIMIT 1;
+-- The two queries this table's other indexes exist for — "what did this person
+-- issue" and "is there already an invitation to this address" — are NOT here.
+-- They have no caller until the reactor that revokes a departing inviter's
+-- invitations and the supersession rule land (WORKLIST 5h), and a generated
+-- query nothing calls is the same built-and-wired-into-nothing this repository
+-- keeps finding. The INDEXES stay: migration 00025 creates them because
+-- workspace.md §9 specifies the table's shape, and removing them would need
+-- another migration to add back.
 
 -- name: TruncateInvitations :exec
 TRUNCATE TABLE invitation_view;

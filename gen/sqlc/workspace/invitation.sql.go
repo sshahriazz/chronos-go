@@ -31,47 +31,6 @@ func (q *Queries) ExtendInvitation(ctx context.Context, arg ExtendInvitationPara
 	return err
 }
 
-const InvitationsBySubject = `-- name: InvitationsBySubject :many
-SELECT invitation_id, workspace_id
-FROM invitation_view
-WHERE org_id = $1 AND invited_by = $2 AND status = 'pending'
-`
-
-type InvitationsBySubjectParams struct {
-	OrgID     string
-	InvitedBy string
-}
-
-type InvitationsBySubjectRow struct {
-	InvitationID string
-	WorkspaceID  string
-}
-
-// What did this person issue, and is it still outstanding?
-//
-// The reactor that revokes an inviter's invitations when they leave the
-// organization reads this. Scoped by org, because an inviter removed from ONE
-// organization keeps whatever they issued in another.
-func (q *Queries) InvitationsBySubject(ctx context.Context, arg InvitationsBySubjectParams) ([]InvitationsBySubjectRow, error) {
-	rows, err := q.db.Query(ctx, InvitationsBySubject, arg.OrgID, arg.InvitedBy)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []InvitationsBySubjectRow{}
-	for rows.Next() {
-		var i InvitationsBySubjectRow
-		if err := rows.Scan(&i.InvitationID, &i.WorkspaceID); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const ListWorkspaceInvitations = `-- name: ListWorkspaceInvitations :many
 SELECT invitation_id, subject_id, invited_by, role, status, expires_at, issued_at
 FROM invitation_view
@@ -140,35 +99,6 @@ func (q *Queries) ListWorkspaceInvitations(ctx context.Context, arg ListWorkspac
 	return items, nil
 }
 
-const PendingInvitationForAddress = `-- name: PendingInvitationForAddress :one
-SELECT invitation_id, workspace_id FROM invitation_view
-WHERE org_id = $1 AND email_index = $2 AND status = 'pending'
-ORDER BY issued_at
-LIMIT 1
-`
-
-type PendingInvitationForAddressParams struct {
-	OrgID      string
-	EmailIndex string
-}
-
-type PendingInvitationForAddressRow struct {
-	InvitationID string
-	WorkspaceID  string
-}
-
-// Is there already an outstanding invitation to this address here?
-//
-// By INDEX, never by address: the address is not in this database. A second
-// invitation to one address supersedes the first (workspace.md §5) rather than
-// taking a second seat, and this is what makes that recognisable.
-func (q *Queries) PendingInvitationForAddress(ctx context.Context, arg PendingInvitationForAddressParams) (PendingInvitationForAddressRow, error) {
-	row := q.db.QueryRow(ctx, PendingInvitationForAddress, arg.OrgID, arg.EmailIndex)
-	var i PendingInvitationForAddressRow
-	err := row.Scan(&i.InvitationID, &i.WorkspaceID)
-	return i, err
-}
-
 const SettleInvitation = `-- name: SettleInvitation :exec
 UPDATE invitation_view SET status = $2, settled_at = $3
 WHERE invitation_id = $1 AND status = 'pending'
@@ -192,9 +122,18 @@ func (q *Queries) SettleInvitation(ctx context.Context, arg SettleInvitationPara
 }
 
 const TruncateInvitations = `-- name: TruncateInvitations :exec
+
 TRUNCATE TABLE invitation_view
 `
 
+// The two queries this table's other indexes exist for — "what did this person
+// issue" and "is there already an invitation to this address" — are NOT here.
+// They have no caller until the reactor that revokes a departing inviter's
+// invitations and the supersession rule land (WORKLIST 5h), and a generated
+// query nothing calls is the same built-and-wired-into-nothing this repository
+// keeps finding. The INDEXES stay: migration 00025 creates them because
+// workspace.md §9 specifies the table's shape, and removing them would need
+// another migration to add back.
 func (q *Queries) TruncateInvitations(ctx context.Context) error {
 	_, err := q.db.Exec(ctx, TruncateInvitations)
 	return err
@@ -213,10 +152,7 @@ ON CONFLICT (invitation_id) DO UPDATE SET
     email_index  = EXCLUDED.email_index,
     invited_by   = EXCLUDED.invited_by,
     role         = EXCLUDED.role,
-    status       = EXCLUDED.status,
-    expires_at   = EXCLUDED.expires_at,
-    issued_at    = EXCLUDED.issued_at,
-    settled_at   = NULL
+    issued_at    = EXCLUDED.issued_at
 `
 
 type UpsertInvitationParams struct {
@@ -239,10 +175,25 @@ type UpsertInvitationParams struct {
 // there spends a seat or a credential.
 // Upsert, because a projector replays: the same event WILL arrive twice.
 //
-// Nothing is untouched on conflict, unlike the membership upserts. A replayed
-// issue is byte-identical to the first, so overwriting costs nothing — and an
-// ON CONFLICT DO NOTHING here would make a rebuild silently skip an invitation
-// whose row survived a partial truncate.
+// # The conflict clause touches only what THIS event owns
+//
+// `status`, `settled_at` and `expires_at` are all written by LATER events — a
+// settlement moves the first two, a resend moves the third — so a redelivered
+// InvitationIssued must not write any of them. The first version of this
+// statement set `status = 'pending'` and `settled_at = NULL` on conflict, which
+// resurrects an accepted invitation onto the admin screen and hands the expiry
+// sweep a settled row to expire. It was safe only because a catch-up
+// subscription happens to deliver in order, which is not a property this
+// statement should depend on.
+//
+// The columns it DOES overwrite are immutable facts about the invitation: which
+// workspace, which organization, which address, who issued it, and as what. A
+// replay writes them back identically, and an ON CONFLICT DO NOTHING would
+// instead make a rebuild silently skip a row that survived a partial truncate.
+//
+// On a genuine rebuild the INSERT path runs — the table was truncated — so
+// status, settled_at and expires_at are set correctly there and the later events
+// move them again, in order.
 func (q *Queries) UpsertInvitation(ctx context.Context, arg UpsertInvitationParams) error {
 	_, err := q.db.Exec(ctx, UpsertInvitation,
 		arg.InvitationID,
