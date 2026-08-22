@@ -9,6 +9,19 @@ import (
 )
 
 type Querier interface {
+	// Redeem a token exactly once and report which invitation it belongs to.
+	//
+	// DELETE ... RETURNING, in one statement. The obvious two-step — look it up,
+	// then delete it — lets two simultaneous clicks of the same link both find it
+	// valid, which turns a single-use credential into a multi-use one for anyone who
+	// intercepted the mail.
+	//
+	// The expiry is checked HERE rather than by the caller, so an expired token is
+	// indistinguishable from an unknown one: both return no rows. Reporting "this
+	// invitation was valid but has expired" tells an attacker holding a guessed
+	// token that they guessed a real one, and tells anyone with an old mail whether
+	// the organization still exists.
+	ConsumeInvitationToken(ctx context.Context, arg ConsumeInvitationTokenParams) (ConsumeInvitationTokenRow, error)
 	// How many workspaces of this organization is this person in?
 	//
 	// Both halves of the seat rule turn on this number (workspace.md §2): zero means
@@ -25,6 +38,13 @@ type Querier interface {
 	// that wrote `guest` over `owner` would demote them out of their own
 	// organization — silently, and with no event that says so.
 	InsertOrgMemberIfAbsent(ctx context.Context, arg InsertOrgMemberIfAbsentParams) error
+	// Queries for the invitation link credential.
+	//
+	// This is NOT a projection. See migration 00023 for why a handler writes it: a
+	// token digest must never enter the event log, so it cannot be projected from
+	// one. It is the same exception identity_token takes.
+	// Record a digest against an invitation, until it expires.
+	IssueInvitationToken(ctx context.Context, arg IssueInvitationTokenParams) error
 	RemoveOrgMember(ctx context.Context, arg RemoveOrgMemberParams) error
 	// Drop the organization membership a workspace join created.
 	//
@@ -34,7 +54,18 @@ type Querier interface {
 	// because they left their last workspace would lock an owner out of their own
 	// tenant at gate 1.
 	RemoveOrgMemberIfWorkspaceOnly(ctx context.Context, arg RemoveOrgMemberIfWorkspaceOnlyParams) error
+	// Drop every outstanding digest for one invitation.
+	//
+	// Two callers, and they need the same statement for opposite reasons. A RESEND
+	// must leave exactly one live link, or the "old token stays dead" rule in
+	// workspace.md §5 is false and two people can accept one invitation. A
+	// SETTLEMENT must leave none, or a revoked invitation is still redeemable by
+	// whoever holds the mail.
+	RevokeInvitationTokens(ctx context.Context, invitationID string) (int64, error)
 	SetWorkspaceMemberRole(ctx context.Context, arg SetWorkspaceMemberRoleParams) error
+	// Retention. A digest is not personal data, but it is evidence that a particular
+	// address was invited, and it has no purpose past its expiry.
+	SweepInvitationTokens(ctx context.Context) (int64, error)
 	TruncateOrgMembers(ctx context.Context) error
 	TruncateWorkspaceMembers(ctx context.Context) error
 	// Organization-granted membership: the owner at creation, admins thereafter.

@@ -345,6 +345,15 @@ func (d *dependencies) buildIdentity(
 	if err != nil {
 		return nil, fmt.Errorf("session store: %w", err)
 	}
+
+	// Held for WORKSPACE, which needs both to issue an invitation and may reach
+	// neither directly (CONVENTIONS §2). Captured here rather than rebuilt in
+	// buildWorkspace so there is ONE blind index in the process: two would be
+	// two HMAC keys in theory and the same key by accident, and the day they
+	// diverged every invitation would fail to recognise an existing account and
+	// silently take a second seat for somebody who already had one.
+	d.emailIndex = index
+	d.accounts = &accountDirectory{accounts: sessions}
 	readModel, err := identitypg.NewReadModel(tx)
 	if err != nil {
 		return nil, fmt.Errorf("identity read model: %w", err)

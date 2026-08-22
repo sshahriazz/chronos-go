@@ -53,6 +53,16 @@ type IdentityToken struct {
 	ExpiresAt pgtype.Timestamptz
 }
 
+// Invitation link credentials, as digests. Consumed by DELETE ... RETURNING. Not a projection.
+type InvitationToken struct {
+	Digest       []byte
+	Purpose      string
+	InvitationID string
+	OrgID        string
+	IssuedAt     pgtype.Timestamptz
+	ExpiresAt    pgtype.Timestamptz
+}
+
 // Authentication outcomes. subject_id is NULL when the identifier matched no account.
 type LoginHistoryView struct {
 	ID         int64

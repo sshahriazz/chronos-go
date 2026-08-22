@@ -3567,6 +3567,105 @@ components:
       title: CreateWorkspaceResponse
       additionalProperties: false
       description: CreateWorkspaceResponse names what was created.
+    chronos.workspace.v1.InviteToWorkspaceRequest:
+      type: object
+      properties:
+        workspaceId:
+          type: string
+          examples:
+            - ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: workspace_id
+          maxLength: 29
+          pattern: ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            Which workspace. Read by the authz gate, which asks for `admin` on THIS
+             object rather than on the organization.
+        email:
+          type: string
+          examples:
+            - colleague@example.com
+          title: email
+          maxLength: 254
+          pattern: ^.+@.+\..+$
+          format: email
+          description: |-
+            Where to send the invitation.
+
+             The bound is PUBLISHED rather than enforced, for the reason every other
+             email field in this schema publishes one: the CEL `email` rule is measured
+             on the trimmed value and a `max_len` rule is measured by the interceptor on
+             the raw one, so an enforced length would refuse an address the handler
+             accepts (CONVENTIONS §7.2).
+        role:
+          type: string
+          examples:
+            - member
+          title: role
+          maxLength: 16
+          enum:
+            - admin
+            - member
+            - guest
+          description: 'The role they join with: `admin`, `member` or `guest`.'
+      title: InviteToWorkspaceRequest
+      additionalProperties: false
+      description: |-
+        InviteToWorkspaceRequest invites an address into a workspace.
+
+         The ADDRESS is the one piece of personal data on this service's wire. It
+         reaches the vault and the blind indexer and goes no further: no event, no log
+         line and no projection carries it, and the response never echoes it back.
+    chronos.workspace.v1.InviteToWorkspaceResponse:
+      type: object
+      properties:
+        invitationId:
+          type: string
+          examples:
+            - inv_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: invitation_id
+          maxLength: 30
+          pattern: ^inv_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: The invitation's public id, a prefixed ULID (ADR-030).
+        role:
+          type: string
+          examples:
+            - member
+          title: role
+          maxLength: 16
+          enum:
+            - admin
+            - member
+            - guest
+          description: The role as recorded.
+        seatConsumed:
+          type: boolean
+          title: seat_consumed
+          description: |-
+            Whether issuing took a seat from the organization's pool.
+
+             The seat is taken AT ISSUE, not at acceptance: otherwise 60 pending
+             invitations against 50 seats all look valid, and the 51st acceptance fails
+             for somebody who did nothing wrong (workspace.md §5). False means the
+             invitee is already in the organization and already holds one.
+        expiresAt:
+          title: expires_at
+          description: |-
+            When the link stops working.
+
+             A Timestamp rather than a formatted string, which is this schema's
+             convention for an instant: a string would need a pattern that re-implements
+             RFC 3339 badly, and every client would parse it by hand.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: InviteToWorkspaceResponse
+      additionalProperties: false
+      description: |-
+        InviteToWorkspaceResponse names the invitation that was created.
+
+         It carries NO TOKEN. The link is a credential, and the only party entitled to
+         it is the person at the address — putting it in this response would hand it to
+         the inviter, who could then join as somebody else. It also never echoes the
+         address back, so the response cannot be used to confirm what was typed.
     chronos.workspace.v1.RemoveWorkspaceMemberRequest:
       type: object
       properties:
@@ -6780,6 +6879,77 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.workspace.v1.CreateWorkspaceResponse'
+  /chronos.workspace.v1.WorkspaceService/InviteToWorkspace:
+    post:
+      tags:
+        - WorkspaceService
+      summary: InviteToWorkspace invites an address into a workspace.
+      description: |-
+        # GROW, and it consumes the seat NOW
+
+         workspace.md §5: the seat is reserved at ISSUE and not at acceptance.
+         Reserving at acceptance means 60 pending invitations against 50 seats all
+         look valid, and the 51st person to click their link is refused for something
+         somebody else did.
+
+         The reservation is still CONDITIONAL — somebody already in the organization
+         holds a seat, and inviting them into another workspace costs nothing — which
+         is why this declares no `(chronos.options.v1.entitlement)`: gate 4 reserves
+         unconditionally, and would charge a second seat every time.
+
+         # The address goes no further than the vault
+
+         It is the one piece of personal data on this service's wire. The event
+         carries a keyed blind index and a pseudonym; the mail resolves the real
+         address from the vault at send time (ADR-002).
+
+         # The response carries no link
+
+         The token is a credential and the only party entitled to it is the person at
+         the address. Returning it here would hand it to the inviter, who could then
+         accept as somebody else.
+      operationId: WorkspaceService_InviteToWorkspace
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.workspace.v1.InviteToWorkspaceRequest'
+            example:
+              workspaceId: ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              email: colleague@example.com
+              role: member
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.workspace.v1.InviteToWorkspaceResponse'
   /chronos.workspace.v1.WorkspaceService/RemoveWorkspaceMember:
     post:
       tags:

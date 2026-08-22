@@ -62,6 +62,9 @@ const (
 	// WorkspaceServiceChangeWorkspaceMemberRoleProcedure is the fully-qualified name of the
 	// WorkspaceService's ChangeWorkspaceMemberRole RPC.
 	WorkspaceServiceChangeWorkspaceMemberRoleProcedure = "/chronos.workspace.v1.WorkspaceService/ChangeWorkspaceMemberRole"
+	// WorkspaceServiceInviteToWorkspaceProcedure is the fully-qualified name of the WorkspaceService's
+	// InviteToWorkspace RPC.
+	WorkspaceServiceInviteToWorkspaceProcedure = "/chronos.workspace.v1.WorkspaceService/InviteToWorkspace"
 )
 
 // WorkspaceServiceClient is a client for the chronos.workspace.v1.WorkspaceService service.
@@ -131,6 +134,32 @@ type WorkspaceServiceClient interface {
 	// A change within one pool — `member` to `admin` — costs nothing and is still
 	// GROW, because the class is a property of the method and not of the argument.
 	ChangeWorkspaceMemberRole(context.Context, *connect.Request[v1.ChangeWorkspaceMemberRoleRequest]) (*connect.Response[v1.ChangeWorkspaceMemberRoleResponse], error)
+	// InviteToWorkspace invites an address into a workspace.
+	//
+	// # GROW, and it consumes the seat NOW
+	//
+	// workspace.md §5: the seat is reserved at ISSUE and not at acceptance.
+	// Reserving at acceptance means 60 pending invitations against 50 seats all
+	// look valid, and the 51st person to click their link is refused for something
+	// somebody else did.
+	//
+	// The reservation is still CONDITIONAL — somebody already in the organization
+	// holds a seat, and inviting them into another workspace costs nothing — which
+	// is why this declares no `(chronos.options.v1.entitlement)`: gate 4 reserves
+	// unconditionally, and would charge a second seat every time.
+	//
+	// # The address goes no further than the vault
+	//
+	// It is the one piece of personal data on this service's wire. The event
+	// carries a keyed blind index and a pseudonym; the mail resolves the real
+	// address from the vault at send time (ADR-002).
+	//
+	// # The response carries no link
+	//
+	// The token is a credential and the only party entitled to it is the person at
+	// the address. Returning it here would hand it to the inviter, who could then
+	// accept as somebody else.
+	InviteToWorkspace(context.Context, *connect.Request[v1.InviteToWorkspaceRequest]) (*connect.Response[v1.InviteToWorkspaceResponse], error)
 }
 
 // NewWorkspaceServiceClient constructs a client for the chronos.workspace.v1.WorkspaceService
@@ -168,6 +197,12 @@ func NewWorkspaceServiceClient(httpClient connect.HTTPClient, baseURL string, op
 			connect.WithSchema(workspaceServiceMethods.ByName("ChangeWorkspaceMemberRole")),
 			connect.WithClientOptions(opts...),
 		),
+		inviteToWorkspace: connect.NewClient[v1.InviteToWorkspaceRequest, v1.InviteToWorkspaceResponse](
+			httpClient,
+			baseURL+WorkspaceServiceInviteToWorkspaceProcedure,
+			connect.WithSchema(workspaceServiceMethods.ByName("InviteToWorkspace")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -177,6 +212,7 @@ type workspaceServiceClient struct {
 	addWorkspaceMember        *connect.Client[v1.AddWorkspaceMemberRequest, v1.AddWorkspaceMemberResponse]
 	removeWorkspaceMember     *connect.Client[v1.RemoveWorkspaceMemberRequest, v1.RemoveWorkspaceMemberResponse]
 	changeWorkspaceMemberRole *connect.Client[v1.ChangeWorkspaceMemberRoleRequest, v1.ChangeWorkspaceMemberRoleResponse]
+	inviteToWorkspace         *connect.Client[v1.InviteToWorkspaceRequest, v1.InviteToWorkspaceResponse]
 }
 
 // CreateWorkspace calls chronos.workspace.v1.WorkspaceService.CreateWorkspace.
@@ -197,6 +233,11 @@ func (c *workspaceServiceClient) RemoveWorkspaceMember(ctx context.Context, req 
 // ChangeWorkspaceMemberRole calls chronos.workspace.v1.WorkspaceService.ChangeWorkspaceMemberRole.
 func (c *workspaceServiceClient) ChangeWorkspaceMemberRole(ctx context.Context, req *connect.Request[v1.ChangeWorkspaceMemberRoleRequest]) (*connect.Response[v1.ChangeWorkspaceMemberRoleResponse], error) {
 	return c.changeWorkspaceMemberRole.CallUnary(ctx, req)
+}
+
+// InviteToWorkspace calls chronos.workspace.v1.WorkspaceService.InviteToWorkspace.
+func (c *workspaceServiceClient) InviteToWorkspace(ctx context.Context, req *connect.Request[v1.InviteToWorkspaceRequest]) (*connect.Response[v1.InviteToWorkspaceResponse], error) {
+	return c.inviteToWorkspace.CallUnary(ctx, req)
 }
 
 // WorkspaceServiceHandler is an implementation of the chronos.workspace.v1.WorkspaceService
@@ -267,6 +308,32 @@ type WorkspaceServiceHandler interface {
 	// A change within one pool — `member` to `admin` — costs nothing and is still
 	// GROW, because the class is a property of the method and not of the argument.
 	ChangeWorkspaceMemberRole(context.Context, *connect.Request[v1.ChangeWorkspaceMemberRoleRequest]) (*connect.Response[v1.ChangeWorkspaceMemberRoleResponse], error)
+	// InviteToWorkspace invites an address into a workspace.
+	//
+	// # GROW, and it consumes the seat NOW
+	//
+	// workspace.md §5: the seat is reserved at ISSUE and not at acceptance.
+	// Reserving at acceptance means 60 pending invitations against 50 seats all
+	// look valid, and the 51st person to click their link is refused for something
+	// somebody else did.
+	//
+	// The reservation is still CONDITIONAL — somebody already in the organization
+	// holds a seat, and inviting them into another workspace costs nothing — which
+	// is why this declares no `(chronos.options.v1.entitlement)`: gate 4 reserves
+	// unconditionally, and would charge a second seat every time.
+	//
+	// # The address goes no further than the vault
+	//
+	// It is the one piece of personal data on this service's wire. The event
+	// carries a keyed blind index and a pseudonym; the mail resolves the real
+	// address from the vault at send time (ADR-002).
+	//
+	// # The response carries no link
+	//
+	// The token is a credential and the only party entitled to it is the person at
+	// the address. Returning it here would hand it to the inviter, who could then
+	// accept as somebody else.
+	InviteToWorkspace(context.Context, *connect.Request[v1.InviteToWorkspaceRequest]) (*connect.Response[v1.InviteToWorkspaceResponse], error)
 }
 
 // NewWorkspaceServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -300,6 +367,12 @@ func NewWorkspaceServiceHandler(svc WorkspaceServiceHandler, opts ...connect.Han
 		connect.WithSchema(workspaceServiceMethods.ByName("ChangeWorkspaceMemberRole")),
 		connect.WithHandlerOptions(opts...),
 	)
+	workspaceServiceInviteToWorkspaceHandler := connect.NewUnaryHandler(
+		WorkspaceServiceInviteToWorkspaceProcedure,
+		svc.InviteToWorkspace,
+		connect.WithSchema(workspaceServiceMethods.ByName("InviteToWorkspace")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/chronos.workspace.v1.WorkspaceService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case WorkspaceServiceCreateWorkspaceProcedure:
@@ -310,6 +383,8 @@ func NewWorkspaceServiceHandler(svc WorkspaceServiceHandler, opts ...connect.Han
 			workspaceServiceRemoveWorkspaceMemberHandler.ServeHTTP(w, r)
 		case WorkspaceServiceChangeWorkspaceMemberRoleProcedure:
 			workspaceServiceChangeWorkspaceMemberRoleHandler.ServeHTTP(w, r)
+		case WorkspaceServiceInviteToWorkspaceProcedure:
+			workspaceServiceInviteToWorkspaceHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -333,4 +408,8 @@ func (UnimplementedWorkspaceServiceHandler) RemoveWorkspaceMember(context.Contex
 
 func (UnimplementedWorkspaceServiceHandler) ChangeWorkspaceMemberRole(context.Context, *connect.Request[v1.ChangeWorkspaceMemberRoleRequest]) (*connect.Response[v1.ChangeWorkspaceMemberRoleResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.ChangeWorkspaceMemberRole is not implemented"))
+}
+
+func (UnimplementedWorkspaceServiceHandler) InviteToWorkspace(context.Context, *connect.Request[v1.InviteToWorkspaceRequest]) (*connect.Response[v1.InviteToWorkspaceResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.InviteToWorkspace is not implemented"))
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	workspacev1 "github.com/chronos/chronos-go/gen/proto/chronos/workspace/v1"
 	"github.com/chronos/chronos-go/internal/modules/workspace/app"
@@ -107,5 +108,56 @@ func (s *Service) ChangeWorkspaceMemberRole(
 
 	return connect.NewResponse(&workspacev1.ChangeWorkspaceMemberRoleResponse{
 		Role: string(result.Role),
+	}), nil
+}
+
+// InviteToWorkspace invites an address into a workspace.
+//
+// The response is deliberately thin. It carries no token — the link is a
+// credential and the only party entitled to it is the person at the address —
+// and it does not echo the address back, so it cannot be used to confirm what
+// was typed.
+func (s *Service) InviteToWorkspace(
+	ctx context.Context, req *connect.Request[workspacev1.InviteToWorkspaceRequest],
+) (*connect.Response[workspacev1.InviteToWorkspaceResponse], error) {
+	tenant, err := db.RequireTenant(ctx)
+	if err != nil {
+		return nil, fail(errs.Internalf("no tenant scope reached the workspace handler; " +
+			"gate 1 resolved no organization").Wrap(err))
+	}
+	inviter, err := callerSubject(ctx)
+	if err != nil {
+		return nil, fail(err)
+	}
+	key, err := idempotencyKey(req.Header())
+	if err != nil {
+		return nil, fail(err)
+	}
+
+	result, err := s.invitations.Issue(ctx, app.IssueInvitationCommand{
+		OrgID:          tenant.OrgID,
+		WorkspaceID:    req.Msg.GetWorkspaceId(),
+		Email:          req.Msg.GetEmail(),
+		Role:           contract.MemberRole(req.Msg.GetRole()),
+		InvitedBy:      inviter,
+		IdempotencyKey: key,
+	})
+	if err != nil {
+		// A PARTIAL success reaches here: the invitation exists and holds its
+		// seat, and only the link is missing. It is still an error to the caller,
+		// because an invitation nobody can redeem is not what they asked for —
+		// and the message says to resend rather than to re-invite, so they do not
+		// take a second seat for one person.
+		return nil, fail(err)
+	}
+
+	// result.Token is deliberately dropped here. It exists so the notification
+	// path can put it in the mail, and this is the layer that must not let it
+	// travel any further.
+	return connect.NewResponse(&workspacev1.InviteToWorkspaceResponse{
+		InvitationId: result.InvitationID,
+		Role:         string(result.Role),
+		SeatConsumed: result.SeatConsumed,
+		ExpiresAt:    timestamppb.New(result.ExpiresAt.UTC()),
 	}), nil
 }

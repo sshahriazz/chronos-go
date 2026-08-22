@@ -26,6 +26,7 @@ import (
 	profileapi "github.com/chronos/chronos-go/internal/modules/profile/api"
 	"github.com/chronos/chronos-go/internal/modules/workspace"
 	workspaceapi "github.com/chronos/chronos-go/internal/modules/workspace/api"
+	workspaceapp "github.com/chronos/chronos-go/internal/modules/workspace/app"
 	"github.com/chronos/chronos-go/internal/platform/authz"
 	"github.com/chronos/chronos-go/internal/platform/blob"
 	"github.com/chronos/chronos-go/internal/platform/clientip"
@@ -89,6 +90,17 @@ type dependencies struct {
 	// OpenFGA is unreachable it is a Guard over DenyAll, so an outage denies
 	// rather than panicking or — far worse — being skipped.
 	authz *authz.Guard
+
+	// emailIndex and accounts are held for WORKSPACE, not for identity — identity
+	// builds and keeps its own.
+	//
+	// Invitations need both, and neither may be reached from the workspace
+	// module: `modules/A` may import `modules/B/contract` and nothing more
+	// (CONVENTIONS §2). Workspace declares the two ports it needs and this
+	// composition root satisfies them, which is the only place allowed to know
+	// both sides. See cmd/api/invitationports.go.
+	emailIndex workspaceapp.EmailIndexer
+	accounts   workspaceapp.Directory
 
 	// authzCache is held so the access projector can CONFIRM a revocation once
 	// it has removed the tuple. Clearing a tombstone on a timer instead would

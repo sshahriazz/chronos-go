@@ -31,18 +31,26 @@ type Membership interface {
 	ChangeRole(ctx context.Context, cmd app.ChangeRoleCommand) (app.ChangeRoleResult, error)
 }
 
+// Invitation is workspace's invitation write side, narrowed to what this layer
+// calls.
+type Invitation interface {
+	Issue(ctx context.Context, cmd app.IssueInvitationCommand) (app.IssueInvitationResult, error)
+}
+
 // Service serves WorkspaceService.
 type Service struct {
 	workspacev1connect.UnimplementedWorkspaceServiceHandler
 
-	creation Creation
-	members  Membership
+	creation    Creation
+	members     Membership
+	invitations Invitation
 }
 
 // Deps is what Service needs.
 type Deps struct {
-	Creation Creation
-	Members  Membership
+	Creation    Creation
+	Members     Membership
+	Invitations Invitation
 }
 
 func New(d Deps) (*Service, error) {
@@ -56,8 +64,12 @@ func New(d Deps) (*Service, error) {
 		// look like a deployment that is merely behind.
 		return nil, fmt.Errorf("workspace: a membership use case is required; without one " +
 			"the member RPCs answer UNIMPLEMENTED and no seat is ever counted")
+	case d.Invitations == nil:
+		return nil, fmt.Errorf("workspace: an invitation use case is required; without one " +
+			"InviteToWorkspace answers UNIMPLEMENTED, which reads as a deployment that is " +
+			"merely behind")
 	}
-	return &Service{creation: d.Creation, members: d.Members}, nil
+	return &Service{creation: d.Creation, members: d.Members, invitations: d.Invitations}, nil
 }
 
 // CreateWorkspace opens a workspace in the caller's organization.

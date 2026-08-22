@@ -22,6 +22,7 @@ package chronos.workspace.v1;
 import "buf/validate/validate.proto";
 import "chronos/options/v1/options.proto";
 import "gnostic/openapi/v3/annotations.proto";
+import "google/protobuf/timestamp.proto";
 
 // CreateWorkspaceRequest opens a workspace in the caller's organization.
 message CreateWorkspaceRequest {
@@ -266,6 +267,109 @@ message ChangeWorkspaceMemberRoleResponse {
   ];
 }
 
+// InviteToWorkspaceRequest invites an address into a workspace.
+//
+// The ADDRESS is the one piece of personal data on this service's wire. It
+// reaches the vault and the blind indexer and goes no further: no event, no log
+// line and no projection carries it, and the response never echoes it back.
+message InviteToWorkspaceRequest {
+  // Which workspace. Read by the authz gate, which asks for `admin` on THIS
+  // object rather than on the organization.
+  string workspace_id = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 29
+    },
+    (buf.validate.field).string = {
+      max_len: 29
+      pattern: "^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Where to send the invitation.
+  //
+  // The bound is PUBLISHED rather than enforced, for the reason every other
+  // email field in this schema publishes one: the CEL `email` rule is measured
+  // on the trimmed value and a `max_len` rule is measured by the interceptor on
+  // the raw one, so an enforced length would refuse an address the handler
+  // accepts (CONVENTIONS §7.2).
+  string email = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "colleague@example.com"}
+      max_length: 254
+      pattern: "^.+@.+\\..+$"
+    },
+    (buf.validate.field).string = {email: true}
+  ];
+
+  // The role they join with: `admin`, `member` or `guest`.
+  string role = 3 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "member"}
+      max_length: 16
+    },
+    (buf.validate.field).string = {
+      max_len: 16
+      in: [
+        "admin",
+        "member",
+        "guest"
+      ]
+    }
+  ];
+}
+
+// InviteToWorkspaceResponse names the invitation that was created.
+//
+// It carries NO TOKEN. The link is a credential, and the only party entitled to
+// it is the person at the address — putting it in this response would hand it to
+// the inviter, who could then join as somebody else. It also never echoes the
+// address back, so the response cannot be used to confirm what was typed.
+message InviteToWorkspaceResponse {
+  // The invitation's public id, a prefixed ULID (ADR-030).
+  string invitation_id = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "inv_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 30
+    },
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^inv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // The role as recorded.
+  string role = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "member"}
+      max_length: 16
+    },
+    (buf.validate.field).string = {
+      max_len: 16
+      in: [
+        "admin",
+        "member",
+        "guest"
+      ]
+    }
+  ];
+
+  // Whether issuing took a seat from the organization's pool.
+  //
+  // The seat is taken AT ISSUE, not at acceptance: otherwise 60 pending
+  // invitations against 50 seats all look valid, and the 51st acceptance fails
+  // for somebody who did nothing wrong (workspace.md §5). False means the
+  // invitee is already in the organization and already holds one.
+  bool seat_consumed = 3;
+
+  // When the link stops working.
+  //
+  // A Timestamp rather than a formatted string, which is this schema's
+  // convention for an instant: a string would need a pattern that re-implements
+  // RFC 3339 badly, and every client would parse it by hand.
+  google.protobuf.Timestamp expires_at = 4;
+}
+
 // WorkspaceService is the collaboration surface.
 service WorkspaceService {
   // CreateWorkspace opens a workspace in the caller's organization.
@@ -401,6 +505,54 @@ service WorkspaceService {
   // A change within one pool — `member` to `admin` — costs nothing and is still
   // GROW, because the class is a property of the method and not of the argument.
   rpc ChangeWorkspaceMemberRole(ChangeWorkspaceMemberRoleRequest) returns (ChangeWorkspaceMemberRoleResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "admin"
+      resource_type: "workspace"
+      resource_id_field: "workspace_id"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_GROW;
+
+    // A MUTATION, so it carries an Idempotency-Key.
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // InviteToWorkspace invites an address into a workspace.
+  //
+  // # GROW, and it consumes the seat NOW
+  //
+  // workspace.md §5: the seat is reserved at ISSUE and not at acceptance.
+  // Reserving at acceptance means 60 pending invitations against 50 seats all
+  // look valid, and the 51st person to click their link is refused for something
+  // somebody else did.
+  //
+  // The reservation is still CONDITIONAL — somebody already in the organization
+  // holds a seat, and inviting them into another workspace costs nothing — which
+  // is why this declares no `(chronos.options.v1.entitlement)`: gate 4 reserves
+  // unconditionally, and would charge a second seat every time.
+  //
+  // # The address goes no further than the vault
+  //
+  // It is the one piece of personal data on this service's wire. The event
+  // carries a keyed blind index and a pseudonym; the mail resolves the real
+  // address from the vault at send time (ADR-002).
+  //
+  // # The response carries no link
+  //
+  // The token is a credential and the only party entitled to it is the person at
+  // the address. Returning it here would hand it to the inviter, who could then
+  // accept as somebody else.
+  rpc InviteToWorkspace(InviteToWorkspaceRequest) returns (InviteToWorkspaceResponse) {
     option (chronos.options.v1.authz) = {
       relation: "admin"
       resource_type: "workspace"

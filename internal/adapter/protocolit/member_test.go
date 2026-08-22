@@ -14,6 +14,7 @@ import (
 	fgaadapter "github.com/chronos/chronos-go/internal/adapter/openfga"
 	valkeyadapter "github.com/chronos/chronos-go/internal/adapter/valkey"
 	accessprojection "github.com/chronos/chronos-go/internal/modules/access/projection"
+	workspacecontract "github.com/chronos/chronos-go/internal/modules/workspace/contract"
 	"github.com/chronos/chronos-go/internal/platform/authz"
 	"github.com/chronos/chronos-go/internal/platform/db"
 	"github.com/chronos/chronos-go/internal/platform/errs"
@@ -450,4 +451,175 @@ func (hh *harness) checker(t *testing.T) *fgaadapter.Checker {
 		t.Fatalf("NewChecker: %v", err)
 	}
 	return checker
+}
+
+// AN INVITATION, END TO END.
+//
+// # What only this can prove
+//
+// Issuing an invitation touches four things no unit test can put together: the
+// blind index and the account directory, both of which are IDENTITY'S and reach
+// workspace only through ports satisfied at the composition root; the vault,
+// which holds the address the event refuses to carry; and the seat pool, which
+// is charged at issue rather than at acceptance.
+//
+// The composition root is the part worth testing here. Workspace declares those
+// ports and cmd/api is the only place allowed to satisfy them — so a wiring that
+// compiles and leaves them unsatisfied is exactly the shape of failure this
+// repository keeps finding, and it would surface as "the invitation service is
+// NOT constructed" in a log line nobody reads.
+func TestInvitingEndToEnd(t *testing.T) {
+	key := os.Getenv("STRIPE_SECRET_KEY")
+	price := os.Getenv("STRIPE_TRIAL_PRICE_ID")
+	storeID := os.Getenv("OPENFGA_STORE_ID")
+	if key == "" || price == "" || storeID == "" {
+		t.Skip("STRIPE_SECRET_KEY, STRIPE_TRIAL_PRICE_ID and OPENFGA_STORE_ID must all be set")
+	}
+	if strings.Contains(key, "_live_") {
+		t.Fatal("STRIPE_SECRET_KEY is a LIVE key")
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
+	defer cancel()
+
+	owner := h.disposableAccount(t, "invite-owner")
+	existing := h.disposableAccount(t, "invite-existing")
+
+	created, err := h.organization.CreateOrganization(ctx,
+		authed(&organizationv1.CreateOrganizationRequest{
+			Name: "Invite Test", Slug: h.freshSlug(),
+		}, owner.bearer))
+	if err != nil {
+		t.Fatalf("CreateOrganization: %v\n%s", err, h.serverLogs())
+	}
+	orgID := created.Msg.GetOrgId()
+
+	h.provision(t, ctx, orgID, owner.subjectID)
+	h.grantOwner(t, ctx, orgID, owner.subjectID)
+	h.awaitOrgStatus(t, ctx, orgID, "trialing")
+	h.awaitOrgMember(t, ctx, orgID, owner.subjectID)
+
+	ws, err := h.workspace.CreateWorkspace(ctx,
+		authed(&workspacev1.CreateWorkspaceRequest{Name: "Invites"}, owner.bearer))
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v\n%s", err, h.serverLogs())
+	}
+	workspaceID := ws.Msg.GetWorkspaceId()
+
+	h.applyAccess(t, ctx, "workspace", workspaceID)
+	h.applyAccess(t, ctx, "membership", workspaceID+"."+owner.subjectID)
+	h.awaitWorkspacePermission(t, ctx, workspaceID, owner.subjectID, "admin", true)
+
+	t.Run("inviting a stranger takes a seat and reveals nothing", func(t *testing.T) {
+		stranger := h.freshEmail("stranger")
+
+		res, err := h.workspace.InviteToWorkspace(ctx,
+			authed(&workspacev1.InviteToWorkspaceRequest{
+				WorkspaceId: workspaceID, Email: stranger, Role: "member",
+			}, owner.bearer))
+		if err != nil {
+			t.Fatalf("InviteToWorkspace: %v\n%s", err, h.serverLogs())
+		}
+
+		if !strings.HasPrefix(res.Msg.GetInvitationId(), "inv_") {
+			t.Errorf("invitation id %q is not a prefixed ULID", res.Msg.GetInvitationId())
+		}
+		if !res.Msg.GetSeatConsumed() {
+			t.Error("inviting somebody new to the organization took no seat, so 60 pending " +
+				"invitations against 50 seats would all look valid and the 51st acceptance " +
+				"would fail for somebody who did nothing wrong")
+		}
+		if res.Msg.GetExpiresAt() == nil {
+			t.Error("no expiry was published, so nothing tells the recipient when the link dies")
+		}
+
+		// The RESPONSE is the disclosure surface here, and it must carry neither
+		// the credential nor the address. Serialising the whole message rather
+		// than checking named fields, so a field added later is covered too.
+		body := res.Msg.String()
+		if strings.Contains(body, stranger) {
+			t.Errorf("the response echoes the address back: %s", body)
+		}
+		if strings.Contains(body, "@") {
+			t.Errorf("the response contains an address: %s", body)
+		}
+	})
+
+	t.Run("inviting an existing account takes a seat but mints no identity", func(t *testing.T) {
+		// The account exists and is in NO organization, so this still costs a
+		// seat. What it must not do is create a second pseudonym for a person
+		// who already has one — which is invisible from the response and visible
+		// in the log.
+		res, err := h.workspace.InviteToWorkspace(ctx,
+			authed(&workspacev1.InviteToWorkspaceRequest{
+				WorkspaceId: workspaceID, Email: existing.email, Role: "member",
+			}, owner.bearer))
+		if err != nil {
+			t.Fatalf("InviteToWorkspace: %v\n%s", err, h.serverLogs())
+		}
+
+		issued := h.invitationIssued(t, ctx, res.Msg.GetInvitationId())
+		if issued.SubjectID != existing.subjectID {
+			t.Errorf("the invitation names %s, want the existing account's %s. A fresh "+
+				"pseudonym would make accepting create a second identity for one person, "+
+				"and the seat would be counted against somebody who cannot log in",
+				issued.SubjectID, existing.subjectID)
+		}
+		if issued.EmailIndex == "" {
+			t.Error("no blind index reached the event")
+		}
+	})
+
+	t.Run("a member cannot invite", func(t *testing.T) {
+		_, err := h.workspace.InviteToWorkspace(ctx,
+			authed(&workspacev1.InviteToWorkspaceRequest{
+				WorkspaceId: workspaceID, Email: h.freshEmail("nope"), Role: "member",
+			}, existing.bearer))
+		if err == nil {
+			t.Fatal("somebody with no permission on this workspace issued an invitation, " +
+				"which spends a seat belonging to an organization they are not in")
+		}
+	})
+}
+
+// invitationIssued reads one invitation's event straight from the log.
+//
+// The LOG and not a projection, because what is being asserted is what was
+// written: a projection could be correct while the event carried an address, and
+// the event is the thing that is permanent.
+func (hh *harness) invitationIssued(
+	t *testing.T, ctx context.Context, invitationID string,
+) *workspacecontract.InvitationIssued {
+	t.Helper()
+
+	stream, err := eventsourcing.NewStreamID("invitation", invitationID)
+	if err != nil {
+		t.Fatalf("stream id: %v", err)
+	}
+	events, err := hh.store.ReadStream(ctx, stream, 0)
+	if err != nil {
+		t.Fatalf("reading %s: %v", stream, err)
+	}
+	if len(events) == 0 {
+		t.Fatalf("%s is empty; the RPC returned an id for an invitation that was never "+
+			"appended", stream)
+	}
+
+	decoded, err := hh.codec.Unmarshal(events[0].Type, events[0].Payload)
+	if err != nil {
+		t.Fatalf("decoding %s: %v", events[0].Type, err)
+	}
+	issued, ok := decoded.(*workspacecontract.InvitationIssued)
+	if !ok {
+		t.Fatalf("the first event on %s is %T", stream, decoded)
+	}
+
+	// The address must not be there, in any form. Asserted on the RAW payload,
+	// because a decoded struct only shows the fields this build knows about.
+	if strings.Contains(string(events[0].Payload), "@") {
+		t.Fatalf("an address reached the event log: %s\nA log is append-only, so this "+
+			"cannot be undone and erasure by key destruction cannot reach it",
+			events[0].Payload)
+	}
+	return issued
 }

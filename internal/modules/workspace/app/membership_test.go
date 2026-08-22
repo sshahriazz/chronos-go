@@ -130,6 +130,20 @@ func (jsonCodec) Unmarshal(eventType string, payload []byte) (eventsourcing.Even
 		return decode[contract.MemberRoleChanged](payload)
 	case (&contract.MemberRemoved{}).EventType():
 		return decode[contract.MemberRemoved](payload)
+	case (&contract.InvitationIssued{}).EventType():
+		return decode[contract.InvitationIssued](payload)
+	case (&contract.InvitationTokenRotated{}).EventType():
+		return decode[contract.InvitationTokenRotated](payload)
+	case (&contract.InvitationAccepted{}).EventType():
+		return decode[contract.InvitationAccepted](payload)
+	case (&contract.InvitationRevoked{}).EventType():
+		return decode[contract.InvitationRevoked](payload)
+	case (&contract.InvitationDeclined{}).EventType():
+		return decode[contract.InvitationDeclined](payload)
+	case (&contract.InvitationExpired{}).EventType():
+		return decode[contract.InvitationExpired](payload)
+	case (&contract.InvitationUndeliverable{}).EventType():
+		return decode[contract.InvitationUndeliverable](payload)
 	default:
 		return nil, nil
 	}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
 	entitlementpg "github.com/chronos/chronos-go/internal/modules/entitlement/adapter/postgres"
@@ -16,6 +17,7 @@ import (
 	workspacedomain "github.com/chronos/chronos-go/internal/modules/workspace/domain"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/platform/ids"
+	"github.com/chronos/chronos-go/internal/platform/secret"
 	"github.com/chronos/chronos-go/internal/server/interceptor"
 )
 
@@ -142,6 +144,53 @@ func (d *dependencies) buildWorkspace(log *slog.Logger) (*workspaceapi.Service, 
 		return nil, fmt.Errorf("workspace creation: %w", err)
 	}
 
+	// Invitations. Every port below is satisfied here and could not be satisfied
+	// inside the module: two of them are identity's and one is the vault's, and
+	// `modules/A` may import `modules/B/contract` and nothing more.
+	if d.emailIndex == nil || d.accounts == nil {
+		return nil, errors.New("no blind index or account directory: identity did not " +
+			"construct, so an invitation could neither recognise an existing account nor " +
+			"keep the invitee's address out of the event")
+	}
+	if d.piiVault == nil {
+		return nil, errors.New("no vault: an invitation names a pseudonym, and without the " +
+			"entry behind it the mail has no address to resolve at send time")
+	}
+
+	invitationRepo := eventsourcing.NewRepository[*workspacedomain.Invitation](
+		d.store, d.codec, d.upcasters,
+		workspacedomain.InvitationCategory, workspacedomain.NewInvitation)
+
+	invitationTokens, err := workspacepg.NewInvitationTokens(pgadapter.New(d.pool))
+	if err != nil {
+		return nil, fmt.Errorf("invitation token store: %w", err)
+	}
+
+	// This module's OWN lifetime table. platform/secret holds no policy, and an
+	// invitation's window is a decision about invitations (workspace.md §5's
+	// seven days) rather than about hashing.
+	invitationMinter, err := secret.New(map[secret.Purpose]time.Duration{
+		workspaceapp.PurposeInvitation: workspaceapp.InvitationTTL,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("invitation token minter: %w", err)
+	}
+
+	invitations, err := workspaceapp.NewInvitations(workspaceapp.InvitationsDeps{
+		Repo:     invitationRepo,
+		Tokens:   invitationTokens,
+		Minter:   invitationMinter,
+		Indexer:  d.emailIndex,
+		Dir:      d.accounts,
+		Vault:    &vaultAddresses{vault: d.piiVault},
+		Subjects: &ulidSubjects{clock: d.clock},
+		Seats:    seats,
+		Now:      d.clock.Now,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("workspace invitations: %w", err)
+	}
+
 	members, err := workspaceapp.NewMembers(workspaceapp.MembersDeps{
 		Workspaces:  repo,
 		Memberships: memberships,
@@ -155,6 +204,9 @@ func (d *dependencies) buildWorkspace(log *slog.Logger) (*workspaceapi.Service, 
 	}
 
 	log.Info("workspace service constructed",
-		"quota", "workspaces.count", "seats", "member+guest", "revocation", "tombstones")
-	return workspaceapi.New(workspaceapi.Deps{Creation: creation, Members: members})
+		"quota", "workspaces.count", "seats", "member+guest",
+		"revocation", "tombstones", "invitations", workspaceapp.InvitationTTL.String())
+	return workspaceapi.New(workspaceapi.Deps{
+		Creation: creation, Members: members, Invitations: invitations,
+	})
 }
