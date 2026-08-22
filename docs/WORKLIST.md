@@ -228,7 +228,7 @@ satisfied at the composition root.
       51st acceptance fails for somebody who did nothing wrong. Address goes to
       the vault and never into an event; the blind index is what the event
       carries.
-- [ ] **5d — Accept.** Five checks, all revalidated at acceptance rather than
+- [x] **5d — Accept.** Five checks, all revalidated at acceptance rather than
       trusted from issue time. Two paths: an existing user authenticates first; a
       new user's acceptance IS proof of address control, so it completes email
       verification rather than sending a second mail.
