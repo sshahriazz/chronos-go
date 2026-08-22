@@ -254,11 +254,20 @@ satisfied at the composition root.
 
 ## Parked
 
-- [ ] `TestTheIdempotencyContractHoldsForEveryAuthenticatedMutation/DeactivateAccount`
-      flake — seen once in a full-package run, passes in isolation and on every
-      re-run. Same family as the one below: deactivation racing the rest of the
-      package. NOT investigated; recorded so a second sighting is a pattern
-      rather than a surprise.
+- [ ] **The two deactivation flakes — NOT reproduced, and one plausible cause
+      removed.** `protocolit .../DeactivateAccount` and
+      `identityit TestADeactivatedAccountCanGetBackIn`.
+      Nine clean runs after the rate-limit fix: five of identityit's lifecycle
+      tests, four full package runs across both suites. Neither reproduced.
+      The hypothesis worth recording is that they were downstream of the
+      exhausted per-IP buckets rather than of deactivation itself — the
+      protocolit sighting happened during a run where those buckets were being
+      spent, and a refusal there fails a later assertion for a reason that has
+      nothing to do with what the test is about.
+      Left OPEN rather than closed: "did not reproduce" is not "fixed", and a
+      speculative change to a test that currently passes would be worse than
+      waiting for a tenth sighting with better evidence. If either recurs now,
+      it is a real race and the rate limits are no longer a confound.
 - [x] **Timing-sensitive unit tests fail under load** — both fixed at the root,
       and neither was load sensitivity.
       `argon2id TestACancelledCallerDoesNotWaitForASlot` found a real defect: the
@@ -278,8 +287,6 @@ satisfied at the composition root.
       argues against specific attacks, and a knob that relaxes them for tests is
       a knob that can relax them in production. Verified by four consecutive full
       protocolit runs and two of identityit, where the third used to fail.
-- [ ] `TestADeactivatedAccountCanGetBackIn` flake — 0/8 in isolation, so it
-      needs concurrency with the rest of its package. Narrowed, not fixed.
 - [ ] `account_name` deprecated field — delete at the first release boundary.
 - [ ] WebAuthn 3-field ADR.
 - [ ] CONVENTIONS §5 doc/code reconciliation.
