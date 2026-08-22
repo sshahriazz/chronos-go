@@ -238,8 +238,12 @@ satisfied at the composition root.
       expires_at)`.
 - [x] **5g — the invitation mail**, through the notification reactor and a
       Temporal activity, addressed from the vault at send time (ADR-002).
-- [ ] **5h — the Temporal workflow**: expiry, reminders and seat release. The
-      invitation outlives any request, so a timer in a handler cannot own it.
+- [x] **5h — the Temporal workflow**: expiry, reminders and seat release, in
+      three commits. The per-invitation timer makes expiry timely and reminders
+      possible; the hourly reconciliation sweep makes expiry certain when a timer
+      was never started. Plus workspace.md §5s two remaining edge cases —
+      supersession (one seat per address, and the old link dies) and a departing
+      inviters outstanding invitations being revoked.
 
 ## Then
 - [ ] **Slice 6** — teams

@@ -49,6 +49,7 @@ type Invitations struct {
 	indexer     EmailIndexer
 	dir         Directory
 	subs        Subscriptions
+	outstanding AddressInvitations
 	vault       Addresses
 	subjects    SubjectMinter
 	seats       *Seats
@@ -70,6 +71,7 @@ type InvitationsDeps struct {
 	Indexer     EmailIndexer
 	Dir         Directory
 	Subs        Subscriptions
+	Outstanding AddressInvitations
 	Vault       Addresses
 	Subjects    SubjectMinter
 	Seats       *Seats
@@ -109,6 +111,10 @@ func NewInvitations(d InvitationsDeps) (*Invitations, error) {
 		return nil, fmt.Errorf("workspace: a directory is required; an invitation to " +
 			"somebody who already has an account must name THEIR pseudonym, or accepting " +
 			"it creates a second identity for one person")
+	case d.Outstanding == nil:
+		return nil, fmt.Errorf("workspace: an outstanding-invitation reader is required; " +
+			"without one a second invitation to one address takes a SECOND seat, and the " +
+			"organization pays twice for somebody who has not even replied once")
 	case d.Vault == nil:
 		return nil, fmt.Errorf("workspace: a vault is required; the address has to be " +
 			"recorded somewhere the mail can resolve it at send time")
@@ -125,7 +131,8 @@ func NewInvitations(d InvitationsDeps) (*Invitations, error) {
 		repo: d.Repo, workspaces: d.Workspaces, memberships: d.Memberships,
 		appender: d.Appender, schemas: d.Schemas,
 		tokens: d.Tokens, indexer: d.Indexer,
-		dir: d.Dir, subs: d.Subs, vault: d.Vault, subjects: d.Subjects,
+		dir: d.Dir, subs: d.Subs, outstanding: d.Outstanding,
+		vault: d.Vault, subjects: d.Subjects,
 		seats: d.Seats, now: d.Now,
 	}
 	settlements, err := NewSettlements(SettlementsDeps{
@@ -198,6 +205,21 @@ func (i *Invitations) Issue(
 	// until somebody changes their address.
 	if err := i.vault.PutEmail(ctx, subjectID, cmd.Email); err != nil {
 		return IssueInvitationResult{}, errs.Internalf("recording the invitee's address").Wrap(err)
+	}
+
+	// SUPERSESSION, before anything is reserved. workspace.md §5: a second
+	// invitation to one address supersedes the first rather than taking a second
+	// seat — and the seat is per ORGANIZATION, so two invitations to one address
+	// in two workspaces of one tenant are exactly the double charge this
+	// prevents.
+	//
+	// Revoking rather than reusing, and revoking FIRST. Reusing would leave the
+	// original workspace and role in place, which is not what the second
+	// invitation asked for. Revoking first releases the seat and — the part that
+	// matters more — KILLS THE OLD LINK: two live links to one address means the
+	// person can accept the invitation nobody meant to send them.
+	if err := i.supersede(ctx, cmd.OrgID, string(index)); err != nil {
+		return IssueInvitationResult{}, err
 	}
 
 	now := i.now().UTC()
@@ -927,4 +949,45 @@ func (s *Settlements) State(ctx context.Context, invitationID string) (Invitatio
 		SubjectID:   inv.SubjectID(),
 		ExpiresAt:   inv.ExpiresAt(),
 	}, nil
+}
+
+// supersede settles an outstanding invitation to the same address.
+//
+// # Why a failure here fails the whole issue
+//
+// The alternative is to carry on and issue the second invitation anyway, which
+// leaves two live links and two seats for one person. That is the precise
+// outcome the rule exists to prevent, so it is better to refuse the new
+// invitation — which the admin can retry — than to create the state.
+//
+// A revocation that finds the invitation already settled is NOT an error: the
+// projection lags, so the row can name something accepted or expired since. The
+// settlement path reports that as a conflict, and here it means the work is
+// already done.
+func (i *Invitations) supersede(ctx context.Context, orgID, emailIndex string) error {
+	existing, found, err := i.outstanding.PendingForAddress(ctx, orgID, emailIndex)
+	if err != nil {
+		return errs.Internalf("looking for an outstanding invitation to that address").Wrap(err)
+	}
+	if !found {
+		return nil
+	}
+
+	// RevokedBy is empty: nobody decided to withdraw this one, it was superseded
+	// by a newer invitation to the same address. The event records the
+	// difference, and an inviter reading the history should be able to see that
+	// they did not revoke it.
+	_, err = i.settlements.settle(ctx, orgID, existing.WorkspaceID, existing.InvitationID,
+		"supersede:"+existing.InvitationID,
+		func(inv *domain.Invitation, at time.Time) error { return inv.Revoke("", at) })
+	switch {
+	case err == nil:
+		return nil
+	case errs.ReasonOf(err) == errs.Conflict, errs.ReasonOf(err) == errs.NotFound:
+		// Settled between the read and the write. The seat it held is already
+		// back and its link is already dead, which is what this call wanted.
+		return nil
+	default:
+		return err
+	}
 }

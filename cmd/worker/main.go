@@ -403,6 +403,17 @@ func reactors(codec *eventcodec.JSON, d *dependencies) []reactor.Reactor {
 		rs = append(rs, r)
 	}
 
+	// A departing inviter's outstanding invitations. Without it an invitation
+	// authorised by somebody who has left the organization stays redeemable by
+	// whoever holds the mail — a live credential nobody can vouch for.
+	if r, err := newInviterDeparture(d); err != nil {
+		slog.Default().Error("the inviter-departure reactor is NOT registered; invitations "+
+			"issued by somebody who has since left the organization stay live and "+
+			"redeemable, and their seats stay held until they expire", "error", err)
+	} else {
+		rs = append(rs, r)
+	}
+
 	// The authorization graph. Without it every non-self-scoped method is
 	// DENIED — correctly, and silently.
 	if r, err := newAccessTuples(codec, d, slog.Default()); err != nil {

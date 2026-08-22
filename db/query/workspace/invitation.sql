@@ -96,14 +96,40 @@ WHERE status = 'pending' AND expires_at <= $1
 ORDER BY expires_at, invitation_id
 LIMIT $2;
 
--- The two queries this table's other indexes exist for — "what did this person
--- issue" and "is there already an invitation to this address" — are NOT here.
--- They have no caller until the reactor that revokes a departing inviter's
--- invitations and the supersession rule land (WORKLIST 5h), and a generated
--- query nothing calls is the same built-and-wired-into-nothing this repository
--- keeps finding. The INDEXES stay: migration 00025 creates them because
--- workspace.md §9 specifies the table's shape, and removing them would need
--- another migration to add back.
+-- name: PendingInvitationsBySubject :many
+-- What is this person still waiting on somebody to accept?
+--
+-- The reactor that revokes a departing inviter's outstanding invitations reads
+-- this. Scoped by ORGANIZATION, because leaving one organization says nothing
+-- about invitations issued in another — a consultant who administers two tenants
+-- keeps what they issued in the one they are still in.
+--
+-- Pending only. A settled invitation has already released whatever it held, and
+-- revoking one again would return a second seat for one hold.
+SELECT invitation_id, workspace_id
+FROM invitation_view
+WHERE org_id = $1 AND invited_by = $2 AND status = 'pending';
+
+-- name: PendingInvitationForAddress :one
+-- Is there already an outstanding invitation to this address here?
+--
+-- By INDEX, never by address: the address is not in this database. A second
+-- invitation to one address SUPERSEDES the first (workspace.md §5) rather than
+-- taking a second seat, and this is what makes that recognisable.
+--
+-- Oldest first and one row. More than one pending invitation for an address is
+-- the state supersession exists to prevent, so if it ever happens the oldest is
+-- the one to settle — and the next issue settles the next one, converging rather
+-- than picking arbitrarily.
+--
+-- Scoped by organization, not by workspace: the SEAT is per organization, so two
+-- invitations to one address in two workspaces of one tenant are exactly the
+-- double charge this prevents.
+SELECT invitation_id, workspace_id
+FROM invitation_view
+WHERE org_id = $1 AND email_index = $2 AND status = 'pending'
+ORDER BY issued_at
+LIMIT 1;
 
 -- name: TruncateInvitations :exec
 TRUNCATE TABLE invitation_view;

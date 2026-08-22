@@ -157,3 +157,35 @@ type Addresses interface {
 type SubjectMinter interface {
 	NewSubject() string
 }
+
+// PendingInvitation names one outstanding invitation.
+//
+// Ids only. It crosses into a reactor and into workflow-adjacent code, so it
+// carries nothing personal — the address it was sent to is in the vault, and the
+// blind index that recognised it stays in the query.
+type PendingInvitation struct {
+	InvitationID string
+	WorkspaceID  string
+}
+
+// AddressInvitations answers "is there already an invitation to this address
+// here?".
+//
+// It exists for workspace.md §5's supersession rule: a second invitation to one
+// address supersedes the first rather than taking a SECOND SEAT. Scoped by
+// organization rather than workspace, because the seat is per organization —
+// two invitations to one address in two workspaces of one tenant are exactly the
+// double charge the rule prevents.
+type AddressInvitations interface {
+	PendingForAddress(ctx context.Context, orgID, emailIndex string) (PendingInvitation, bool, error)
+}
+
+// OutstandingInvitations lists what one person has issued and nobody has settled.
+//
+// For the reactor that revokes a departing inviter's invitations
+// (workspace.md §5): the authorisation to join came from somebody who is no
+// longer there, and an invitation nobody can vouch for should not still be
+// redeemable.
+type OutstandingInvitations interface {
+	ListPendingBy(ctx context.Context, orgID, subjectID string) ([]PendingInvitation, error)
+}

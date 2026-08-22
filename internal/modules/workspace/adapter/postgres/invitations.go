@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/chronos/chronos-go/internal/modules/workspace/domain"
 	"github.com/chronos/chronos-go/internal/platform/db"
 	"github.com/chronos/chronos-go/internal/platform/page"
+	"github.com/jackc/pgx/v5"
 )
 
 // InvitationReads is the read side of invitation_view.
@@ -160,6 +162,89 @@ func (r *DueReads) ListDue(
 	})
 	if err != nil {
 		return nil, fmt.Errorf("workspace: listing due invitations: %w", err)
+	}
+	return out, nil
+}
+
+// PendingForAddress reports an outstanding invitation to an address, if any.
+//
+// A TENANT transaction: it runs inside the issue path, after gate 1 has resolved
+// a scope, so the row security policy applies and another organization's
+// invitations are invisible rather than merely unmatched.
+func (r *InvitationReads) PendingForAddress(
+	ctx context.Context, orgID, emailIndex string,
+) (app.PendingInvitation, bool, error) {
+	if orgID == "" || emailIndex == "" {
+		return app.PendingInvitation{}, false, fmt.Errorf(
+			"workspace: looking for an outstanding invitation needs an organization and an index")
+	}
+
+	var out app.PendingInvitation
+	var found bool
+	err := r.tx.InTenantTx(ctx, func(ctx context.Context, q db.Querier) error {
+		row := q.QueryRow(ctx, workspacedb.PendingInvitationForAddress, orgID, emailIndex)
+		switch err := row.Scan(&out.InvitationID, &out.WorkspaceID); {
+		case errors.Is(err, pgx.ErrNoRows):
+			return nil
+		case err != nil:
+			return err
+		}
+		found = true
+		return nil
+	})
+	if err != nil {
+		return app.PendingInvitation{}, false, fmt.Errorf(
+			"workspace: looking for an outstanding invitation: %w", err)
+	}
+	return out, found, nil
+}
+
+// PendingBySubject lists what one person still has outstanding.
+//
+// A SYSTEM transaction, unlike the read above. The reactor that revokes a
+// departing inviter's invitations runs in the worker, where no request has
+// established a tenant scope — and the organization comes from the EVENT rather
+// than from a caller, which is what makes an explicit id safe here.
+type PendingBySubject struct{ system db.SystemTX }
+
+var _ app.OutstandingInvitations = (*PendingBySubject)(nil)
+
+func NewPendingBySubject(system db.SystemTX) (*PendingBySubject, error) {
+	if system == nil {
+		return nil, fmt.Errorf("workspace: a system transaction source is required; the " +
+			"reactor runs with no request and therefore no tenant scope")
+	}
+	return &PendingBySubject{system: system}, nil
+}
+
+// ListPendingBy returns the pending invitations one person issued.
+func (r *PendingBySubject) ListPendingBy(
+	ctx context.Context, orgID, subjectID string,
+) ([]app.PendingInvitation, error) {
+	if orgID == "" || subjectID == "" {
+		return nil, fmt.Errorf("workspace: listing outstanding invitations needs an " +
+			"organization and a subject")
+	}
+
+	var out []app.PendingInvitation
+	err := r.system.InSystemTx(ctx, func(ctx context.Context, q db.Querier) error {
+		rows, err := q.Query(ctx, workspacedb.PendingInvitationsBySubject, orgID, subjectID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var p app.PendingInvitation
+			if err := rows.Scan(&p.InvitationID, &p.WorkspaceID); err != nil {
+				return err
+			}
+			out = append(out, p)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("workspace: listing invitations issued by %s: %w", subjectID, err)
 	}
 	return out, nil
 }

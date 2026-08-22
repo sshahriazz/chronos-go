@@ -159,6 +159,14 @@ func (d *dependencies) buildWorkspace(log *slog.Logger) (*workspaceapi.Service, 
 		d.store, d.codec, d.upcasters,
 		workspacedomain.InvitationCategory, workspacedomain.NewInvitation)
 
+	// Built before the use case, because ISSUING reads it: a second invitation to
+	// one address supersedes the first rather than taking a second seat
+	// (workspace.md §5).
+	invitationReads, err := workspacepg.NewInvitationReads(pgadapter.New(d.pool))
+	if err != nil {
+		return nil, fmt.Errorf("invitation reads: %w", err)
+	}
+
 	invitationTokens, err := workspacepg.NewInvitationTokens(pgadapter.New(d.pool))
 	if err != nil {
 		return nil, fmt.Errorf("invitation token store: %w", err)
@@ -177,6 +185,7 @@ func (d *dependencies) buildWorkspace(log *slog.Logger) (*workspaceapi.Service, 
 		Appender:    appender,
 		Schemas:     d.upcasters,
 		Subs:        &joinPermission{gate: d.subscriptions},
+		Outstanding: invitationReads,
 		Tokens:      invitationTokens,
 		Indexer:     d.emailIndex,
 		Dir:         d.accounts,
@@ -204,10 +213,6 @@ func (d *dependencies) buildWorkspace(log *slog.Logger) (*workspaceapi.Service, 
 	log.Info("workspace service constructed",
 		"quota", "workspaces.count", "seats", "member+guest",
 		"revocation", "tombstones", "invitations", workspaceapp.InvitationTTL.String())
-	invitationReads, err := workspacepg.NewInvitationReads(pgadapter.New(d.pool))
-	if err != nil {
-		return nil, fmt.Errorf("invitation reads: %w", err)
-	}
 	invitationQueries, err := workspaceapp.NewInvitationQueries(invitationReads)
 	if err != nil {
 		return nil, fmt.Errorf("invitation queries: %w", err)

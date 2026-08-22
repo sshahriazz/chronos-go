@@ -14,6 +14,7 @@ import (
 	entitlementpg "github.com/chronos/chronos-go/internal/modules/entitlement/adapter/postgres"
 	entitlementapp "github.com/chronos/chronos-go/internal/modules/entitlement/app"
 	entitlementdomain "github.com/chronos/chronos-go/internal/modules/entitlement/domain"
+	"github.com/chronos/chronos-go/internal/modules/organization"
 	"github.com/chronos/chronos-go/internal/modules/workspace"
 	workspacepg "github.com/chronos/chronos-go/internal/modules/workspace/adapter/postgres"
 	workspaceapp "github.com/chronos/chronos-go/internal/modules/workspace/app"
@@ -445,4 +446,68 @@ func newInvitationSettlements(d *dependencies) (*workspaceapp.Settlements, error
 	return workspaceapp.NewSettlements(workspaceapp.SettlementsDeps{
 		Repo: repo, Tokens: tokens, Seats: seats, Now: clock.System{}.Now,
 	})
+}
+
+// newInviterDeparture builds the reactor that revokes what a departing inviter
+// left outstanding.
+//
+// Its codec carries BOTH modules' events: it reacts to organization's
+// OrgAdminRemoved as well as workspace's MemberRemoved, because belonging to an
+// organization ends in two ways and an invitation nobody can vouch for should
+// not survive either.
+func newInviterDeparture(d *dependencies) (*workspacereactor.InviterDeparture, error) {
+	if d.pool == nil {
+		return nil, errors.New("no read model: the work list is invitation_view, so nothing " +
+			"can find what a departing inviter left outstanding")
+	}
+
+	outstanding, err := workspacepg.NewPendingBySubject(pgadapter.New(d.pool))
+	if err != nil {
+		return nil, err
+	}
+	settlements, err := newInvitationSettlements(d)
+	if err != nil {
+		return nil, err
+	}
+	departures, err := workspaceapp.NewInviterDepartures(
+		outstanding, settlements, slog.Default())
+	if err != nil {
+		return nil, fmt.Errorf("inviter departures: %w", err)
+	}
+
+	return workspacereactor.NewInviterDeparture(
+		departureAdapter{departures: departures}, departureCodec())
+}
+
+// departureAdapter narrows the use case to the reactor's port.
+//
+// The reactor is told whether the call failed and nothing else. The counts are
+// for the log, and a reactor that could read them would eventually branch on
+// them — which is a decision that belongs in the use case.
+type departureAdapter struct {
+	departures *workspaceapp.InviterDepartures
+}
+
+var _ workspacereactor.Departures = departureAdapter{}
+
+func (a departureAdapter) Depart(ctx context.Context, orgID, subjectID string) error {
+	_, err := a.departures.Depart(ctx, orgID, subjectID)
+	return err
+}
+
+// departureCodec decodes BOTH modules' events.
+//
+// The reactor subscribes to organization's OrgAdminRemoved and workspace's
+// MemberRemoved, so a codec carrying only one of them would park every event of
+// the other kind — visibly, but only after somebody had already left with their
+// invitations still live.
+func departureCodec() *eventcodec.JSON {
+	upcasters := eventsourcing.NewUpcasterRegistry()
+	workspace.RegisterSchemas(upcasters)
+	organization.RegisterSchemas(upcasters)
+
+	codec := eventcodec.NewJSON(upcasters)
+	workspace.RegisterEvents(codec)
+	organization.RegisterEvents(codec)
+	return codec
 }

@@ -76,6 +76,24 @@ func (f *fakeVault) PutEmail(_ context.Context, subjectID, email string) error {
 
 // fakeSubs stands in for gate 3, asked about an organization the caller did not
 // name.
+// fakeOutstanding answers "is there already an invitation to this address here".
+//
+// It records the LOOKUP as well as the answer, so a test can tell "there was
+// nothing to supersede" from "nobody looked".
+type fakeOutstanding struct {
+	pending app.PendingInvitation
+	found   bool
+	err     error
+	lookups int
+}
+
+func (f *fakeOutstanding) PendingForAddress(
+	context.Context, string, string,
+) (app.PendingInvitation, bool, error) {
+	f.lookups++
+	return f.pending, f.found, f.err
+}
+
 type fakeSubs struct{ err error }
 
 func (f fakeSubs) PermitJoin(context.Context, string) error { return f.err }
@@ -172,6 +190,7 @@ type inviteHarness struct {
 	clock       *testClock
 	issuer      *app.InvitationIssuer
 	settlements *app.Settlements
+	outstanding *fakeOutstanding
 }
 
 // testClock is a clock a test can move.
@@ -191,6 +210,10 @@ type inviteOpts struct {
 	poolFull     string
 	suspended    error
 	archived     bool
+
+	// supersedes names an invitation the issue path should find and withdraw.
+	supersedes     app.PendingInvitation
+	outstandingErr error
 }
 
 func newInviteHarness(t *testing.T, o inviteOpts) *inviteHarness {
@@ -233,6 +256,9 @@ func newInviteHarness(t *testing.T, o inviteOpts) *inviteHarness {
 		dir.subject, dir.known = knownSubject, true
 	}
 
+	outstanding := &fakeOutstanding{
+		pending: o.supersedes, found: o.supersedes.InvitationID != "", err: o.outstandingErr,
+	}
 	tokens := &fakeTokens{err: o.tokenErr}
 	vault := &fakeVault{err: o.vaultErr}
 	subjects := &fakeSubjects{}
@@ -243,7 +269,8 @@ func newInviteHarness(t *testing.T, o inviteOpts) *inviteHarness {
 		Appender: store, Schemas: noSchemas{},
 		Tokens:  tokens,
 		Indexer: fakeIndexer{err: o.indexErr}, Dir: dir, Subs: fakeSubs{err: o.suspended},
-		Vault: vault, Subjects: subjects, Seats: seats, Now: now,
+		Outstanding: outstanding,
+		Vault:       vault, Subjects: subjects, Seats: seats, Now: now,
 	})
 	if err != nil {
 		t.Fatalf("NewInvitations: %v", err)
@@ -293,7 +320,7 @@ func newInviteHarness(t *testing.T, o inviteOpts) *inviteHarness {
 		invitations: invitations, store: store, tokens: tokens,
 		vault: vault, subjects: subjects, reserver: reserver, counter: counter,
 		memberships: memberships, workspaceID: inviteWS, clock: clock, issuer: issuer,
-		settlements: settlements,
+		settlements: settlements, outstanding: outstanding,
 	}
 }
 
@@ -716,7 +743,8 @@ func TestInvitationsRefusesAnIncompleteWiring(t *testing.T) {
 		Appender: store, Schemas: noSchemas{},
 		Tokens:  &fakeTokens{},
 		Indexer: fakeIndexer{}, Dir: fakeDirectory{}, Subs: fakeSubs{},
-		Vault: &fakeVault{}, Subjects: &fakeSubjects{}, Seats: seats, Now: time.Now,
+		Outstanding: &fakeOutstanding{},
+		Vault:       &fakeVault{}, Subjects: &fakeSubjects{}, Seats: seats, Now: time.Now,
 	}
 	if _, err := app.NewInvitations(full); err != nil {
 		t.Fatalf("precondition: a complete wiring was refused, so every case below would "+
@@ -734,6 +762,7 @@ func TestInvitationsRefusesAnIncompleteWiring(t *testing.T) {
 		{"no appender", func(d *app.InvitationsDeps) { d.Appender = nil }, "appender"},
 		{"no schemas", func(d *app.InvitationsDeps) { d.Schemas = nil }, "schema registry"},
 		{"no subscriptions", func(d *app.InvitationsDeps) { d.Subs = nil }, "subscription check"},
+		{"no outstanding reader", func(d *app.InvitationsDeps) { d.Outstanding = nil }, "outstanding-invitation reader"},
 		{"no token store", func(d *app.InvitationsDeps) { d.Tokens = nil }, "token store"},
 		{"no indexer", func(d *app.InvitationsDeps) { d.Indexer = nil }, "blind indexer"},
 		{"no directory", func(d *app.InvitationsDeps) { d.Dir = nil }, "directory"},
