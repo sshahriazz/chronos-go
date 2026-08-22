@@ -216,7 +216,7 @@ owns credentials. The address is personal data, and only the vault may hold it.
 neither can be reached for directly — the port is declared by workspace and
 satisfied at the composition root.
 
-- [ ] **5a — the token primitive moves to `platform/`.** Identity's minter is
+- [x] **5a — the token primitive moves to `platform/`.** Identity's minter is
       module-private, so workspace may not import it, and copying 200 lines of
       credential-hashing into a second module is the version of this that rots.
       Behaviour unchanged; identity's adapter becomes a thin wrapper.
