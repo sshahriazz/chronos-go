@@ -232,7 +232,7 @@ satisfied at the composition root.
       trusted from issue time. Two paths: an existing user authenticates first; a
       new user's acceptance IS proof of address control, so it completes email
       verification rather than sending a second mail.
-- [ ] **5e — Revoke, decline, resend.** Resend rotates the token and extends
+- [x] **5e — Revoke, decline, resend.** Resend rotates the token and extends
       expiry; the old token stays dead.
 - [ ] **5f — `invitation_view`** projection, keyed `(workspace_id, status,
       expires_at)`.
