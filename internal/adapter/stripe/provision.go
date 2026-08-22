@@ -18,6 +18,27 @@ import (
 	"github.com/chronos/chronos-go/internal/modules/organization/app"
 )
 
+// APIVersion is the Stripe API version every request from this build carries.
+//
+// It is NOT configurable, and that is the SDK's design rather than an omission
+// here: stripe-go pins it in `stripe.APIVersion` and sends it as `Stripe-Version`
+// on every request, so the version is coupled to the module major. Upgrading the
+// API version means upgrading the SDK, which is a dependency bump somebody
+// reviews — not an environment variable that can differ between two deployments
+// of the same binary.
+//
+// It is restated here for one reason, and it is the webhook one:
+// `stripe.ConstructEvent` REFUSES an event whose `api_version` does not match
+// this constant. So anything replaying events at us has to speak the same
+// version, and `stripe listen` in particular must be told:
+//
+//	stripe listen --api-version 2026-07-29.dahlia --forward-to localhost:8080/stripe/webhook
+//
+// Without the flag the CLI forwards events at the account's default version, and
+// signature verification fails with a message about the version rather than
+// about the signature — which reads like a broken secret.
+const APIVersion = stripe.APIVersion
+
 // orgMetadataKey is our organization id, stored on both Stripe objects.
 //
 // It is what makes provisioning idempotent: a retry searches by it and finds

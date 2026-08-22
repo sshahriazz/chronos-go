@@ -194,6 +194,27 @@ Four properties, each of which fails silently if skipped:
 - **200 immediately.** Work happens in the workflow. A handler that does its
   work before responding turns a slow reconcile into a Stripe retry storm.
 
+### The API version is pinned by the SDK, and the CLI must match
+
+stripe-go pins the version in `stripe.APIVersion` and sends it as
+`Stripe-Version` on every request. There is no option to override it, which is
+the right design: upgrading the API version becomes a dependency bump somebody
+reviews, not an environment variable that can differ between two deployments of
+one binary. As of stripe-go v86 that is **2026-07-29.dahlia**.
+
+It has one consequence that will otherwise cost an afternoon:
+`stripe.ConstructEvent` REFUSES an event whose `api_version` does not match the
+constant. So the CLI has to be told the same version when forwarding:
+
+```
+stripe listen --api-version 2026-07-29.dahlia \
+  --forward-to localhost:8080/stripe/webhook
+```
+
+Without the flag the CLI forwards at the account's default version and
+verification fails with a message about the version — which reads like a broken
+signing secret, and sends you looking at the wrong thing.
+
 ### Events that matter for the cardless trial specifically
 
 On top of billing.md §4's list:

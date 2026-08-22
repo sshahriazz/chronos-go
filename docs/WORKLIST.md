@@ -51,7 +51,7 @@ binary. So 1b now FOLLOWS the organization aggregate.
 - [ ] **Gate 1 (`OrgResolver`)** — "which organization is this request in"
       *Blocked on:* organizations existing.
 
-## Now: Slice 2 — organization core  (nearly done)
+## Slice 2 — organization core  ✅ complete
 
 Pulled forward ahead of 1b, because 1b has nothing to react to until this
 exists. Built inside-out: the pure domain first, since it needs no
@@ -78,7 +78,7 @@ infrastructure and every later piece depends on its shape.
       into cmd/api. Both uniqueness rules hold at the WRITE: one atomic append
       to three streams, each with `NoStream`. Two concurrent creations by one
       person produce exactly one organization, proved against real KurrentDB.
-- [>] **Billing: provisioning only** — a THIN slice of billing, pulled forward.
+- [x] **Billing: provisioning only** — a THIN slice of billing, pulled forward.
 
       *Why the plan changed:* it said "billing is additive after" the other
       slices. That was wrong. An organization is unusable in `provisioning`, and
@@ -99,10 +99,13 @@ infrastructure and every later piece depends on its shape.
             Cardless, `missing_payment_method: pause`, idempotent on our org id
             in Stripe metadata.
       - [x] The reactor, wired into cmd/worker.
-      - [ ] **BLOCKED ON YOU:** a Stripe test key and a $0 recurring Price. See
-            the commands in `.env.example`. Until then the worker logs that the
-            reactor is not registered, and organizations stay in
-            `provisioning`.
+      - [x] Stripe test key and $0 recurring Price configured.
+      - [x] **Proved against the real Stripe test account:** a cardless trialing
+            subscription with no payment method, `missing_payment_method: pause`,
+            and provisioning twice returns the SAME customer and subscription.
+      - [x] **The loop closes:** `OrganizationCreated` -> reactor -> Stripe ->
+            `trialing`, asserted against the event log. A redelivery changes
+            nothing — same subscription, same revision.
 - [ ] **Then 1b**: access projector consuming `OrganizationCreated`, tombstones,
       `OrgResolver`
 
