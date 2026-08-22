@@ -1,9 +1,7 @@
 package token_test
 
 import (
-	"crypto/rand"
 	"encoding/base64"
-	"io"
 	"strings"
 	"testing"
 	"time"
@@ -187,19 +185,11 @@ func TestAnUnknownPurposeIsRefused(t *testing.T) {
 	}
 }
 
-// A failing entropy source fails the mint rather than producing a weak token.
-//
-// A short read leaves trailing zeroes, and a token whose tail is predictable is
-// one an attacker can search.
-func TestAFailingEntropySourceFailsTheMint(t *testing.T) {
-	m := token.New()
-	token.SetRandForTest(m, io.LimitReader(rand.Reader, 4))
-
-	if _, err := m.Mint(app.PurposeEmailVerification, at); err == nil {
-		t.Fatal("a token was minted from a short entropy read: its tail is zeroes, and every " +
-			"token minted while the source is degraded shares that structure")
-	}
-}
+// The entropy source's failure path is asserted in platform/secret, which is
+// where the read now happens. A copy here could only reach it through a
+// test-only export of another package's unexported field, which does not exist
+// across package boundaries — and the branch is the primitive's, not this
+// package's policy.
 
 // Digesting is deterministic and order-independent across calls.
 func TestDigestingIsDeterministic(t *testing.T) {

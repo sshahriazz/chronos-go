@@ -204,8 +204,44 @@ Trial caps: **3 workspaces, 5 seats**.
 - [x] `entitlement.ReserveFor` / `ReleaseFor` implemented — `Seats` declared the
       port and nothing satisfied it, so the seat rule could not have run.
 
+## Now — Slice 5, invitations
+
+workspace.md §5. Decomposed because it is the largest slice so far and touches
+four modules; each step below is a commit that leaves the tree green.
+
+The shape of the problem: an invitation is a **credential sent to an address**,
+and both halves cross a module boundary. The token is a credential, and identity
+owns credentials. The address is personal data, and only the vault may hold it.
+`modules/A` may import `modules/B/contract` and nothing else (CONVENTIONS §2), so
+neither can be reached for directly — the port is declared by workspace and
+satisfied at the composition root.
+
+- [ ] **5a — the token primitive moves to `platform/`.** Identity's minter is
+      module-private, so workspace may not import it, and copying 200 lines of
+      credential-hashing into a second module is the version of this that rots.
+      Behaviour unchanged; identity's adapter becomes a thin wrapper.
+- [ ] **5b — the Invitation aggregate.** Pending → Accepted / Revoked / Expired /
+      Declined / Undeliverable, as a transition table. Its own stream category,
+      for the reason memberships have one.
+- [ ] **5c — Issue.** Seat reserved AT ISSUE and conditionally (workspace.md §5):
+      60 pending invitations against 50 seats otherwise all look valid, and the
+      51st acceptance fails for somebody who did nothing wrong. Address goes to
+      the vault and never into an event; the blind index is what the event
+      carries.
+- [ ] **5d — Accept.** Five checks, all revalidated at acceptance rather than
+      trusted from issue time. Two paths: an existing user authenticates first; a
+      new user's acceptance IS proof of address control, so it completes email
+      verification rather than sending a second mail.
+- [ ] **5e — Revoke, decline, resend.** Resend rotates the token and extends
+      expiry; the old token stays dead.
+- [ ] **5f — `invitation_view`** projection, keyed `(workspace_id, status,
+      expires_at)`.
+- [ ] **5g — the invitation mail**, through the notification reactor and a
+      Temporal activity, addressed from the vault at send time (ADR-002).
+- [ ] **5h — the Temporal workflow**: expiry, reminders and seat release. The
+      invitation outlives any request, so a timer in a handler cannot own it.
+
 ## Then
-- [ ] **Slice 5** — invitations
 - [ ] **Slice 6** — teams
 - [ ] **Billing** — Stripe, per [BILLING-PLAN.md](BILLING-PLAN.md). Additive
       after any of the above.
