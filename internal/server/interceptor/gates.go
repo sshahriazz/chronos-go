@@ -27,6 +27,7 @@ import (
 	optionsv1 "github.com/chronos/chronos-go/gen/proto/chronos/options/v1"
 	"github.com/chronos/chronos-go/internal/platform/authz"
 	"github.com/chronos/chronos-go/internal/platform/cqrs"
+	"github.com/chronos/chronos-go/internal/platform/db"
 	"github.com/chronos/chronos-go/internal/platform/errs"
 	srvconnect "github.com/chronos/chronos-go/internal/server/connect"
 	"github.com/chronos/chronos-go/internal/server/policy"
@@ -506,7 +507,14 @@ func (g *Gates) enforce(
 	if g.deps.Authz == nil {
 		return ctx, nil, unavailable(GateAuthz, p)
 	}
-	resourceID, err := resourceIDFor(p, principal, header)
+	// The organization gate 1 just resolved, read from the scope every later
+	// query uses rather than from a second copy that could disagree with it.
+	tenant, err := db.RequireTenant(ctx)
+	if err != nil {
+		return ctx, nil, srvconnect.Error(errs.Internalf(
+			"gate 1 resolved no tenant scope, so gate 2 has no object to check").Wrap(err))
+	}
+	resourceID, err := resourceIDFor(p, tenant.OrgID, header)
 	if err != nil {
 		return ctx, nil, srvconnect.Error(errs.NotFoundf("not found"))
 	}
@@ -605,12 +613,27 @@ func unavailable(gate Gate, p policy.Policy) error {
 // A self-scoped method never reaches here: enforce takes the selfCheck branch
 // above, where the resource is the principal's own subject. Both shapes below
 // are org-scoped, which is why identity needed the third one.
-func resourceIDFor(p policy.Policy, principal Principal, _ Header) (string, error) {
+// resourceIDFor decides WHICH object gate 2 asks about.
+//
+// # Why the organization comes from the resolved scope and not the principal
+//
+// It used to read `principal.Context.ActiveOrg`, and nothing ever set that
+// field — so every org-scoped method failed with "no active organization", which
+// the disclosure ladder turned into NOT_FOUND. That is indistinguishable from
+// "you are not a member", and it stayed invisible for as long as no method was
+// org-scoped.
+//
+// Gate 1 runs immediately before this and its entire job is to establish which
+// organization the request is in. Reading its answer is both correct and the
+// only version that cannot drift: a second copy on the principal would have to
+// be kept in step with the scope every query already uses.
+func resourceIDFor(p policy.Policy, orgID string, _ Header) (string, error) {
 	if p.ResourceIDField == "" {
-		if principal.Context.ActiveOrg == "" {
-			return "", fmt.Errorf("no active organization for an org-scoped method")
+		if orgID == "" {
+			return "", fmt.Errorf("no organization in scope for an org-scoped method; gate 1 " +
+				"resolved none")
 		}
-		return principal.Context.ActiveOrg, nil
+		return orgID, nil
 	}
 	return "", fmt.Errorf("%w: %s reads its resource id from field %q, which is not "+
 		"implemented", ErrGateUnavailable, p.Method, p.ResourceIDField)

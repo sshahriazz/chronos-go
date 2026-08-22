@@ -15,6 +15,7 @@ import (
 	systemv1 "github.com/chronos/chronos-go/gen/proto/chronos/system/v1"
 	"github.com/chronos/chronos-go/internal/platform/authz"
 	"github.com/chronos/chronos-go/internal/platform/cqrs"
+	"github.com/chronos/chronos-go/internal/platform/db"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/server/interceptor"
 	"github.com/chronos/chronos-go/internal/server/policy"
@@ -457,10 +458,32 @@ func (*allowAuthnPtr) Authenticate(context.Context, interceptor.Header) (interce
 	return interceptor.Principal{}, errors.New("unused")
 }
 
+// passOrg resolves every request into one organization.
+//
+// It ATTACHES A TENANT SCOPE, which the first version of this fake did not — it
+// returned the context untouched. That made it a resolver that resolves nothing,
+// and it hid a real defect for as long as no method was org-scoped: gate 2 read
+// the organization from `principal.Context.ActiveOrg`, which nothing ever set,
+// so every org-scoped request failed. A fake that does not do the one thing the
+// real implementation exists to do cannot catch that.
+// resolvesNothing is a gate 1 that cannot place the caller in any organization.
+//
+// The real one returns NOT_FOUND in that case; this returns success with no
+// scope attached, which is the harsher shape — it checks that gate 2 refuses on
+// its own rather than relying on gate 1 having already failed.
+type resolvesNothing struct{}
+
+func (resolvesNothing) Resolve(ctx context.Context, _ interceptor.Principal, _ interceptor.Header) (context.Context, error) {
+	return ctx, nil
+}
+
 type passOrg struct{}
 
-func (passOrg) Resolve(ctx context.Context, _ interceptor.Principal, _ interceptor.Header) (context.Context, error) {
-	return ctx, nil
+func (passOrg) Resolve(ctx context.Context, p interceptor.Principal, _ interceptor.Header) (context.Context, error) {
+	return db.WithTenant(ctx, db.Tenant{
+		OrgID:  "org1",
+		UserID: p.Subject.ID,
+	}), nil
 }
 
 type permitAll struct{}
@@ -1509,14 +1532,20 @@ func TestASelfScopedMutationStillNeedsTheIdempotencyGate(t *testing.T) {
 
 // The org-scoped shape did NOT become more permissive.
 //
-// An org-scoped method whose caller has no active organization is still refused:
-// the self branch answers a different question and must not have loosened this
-// one.
+// An org-scoped method for which gate 1 resolved NO organization is still
+// refused: the self branch answers a different question and must not have
+// loosened this one.
+//
+// The mechanism changed with the gate. It used to mean "the principal carries no
+// ActiveOrg", a field nothing ever populated; it now means "gate 1 attached no
+// tenant scope", which is the state a resolver actually produces when it cannot
+// place a caller. `resolvesNothing` below is that resolver.
 func TestAnOrgScopedMethodWithNoOrganizationIsStillRefused(t *testing.T) {
 	svc, procedure := mutatingService(t, "chronos.test.gates.noorg.v1")
 	deps := fullDeps(t, svc, allowChecker{})
 	orgless := selfPrincipal("subj_01J000000000000000000004")
-	deps.Authn = stubAuthn{principal: orgless} // ActiveOrg is empty
+	deps.Authn = stubAuthn{principal: orgless}
+	deps.Org = resolvesNothing{}
 
 	g, err := interceptor.NewGates(deps)
 	if err != nil {

@@ -129,6 +129,7 @@ import (
 	"github.com/chronos/chronos-go/gen/proto/chronos/identity/v1/identityv1connect"
 	optionsv1 "github.com/chronos/chronos-go/gen/proto/chronos/options/v1"
 	"github.com/chronos/chronos-go/gen/proto/chronos/organization/v1/organizationv1connect"
+	"github.com/chronos/chronos-go/gen/proto/chronos/workspace/v1/workspacev1connect"
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
 	kurrentadapter "github.com/chronos/chronos-go/internal/adapter/kurrentdb"
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
@@ -143,8 +144,11 @@ import (
 	notificationcontract "github.com/chronos/chronos-go/internal/modules/notification/contract"
 	notificationdomain "github.com/chronos/chronos-go/internal/modules/notification/domain"
 	notificationprojection "github.com/chronos/chronos-go/internal/modules/notification/projection"
+	"github.com/chronos/chronos-go/internal/modules/organization"
+	organizationprojection "github.com/chronos/chronos-go/internal/modules/organization/projection"
 	"github.com/chronos/chronos-go/internal/modules/profile"
 	profileprojection "github.com/chronos/chronos-go/internal/modules/profile/projection"
+	"github.com/chronos/chronos-go/internal/modules/workspace"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/db"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
@@ -183,10 +187,14 @@ type harness struct {
 	// organization is the same, for the tenant-creation fixtures.
 	organization organizationv1connect.OrganizationServiceClient
 
-	pool  *pgxpool.Pool
-	pg    *pgadapter.DB
-	store *kurrentadapter.Store
-	codec *eventcodec.JSON
+	// workspace is the first client whose RPC traverses every gate.
+	workspace workspacev1connect.WorkspaceServiceClient
+
+	pool      *pgxpool.Pool
+	pg        *pgadapter.DB
+	store     *kurrentadapter.Store
+	codec     *eventcodec.JSON
+	upcasters *eventsourcing.UpcasterRegistry
 
 	index  *blindindex.Index
 	guards *identitypg.Guards
@@ -326,6 +334,7 @@ func newHarness() (*harness, error) {
 	}
 	hh.identity = identityv1connect.NewIdentityServiceClient(hh.http, hh.baseURL)
 	hh.organization = organizationv1connect.NewOrganizationServiceClient(hh.http, hh.baseURL)
+	hh.workspace = workspacev1connect.NewWorkspaceServiceClient(hh.http, hh.baseURL)
 
 	if err := hh.dialInfra(env); err != nil {
 		return nil, err
@@ -369,13 +378,18 @@ func (hh *harness) dialInfra(env map[string]string) error {
 	// one binary and not another is a projector that stops on an event the API
 	// happily wrote.
 	upcasters := eventsourcing.NewUpcasterRegistry()
+	hh.upcasters = upcasters
 	identity.RegisterSchemas(upcasters)
 	notification.RegisterSchemas(upcasters)
 	profile.RegisterSchemas(upcasters)
+	organization.RegisterSchemas(upcasters)
+	workspace.RegisterSchemas(upcasters)
 	codec := eventcodec.NewJSON(upcasters)
 	identity.RegisterEvents(codec)
 	notification.RegisterEvents(codec)
 	profile.RegisterEvents(codec)
+	organization.RegisterEvents(codec)
+	workspace.RegisterEvents(codec)
 	hh.codec = codec
 
 	client, err := kurrentadapter.Dial(
@@ -503,6 +517,10 @@ func (hh *harness) startProjectors() {
 		notificationprojection.NewPushSubscriptions(hh.codec),
 		notificationprojection.NewPreferences(hh.codec),
 		profileprojection.NewProfile(hh.codec),
+		// Organization's two: gate 3 reads the first on every request, and gate 1
+		// verifies membership against the second.
+		organizationprojection.NewStatus(hh.codec),
+		organizationprojection.NewMembers(hh.codec),
 		identityprojection.NewUser(hh.codec),
 		identityprojection.NewSession(hh.codec),
 		identityprojection.NewReservation(hh.codec),

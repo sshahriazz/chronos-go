@@ -165,7 +165,9 @@ Trial caps: **3 workspaces, 5 seats**.
       membership rather than trusting a header), the `org_member_index`
       projection, and the ACCESS PROJECTOR writing tuples from the event log
 - [x] **cmd/api now boots with all six gates wired and zero ERROR lines**
-- [ ] End-to-end proof: 3 workspaces succeed, the 4th is refused
+- [x] **End-to-end proof: 3 workspaces succeed, the 4th is refused** with
+      QUOTA_EXCEEDED, through authn -> org-context -> authz -> subscription ->
+      entitlement -> idempotency. Raising the cap to 4 fails the test.
 - [ ] Seat accounting: one person per ORGANIZATION, not per membership
 - [ ] Revocation tombstones (ADR-045) — still nothing revokes yet
 
