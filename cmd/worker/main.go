@@ -394,7 +394,7 @@ func reactors(codec *eventcodec.JSON, d *dependencies) []reactor.Reactor {
 
 	// The authorization graph. Without it every non-self-scoped method is
 	// DENIED — correctly, and silently.
-	if r, err := newAccessTuples(codec, d); err != nil {
+	if r, err := newAccessTuples(codec, d, slog.Default()); err != nil {
 		slog.Default().Error("the access tuple projector is NOT registered; NOTHING will be "+
 			"granted in the authorization graph, so every organization- and "+
 			"workspace-scoped method is denied for the lifetime of this process",

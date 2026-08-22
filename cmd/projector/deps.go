@@ -10,10 +10,8 @@ import (
 	centrifugoadapter "github.com/chronos/chronos-go/internal/adapter/centrifugo"
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
 	kurrentadapter "github.com/chronos/chronos-go/internal/adapter/kurrentdb"
-	fgaadapter "github.com/chronos/chronos-go/internal/adapter/openfga"
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
 	valkeyadapter "github.com/chronos/chronos-go/internal/adapter/valkey"
-	"github.com/chronos/chronos-go/internal/platform/authz"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/config"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
@@ -51,16 +49,19 @@ type dependencies struct {
 	holder   string
 	metrics  *obs.Metrics
 
-	// tuples is the write side of the authorization graph, and the ONLY thing in
-	// this repository that holds it (access.md §15). A use case that wrote a
-	// tuple directly would put an edge in the graph that no event explains and no
-	// rebuild reproduces, so the restriction is enforced by which binary can
-	// reach it rather than by convention.
+	// The authorization graph is written by cmd/worker, not here.
 	//
-	// It is a ConfirmingWriter, never a bare adapter: removing a tuple and
-	// clearing the tombstone that stood in for it are one sequence, and doing
-	// them in the wrong order restores access to a revoked principal (ADR-045).
-	tuples *authz.ConfirmingWriter
+	// This binary used to build a ConfirmingWriter that nothing read — assigned
+	// and never used, which is the same "built and wired into nothing" shape
+	// that left three notification adapters dead. It was removed when the access
+	// projector was actually written, and the writer moved to the binary that
+	// consumes it.
+	//
+	// It belongs there rather than here for a structural reason: every
+	// projection this binary runs writes its rows and its checkpoint in ONE
+	// transaction, which is what makes it exactly-once. No transaction spans
+	// PostgreSQL and OpenFGA, so tuple writing is at-least-once work and lives
+	// with the other at-least-once work.
 
 	// rebuildShards is the parallelism a rebuild applies events through. One is
 	// sequential. Config validates it against POSTGRES_MAX_CONNS, because each
@@ -146,68 +147,22 @@ func newDependencies(
 		d.closes = append(d.closes, func() { _ = conn.Close() })
 	}
 
-	// ---- The write side of the authorization graph ------------------------
+	// ---- Valkey, for the health probe -------------------------------------
 	//
-	// Both halves are required, and the failure is LOUD rather than degraded.
-	// This is the one place in the projector where ADR-010's "stay up and let the
-	// probe report DOWN" does not apply on its own terms: a projector that runs
-	// without a tuple writer keeps applying events and advancing checkpoints
-	// while the permission graph silently stops changing. Everything looks
-	// healthy; grants stop landing and revocations stop being confirmed.
-	//
-	// So the writer is either fully constructed or nil, and a nil one is
-	// reported at every level available — an error log here, a DOWN probe, and a
-	// failing composition-root test.
-	var revocations authz.Revocations
+	// This binary no longer writes tuples — cmd/worker does — so it needs no
+	// revocation store. The client stays for the probe: a projector publishes
+	// realtime invalidation through Valkey, and an operator wants that reported
+	// alongside everything else this process depends on.
 	if vk, err := valkey.NewClient(valkey.ClientOption{
 		InitAddress:  cfg.Valkey.Addr,
 		Password:     cfg.Valkey.Password.Expose(),
 		DisableCache: true,
 	}); err != nil {
-		log.Error("valkey client unavailable; revocations cannot be CONFIRMED, so every "+
-			"tombstone will survive to its TTL", "error", err)
+		log.Error("valkey client unavailable", "error", err)
 		d.probes = append(d.probes, valkeyadapter.Probe{})
 	} else {
-		revocations = valkeyadapter.NewAuthz(vk)
 		d.probes = append(d.probes, valkeyadapter.Probe{Client: vk})
 		d.closes = append(d.closes, vk.Close)
-	}
-
-	if conn, err := fgaadapter.Dial(cfg.OpenFGA.Endpoint, cfg.OpenFGA.PresharedKey.Expose()); err != nil {
-		log.Error("openfga client unavailable; NO permission change will be applied", "error", err)
-		d.probes = append(d.probes, fgaadapter.Probe{})
-	} else {
-		d.probes = append(d.probes, fgaadapter.Probe{Conn: conn})
-		d.closes = append(d.closes, func() { _ = conn.Close() })
-
-		writer, err := fgaadapter.NewWriter(conn, fgaadapter.Config{
-			StoreID: cfg.OpenFGA.StoreID,
-			ModelID: cfg.OpenFGA.ModelID,
-		})
-		switch {
-		case err != nil:
-			log.Error("openfga tuple writer not constructed; NO permission change will be "+
-				"applied", "error", err)
-		case revocations == nil:
-			// NewConfirmingWriter refuses this on its own — verified, by deleting
-			// this branch and watching the tests still pass. It stays for the
-			// message: "no revocation store" names the cause, where the kernel's
-			// error names only the missing argument.
-			//
-			// What must NOT appear here is a fallback to the bare writer. It
-			// would remove tuples and confirm nothing, leaving every tombstone to
-			// expire on its TTL — the exact failure ADR-045 exists to prevent,
-			// and it would look like the system was working.
-			log.Error("no revocation store; refusing to construct a tuple writer that " +
-				"cannot confirm what it removes")
-		default:
-			cw, cerr := authz.NewConfirmingWriter(writer, revocations, log)
-			if cerr != nil {
-				log.Error("confirming tuple writer not constructed", "error", cerr)
-			} else {
-				d.tuples = cw
-			}
-		}
 	}
 
 	return d, func() {

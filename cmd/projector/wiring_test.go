@@ -1,7 +1,6 @@
 package main
 
 import (
-	"log/slog"
 	"testing"
 
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
@@ -38,22 +37,18 @@ func testConfig(t *testing.T) *config.Config {
 // wiring_integration_test.go, because a composition-root test that silently
 // depends on a running service fails in CI for a reason that has nothing to do
 // with the code.
-func TestTheProjectorProbesOpenFGA(t *testing.T) {
-	cfg := testConfig(t)
-	d, closeAll := newDependencies(cfg, slog.New(slog.DiscardHandler), newCodec(), 2)
-	defer closeAll()
-
-	var found bool
-	for _, p := range d.probes {
-		if p.Name() == "openfga" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("no openfga probe is registered on the projector: a permission graph that " +
-			"has stopped changing would report healthy")
-	}
-}
+//
+// # This assertion MOVED rather than being deleted
+//
+// It used to live here because the projector wrote tuples. It no longer does —
+// cmd/worker does, because no transaction spans PostgreSQL and OpenFGA, so tuple
+// writing is at-least-once work — and a probe on this binary would report the
+// health of a dependency it does not use.
+//
+// The concern it protected is unchanged and now belongs to the worker:
+// TestTheWorkerProbesOpenFGA asserts it there. Deleting it outright would have
+// lost the point, which is that a permission graph that has stopped changing
+// must not report healthy.
 
 // Every read model in the system must appear in the registry, because a
 // projection that is not listed there does not run.
