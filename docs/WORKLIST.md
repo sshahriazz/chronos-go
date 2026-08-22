@@ -252,7 +252,7 @@ one costs a single tuple whatever its size, which access.md §4 measured and §6
 confirmed at the latency level too (a check through a 1000-member team costs
 2.1 ms against a direct grant's 2.0 ms).
 
-- [ ] **6a — the Team aggregate and its place in the graph.** Flat, never
+- [x] **6a — the Team aggregate and its place in the graph.** Flat, never
       nested: the engine could model `team#member` referencing another team, and
       the reason not to is that nesting makes effective membership non-obvious to
       the people managing it, which is the problem teams exist to solve.
