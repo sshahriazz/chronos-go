@@ -371,7 +371,7 @@ func TestIdentityIsUnregisteredWithoutKeys(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	served := registerServices(mux, d, testSystemService(t), slog.New(slog.DiscardHandler))
+	served := registerServices(mux, d, testConfig(t), testSystemService(t), slog.New(slog.DiscardHandler))
 	if slices.Contains(served, identityv1connect.IdentityServiceName) {
 		t.Fatal("IdentityService was registered without key material")
 	}
@@ -515,7 +515,7 @@ func TestTheCompositionRootNeedsNoInfrastructure(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	served := registerServices(mux, d, testSystemService(t), slog.New(slog.DiscardHandler))
+	served := registerServices(mux, d, testConfig(t), testSystemService(t), slog.New(slog.DiscardHandler))
 	if !slices.Contains(served, identityv1connect.IdentityServiceName) {
 		t.Fatalf("registerServices returned %v against closed ports", served)
 	}
@@ -534,7 +534,7 @@ func serveTestMux(t *testing.T) (*http.ServeMux, *dependencies, []string) {
 	t.Cleanup(closeAll)
 
 	mux := http.NewServeMux()
-	served := registerServices(mux, d, testSystemService(t), slog.New(slog.DiscardHandler))
+	served := registerServices(mux, d, testConfig(t), testSystemService(t), slog.New(slog.DiscardHandler))
 	return mux, d, served
 }
 

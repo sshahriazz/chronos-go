@@ -194,7 +194,7 @@ Four properties, each of which fails silently if skipped:
 - **200 immediately.** Work happens in the workflow. A handler that does its
   work before responding turns a slow reconcile into a Stripe retry storm.
 
-### The API version is pinned by the SDK, and the CLI must match
+### The API version is pinned by the SDK, and incoming events need not match
 
 stripe-go pins the version in `stripe.APIVersion` and sends it as
 `Stripe-Version` on every request. There is no option to override it, which is
@@ -202,18 +202,32 @@ the right design: upgrading the API version becomes a dependency bump somebody
 reviews, not an environment variable that can differ between two deployments of
 one binary. As of stripe-go v86 that is **2026-07-29.dahlia**.
 
-It has one consequence that will otherwise cost an afternoon:
-`stripe.ConstructEvent` REFUSES an event whose `api_version` does not match the
-constant. So the CLI has to be told the same version when forwarding:
+INCOMING events are a separate question, and it took a real mismatch to get it
+right. `ConstructEvent` refuses an event whose `api_version` differs from that
+constant, and the two are set in places nobody keeps in step: the account's
+default event version is a dashboard setting — this account emits
+**2026-04-22.dahlia** — while the SDK's is a Go module version. Requiring
+equality makes every SDK bump a coordinated dashboard change, and fails with a
+message about the version that reads like a broken signing secret.
+
+So `IgnoreAPIVersionMismatch` is set, and the signature and timestamp checks are
+not. It is safe because of the re-fetch: the handler reads exactly two strings
+out of an event — the object id and its kind — and asks Stripe for everything
+else at the SDK's own version. The payload's shape cannot change what this
+system believes.
+
+**It stops being safe the moment any handler reads a FIELD off the event body.**
+An older version can spell that field differently, and the result is a silent
+wrong answer rather than a loud failure. That is the condition to check before
+adding one.
+
+The tunnel is then simply:
 
 ```
-stripe listen --api-version 2026-07-29.dahlia \
-  --forward-to localhost:8080/stripe/webhook
+stripe listen --forward-to localhost:8090/stripe/webhook
 ```
 
-Without the flag the CLI forwards at the account's default version and
-verification fails with a message about the version — which reads like a broken
-signing secret, and sends you looking at the wrong thing.
+Port 8090 is `API_PORT`; 8080 belongs to OpenFGA.
 
 ### Events that matter for the cardless trial specifically
 

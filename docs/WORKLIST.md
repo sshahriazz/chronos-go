@@ -114,6 +114,26 @@ workspace.
 
 ---
 
+## Now: Billing — webhook ingestion
+
+**Pulled forward for the same reason provisioning was.** Stripe pauses a
+cardless trial at day 14 and emits `customer.subscription.paused`. Without an
+endpoint to receive it we never learn, `org_status_view` says `trialing`
+forever, and the trial that was supposed to end never does — a free forever
+account, which is exactly the leak the `Provisioning` state was introduced to
+prevent.
+
+- [x] `STRIPE_WEBHOOK_SECRET` config, with rotation overlap
+- [x] The endpoint: verifies the signature against the RAW body, dedupes on
+      Stripe's event id, refuses to be served at all without a secret
+- [x] Re-fetches the object from Stripe rather than trusting the payload
+- [x] Stripe status -> org lifecycle, all 8 statuses asserted
+- [x] **Proved end to end with `stripe listen`:** cancelling a real trialing
+      subscription drove `customer.subscription.deleted` through verification,
+      dedupe, re-fetch and append, and the organization reached `closed`.
+- [ ] `customer.subscription.paused` at real trial end — needs a Stripe test
+      clock to reach day 14 without waiting for it
+
 ## Then
 
 - [ ] **Slice 3** — entitlement + trial catalogue (before workspace, so

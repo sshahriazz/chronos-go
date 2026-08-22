@@ -24,6 +24,7 @@ import (
 	"github.com/chronos/chronos-go/gen/proto/chronos/organization/v1/organizationv1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/profile/v1/profilev1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/system/v1/systemv1connect"
+	billingapi "github.com/chronos/chronos-go/internal/modules/billing/api"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/config"
 	"github.com/chronos/chronos-go/internal/platform/obs"
@@ -137,7 +138,7 @@ func run(addr string, log *slog.Logger) error {
 
 	// One handler, three protocols.
 	systemSvc := health.NewService(registry, version, cfg.Timezone, startedAt)
-	served := registerServices(mux, deps, systemSvc, log)
+	served := registerServices(mux, deps, cfg, systemSvc, log)
 
 	// Reflection lets grpcurl and Postman explore a running server. It advertises
 	// exactly what was REGISTERED, not what this build could serve: a reflector
@@ -261,6 +262,7 @@ func handlerOptions(gates ...connectrpc.Interceptor) []connectrpc.HandlerOption 
 func registerServices(
 	mux *http.ServeMux,
 	d *dependencies,
+	cfg *config.Config,
 	systemSvc systemv1connect.SystemServiceHandler,
 	log *slog.Logger,
 ) []string {
@@ -309,6 +311,20 @@ func registerServices(
 	} else {
 		mux.Handle(profilev1connect.NewProfileServiceHandler(d.profile, opts...))
 		served = append(served, profilev1connect.ProfileServiceName)
+	}
+
+	// The Stripe webhook is plain HTTP, not a Connect procedure: Stripe posts a
+	// signed body to a URL and knows nothing of Connect's envelope. It is also
+	// deliberately OUTSIDE the interceptor chain — there is no session, no
+	// principal and no Idempotency-Key header, and its authentication is the
+	// signature over the raw body.
+	if hook, err := d.buildStripeWebhook(cfg, log); err != nil {
+		log.Error("the Stripe webhook endpoint is NOT served; a cardless trial will end in "+
+			"Stripe and never end here, so the tenant keeps working for free and nothing "+
+			"says so", "error", err)
+	} else {
+		mux.Handle(billingapi.Path, hook)
+		log.Info("stripe webhook registered", "path", billingapi.Path)
 	}
 
 	if d.organization == nil {

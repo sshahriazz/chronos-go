@@ -329,7 +329,7 @@ func TestTheErrorGateIsWiredIntoEveryService(t *testing.T) {
 		slog.NewJSONHandler(&captured, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
 	mux := http.NewServeMux()
-	registerServices(mux, d, failingStatus{}, log)
+	registerServices(mux, d, testConfig(t), failingStatus{}, log)
 
 	srv := httptest.NewServer(mux)
 	defer srv.Close()

@@ -754,6 +754,23 @@ type StripeConfig struct {
 	// plan and the variable goes away.
 	TrialPriceID string `env:"STRIPE_TRIAL_PRICE_ID"`
 
+	// WebhookSecret verifies that an event genuinely came from Stripe.
+	//
+	// Without it the endpoint is an unauthenticated way to change billing state:
+	// anybody who can reach it could suspend a tenant or mark one active.
+	// Verification is therefore not optional, and the endpoint refuses to
+	// register at all when this is unset rather than accepting events it cannot
+	// check.
+	WebhookSecret Secret `env:"STRIPE_WEBHOOK_SECRET"`
+
+	// WebhookSecretPrevious is the secret being rotated OUT.
+	//
+	// Both are accepted while a rotation is in flight (billing.md §5 case 26).
+	// Without an overlap window every event delivered between updating Stripe
+	// and restarting the process fails verification — and Stripe retries for
+	// three days, so the damage is bounded but the pager is not.
+	WebhookSecretPrevious Secret `env:"STRIPE_WEBHOOK_SECRET_PREVIOUS"`
+
 	// TrialDays is how long a cardless trial runs.
 	//
 	// Stripe caps a trial at 730 days. Fourteen is the decision recorded in
@@ -769,6 +786,23 @@ type StripeConfig struct {
 // organization.
 func (s StripeConfig) Configured() bool {
 	return !s.SecretKey.IsZero() && s.TrialPriceID != ""
+}
+
+// WebhookSecrets is every secret an incoming signature may be checked against,
+// newest first.
+//
+// A slice rather than one value, because a rotation needs both live at once.
+// Empty means the endpoint must not be served: an unverified webhook is an
+// unauthenticated request that changes billing state.
+func (s StripeConfig) WebhookSecrets() []string {
+	var out []string
+	if !s.WebhookSecret.IsZero() {
+		out = append(out, s.WebhookSecret.Expose())
+	}
+	if !s.WebhookSecretPrevious.IsZero() {
+		out = append(out, s.WebhookSecretPrevious.Expose())
+	}
+	return out
 }
 
 // Live reports whether the key addresses real money.

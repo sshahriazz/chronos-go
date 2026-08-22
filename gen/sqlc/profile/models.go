@@ -198,6 +198,16 @@ type SessionView struct {
 	RevokedAt                  pgtype.Timestamptz
 }
 
+// Raw Stripe webhooks, keyed by Stripe event id. The idempotency boundary for billing.
+type StripeWebhookEvent struct {
+	EventID     string
+	EventType   string
+	Payload     []byte
+	ReceivedAt  pgtype.Timestamptz
+	ProcessedAt pgtype.Timestamptz
+	LastError   string
+}
+
 type TenantProbe struct {
 	ID          string
 	OrgID       string

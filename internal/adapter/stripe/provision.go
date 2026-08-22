@@ -27,16 +27,18 @@ import (
 // reviews — not an environment variable that can differ between two deployments
 // of the same binary.
 //
-// It is restated here for one reason, and it is the webhook one:
-// `stripe.ConstructEvent` REFUSES an event whose `api_version` does not match
-// this constant. So anything replaying events at us has to speak the same
-// version, and `stripe listen` in particular must be told:
+// It is restated here because it is the version every REQUEST carries, and
+// therefore the version the re-fetch in webhook.go speaks. Incoming events do
+// NOT have to match it: the verifier relaxes that check deliberately, and
+// webhook.go explains why it is safe given how little of a payload is read.
 //
-//	stripe listen --api-version 2026-07-29.dahlia --forward-to localhost:8080/stripe/webhook
+// The webhook tunnel is then just:
 //
-// Without the flag the CLI forwards events at the account's default version, and
-// signature verification fails with a message about the version rather than
-// about the signature — which reads like a broken secret.
+//	stripe listen --forward-to localhost:8090/stripe/webhook
+//
+// Port 8090 is API_PORT. 8080 belongs to OpenFGA — forwarding there sends
+// Stripe's events to the authorization server, which answers 404 and logs
+// nothing useful.
 const APIVersion = stripe.APIVersion
 
 // orgMetadataKey is our organization id, stored on both Stripe objects.
