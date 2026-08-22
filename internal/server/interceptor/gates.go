@@ -90,10 +90,26 @@ type Subscriptions interface {
 	Permit(ctx context.Context, class optionsv1.OperationClass) error
 }
 
-// Entitlements is gate 4: is the feature purchased and is quota available. The
-// returned func releases a reservation the handler did not end up using.
+// Entitlements is gate 4: is the feature purchased and is quota available.
+//
+// # The three return values are the reservation protocol
+//
+// entitlement.md §4 is check -> reserve -> commit/release, and a plain
+// check-then-act is a race: two admins inviting the last seat both read
+// `49 < 50` and both proceed.
+//
+// The CONTEXT carries the reservation forward, so the handler that consumes the
+// quota can COMMIT it. Without that the handler cannot name what it was granted,
+// and the only options left are counting usage from a projection — which lags
+// the log, reopening the exact window a reservation exists to close — or never
+// committing at all.
+//
+// The FUNC releases. WrapUnary defers it unconditionally, which is deliberate
+// and is why an implementation must make it a no-op once committed: a
+// reservation the handler used must survive, and one it did not must not leak
+// until its TTL.
 type Entitlements interface {
-	Reserve(ctx context.Context, key string) (release func(), err error)
+	Reserve(ctx context.Context, key string) (context.Context, func(), error)
 }
 
 // Gate names one rung of the pipeline, for errors that say which is missing.
@@ -522,7 +538,7 @@ func (g *Gates) enforce(
 	if g.deps.Entitlements == nil {
 		return ctx, nil, unavailable(GateEntitlement, p)
 	}
-	release, err := g.deps.Entitlements.Reserve(ctx, p.Entitlement)
+	ctx, release, err := g.deps.Entitlements.Reserve(ctx, p.Entitlement)
 	if err != nil {
 		return ctx, nil, srvconnect.Error(errs.QuotaExceededf("%s", err))
 	}

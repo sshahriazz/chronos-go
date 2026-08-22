@@ -135,17 +135,30 @@ prevent.
       clock: a real subscription reaches day 14, Stripe pauses it, and the
       organization suspends. `trial ended -> stripe paused -> org suspended`.
 
-## Now: Slice 3 — entitlement and the trial catalogue
+## Now: Slices 3+4 MERGED — entitlement, then workspace
 
-The caps a trial org actually gets: **3 workspaces, 5 seats**. Must land before
-`CreateWorkspace`, so that RPC is quota-gated from its first commit rather than
-retrofitted (organization.md §6 runs authz -> subscription -> entitlement ->
-handler).
+**Merged, and the reason is the 1b lesson again.** Gate 4 has no consumer until
+a method declares an entitlement, and none does: `CreateWorkspace` is the first.
+Building entitlement alone would leave the gate implemented and unreachable —
+adapters wired to nothing. The ordering reason still stands, so entitlement
+comes FIRST INSIDE this slice rather than as a slice of its own, and
+`CreateWorkspace` is quota-gated from its first commit.
 
-- [ ] The catalogue: features, limits, meters keyed by string
-- [ ] check -> reserve -> commit/release, so two concurrent requests cannot both
-      consume the last seat
-- [ ] Gate 4, and the `Entitlements` interface that has had no implementation
+Trial caps: **3 workspaces, 5 seats**.
+
+### Entitlement first
+
+- [x] The catalogue: limits keyed by string, with the trial plan a REAL plan
+      rather than an `if trialing` branch in the derivation
+- [x] check -> reserve -> commit/release in POSTGRES, not Valkey. **Two
+      concurrent reservations for the last unit: exactly one wins**, and 5 of 5
+      runs fail without the advisory lock.
+- [>] Gate 4, the `Entitlements` interface that has never had an implementation
+
+### Then workspace, gated from the start
+
+- [ ] `Workspace` aggregate, never-zero-admins, inheritance
+- [ ] `CreateWorkspace` running authz -> subscription -> entitlement -> handler
 - [ ] Seat accounting: one person per ORGANIZATION, not per membership
 
 ## Then

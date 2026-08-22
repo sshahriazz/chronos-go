@@ -2,7 +2,7 @@
 // versions:
 //   sqlc v1.31.1
 
-package notificationdb
+package entitlementdb
 
 import (
 	"github.com/jackc/pgx/v5/pgtype"
@@ -14,8 +14,8 @@ type Credential struct {
 	SubjectID    string
 	Kind         string
 	// password: PHC-shaped one-way verifier. totp: the sealed shared secret (AES-256-GCM, AAD-bound to subject_id:credential_id) — NOT the vault, which holds personal data only. recovery_code/passkey: NULL.
-	Verifier      *string
-	PepperVersion *int32
+	Verifier      pgtype.Text
+	PepperVersion pgtype.Int4
 	EnabledAt     pgtype.Timestamptz
 	DisabledAt    pgtype.Timestamptz
 	CreatedAt     pgtype.Timestamptz
@@ -56,13 +56,13 @@ type IdentityToken struct {
 // Authentication outcomes. subject_id is NULL when the identifier matched no account.
 type LoginHistoryView struct {
 	ID         int64
-	SubjectID  *string
-	EmailIndex *string
+	SubjectID  pgtype.Text
+	EmailIndex pgtype.Text
 	Succeeded  bool
-	Reason     *string
+	Reason     pgtype.Text
 	Methods    []string
-	Aal        *int32
-	DeviceID   *string
+	Aal        pgtype.Int4
+	DeviceID   pgtype.Text
 	OccurredAt pgtype.Timestamptz
 }
 
@@ -134,7 +134,7 @@ type ProjectionCheckpoint struct {
 	EventsProcessed int64
 	LastEventAt     pgtype.Timestamptz
 	UpdatedAt       pgtype.Timestamptz
-	Holder          *string
+	Holder          pgtype.Text
 }
 
 type ProjectionProbe struct {
@@ -156,7 +156,7 @@ type PushSubscription struct {
 	UserAgent      string
 	SubscribedAt   pgtype.Timestamptz
 	ExpiredAt      pgtype.Timestamptz
-	ExpiredReason  *string
+	ExpiredReason  pgtype.Text
 }
 
 // Quota reservations and committed usage. Held rows expire; committed rows are the usage record.
@@ -199,11 +199,11 @@ type SessionToken struct {
 type SessionView struct {
 	SessionID                  string
 	SubjectID                  string
-	DeviceID                   *string
+	DeviceID                   pgtype.Text
 	Aal                        int32
 	AbsoluteExpiresAt          pgtype.Timestamptz
 	RequiresCredentialRotation bool
-	ElevatedScope              *string
+	ElevatedScope              pgtype.Text
 	ElevatedUntil              pgtype.Timestamptz
 	CreatedAt                  pgtype.Timestamptz
 	RevokedAt                  pgtype.Timestamptz
@@ -254,5 +254,5 @@ type UserView struct {
 	// When erasure falls due, copied from the event. Never recomputed from the current grace period.
 	DeletionScheduledFor pgtype.Timestamptz
 	// Public handle, CLEARTEXT and deliberately so (ADR-051). NULL means never claimed, or erased. The one personal-data column in a projection; erasure DELETES it and tombstones the handle.
-	Username *string
+	Username pgtype.Text
 }

@@ -1,0 +1,169 @@
+// Package app is entitlement's use cases and the ports they depend on.
+package app
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/chronos/chronos-go/internal/modules/entitlement/domain"
+)
+
+// ErrQuotaExhausted is the limit being reached. Distinguished from every other
+// failure because it is the only one a CUSTOMER can act on — the answer is
+// "upgrade or free one up", not "try again".
+var ErrQuotaExhausted = errors.New("quota exhausted")
+
+// Reservation is a claim on one unit of a limit.
+type Reservation struct {
+	ID       string
+	OrgID    string
+	Limit    domain.LimitKey
+	ExpireAt time.Time
+
+	// SubjectRef names what consumed the unit — a workspace id, a subject
+	// pseudonym. Not used for enforcement; it is what answers the operator
+	// question "which workspace is using this seat", and what lets a deletion
+	// return exactly the units that resource held.
+	SubjectRef string
+}
+
+// Store is the durable half of the reservation protocol.
+//
+// A port, and its methods are exactly entitlement.md §4's steps. It lives in
+// Postgres rather than Valkey and the reason is a standing invariant: Valkey
+// must survive FLUSHALL, and a reservation cannot — flushing would destroy every
+// in-flight one and let two requests take the last seat.
+type Store interface {
+	// Reserve counts what is live and claims one more, ATOMICALLY.
+	//
+	// The count and the insert must be one transaction under one lock, or the
+	// race this protocol exists to close is simply moved inside the port.
+	Reserve(ctx context.Context, r Reservation, limit int) error
+
+	// Commit turns a held reservation into usage. Reports whether it found one
+	// to commit: a lapsed reservation must not be resurrected, because the unit
+	// it held went back to the pool and may already be taken.
+	Commit(ctx context.Context, reservationID string) (bool, error)
+
+	// Release returns a held reservation. A committed one is untouched.
+	Release(ctx context.Context, reservationID string) error
+}
+
+// Plans resolves the allowance an organization is entitled to.
+type Plans interface {
+	AllowanceFor(ctx context.Context, orgID string) (domain.Allowance, error)
+}
+
+// Reserver is gate 4's use case.
+type Reserver struct {
+	store Store
+	plans Plans
+	ttl   time.Duration
+	now   func() time.Time
+	newID func() string
+}
+
+// ReserverDeps is what Reserver needs.
+type ReserverDeps struct {
+	Store Store
+	Plans Plans
+	TTL   time.Duration
+	Now   func() time.Time
+	NewID func() string
+}
+
+// DefaultTTL bounds how long a reservation may be held without being committed.
+//
+// It has to outlast the slowest request that could commit one and be far shorter
+// than a human notices a seat missing. A minute is generous for an append and a
+// projection, and short enough that a crashed process returns its seat before
+// anybody counts.
+const DefaultTTL = time.Minute
+
+func NewReserver(d ReserverDeps) (*Reserver, error) {
+	switch {
+	case d.Store == nil:
+		return nil, fmt.Errorf("entitlement: a reservation store is required")
+	case d.Plans == nil:
+		return nil, fmt.Errorf("entitlement: a plan resolver is required")
+	case d.Now == nil:
+		return nil, fmt.Errorf("entitlement: a clock is required")
+	case d.NewID == nil:
+		return nil, fmt.Errorf("entitlement: an id source is required")
+	}
+	ttl := d.TTL
+	if ttl <= 0 {
+		ttl = DefaultTTL
+	}
+	return &Reserver{store: d.Store, plans: d.Plans, ttl: ttl, now: d.Now, newID: d.NewID}, nil
+}
+
+// Reserve claims one unit of a limit for an organization.
+//
+// # Why the allowance is read first and the count second
+//
+// The allowance comes from the plan and changes only when a subscription does.
+// The count is what races. Reading the allowance outside the store's transaction
+// keeps the lock as short as possible, and a plan that changed underneath is not
+// a correctness problem: the worst case is one request gated against the
+// previous plan, which the next request corrects.
+func (r *Reserver) Reserve(
+	ctx context.Context, orgID string, key domain.LimitKey, subjectRef string,
+) (Reservation, error) {
+	if orgID == "" {
+		return Reservation{}, fmt.Errorf("entitlement: no organization to reserve against")
+	}
+
+	allowance, err := r.plans.AllowanceFor(ctx, orgID)
+	if err != nil {
+		return Reservation{}, fmt.Errorf("entitlement: resolving the plan for %s: %w", orgID, err)
+	}
+
+	limit, known := allowance.Of(key)
+	if !known {
+		// An RPC declared an entitlement the organization's plan says nothing
+		// about. Refused rather than allowed: treating it as unlimited would
+		// silently ungate that RPC for every customer on that plan.
+		return Reservation{}, fmt.Errorf("entitlement: plan %q grants no %q, so there is no "+
+			"allowance to reserve against", allowance.Name, key)
+	}
+
+	reservation := Reservation{
+		ID:         r.newID(),
+		OrgID:      orgID,
+		Limit:      key,
+		ExpireAt:   r.now().UTC().Add(r.ttl),
+		SubjectRef: subjectRef,
+	}
+	if err := r.store.Reserve(ctx, reservation, limit); err != nil {
+		return Reservation{}, err
+	}
+	return reservation, nil
+}
+
+// Commit records that the reservation was used.
+func (r *Reserver) Commit(ctx context.Context, reservationID string) error {
+	committed, err := r.store.Commit(ctx, reservationID)
+	if err != nil {
+		return fmt.Errorf("entitlement: committing %s: %w", reservationID, err)
+	}
+	if !committed {
+		// The reservation lapsed before the handler finished. The unit went back
+		// to the pool and may already be taken, so this is a real failure rather
+		// than a no-op — the caller has consumed something it no longer holds.
+		return fmt.Errorf("entitlement: reservation %s had already expired; the quota it held "+
+			"was returned to the pool", reservationID)
+	}
+	return nil
+}
+
+// Release returns an uncommitted reservation.
+//
+// Errors are swallowed by design at the call site, not here: the gate defers
+// this after every request and a failure to release costs one unit until the
+// TTL, which is exactly what the TTL is for.
+func (r *Reserver) Release(ctx context.Context, reservationID string) error {
+	return r.store.Release(ctx, reservationID)
+}

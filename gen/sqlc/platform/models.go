@@ -159,6 +159,17 @@ type PushSubscription struct {
 	ExpiredReason  pgtype.Text
 }
 
+// Quota reservations and committed usage. Held rows expire; committed rows are the usage record.
+type QuotaReservation struct {
+	ReservationID string
+	OrgID         string
+	LimitKey      string
+	CommittedAt   pgtype.Timestamptz
+	ExpiresAt     pgtype.Timestamptz
+	SubjectRef    string
+	CreatedAt     pgtype.Timestamptz
+}
+
 // One row per (reactor, event) already handled. Filters at-least-once redelivery.
 type ReactorProcessed struct {
 	Reactor     string

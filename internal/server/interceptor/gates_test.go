@@ -830,7 +830,9 @@ func (denyChecker) BatchCheck(_ context.Context, qs []authz.Query) ([]authz.Deci
 
 type reserveAll struct{}
 
-func (reserveAll) Reserve(context.Context, string) (func(), error) { return func() {}, nil }
+func (reserveAll) Reserve(ctx context.Context, _ string) (context.Context, func(), error) {
+	return ctx, func() {}, nil
+}
 
 // memStore is an in-memory cqrs.Store that also RECORDS the scopes it was asked
 // about, so a test can assert what the pipeline actually scoped by.
