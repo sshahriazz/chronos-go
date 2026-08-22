@@ -53,6 +53,13 @@ type Querier interface {
 	// `defer release()` safe: the handler that used its reservation committed it,
 	// and this then does nothing.
 	ReleaseQuotaReservation(ctx context.Context, reservationID string) (int64, error)
+	// The reservation a subject already holds of a per-person limit, if any.
+	//
+	// Asked under the same advisory lock as the count, so "do they already hold one"
+	// and "take one" cannot interleave. Without the lock two concurrent requests
+	// both see no seat and both insert, and one of them hits the unique index — a
+	// correct outcome reported as a database error rather than as the reuse it is.
+	SeatHeldBy(ctx context.Context, arg SeatHeldByParams) (string, error)
 }
 
 var _ Querier = (*Queries)(nil)

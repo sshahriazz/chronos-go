@@ -3388,6 +3388,71 @@ components:
         - HEALTH_DEGRADED
         - HEALTH_DOWN
       description: Health is a dependency's current state.
+    chronos.workspace.v1.AcceptInvitationRequest:
+      type: object
+      properties:
+        token:
+          type: string
+          examples:
+            - 3q2-7wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          title: token
+          maxLength: 43
+          minLength: 43
+          pattern: ^[A-Za-z0-9_-]{43}$
+          description: |-
+            The token from the link.
+
+             256 bits of crypto/rand, base64url without padding — 43 characters. The
+             bound is published AND enforced, because unlike a password there is no
+             oracle: every value of the right shape is equally unguessable, and refusing
+             a malformed one tells an attacker nothing they did not already know.
+      title: AcceptInvitationRequest
+      additionalProperties: false
+      description: AcceptInvitationRequest redeems an invitation link.
+    chronos.workspace.v1.AcceptInvitationResponse:
+      type: object
+      properties:
+        workspaceId:
+          type: string
+          examples:
+            - ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: workspace_id
+          maxLength: 29
+          pattern: ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: The workspace now joined.
+        orgId:
+          type: string
+          examples:
+            - org_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: org_id
+          maxLength: 30
+          pattern: ^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            The organization it belongs to, which the caller may be learning for the
+             first time — the invitation named neither until it was redeemed.
+        role:
+          type: string
+          examples:
+            - member
+          title: role
+          maxLength: 16
+          enum:
+            - admin
+            - member
+            - guest
+          description: The role now held.
+        alreadyMember:
+          type: boolean
+          title: already_member
+          description: |-
+            True when the caller was already in the workspace and nothing changed.
+
+             A SUCCESS, not an error: the inviter's intent was already satisfied, and
+             reporting a conflict would make a second click of one link look like a
+             failure (workspace.md §5).
+      title: AcceptInvitationResponse
+      additionalProperties: false
+      description: AcceptInvitationResponse names what was joined.
     chronos.workspace.v1.AddWorkspaceMemberRequest:
       type: object
       properties:
@@ -6699,6 +6764,73 @@ paths:
                     lastCheckedAt: '2026-08-14T11:04:55Z'
                     latencyMs: '1004'
       security: []
+  /chronos.workspace.v1.WorkspaceService/AcceptInvitation:
+    post:
+      tags:
+        - WorkspaceService
+      summary: AcceptInvitation redeems an invitation link.
+      description: |-
+        # Self-scoped, because the caller is not in the organization yet
+
+         Every other org-scoped RPC gets its tenant from gate 1, which verifies
+         membership. The person clicking this link has none — joining is what they
+         are doing — so there is nothing for gate 1 to resolve and nothing for gate 2
+         to check. The TOKEN is the authorization: a 256-bit capability this system
+         issued and stored, which names the organization only after the handler has
+         looked it up.
+
+         So the checks gates 1 and 3 would have made move into the handler, and
+         workspace.md §5 lists all five: the token is valid and unspent, the
+         organization still permits growth, the workspace is still active, the caller
+         is the person it was sent to, and a seat is still available. Every one is
+         revalidated at redemption rather than trusted from issue time, because days
+         pass and organizations stop paying.
+
+         # It consumes no quota of its own
+
+         The seat was taken at issue. Declaring an entitlement here would charge a
+         second one for the same person, which is the mistake charging at issue
+         exists to avoid.
+      operationId: WorkspaceService_AcceptInvitation
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.workspace.v1.AcceptInvitationRequest'
+            example:
+              token: 3q2-7wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.workspace.v1.AcceptInvitationResponse'
   /chronos.workspace.v1.WorkspaceService/AddWorkspaceMember:
     post:
       tags:

@@ -168,3 +168,27 @@ func (q *Queries) ReleaseQuotaReservation(ctx context.Context, reservationID str
 	}
 	return result.RowsAffected(), nil
 }
+
+const SeatHeldBy = `-- name: SeatHeldBy :one
+SELECT reservation_id FROM quota_reservation
+WHERE org_id = $1 AND limit_key = $2 AND subject_ref = $3
+`
+
+type SeatHeldByParams struct {
+	OrgID      string
+	LimitKey   string
+	SubjectRef string
+}
+
+// The reservation a subject already holds of a per-person limit, if any.
+//
+// Asked under the same advisory lock as the count, so "do they already hold one"
+// and "take one" cannot interleave. Without the lock two concurrent requests
+// both see no seat and both insert, and one of them hits the unique index — a
+// correct outcome reported as a database error rather than as the reuse it is.
+func (q *Queries) SeatHeldBy(ctx context.Context, arg SeatHeldByParams) (string, error) {
+	row := q.db.QueryRow(ctx, SeatHeldBy, arg.OrgID, arg.LimitKey, arg.SubjectRef)
+	var reservation_id string
+	err := row.Scan(&reservation_id)
+	return reservation_id, err
+}

@@ -109,6 +109,22 @@ func NewReserver(d ReserverDeps) (*Reserver, error) {
 	return &Reserver{store: d.Store, plans: d.Plans, ttl: ttl, now: d.Now, newID: d.NewID}, nil
 }
 
+// SeatAlreadyHeld reports that a PER-PERSON limit was already held by this
+// subject, so nothing new was taken.
+//
+// An error type rather than a bool return, because it has to survive being
+// returned from inside a transaction closure — and because every existing caller
+// of Reserve treats a nil error as "a unit was taken", which is exactly the
+// belief that must not silently become wrong.
+//
+// It is a SUCCESS. The reservation named by it is the seat the subject already
+// holds, and it is the one to commit.
+type SeatAlreadyHeld struct{ ReservationID string }
+
+func (SeatAlreadyHeld) Error() string {
+	return "entitlement: this subject already holds a seat in that pool"
+}
+
 // Reserve claims one unit of a limit for an organization.
 //
 // # Why the allowance is read first and the count second
@@ -147,6 +163,14 @@ func (r *Reserver) Reserve(
 		SubjectRef: subjectRef,
 	}
 	if err := r.store.Reserve(ctx, reservation, limit); err != nil {
+		// Already held is a SUCCESS with a different reservation id: the seat is
+		// the one they already have, and committing THAT is what keeps the
+		// caller's commit from failing against a row that was never inserted.
+		var held SeatAlreadyHeld
+		if errors.As(err, &held) {
+			reservation.ID = held.ReservationID
+			return reservation, held
+		}
 		return Reservation{}, err
 	}
 	return reservation, nil
@@ -187,7 +211,14 @@ func (r *Reserver) ReserveFor(
 	ctx context.Context, orgID, limitKey, subjectRef string,
 ) (string, error) {
 	reservation, err := r.Reserve(ctx, orgID, domain.LimitKey(limitKey), subjectRef)
-	if err != nil {
+	var held SeatAlreadyHeld
+	switch {
+	case errors.As(err, &held):
+		// The seat they already hold. Returned WITH the sentinel, so the seat
+		// rule can report `seat_consumed: false` — the customer is not charged
+		// twice, and the caller is told which of the two happened.
+		return reservation.ID, held
+	case err != nil:
 		return "", err
 	}
 	return reservation.ID, nil

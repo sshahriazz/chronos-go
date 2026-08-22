@@ -119,7 +119,7 @@ func (d *dependencies) buildWorkspace(log *slog.Logger) (*workspaceapi.Service, 
 	// so declaring `seats.member` on the RPC would charge somebody a second seat
 	// every time they joined another workspace.
 	seats, err := workspaceapp.NewSeats(workspaceapp.SeatsDeps{
-		Reserver: d.reserver,
+		Reserver: &seatReserver{inner: d.reserver},
 		Members:  counter,
 	})
 	if err != nil {
@@ -176,16 +176,27 @@ func (d *dependencies) buildWorkspace(log *slog.Logger) (*workspaceapi.Service, 
 		return nil, fmt.Errorf("invitation token minter: %w", err)
 	}
 
+	if d.subscriptions == nil {
+		return nil, errors.New("no subscription gate: acceptance revalidates that the " +
+			"organization still permits growth, and it cannot use the interceptor's — the " +
+			"person clicking the link is not in the organization yet")
+	}
+
 	invitations, err := workspaceapp.NewInvitations(workspaceapp.InvitationsDeps{
-		Repo:     invitationRepo,
-		Tokens:   invitationTokens,
-		Minter:   invitationMinter,
-		Indexer:  d.emailIndex,
-		Dir:      d.accounts,
-		Vault:    &vaultAddresses{vault: d.piiVault},
-		Subjects: &ulidSubjects{clock: d.clock},
-		Seats:    seats,
-		Now:      d.clock.Now,
+		Repo:        invitationRepo,
+		Workspaces:  repo,
+		Memberships: memberships,
+		Appender:    appender,
+		Schemas:     d.upcasters,
+		Subs:        &joinPermission{gate: d.subscriptions},
+		Tokens:      invitationTokens,
+		Minter:      invitationMinter,
+		Indexer:     d.emailIndex,
+		Dir:         d.accounts,
+		Vault:       &vaultAddresses{vault: d.piiVault},
+		Subjects:    &ulidSubjects{clock: d.clock},
+		Seats:       seats,
+		Now:         d.clock.Now,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("workspace invitations: %w", err)

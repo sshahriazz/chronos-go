@@ -78,6 +78,44 @@ func (q *Queries) IssueInvitationToken(ctx context.Context, arg IssueInvitationT
 	return err
 }
 
+const LookupInvitationToken = `-- name: LookupInvitationToken :one
+SELECT invitation_id, org_id FROM invitation_token
+WHERE digest = $1 AND purpose = $2 AND expires_at > $3
+`
+
+type LookupInvitationTokenParams struct {
+	Digest    []byte
+	Purpose   string
+	ExpiresAt pgtype.Timestamptz
+}
+
+type LookupInvitationTokenRow struct {
+	InvitationID string
+	OrgID        string
+}
+
+// Read a digest WITHOUT spending it, so the checks that can fail transiently run
+// first.
+//
+// The alternative — consume, then check — burns the link for a failure the
+// recipient did nothing to cause: an organization that is briefly past due, or a
+// seat pool that is momentarily full. They would then hold a dead link for a
+// pending invitation, and only a resend could fix it.
+//
+// Single use is NOT weakened by this. Consumption is still one atomic
+// DELETE ... RETURNING immediately before the append, so two simultaneous clicks
+// still resolve to exactly one winner; this only moves the transient failures to
+// the side of that line where they can be retried.
+//
+// Same expiry treatment as the consume, for the same reason: an expired token
+// must be indistinguishable from an unknown one.
+func (q *Queries) LookupInvitationToken(ctx context.Context, arg LookupInvitationTokenParams) (LookupInvitationTokenRow, error) {
+	row := q.db.QueryRow(ctx, LookupInvitationToken, arg.Digest, arg.Purpose, arg.ExpiresAt)
+	var i LookupInvitationTokenRow
+	err := row.Scan(&i.InvitationID, &i.OrgID)
+	return i, err
+}
+
 const RevokeInvitationTokens = `-- name: RevokeInvitationTokens :execrows
 DELETE FROM invitation_token WHERE invitation_id = $1
 `

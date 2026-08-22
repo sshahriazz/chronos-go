@@ -4,12 +4,16 @@ import (
 	"context"
 	"errors"
 
+	optionsv1 "github.com/chronos/chronos-go/gen/proto/chronos/options/v1"
+	identityentitlement "github.com/chronos/chronos-go/internal/modules/entitlement/app"
 	identityapp "github.com/chronos/chronos-go/internal/modules/identity/app"
 	identitycontract "github.com/chronos/chronos-go/internal/modules/identity/contract"
 	workspaceapp "github.com/chronos/chronos-go/internal/modules/workspace/app"
 	"github.com/chronos/chronos-go/internal/platform/clock"
+	"github.com/chronos/chronos-go/internal/platform/db"
 	"github.com/chronos/chronos-go/internal/platform/ids"
 	"github.com/chronos/chronos-go/internal/platform/pii"
+	"github.com/chronos/chronos-go/internal/server/interceptor"
 )
 
 // This file is where workspace's invitation ports meet identity's and the
@@ -30,6 +34,9 @@ import (
 type accountDirectory struct {
 	accounts interface {
 		AccountByEmailIndex(ctx context.Context, index identitycontract.EmailIndex) (identityapp.Account, error)
+	}
+	reads interface {
+		Account(ctx context.Context, subjectID string) (identityapp.AccountView, error)
 	}
 }
 
@@ -87,4 +94,92 @@ var _ workspaceapp.SubjectMinter = (*ulidSubjects)(nil)
 
 func (s *ulidSubjects) NewSubject() string {
 	return ids.New[ids.Subject](s.clock.Now(), ids.Entropy()).String()
+}
+
+// IsAccount reports whether a pseudonym names a real account.
+//
+// Deliberately NOT a lookup of the address or its index. identity drops the
+// blind index at this exact boundary because it is a re-identification handle,
+// and acceptance does not need one — see the port's own comment.
+//
+// A minted invitation pseudonym lands in the false branch, which is not an
+// error: it names a vault entry rather than an account, so there is nothing for
+// identity to know about it.
+func (d *accountDirectory) IsAccount(ctx context.Context, subjectID string) (bool, error) {
+	_, err := d.reads.Account(ctx, subjectID)
+	switch {
+	case errors.Is(err, identityapp.ErrNoSuchSubject):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	return true, nil
+}
+
+// seatReserver translates entitlement's already-held signal into workspace's.
+//
+// Both modules declare the same value because neither may import the other's app
+// package (CONVENTIONS §2), and this is the one place that knows both names. It
+// is not ceremony: without the translation workspace's errors.As never matches,
+// the already-held case falls through as a plain error, and a person who already
+// holds a seat cannot be added to a second workspace at all.
+type seatReserver struct {
+	inner interface {
+		ReserveFor(ctx context.Context, orgID, limitKey, subjectRef string) (string, error)
+		Commit(ctx context.Context, reservationID string) error
+		Release(ctx context.Context, reservationID string) error
+		ReleaseFor(ctx context.Context, orgID, limitKey, subjectRef string) error
+	}
+}
+
+var _ workspaceapp.Reserver = (*seatReserver)(nil)
+
+func (r *seatReserver) ReserveFor(
+	ctx context.Context, orgID, limitKey, subjectRef string,
+) (string, error) {
+	id, err := r.inner.ReserveFor(ctx, orgID, limitKey, subjectRef)
+	var held identityentitlement.SeatAlreadyHeld
+	if errors.As(err, &held) {
+		return id, workspaceapp.SeatAlreadyHeld{ReservationID: held.ReservationID}
+	}
+	return id, err
+}
+
+func (r *seatReserver) Commit(ctx context.Context, reservationID string) error {
+	return r.inner.Commit(ctx, reservationID)
+}
+
+func (r *seatReserver) Release(ctx context.Context, reservationID string) error {
+	return r.inner.Release(ctx, reservationID)
+}
+
+func (r *seatReserver) ReleaseFor(ctx context.Context, orgID, limitKey, subjectRef string) error {
+	return r.inner.ReleaseFor(ctx, orgID, limitKey, subjectRef)
+}
+
+// joinPermission asks gate 3 about an organization the caller did not name.
+//
+// The gate reads the tenant scope from the context, because "which organization
+// is this request in" is precisely the question a caller must not answer for
+// itself. Acceptance is the one flow where that scope cannot exist yet: the
+// person clicking the link is not a member, so gate 1 had nothing to resolve.
+//
+// So the scope is attached HERE, from the organization the TOKEN named. That is
+// safe for the reason it is unsafe everywhere else — the id did not come from
+// the caller, it came from a 256-bit capability this system issued and stored and
+// has just verified.
+//
+// GROW and not WRITE: joining adds a person to an organization, and
+// organization.md §5.2's rule is that growth stops before work does. A past-due
+// tenant keeps working and stops adding people.
+type joinPermission struct{ gate interceptor.Subscriptions }
+
+var _ workspaceapp.Subscriptions = (*joinPermission)(nil)
+
+func (p *joinPermission) PermitJoin(ctx context.Context, orgID string) error {
+	// UserID is left empty: the gate reads only OrgID, and the accepting account
+	// is not a member of this tenant yet — naming them here would assert a
+	// relationship that is exactly what the acceptance is about to create.
+	scoped := db.WithTenant(ctx, db.Tenant{OrgID: orgID})
+	return p.gate.Permit(scoped, optionsv1.OperationClass_OPERATION_CLASS_GROW)
 }

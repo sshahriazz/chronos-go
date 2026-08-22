@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -120,6 +121,12 @@ func (jsonCodec) Unmarshal(eventType string, payload []byte) (eventsourcing.Even
 	switch eventType {
 	case (&contract.WorkspaceCreated{}).EventType():
 		return decode[contract.WorkspaceCreated](payload)
+	case (&contract.WorkspaceRenamed{}).EventType():
+		return decode[contract.WorkspaceRenamed](payload)
+	case (&contract.WorkspaceArchived{}).EventType():
+		return decode[contract.WorkspaceArchived](payload)
+	case (&contract.WorkspaceRestored{}).EventType():
+		return decode[contract.WorkspaceRestored](payload)
 	case (&contract.WorkspaceAdminAdded{}).EventType():
 		return decode[contract.WorkspaceAdminAdded](payload)
 	case (&contract.WorkspaceAdminRemoved{}).EventType():
@@ -145,7 +152,11 @@ func (jsonCodec) Unmarshal(eventType string, payload []byte) (eventsourcing.Even
 	case (&contract.InvitationUndeliverable{}).EventType():
 		return decode[contract.InvitationUndeliverable](payload)
 	default:
-		return nil, nil
+		// A HARD ERROR, matching the real codec. Returning (nil, nil) makes an
+		// unregistered type replay as though it never happened — which is how an
+		// archived workspace rebuilt as active, and the test that should have
+		// caught it passed instead.
+		return nil, fmt.Errorf("test codec: %q is not registered", eventType)
 	}
 }
 

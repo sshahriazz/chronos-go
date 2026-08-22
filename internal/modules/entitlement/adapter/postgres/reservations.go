@@ -3,7 +3,10 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
+
+	"github.com/jackc/pgx/v5"
 
 	entitlementdb "github.com/chronos/chronos-go/gen/sqlc/entitlement"
 	"github.com/chronos/chronos-go/internal/modules/entitlement/app"
@@ -52,12 +55,36 @@ func NewReservations(tx db.TX, system db.SystemTX) (*Reservations, error) {
 // A TENANT transaction, so the RLS predicate and the WHERE clause say the same
 // thing. The policy is what holds when somebody forgets the predicate.
 func (r *Reservations) Reserve(ctx context.Context, res app.Reservation, limit int) error {
-	return r.tx.InTenantTx(ctx, func(ctx context.Context, q db.Querier) error {
+	err := r.tx.InTenantTx(ctx, func(ctx context.Context, q db.Querier) error {
 		// FIRST, and in the same transaction as the count and the insert.
 		// Released automatically at COMMIT or ROLLBACK.
 		if _, err := q.Exec(ctx, entitlementdb.LockQuota,
 			res.OrgID, string(res.Limit)); err != nil {
 			return fmt.Errorf("locking %s for %s: %w", res.Limit, res.OrgID, err)
+		}
+
+		// A PER-PERSON limit that this subject already holds is not a second
+		// unit — it is the same seat. Asked under the lock taken above, so "do
+		// they already hold one" and "take one" cannot interleave.
+		//
+		// This is what makes "a seat is per person per organization" true across
+		// callers that cannot see each other. A pending invitation holds a seat
+		// and creates no membership row, so the invite path and the direct-add
+		// path each ask "is this person already a member", each get no, and each
+		// reserve — charging the organization twice for one person. The unique
+		// index added in migration 00024 makes the second row impossible; this
+		// turns that impossibility into a reuse rather than an error.
+		if res.Limit.PerSubject() && res.SubjectRef != "" {
+			var existing string
+			err := q.QueryRow(ctx, entitlementdb.SeatHeldBy,
+				res.OrgID, string(res.Limit), res.SubjectRef).Scan(&existing)
+			switch {
+			case err == nil:
+				return errAlreadyHeld{reservationID: existing}
+			case !errors.Is(err, pgx.ErrNoRows):
+				return fmt.Errorf("reading the %s held by %s: %w",
+					res.Limit, res.SubjectRef, err)
+			}
 		}
 
 		var used int64
@@ -80,7 +107,26 @@ func (r *Reservations) Reserve(ctx context.Context, res app.Reservation, limit i
 		}
 		return nil
 	})
+
+	// A seat this subject already holds is a SUCCESS, and it is reported as
+	// app.ErrSeatAlreadyHeld so the caller can tell "took one" from "already had
+	// one" — which is the difference between charging the customer and not, and
+	// is what `seat_consumed` publishes.
+	var held errAlreadyHeld
+	if errors.As(err, &held) {
+		return app.SeatAlreadyHeld{ReservationID: held.reservationID}
+	}
+	return err
 }
+
+// errAlreadyHeld carries the existing reservation out of the transaction.
+//
+// A sentinel rather than a nil return, because returning nil from inside
+// InTenantTx would COMMIT the transaction as a successful reservation that
+// inserted nothing — indistinguishable, from the outside, from one that did.
+type errAlreadyHeld struct{ reservationID string }
+
+func (errAlreadyHeld) Error() string { return "entitlement: seat already held" }
 
 // Commit turns a held reservation into usage.
 func (r *Reservations) Commit(ctx context.Context, reservationID string) (bool, error) {

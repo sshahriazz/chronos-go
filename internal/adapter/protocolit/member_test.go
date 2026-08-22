@@ -4,6 +4,10 @@ package protocolit_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -14,11 +18,13 @@ import (
 	fgaadapter "github.com/chronos/chronos-go/internal/adapter/openfga"
 	valkeyadapter "github.com/chronos/chronos-go/internal/adapter/valkey"
 	accessprojection "github.com/chronos/chronos-go/internal/modules/access/projection"
+	workspaceapp "github.com/chronos/chronos-go/internal/modules/workspace/app"
 	workspacecontract "github.com/chronos/chronos-go/internal/modules/workspace/contract"
 	"github.com/chronos/chronos-go/internal/platform/authz"
 	"github.com/chronos/chronos-go/internal/platform/db"
 	"github.com/chronos/chronos-go/internal/platform/errs"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
+	"github.com/chronos/chronos-go/internal/platform/secret"
 	"github.com/valkey-io/valkey-go"
 )
 
@@ -570,6 +576,69 @@ func TestInvitingEndToEnd(t *testing.T) {
 		}
 	})
 
+	t.Run("an invitation is accepted and creates a membership", func(t *testing.T) {
+		// The invitee is an ACCOUNT with no organization: they can authenticate
+		// but gate 1 resolves nothing for them, which is precisely the state the
+		// accept RPC has to work in. Every other org-scoped call they make is
+		// NOT_FOUND until this succeeds.
+		invitee := h.disposableAccount(t, "invite-accepts")
+
+		res, err := h.workspace.InviteToWorkspace(ctx,
+			authed(&workspacev1.InviteToWorkspaceRequest{
+				WorkspaceId: workspaceID, Email: invitee.email, Role: "member",
+			}, owner.bearer))
+		if err != nil {
+			t.Fatalf("InviteToWorkspace: %v\n%s", err, h.serverLogs())
+		}
+		invitationID := res.Msg.GetInvitationId()
+
+		// The token is not in the response, and not in the log — it is in the
+		// mail, which does not exist yet (WORKLIST 5g). So it is read from the
+		// credential store the same way the mail activity will: by digest.
+		token := h.invitationToken(t, ctx, invitationID)
+
+		accepted, err := h.workspace.AcceptInvitation(ctx,
+			authed(&workspacev1.AcceptInvitationRequest{Token: token}, invitee.bearer))
+		if err != nil {
+			t.Fatalf("AcceptInvitation: %v\n%s", err, h.serverLogs())
+		}
+		if accepted.Msg.GetWorkspaceId() != workspaceID {
+			t.Errorf("joined %s, want %s", accepted.Msg.GetWorkspaceId(), workspaceID)
+		}
+		if accepted.Msg.GetOrgId() != orgID {
+			t.Errorf("reported org %s, want %s", accepted.Msg.GetOrgId(), orgID)
+		}
+		if accepted.Msg.GetAlreadyMember() {
+			t.Error("reported already-member for somebody who had never joined")
+		}
+
+		h.awaitWorkspaceMember(t, ctx, orgID, workspaceID, invitee.subjectID, "member")
+
+		// And gate 1 now resolves for them, which is the end-to-end consequence:
+		// before accepting they were an account with no tenant, and every
+		// org-scoped call answered NOT_FOUND.
+		h.awaitOrgMember(t, ctx, orgID, invitee.subjectID)
+
+		// THE LINK IS SPENT. A second click must not admit a second person.
+		if _, err := h.workspace.AcceptInvitation(ctx,
+			authed(&workspacev1.AcceptInvitationRequest{Token: token},
+				existing.bearer)); err == nil {
+			t.Fatal("a second account joined on one invitation; that is one seat " +
+				"admitting two people")
+		}
+
+		// Asserted against the STORE as well, and not only against the second
+		// call, because the two refuse for different reasons and only one of them
+		// is the token. The settled invitation refuses a replay all by itself —
+		// so a Consume that quietly stopped consuming would leave a live digest
+		// behind and the call above would still fail, for the wrong reason and
+		// with nothing to say so.
+		if n := h.invitationTokenRows(t, ctx, invitationID); n != 0 {
+			t.Errorf("%d digests survive a redeemed invitation; a credential that outlives "+
+				"what it authorised is one a mail archive can replay", n)
+		}
+	})
+
 	t.Run("a member cannot invite", func(t *testing.T) {
 		_, err := h.workspace.InviteToWorkspace(ctx,
 			authed(&workspacev1.InviteToWorkspaceRequest{
@@ -622,4 +691,88 @@ func (hh *harness) invitationIssued(
 			events[0].Payload)
 	}
 	return issued
+}
+
+// invitationToken installs a link the test knows the plaintext of.
+//
+// # Why the token cannot simply be read
+//
+// The plaintext exists in exactly one place — the mail — and the store holds only
+// a digest, which cannot be reversed. That is the whole point of storing one. The
+// mail does not exist yet (WORKLIST 5g), so there is no channel to read it from.
+//
+// The alternatives were both worse. A test-only endpoint that returns a live
+// credential is a production path added to satisfy a test, and it is the kind
+// that survives into production. Skipping the test asserts nothing at all, which
+// is the failure this repository keeps finding in its own suite.
+//
+// So the test substitutes the DELIVERY, and nothing else. It replaces the
+// invitation's digests with one it minted — which is exactly what a resend does,
+// through the same store, the same purpose and the same expiry — and then drives
+// the real RPC. Every check on the accept path runs against the real thing:
+// the token store, the subscription gate, the workspace aggregate, the directory
+// and the seat pool.
+func (hh *harness) invitationToken(t *testing.T, ctx context.Context, invitationID string) string {
+	t.Helper()
+
+	// The SERVER's clock, not this process's. Another test in this package
+	// travels the server hours or days forward to expire a session, and the
+	// server is what evaluates `expires_at > now` — so a window measured from
+	// real time is already closed by the time the lookup runs, and the symptom is
+	// an acceptance refused as NOT_FOUND for a link that was just installed.
+	//
+	// It passes in isolation and fails in a full run, which is the shape of
+	// interference a fixed timestamp hides.
+	reading, err := hh.clockState(ctx, http.MethodGet, hh.clockURL+"/debug/clock")
+	if err != nil {
+		t.Fatalf("reading the server's clock: %v", err)
+	}
+
+	raw := make([]byte, secret.Bytes)
+	if _, err := rand.Read(raw); err != nil {
+		t.Fatalf("generating a token: %v", err)
+	}
+	plaintext := base64.RawURLEncoding.EncodeToString(raw)
+	digest := secret.Digest(workspaceapp.PurposeInvitation, plaintext)
+
+	// A SYSTEM transaction, because invitation_token carries no row security:
+	// redemption happens before any tenant scope exists (migration 00023).
+	err = hh.pg.InSystemTx(ctx, func(ctx context.Context, q db.Querier) error {
+		var orgID string
+		if err := q.QueryRow(ctx,
+			`SELECT org_id FROM invitation_token WHERE invitation_id = $1`,
+			invitationID).Scan(&orgID); err != nil {
+			return fmt.Errorf("the issuing path stored no digest for %s: %w",
+				invitationID, err)
+		}
+		if _, err := q.Exec(ctx,
+			`DELETE FROM invitation_token WHERE invitation_id = $1`, invitationID); err != nil {
+			return err
+		}
+		_, err := q.Exec(ctx,
+			`INSERT INTO invitation_token (digest, purpose, invitation_id, org_id, expires_at)
+			 VALUES ($1, $2, $3, $4, $5)`,
+			digest, string(workspaceapp.PurposeInvitation), invitationID, orgID,
+			reading.now.UTC().Add(workspaceapp.InvitationTTL))
+		return err
+	})
+	if err != nil {
+		t.Fatalf("installing an invitation link: %v", err)
+	}
+	return plaintext
+}
+
+// invitationTokenRows counts the live digests for an invitation.
+func (hh *harness) invitationTokenRows(t *testing.T, ctx context.Context, invitationID string) int {
+	t.Helper()
+	var n int
+	err := hh.pg.InSystemTx(ctx, func(ctx context.Context, q db.Querier) error {
+		return q.QueryRow(ctx,
+			`SELECT count(*) FROM invitation_token WHERE invitation_id = $1`,
+			invitationID).Scan(&n)
+	})
+	if err != nil {
+		t.Fatalf("counting invitation tokens: %v", err)
+	}
+	return n
 }

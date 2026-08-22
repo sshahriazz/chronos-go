@@ -69,3 +69,13 @@ WHERE committed_at IS NULL AND expires_at <= now();
 -- member removed. Committed rows included: this is usage going away.
 DELETE FROM quota_reservation
 WHERE org_id = $1 AND limit_key = $2 AND subject_ref = $3;
+
+-- name: SeatHeldBy :one
+-- The reservation a subject already holds of a per-person limit, if any.
+--
+-- Asked under the same advisory lock as the count, so "do they already hold one"
+-- and "take one" cannot interleave. Without the lock two concurrent requests
+-- both see no seat and both insert, and one of them hits the unique index — a
+-- correct outcome reported as a database error rather than as the reuse it is.
+SELECT reservation_id FROM quota_reservation
+WHERE org_id = $1 AND limit_key = $2 AND subject_ref = $3;

@@ -45,6 +45,22 @@ type Querier interface {
 	// one. It is the same exception identity_token takes.
 	// Record a digest against an invitation, until it expires.
 	IssueInvitationToken(ctx context.Context, arg IssueInvitationTokenParams) error
+	// Read a digest WITHOUT spending it, so the checks that can fail transiently run
+	// first.
+	//
+	// The alternative — consume, then check — burns the link for a failure the
+	// recipient did nothing to cause: an organization that is briefly past due, or a
+	// seat pool that is momentarily full. They would then hold a dead link for a
+	// pending invitation, and only a resend could fix it.
+	//
+	// Single use is NOT weakened by this. Consumption is still one atomic
+	// DELETE ... RETURNING immediately before the append, so two simultaneous clicks
+	// still resolve to exactly one winner; this only moves the transient failures to
+	// the side of that line where they can be retried.
+	//
+	// Same expiry treatment as the consume, for the same reason: an expired token
+	// must be indistinguishable from an unknown one.
+	LookupInvitationToken(ctx context.Context, arg LookupInvitationTokenParams) (LookupInvitationTokenRow, error)
 	RemoveOrgMember(ctx context.Context, arg RemoveOrgMemberParams) error
 	// Drop the organization membership a workspace join created.
 	//

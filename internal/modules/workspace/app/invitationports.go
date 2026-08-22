@@ -43,6 +43,10 @@ type InvitationTokenStore interface {
 	// Issue records a digest against an invitation, until expiresAt.
 	Issue(ctx context.Context, digest []byte, invitationID, orgID string, expiresAt time.Time) error
 
+	// Lookup reads a digest WITHOUT spending it, so the checks that can fail
+	// transiently run before the link is burned.
+	Lookup(ctx context.Context, digest []byte, now time.Time) (invitationID, orgID string, err error)
+
 	// Consume redeems a digest exactly once and reports which invitation it
 	// names. Returns ErrInvitationTokenNotFound for unknown, spent or expired.
 	Consume(ctx context.Context, digest []byte, now time.Time) (invitationID, orgID string, err error)
@@ -92,6 +96,46 @@ type Directory interface {
 	// people who have never used this system, and treating that as a failure
 	// would make inviting a new colleague impossible.
 	SubjectFor(ctx context.Context, index identitycontract.EmailIndex) (subjectID string, known bool, err error)
+
+	// IsAccount reports whether a pseudonym names a real account.
+	//
+	// # What acceptance does with the answer, and why it is not a comparison of
+	// addresses
+	//
+	// workspace.md §5 wants a caller signed in as a DIFFERENT user to be told so
+	// explicitly rather than have the invitation silently bound to the wrong
+	// account. The obvious implementation compares the caller's address to the
+	// invited one — and it cannot be built, because identity deliberately drops
+	// the blind index at its read boundary: it is a re-identification handle
+	// over an address, and letting one out of a result whose whole design is
+	// that it carries a pseudonym is the thing that comment exists to prevent.
+	//
+	// This answers the same question without one. An invitation to somebody who
+	// ALREADY had an account names that account's pseudonym, so a different
+	// caller is detectable by comparing pseudonyms. An invitation to somebody
+	// who did not names a minted pseudonym that is not an account at all — and
+	// there is nothing to compare, nor anything to gain: holding the link is
+	// proof of control over the mailbox it was sent to, which is the entire
+	// reason the token is a credential.
+	IsAccount(ctx context.Context, subjectID string) (bool, error)
+}
+
+// Subscriptions is gate 3, asked about an organization the CALLER did not name.
+//
+// Every other org-scoped RPC gets this from the interceptor, which reads the
+// tenant scope gate 1 resolved. Acceptance cannot: the person clicking the link
+// may not be in the organization yet, so there is no membership to resolve a
+// scope from — the TOKEN is what names the organization, and it names it only
+// after the handler has looked it up.
+//
+// So the check moves into the handler and takes an explicit id. That is safe
+// here for the reason it is unsafe everywhere else: the id did not come from the
+// caller, it came from a 256-bit capability this system issued and stored.
+type Subscriptions interface {
+	// PermitJoin refuses an acceptance the organization's subscription does not
+	// allow. workspace.md §5 wants ORG_SUSPENDED here, which is what makes a
+	// suspended tenant unable to grow while its existing members keep working.
+	PermitJoin(ctx context.Context, orgID string) error
 }
 
 // Addresses is the vault, narrowed to the one field an invitation needs.

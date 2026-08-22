@@ -9,6 +9,25 @@
 INSERT INTO invitation_token (digest, purpose, invitation_id, org_id, expires_at)
 VALUES ($1, $2, $3, $4, $5);
 
+-- name: LookupInvitationToken :one
+-- Read a digest WITHOUT spending it, so the checks that can fail transiently run
+-- first.
+--
+-- The alternative — consume, then check — burns the link for a failure the
+-- recipient did nothing to cause: an organization that is briefly past due, or a
+-- seat pool that is momentarily full. They would then hold a dead link for a
+-- pending invitation, and only a resend could fix it.
+--
+-- Single use is NOT weakened by this. Consumption is still one atomic
+-- DELETE ... RETURNING immediately before the append, so two simultaneous clicks
+-- still resolve to exactly one winner; this only moves the transient failures to
+-- the side of that line where they can be retried.
+--
+-- Same expiry treatment as the consume, for the same reason: an expired token
+-- must be indistinguishable from an unknown one.
+SELECT invitation_id, org_id FROM invitation_token
+WHERE digest = $1 AND purpose = $2 AND expires_at > $3;
+
 -- name: ConsumeInvitationToken :one
 -- Redeem a token exactly once and report which invitation it belongs to.
 --

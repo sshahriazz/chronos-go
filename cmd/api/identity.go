@@ -353,11 +353,11 @@ func (d *dependencies) buildIdentity(
 	// diverged every invitation would fail to recognise an existing account and
 	// silently take a second seat for somebody who already had one.
 	d.emailIndex = index
-	d.accounts = &accountDirectory{accounts: sessions}
 	readModel, err := identitypg.NewReadModel(tx)
 	if err != nil {
 		return nil, fmt.Errorf("identity read model: %w", err)
 	}
+	d.accounts = &accountDirectory{accounts: sessions, reads: readModel}
 	guards, err := identitypg.NewGuards(tx)
 	if err != nil {
 		return nil, fmt.Errorf("single-use guards: %w", err)

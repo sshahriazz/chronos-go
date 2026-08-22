@@ -161,3 +161,44 @@ func (s *Service) InviteToWorkspace(
 		ExpiresAt:    timestamppb.New(result.ExpiresAt.UTC()),
 	}), nil
 }
+
+// AcceptInvitation redeems an invitation link.
+//
+// # No tenant scope, deliberately
+//
+// Every other handler in this file starts with db.RequireTenant. This one cannot:
+// the person clicking the link is not in the organization yet, so gate 1 had
+// nothing to resolve — the RPC is self-scoped for exactly that reason. The
+// organization comes out of the TOKEN, inside the use case, and the checks gates
+// 1 and 3 would have made happen there.
+func (s *Service) AcceptInvitation(
+	ctx context.Context, req *connect.Request[workspacev1.AcceptInvitationRequest],
+) (*connect.Response[workspacev1.AcceptInvitationResponse], error) {
+	// The accepting account comes from the SESSION and from nowhere else — not
+	// from the request, not from a header. A request that could name its own
+	// acceptor would let anybody bind an invitation to any account.
+	acceptor, err := callerSubject(ctx)
+	if err != nil {
+		return nil, fail(err)
+	}
+	key, err := idempotencyKey(req.Header())
+	if err != nil {
+		return nil, fail(err)
+	}
+
+	result, err := s.invitations.Accept(ctx, app.AcceptInvitationCommand{
+		Token:          req.Msg.GetToken(),
+		AcceptedBy:     acceptor,
+		IdempotencyKey: key,
+	})
+	if err != nil {
+		return nil, fail(err)
+	}
+
+	return connect.NewResponse(&workspacev1.AcceptInvitationResponse{
+		WorkspaceId:   result.WorkspaceID,
+		OrgId:         result.OrgID,
+		Role:          string(result.Role),
+		AlreadyMember: result.AlreadyMember,
+	}), nil
+}

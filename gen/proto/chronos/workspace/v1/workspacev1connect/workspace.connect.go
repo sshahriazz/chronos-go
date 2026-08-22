@@ -65,6 +65,9 @@ const (
 	// WorkspaceServiceInviteToWorkspaceProcedure is the fully-qualified name of the WorkspaceService's
 	// InviteToWorkspace RPC.
 	WorkspaceServiceInviteToWorkspaceProcedure = "/chronos.workspace.v1.WorkspaceService/InviteToWorkspace"
+	// WorkspaceServiceAcceptInvitationProcedure is the fully-qualified name of the WorkspaceService's
+	// AcceptInvitation RPC.
+	WorkspaceServiceAcceptInvitationProcedure = "/chronos.workspace.v1.WorkspaceService/AcceptInvitation"
 )
 
 // WorkspaceServiceClient is a client for the chronos.workspace.v1.WorkspaceService service.
@@ -160,6 +163,30 @@ type WorkspaceServiceClient interface {
 	// the address. Returning it here would hand it to the inviter, who could then
 	// accept as somebody else.
 	InviteToWorkspace(context.Context, *connect.Request[v1.InviteToWorkspaceRequest]) (*connect.Response[v1.InviteToWorkspaceResponse], error)
+	// AcceptInvitation redeems an invitation link.
+	//
+	// # Self-scoped, because the caller is not in the organization yet
+	//
+	// Every other org-scoped RPC gets its tenant from gate 1, which verifies
+	// membership. The person clicking this link has none — joining is what they
+	// are doing — so there is nothing for gate 1 to resolve and nothing for gate 2
+	// to check. The TOKEN is the authorization: a 256-bit capability this system
+	// issued and stored, which names the organization only after the handler has
+	// looked it up.
+	//
+	// So the checks gates 1 and 3 would have made move into the handler, and
+	// workspace.md §5 lists all five: the token is valid and unspent, the
+	// organization still permits growth, the workspace is still active, the caller
+	// is the person it was sent to, and a seat is still available. Every one is
+	// revalidated at redemption rather than trusted from issue time, because days
+	// pass and organizations stop paying.
+	//
+	// # It consumes no quota of its own
+	//
+	// The seat was taken at issue. Declaring an entitlement here would charge a
+	// second one for the same person, which is the mistake charging at issue
+	// exists to avoid.
+	AcceptInvitation(context.Context, *connect.Request[v1.AcceptInvitationRequest]) (*connect.Response[v1.AcceptInvitationResponse], error)
 }
 
 // NewWorkspaceServiceClient constructs a client for the chronos.workspace.v1.WorkspaceService
@@ -203,6 +230,12 @@ func NewWorkspaceServiceClient(httpClient connect.HTTPClient, baseURL string, op
 			connect.WithSchema(workspaceServiceMethods.ByName("InviteToWorkspace")),
 			connect.WithClientOptions(opts...),
 		),
+		acceptInvitation: connect.NewClient[v1.AcceptInvitationRequest, v1.AcceptInvitationResponse](
+			httpClient,
+			baseURL+WorkspaceServiceAcceptInvitationProcedure,
+			connect.WithSchema(workspaceServiceMethods.ByName("AcceptInvitation")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -213,6 +246,7 @@ type workspaceServiceClient struct {
 	removeWorkspaceMember     *connect.Client[v1.RemoveWorkspaceMemberRequest, v1.RemoveWorkspaceMemberResponse]
 	changeWorkspaceMemberRole *connect.Client[v1.ChangeWorkspaceMemberRoleRequest, v1.ChangeWorkspaceMemberRoleResponse]
 	inviteToWorkspace         *connect.Client[v1.InviteToWorkspaceRequest, v1.InviteToWorkspaceResponse]
+	acceptInvitation          *connect.Client[v1.AcceptInvitationRequest, v1.AcceptInvitationResponse]
 }
 
 // CreateWorkspace calls chronos.workspace.v1.WorkspaceService.CreateWorkspace.
@@ -238,6 +272,11 @@ func (c *workspaceServiceClient) ChangeWorkspaceMemberRole(ctx context.Context, 
 // InviteToWorkspace calls chronos.workspace.v1.WorkspaceService.InviteToWorkspace.
 func (c *workspaceServiceClient) InviteToWorkspace(ctx context.Context, req *connect.Request[v1.InviteToWorkspaceRequest]) (*connect.Response[v1.InviteToWorkspaceResponse], error) {
 	return c.inviteToWorkspace.CallUnary(ctx, req)
+}
+
+// AcceptInvitation calls chronos.workspace.v1.WorkspaceService.AcceptInvitation.
+func (c *workspaceServiceClient) AcceptInvitation(ctx context.Context, req *connect.Request[v1.AcceptInvitationRequest]) (*connect.Response[v1.AcceptInvitationResponse], error) {
+	return c.acceptInvitation.CallUnary(ctx, req)
 }
 
 // WorkspaceServiceHandler is an implementation of the chronos.workspace.v1.WorkspaceService
@@ -334,6 +373,30 @@ type WorkspaceServiceHandler interface {
 	// the address. Returning it here would hand it to the inviter, who could then
 	// accept as somebody else.
 	InviteToWorkspace(context.Context, *connect.Request[v1.InviteToWorkspaceRequest]) (*connect.Response[v1.InviteToWorkspaceResponse], error)
+	// AcceptInvitation redeems an invitation link.
+	//
+	// # Self-scoped, because the caller is not in the organization yet
+	//
+	// Every other org-scoped RPC gets its tenant from gate 1, which verifies
+	// membership. The person clicking this link has none — joining is what they
+	// are doing — so there is nothing for gate 1 to resolve and nothing for gate 2
+	// to check. The TOKEN is the authorization: a 256-bit capability this system
+	// issued and stored, which names the organization only after the handler has
+	// looked it up.
+	//
+	// So the checks gates 1 and 3 would have made move into the handler, and
+	// workspace.md §5 lists all five: the token is valid and unspent, the
+	// organization still permits growth, the workspace is still active, the caller
+	// is the person it was sent to, and a seat is still available. Every one is
+	// revalidated at redemption rather than trusted from issue time, because days
+	// pass and organizations stop paying.
+	//
+	// # It consumes no quota of its own
+	//
+	// The seat was taken at issue. Declaring an entitlement here would charge a
+	// second one for the same person, which is the mistake charging at issue
+	// exists to avoid.
+	AcceptInvitation(context.Context, *connect.Request[v1.AcceptInvitationRequest]) (*connect.Response[v1.AcceptInvitationResponse], error)
 }
 
 // NewWorkspaceServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -373,6 +436,12 @@ func NewWorkspaceServiceHandler(svc WorkspaceServiceHandler, opts ...connect.Han
 		connect.WithSchema(workspaceServiceMethods.ByName("InviteToWorkspace")),
 		connect.WithHandlerOptions(opts...),
 	)
+	workspaceServiceAcceptInvitationHandler := connect.NewUnaryHandler(
+		WorkspaceServiceAcceptInvitationProcedure,
+		svc.AcceptInvitation,
+		connect.WithSchema(workspaceServiceMethods.ByName("AcceptInvitation")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/chronos.workspace.v1.WorkspaceService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case WorkspaceServiceCreateWorkspaceProcedure:
@@ -385,6 +454,8 @@ func NewWorkspaceServiceHandler(svc WorkspaceServiceHandler, opts ...connect.Han
 			workspaceServiceChangeWorkspaceMemberRoleHandler.ServeHTTP(w, r)
 		case WorkspaceServiceInviteToWorkspaceProcedure:
 			workspaceServiceInviteToWorkspaceHandler.ServeHTTP(w, r)
+		case WorkspaceServiceAcceptInvitationProcedure:
+			workspaceServiceAcceptInvitationHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -412,4 +483,8 @@ func (UnimplementedWorkspaceServiceHandler) ChangeWorkspaceMemberRole(context.Co
 
 func (UnimplementedWorkspaceServiceHandler) InviteToWorkspace(context.Context, *connect.Request[v1.InviteToWorkspaceRequest]) (*connect.Response[v1.InviteToWorkspaceResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.InviteToWorkspace is not implemented"))
+}
+
+func (UnimplementedWorkspaceServiceHandler) AcceptInvitation(context.Context, *connect.Request[v1.AcceptInvitationRequest]) (*connect.Response[v1.AcceptInvitationResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.AcceptInvitation is not implemented"))
 }

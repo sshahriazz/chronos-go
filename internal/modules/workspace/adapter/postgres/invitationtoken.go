@@ -60,6 +60,33 @@ func (t *InvitationTokens) Issue(
 	})
 }
 
+// Lookup reads a digest without spending it.
+//
+// Non-destructive on purpose: the checks that can fail TRANSIENTLY — a briefly
+// past-due organization, a momentarily full seat pool — run before the token is
+// spent, so a recipient is not left holding a dead link for a failure they did
+// nothing to cause. Single use is unaffected, because Consume is still one
+// atomic statement immediately before the append.
+func (t *InvitationTokens) Lookup(
+	ctx context.Context, digest []byte, now time.Time,
+) (invitationID, orgID string, err error) {
+	if len(digest) != 32 {
+		return "", "", app.ErrInvitationTokenNotFound
+	}
+	err = t.system.InSystemTx(ctx, func(ctx context.Context, q db.Querier) error {
+		row := q.QueryRow(ctx, workspacedb.LookupInvitationToken,
+			digest, string(app.PurposeInvitation), now.UTC())
+		return row.Scan(&invitationID, &orgID)
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return "", "", app.ErrInvitationTokenNotFound
+	case err != nil:
+		return "", "", fmt.Errorf("workspace: looking up an invitation token: %w", err)
+	}
+	return invitationID, orgID, nil
+}
+
 // Consume redeems a digest exactly once and reports which invitation it names.
 //
 // Returns app.ErrInvitationTokenNotFound for a digest that is unknown, already

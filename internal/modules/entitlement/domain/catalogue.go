@@ -28,6 +28,24 @@ const (
 
 // LimitKeys is every limit this build knows, for exhaustive tests and for the
 // startup check that a declared entitlement is one the catalogue can answer.
+// PerSubject reports whether a limit is counted ONE PER PERSON.
+//
+// Seats are; resources are not. The distinction is the whole of "a seat is per
+// person per organization, not per membership" (workspace.md §2) expressed where
+// the reservation store can act on it — and it has to be here rather than at the
+// call sites, because there are now two independent paths that take a seat.
+// Somebody can hold a pending invitation to one workspace and be added directly
+// to another, and each path's own conditional check is blind to the other's
+// reservation: the invitation holds a seat that no membership row reflects.
+//
+// `workspaces.count` is deliberately NOT per-subject. Gate 4 records the CREATOR
+// as its subject_ref, so one admin opening three workspaces is three units of
+// one limit — treating that as per-subject would cap every organization at one
+// workspace per admin.
+func (k LimitKey) PerSubject() bool {
+	return k == SeatsMember || k == SeatsGuest
+}
+
 func LimitKeys() []LimitKey {
 	return []LimitKey{WorkspacesCount, SeatsMember, SeatsGuest}
 }

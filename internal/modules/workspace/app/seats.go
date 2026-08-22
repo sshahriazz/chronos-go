@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/chronos/chronos-go/internal/modules/workspace/contract"
@@ -40,6 +41,19 @@ type OrgMembership interface {
 type Seats struct {
 	reserver Reserver
 	members  OrgMembership
+}
+
+// SeatAlreadyHeld reports that this subject already holds a seat in that pool,
+// so nothing new was taken.
+//
+// Declared HERE as well as in entitlement, because workspace may not import
+// entitlement's app package (CONVENTIONS §2) and this is a value that crosses
+// the port. The composition root translates one into the other; the two are kept
+// in step by a test that would fail if either changed shape.
+type SeatAlreadyHeld struct{ ReservationID string }
+
+func (SeatAlreadyHeld) Error() string {
+	return "workspace: this subject already holds a seat in that pool"
 }
 
 // Reserver is entitlement's protocol, narrowed to what this module needs.
@@ -86,6 +100,20 @@ func (s *Seats) ReserveForJoin(
 	}
 
 	id, err := s.reserver.ReserveFor(ctx, orgID, role.SeatPool(), subjectID)
+
+	// ALREADY HELD is a success that consumed nothing. It is the store's
+	// backstop for the case the count above cannot see: a PENDING INVITATION
+	// holds a seat and creates no membership row, so somebody invited to one
+	// workspace and added directly to another looks new on both paths and would
+	// be charged twice.
+	//
+	// The count stays because it is what makes the common case cheap and what
+	// reports `seat_consumed` honestly for somebody who is plainly already a
+	// member. This is what makes the rule true when the count is blind.
+	var held SeatAlreadyHeld
+	if errors.As(err, &held) {
+		return held.ReservationID, false, nil
+	}
 	if err != nil {
 		return "", false, err
 	}

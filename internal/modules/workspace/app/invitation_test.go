@@ -17,6 +17,7 @@ import (
 )
 
 const (
+	inviteWS     = "ws_01ARZ3NDEKTSV4RRFFQ69G5FAW"
 	inviteeEmail = "colleague@example.com"
 	knownSubject = "subj_01ARZ3NDEKTSV4RRFFQ69G5FAK"
 	mintedSubjct = "subj_01ARZ3NDEKTSV4RRFFQ69G5FAM"
@@ -47,6 +48,16 @@ func (f fakeDirectory) SubjectFor(context.Context, identitycontract.EmailIndex) 
 	return f.subject, f.known, f.err
 }
 
+// IsAccount answers for the pseudonym the fake directory knows about, and false
+// for anything else — which is exactly the shape of a minted invitation
+// pseudonym, the case acceptance must NOT compare against.
+func (f fakeDirectory) IsAccount(_ context.Context, subjectID string) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
+	return f.known && subjectID == f.subject, nil
+}
+
 type fakeVault struct {
 	stored map[string]string
 	err    error
@@ -63,6 +74,12 @@ func (f *fakeVault) PutEmail(_ context.Context, subjectID, email string) error {
 	return nil
 }
 
+// fakeSubs stands in for gate 3, asked about an organization the caller did not
+// name.
+type fakeSubs struct{ err error }
+
+func (f fakeSubs) PermitJoin(context.Context, string) error { return f.err }
+
 type fakeSubjects struct{ minted int }
 
 func (f *fakeSubjects) NewSubject() string { f.minted++; return mintedSubjct }
@@ -76,6 +93,7 @@ type storedToken struct {
 
 type fakeTokens struct {
 	issued  []storedToken
+	spent   []string
 	revoked []string
 	err     error
 }
@@ -90,8 +108,32 @@ func (f *fakeTokens) Issue(
 	return nil
 }
 
-func (f *fakeTokens) Consume(context.Context, []byte, time.Time) (string, string, error) {
+// Lookup and Consume both resolve a presented digest against what was issued.
+// Consume additionally SPENDS it, so a second call finds nothing — which is the
+// single-use property the real store gets from DELETE ... RETURNING.
+func (f *fakeTokens) Lookup(_ context.Context, digest []byte, now time.Time) (string, string, error) {
+	for _, t := range f.issued {
+		if secret.Equal(t.digest, digest) && now.Before(t.expiresAt) {
+			return t.invitationID, t.orgID, nil
+		}
+	}
 	return "", "", app.ErrInvitationTokenNotFound
+}
+
+func (f *fakeTokens) Consume(ctx context.Context, digest []byte, now time.Time) (string, string, error) {
+	invitationID, orgID, err := f.Lookup(ctx, digest, now)
+	if err != nil {
+		return "", "", err
+	}
+	kept := f.issued[:0]
+	for _, t := range f.issued {
+		if !secret.Equal(t.digest, digest) {
+			kept = append(kept, t)
+		}
+	}
+	f.issued = kept
+	f.spent = append(f.spent, invitationID)
+	return invitationID, orgID, nil
 }
 
 func (f *fakeTokens) RevokeAll(_ context.Context, invitationID string) (int64, error) {
@@ -110,6 +152,9 @@ type inviteHarness struct {
 	vault       *fakeVault
 	subjects    *fakeSubjects
 	reserver    *fakeReserver
+	counter     *countingMembers
+	memberships *eventsourcing.Repository[*domain.Membership]
+	workspaceID string
 }
 
 type inviteOpts struct {
@@ -120,6 +165,8 @@ type inviteOpts struct {
 	vaultErr     error
 	tokenErr     error
 	poolFull     string
+	suspended    error
+	archived     bool
 }
 
 func newInviteHarness(t *testing.T, o inviteOpts) *inviteHarness {
@@ -129,6 +176,10 @@ func newInviteHarness(t *testing.T, o inviteOpts) *inviteHarness {
 
 	repo := eventsourcing.NewRepository[*domain.Invitation](
 		store, jsonCodec{}, nil, domain.InvitationCategory, domain.NewInvitation)
+	workspaces := eventsourcing.NewRepository[*domain.Workspace](
+		store, jsonCodec{}, nil, domain.Category, domain.NewWorkspace)
+	memberships := eventsourcing.NewRepository[*domain.Membership](
+		store, jsonCodec{}, nil, domain.MembershipCategory, domain.NewMembership)
 
 	reserver := newFakeReserver()
 	if o.poolFull != "" {
@@ -156,26 +207,66 @@ func newInviteHarness(t *testing.T, o inviteOpts) *inviteHarness {
 	tokens := &fakeTokens{err: o.tokenErr}
 	vault := &fakeVault{err: o.vaultErr}
 	subjects := &fakeSubjects{}
+	counter := &countingMembers{n: o.existingWS}
 
 	invitations, err := app.NewInvitations(app.InvitationsDeps{
-		Repo: repo, Tokens: tokens, Minter: minter,
-		Indexer: fakeIndexer{err: o.indexErr}, Dir: dir,
+		Repo: repo, Workspaces: workspaces, Memberships: memberships,
+		Appender: store, Schemas: noSchemas{},
+		Tokens: tokens, Minter: minter,
+		Indexer: fakeIndexer{err: o.indexErr}, Dir: dir, Subs: fakeSubs{err: o.suspended},
 		Vault: vault, Subjects: subjects, Seats: seats, Now: now,
 	})
 	if err != nil {
 		t.Fatalf("NewInvitations: %v", err)
 	}
+
+	// A REAL workspace, opened through its own aggregate. Acceptance revalidates
+	// that it is still active, and a fabricated one would skip the check this
+	// harness exists to exercise.
+	ws, err := workspaces.Load(context.Background(), domain.StreamKey(inviteWS))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.Create(inviteWS, testOrg, "Invites", founder, now()); err != nil {
+		t.Fatal(err)
+	}
+	if o.archived {
+		if err := ws.Archive(now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := workspaces.Save(context.Background(), domain.StreamKey(inviteWS), ws,
+		"seed-ws", eventsourcing.Metadata{}); err != nil {
+		t.Fatal(err)
+	}
+
 	return &inviteHarness{
 		invitations: invitations, store: store, tokens: tokens,
-		vault: vault, subjects: subjects, reserver: reserver,
+		vault: vault, subjects: subjects, reserver: reserver, counter: counter,
+		memberships: memberships, workspaceID: inviteWS,
 	}
 }
 
 func (h *inviteHarness) issue(role contract.MemberRole) (app.IssueInvitationResult, error) {
 	return h.invitations.Issue(context.Background(), app.IssueInvitationCommand{
-		OrgID: testOrg, WorkspaceID: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV", Email: inviteeEmail,
+		OrgID: testOrg, WorkspaceID: inviteWS, Email: inviteeEmail,
 		Role: role, InvitedBy: founder, IdempotencyKey: "key-invite",
 	})
+}
+
+// invitationStreams counts how many invitations were appended.
+//
+// Counting the INVITATION streams rather than every stream, because the harness
+// seeds a real workspace: `len(store.streams) == 0` would have been an assertion
+// about the fixture rather than about the command.
+func (h *inviteHarness) invitationStreams() int {
+	var n int
+	for stream := range h.store.streams {
+		if strings.HasPrefix(string(stream), string(domain.InvitationCategory)+"-") {
+			n++
+		}
+	}
+	return n
 }
 
 // issuedEvent digs the one event out of the store.
@@ -280,7 +371,7 @@ func TestAVaultFailureIssuesNothing(t *testing.T) {
 		t.Fatal("an invitation was issued with no address recorded; it holds a seat for " +
 			"somebody nobody can contact")
 	}
-	if len(h.store.streams) != 0 {
+	if h.invitationStreams() != 0 {
 		t.Error("an event was appended for an invitation that could not record its address")
 	}
 	if len(h.reserver.reserved) != 0 {
@@ -408,7 +499,7 @@ func TestAFullPoolIssuesNothing(t *testing.T) {
 		t.Errorf("refused with %s, want QUOTA_EXCEEDED: the customer needs to be told to "+
 			"upgrade, not that they lack permission", got)
 	}
-	if len(h.store.streams) != 0 {
+	if h.invitationStreams() != 0 {
 		t.Error("an invitation was appended for a seat that was never granted")
 	}
 }
@@ -507,7 +598,7 @@ func TestAFailedTokenLeavesTheInvitationAndSaysToResend(t *testing.T) {
 		t.Error("the invitation id was not returned, so the caller cannot resend the " +
 			"invitation that exists")
 	}
-	if len(h.store.streams) == 0 {
+	if h.invitationStreams() == 0 {
 		t.Error("nothing was appended, so this is a rollback rather than a partial success")
 	}
 }
@@ -539,9 +630,15 @@ func TestInvitationsRefusesAnIncompleteWiring(t *testing.T) {
 		t.Fatal(err)
 	}
 	full := app.InvitationsDeps{
-		Repo: repo, Tokens: &fakeTokens{}, Minter: minter,
-		Indexer: fakeIndexer{}, Dir: fakeDirectory{}, Vault: &fakeVault{},
-		Subjects: &fakeSubjects{}, Seats: seats, Now: time.Now,
+		Repo: repo,
+		Workspaces: eventsourcing.NewRepository[*domain.Workspace](
+			store, jsonCodec{}, nil, domain.Category, domain.NewWorkspace),
+		Memberships: eventsourcing.NewRepository[*domain.Membership](
+			store, jsonCodec{}, nil, domain.MembershipCategory, domain.NewMembership),
+		Appender: store, Schemas: noSchemas{},
+		Tokens: &fakeTokens{}, Minter: minter,
+		Indexer: fakeIndexer{}, Dir: fakeDirectory{}, Subs: fakeSubs{},
+		Vault: &fakeVault{}, Subjects: &fakeSubjects{}, Seats: seats, Now: time.Now,
 	}
 	if _, err := app.NewInvitations(full); err != nil {
 		t.Fatalf("precondition: a complete wiring was refused, so every case below would "+
@@ -553,7 +650,12 @@ func TestInvitationsRefusesAnIncompleteWiring(t *testing.T) {
 		mut  func(*app.InvitationsDeps)
 		want string
 	}{
-		{"no repository", func(d *app.InvitationsDeps) { d.Repo = nil }, "repository"},
+		{"no repository", func(d *app.InvitationsDeps) { d.Repo = nil }, "invitation repository"},
+		{"no workspaces", func(d *app.InvitationsDeps) { d.Workspaces = nil }, "workspace repository"},
+		{"no memberships", func(d *app.InvitationsDeps) { d.Memberships = nil }, "membership repository"},
+		{"no appender", func(d *app.InvitationsDeps) { d.Appender = nil }, "appender"},
+		{"no schemas", func(d *app.InvitationsDeps) { d.Schemas = nil }, "schema registry"},
+		{"no subscriptions", func(d *app.InvitationsDeps) { d.Subs = nil }, "subscription check"},
 		{"no token store", func(d *app.InvitationsDeps) { d.Tokens = nil }, "token store"},
 		{"no minter", func(d *app.InvitationsDeps) { d.Minter = nil }, "minter"},
 		{"no indexer", func(d *app.InvitationsDeps) { d.Indexer = nil }, "blind indexer"},
@@ -594,5 +696,373 @@ func TestARejectedAddressIsNotQuotedBack(t *testing.T) {
 	}
 	if got := errs.ReasonOf(err); got != errs.ValidationFailed {
 		t.Errorf("refused with %s, want VALIDATION_FAILED", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// acceptance
+// ---------------------------------------------------------------------------
+
+const acceptor = "subj_01ARZ3NDEKTSV4RRFFQ69G5FAP"
+
+// issueThenAccept issues an invitation and redeems it as `by`.
+func (h *inviteHarness) accept(token, by string) (app.AcceptInvitationResult, error) {
+	return h.invitations.Accept(context.Background(), app.AcceptInvitationCommand{
+		Token: token, AcceptedBy: by, IdempotencyKey: "key-accept-" + by,
+	})
+}
+
+// ACCEPTING CREATES THE MEMBERSHIP AND SETTLES THE INVITATION, atomically.
+//
+// Two streams, one append. Two appends would leave either an invitation spent
+// with nobody admitted, or a membership beside a still-pending invitation — and
+// the second is the expensive one: the expiry workflow would later "release the
+// seat" for that invitation, taking back the seat the new member is sitting in.
+func TestAcceptingCreatesTheMembership(t *testing.T) {
+	h := newInviteHarness(t, inviteOpts{})
+	issued, err := h.issue(contract.RoleMember)
+	if err != nil {
+		t.Fatalf("issuing: %v", err)
+	}
+
+	result, err := h.accept(issued.Token, acceptor)
+	if err != nil {
+		t.Fatalf("accepting: %v", err)
+	}
+	if result.WorkspaceID != h.workspaceID || result.Role != contract.RoleMember {
+		t.Errorf("joined %s as %q", result.WorkspaceID, result.Role)
+	}
+
+	membership, err := h.memberships.Load(context.Background(),
+		domain.MembershipStreamKey(h.workspaceID, acceptor))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !membership.Exists() || !membership.Active() {
+		t.Fatal("no membership was created, so a spent invitation admitted nobody")
+	}
+	if !membership.SeatConsumed() {
+		t.Error("the membership records no seat, so removing this person would return " +
+			"nothing and the seat the invitation took leaks")
+	}
+
+	// The LINK is spent, asserted separately from the invitation's state.
+	//
+	// Both would refuse a second click, and that redundancy is deliberate — but
+	// asserting only the aggregate lets the token quietly stop being consumed:
+	// the invitation is Accepted either way, so the second click is refused for
+	// the wrong reason and nothing says so. A live digest for a settled
+	// invitation is a credential outliving what it authorised.
+	if len(h.tokens.spent) != 1 {
+		t.Errorf("the link was spent %d times, want once; a digest that survives its own "+
+			"redemption is a live credential for an invitation that is already closed",
+			len(h.tokens.spent))
+	}
+	if _, _, err := h.tokens.Lookup(context.Background(), secret.Digest(
+		app.PurposeInvitation, issued.Token), time.Unix(1_700_000_000, 0).UTC()); err == nil {
+		t.Error("the digest is still redeemable after the invitation was accepted")
+	}
+
+	inv := h.loadInvitation(t, issued.InvitationID)
+	if inv.Status() != domain.InvitationAccepted {
+		t.Errorf("the invitation is %s, want accepted; a still-pending one would be "+
+			"expired later and its seat returned out from under the new member",
+			inv.Status())
+	}
+}
+
+// loadInvitation rebuilds one invitation from the store.
+func (h *inviteHarness) loadInvitation(t *testing.T, invitationID string) *domain.Invitation {
+	t.Helper()
+	repo := eventsourcing.NewRepository[*domain.Invitation](
+		h.store, jsonCodec{}, nil, domain.InvitationCategory, domain.NewInvitation)
+	inv, err := repo.Load(context.Background(), domain.InvitationStreamKey(invitationID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return inv
+}
+
+// A LINK IS SINGLE USE.
+//
+// Two people cannot join on one invitation. The second attempt is NOT_FOUND,
+// which is also what a wrong token gets: nothing distinguishes "already used"
+// from "never existed".
+func TestALinkCannotBeRedeemedTwice(t *testing.T) {
+	h := newInviteHarness(t, inviteOpts{})
+	issued, err := h.issue(contract.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.accept(issued.Token, acceptor); err != nil {
+		t.Fatalf("the first acceptance failed, so this proves nothing: %v", err)
+	}
+
+	const second = "subj_01ARZ3NDEKTSV4RRFFQ69G5FAQ"
+	_, err = h.accept(issued.Token, second)
+	if err == nil {
+		t.Fatal("a second person joined on one invitation, which is one seat admitting two")
+	}
+	if got := errs.ReasonOf(err); got != errs.NotFound {
+		t.Errorf("refused with %s, want NOT_FOUND: a spent link must be indistinguishable "+
+			"from one that never existed", got)
+	}
+}
+
+// A WRONG OR ABSENT TOKEN IS NOT_FOUND, and reveals nothing.
+func TestAWrongTokenIsNotFound(t *testing.T) {
+	h := newInviteHarness(t, inviteOpts{})
+	if _, err := h.issue(contract.RoleMember); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, token := range []string{"", "not-a-token", strings.Repeat("A", 43)} {
+		_, err := h.accept(token, acceptor)
+		if err == nil {
+			t.Fatalf("token %q was accepted", token)
+		}
+		if got := errs.ReasonOf(err); got != errs.NotFound {
+			t.Errorf("token %q refused with %s, want NOT_FOUND", token, got)
+		}
+	}
+}
+
+// A SUSPENDED ORGANIZATION REFUSES THE JOIN, and leaves the link alive.
+//
+// ORG_SUSPENDED rather than NOT_FOUND, because the caller has presented a valid
+// credential for this organization and is entitled to know why they cannot join
+// — "not found" would send them back to an inviter who can see the invitation is
+// perfectly fine.
+//
+// The link SURVIVES, which is why the token is looked up before it is spent: the
+// organization's payment is not the recipient's doing, and burning their link
+// for it would need a resend to repair.
+func TestASuspendedOrganizationRefusesAcceptance(t *testing.T) {
+	h := newInviteHarness(t, inviteOpts{suspended: errs.OrgSuspendedf("this organization is suspended")})
+	issued, err := h.issue(contract.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = h.accept(issued.Token, acceptor)
+	if err == nil {
+		t.Fatal("somebody joined a suspended organization")
+	}
+	if got := errs.ReasonOf(err); got != errs.OrgSuspended {
+		t.Errorf("refused with %s, want ORG_SUSPENDED", got)
+	}
+	if len(h.tokens.spent) != 0 {
+		t.Fatal("the link was spent for a refusal the recipient did not cause; only a " +
+			"resend could repair it, and nobody knows to send one")
+	}
+}
+
+// AN ARCHIVED WORKSPACE REFUSES THE JOIN.
+//
+// Checked against the AGGREGATE and not a projection: a projection lags, and
+// this decision admits somebody to a tenant.
+func TestAnArchivedWorkspaceRefusesAcceptance(t *testing.T) {
+	h := newInviteHarness(t, inviteOpts{archived: true})
+	issued, err := h.issue(contract.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = h.accept(issued.Token, acceptor)
+	if err == nil {
+		t.Fatal("somebody joined an archived workspace")
+	}
+	if got := errs.ReasonOf(err); got != errs.NotFound {
+		t.Errorf("refused with %s, want NOT_FOUND: a non-member has no standing to learn "+
+			"that the workspace exists but is archived (ADR-036)", got)
+	}
+	if len(h.tokens.spent) != 0 {
+		t.Error("the link was spent for a workspace that may be restored")
+	}
+}
+
+// A DIFFERENT SIGNED-IN ACCOUNT IS TOLD SO, explicitly.
+//
+// The footgun workspace.md §5 names: a forwarded link, or a shared machine,
+// silently binding the invitation to whoever happened to be signed in. It only
+// applies when the invitation names a REAL account — an invitation to somebody
+// with no account names a minted pseudonym, which cannot match anybody and needs
+// no comparison, because holding the link is proof of control over the mailbox.
+func TestAcceptingAsSomebodyElseIsRefusedExplicitly(t *testing.T) {
+	h := newInviteHarness(t, inviteOpts{knownAccount: true})
+	issued, err := h.issue(contract.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = h.accept(issued.Token, acceptor) // not knownSubject
+	if err == nil {
+		t.Fatal("an invitation addressed to one account was bound to another; the wrong " +
+			"person is now in the workspace and the right one still cannot get in")
+	}
+	if got := errs.ReasonOf(err); got != errs.AccessDenied {
+		t.Errorf("refused with %s, want ACCESS_DENIED: the fix is to sign in as the right "+
+			"account, which the caller can act on and cannot guess", got)
+	}
+	if !strings.Contains(err.Error(), "sign in") {
+		t.Errorf("the message does not say what to do: %v", err)
+	}
+
+	// And the invited account CAN accept, which is what proves the refusal above
+	// is about identity rather than about everything failing.
+	if _, err := h.accept(issued.Token, knownSubject); err != nil {
+		t.Fatalf("the invited account could not accept its own invitation: %v", err)
+	}
+}
+
+// A STRANGER'S INVITATION IS ACCEPTED BY WHOEVER HOLDS THE LINK.
+//
+// The new-user path. The invitation names a minted pseudonym; by the time the
+// person registers, identity has minted them a different one — so a pseudonym
+// comparison would refuse every new-user acceptance in the system.
+func TestAStrangerAcceptsUnderTheirOwnPseudonym(t *testing.T) {
+	h := newInviteHarness(t, inviteOpts{knownAccount: false})
+	issued, err := h.issue(contract.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := h.accept(issued.Token, acceptor)
+	if err != nil {
+		t.Fatalf("a newly registered invitee could not accept: %v\nThe invitation names a "+
+			"minted pseudonym and their account names another; comparing the two refuses "+
+			"every new-user acceptance", err)
+	}
+
+	membership, err := h.memberships.Load(context.Background(),
+		domain.MembershipStreamKey(h.workspaceID, acceptor))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !membership.Active() {
+		t.Fatal("no membership for the accepting account")
+	}
+	if result.Role != contract.RoleMember {
+		t.Errorf("joined as %q", result.Role)
+	}
+}
+
+// ALREADY A MEMBER IS IDEMPOTENT SUCCESS.
+//
+// workspace.md §5: the inviter's intent is satisfied. Reporting a conflict would
+// make a second click of one link look like a failure.
+func TestAcceptingWhenAlreadyAMemberSucceeds(t *testing.T) {
+	h := newInviteHarness(t, inviteOpts{})
+	issued, err := h.issue(contract.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Join by another route first.
+	membership, err := h.memberships.Load(context.Background(),
+		domain.MembershipStreamKey(h.workspaceID, acceptor))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := membership.Join(h.workspaceID, testOrg, acceptor,
+		contract.RoleAdmin, true, time.Unix(1_700_000_000, 0).UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.memberships.Save(context.Background(),
+		domain.MembershipStreamKey(h.workspaceID, acceptor), membership,
+		"seed-member", eventsourcing.Metadata{}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := h.accept(issued.Token, acceptor)
+	if err != nil {
+		t.Fatalf("accepting as an existing member failed: %v", err)
+	}
+	if !result.AlreadyMember {
+		t.Error("the result does not say the caller was already a member")
+	}
+	if result.Role != contract.RoleAdmin {
+		t.Errorf("the reported role is %q, want the role they ALREADY hold; an invitation "+
+			"must not silently demote somebody who is already an admin", result.Role)
+	}
+	if len(h.tokens.spent) != 1 {
+		t.Error("the link was left live for an invitation whose intent is already satisfied")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// the seat, across two blind paths
+// ---------------------------------------------------------------------------
+
+// THE SEAT AN INVITATION TOOK CARRIES OVER TO THE MEMBERSHIP.
+//
+// Nothing more is reserved at acceptance, which is the whole point of charging
+// at issue: the person was already counted, and counting them again would mean
+// the limit binds twice for one join.
+func TestAcceptanceReservesNoSecondSeat(t *testing.T) {
+	h := newInviteHarness(t, inviteOpts{})
+	issued, err := h.issue(contract.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !issued.SeatConsumed {
+		t.Fatal("precondition: issuing took no seat")
+	}
+	before := len(h.reserver.reserved)
+
+	if _, err := h.accept(issued.Token, acceptor); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(h.reserver.reserved) - before; got != 0 {
+		t.Fatalf("acceptance reserved %d more seats; the invitation already paid for this "+
+			"person, so the limit would bind twice for one join", got)
+	}
+}
+
+// A SEAT ALREADY HELD IS NOT CHARGED AGAIN, even when both paths are blind to
+// each other.
+//
+// This is the hole invitations opened. A PENDING invitation holds a seat and
+// creates no membership row, so `WorkspaceCount` — which counts memberships —
+// answers zero for somebody who is already being paid for. The invite path and
+// the direct-add path each ask that question, each get zero, and each reserve.
+//
+// The store is what closes it: a per-person limit already held is the same seat,
+// reported as consumed-nothing rather than taken again.
+func TestASeatHeldByAPendingInvitationIsNotChargedTwice(t *testing.T) {
+	h := newInviteHarness(t, inviteOpts{})
+
+	issued, err := h.issue(contract.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !issued.SeatConsumed {
+		t.Fatal("precondition: issuing took no seat")
+	}
+
+	// The SAME person, reserved again through the other path. The membership
+	// count is still zero — the invitation created no membership — so the
+	// conditional check is blind here by construction.
+	h.reserver.held["seats.member:"+issued.InvitationID] = true
+	seats, err := app.NewSeats(app.SeatsDeps{
+		Reserver: h.reserver, Members: &countingMembers{n: 0},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	before := len(h.reserver.reserved)
+	_, consumed, err := seats.ReserveForJoin(context.Background(), testOrg,
+		h.issuedEvent(t).SubjectID, contract.RoleMember)
+	if err != nil {
+		t.Fatalf("reserving for somebody who already holds a seat failed: %v", err)
+	}
+	if consumed {
+		t.Fatal("a second seat was charged for one person: the invitation holds one and " +
+			"this took another. The organization pays twice, silently, in the direction " +
+			"they notice last")
+	}
+	if got := len(h.reserver.reserved) - before; got != 0 {
+		t.Errorf("the pool grew by %d for a person who already held a seat", got)
 	}
 }

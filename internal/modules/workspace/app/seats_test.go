@@ -16,19 +16,35 @@ type fakeReserver struct {
 	committed int
 	released  []string // pool keys released by subject
 	full      map[string]bool
-	nextID    int
+
+	// held models the store's per-person backstop: a subject that already holds
+	// a seat in a pool gets the SAME one back rather than a second. It is the
+	// only thing standing between the customer and a double charge once a
+	// pending invitation holds a seat that no membership row reflects.
+	held map[string]bool
+
+	nextID int
 }
 
 func newFakeReserver() *fakeReserver {
-	return &fakeReserver{full: map[string]bool{}}
+	return &fakeReserver{full: map[string]bool{}, held: map[string]bool{}}
 }
 
-func (f *fakeReserver) ReserveFor(_ context.Context, _, limitKey, _ string) (string, error) {
+func (f *fakeReserver) ReserveFor(_ context.Context, _, limitKey, subjectRef string) (string, error) {
+	for key := range f.held {
+		if strings.HasPrefix(key, limitKey+":") {
+			// Already theirs. Reported as a SUCCESS carrying the existing
+			// reservation, exactly as the store does — not as a failure, and not
+			// as a fresh unit.
+			return key, app.SeatAlreadyHeld{ReservationID: key}
+		}
+	}
 	if f.full[limitKey] {
 		return "", errors.New("quota exhausted: " + limitKey)
 	}
 	f.reserved = append(f.reserved, limitKey)
 	f.nextID++
+	_ = subjectRef
 	return "res_" + limitKey, nil
 }
 
