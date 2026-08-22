@@ -88,6 +88,14 @@ type InvitationMail struct {
 	codec    eventsourcing.Codec
 	dispatch Dispatcher
 	starter  workflow.Starter
+
+	// lifecycleStarter and lifecycle are the per-invitation timer. SEPARATE from
+	// starter above, so that enabling the timer does not silently also move mail
+	// delivery onto a workflow — two independent decisions with two independent
+	// failure modes, and one option that quietly did both would be found out by
+	// somebody debugging why an SMTP outage stopped parking events.
+	lifecycleStarter workflow.Starter
+	lifecycle        string
 }
 
 // Option configures the reactor.
@@ -111,6 +119,28 @@ type Option func(*InvitationMail)
 // option the link never leaves this process.
 func WithWorkflows(s workflow.Starter) Option {
 	return func(r *InvitationMail) { r.starter = s }
+}
+
+// WithLifecycle makes the reactor START the per-invitation timer.
+//
+// The timer is what reminds and expires on time; the reconciliation sweep is
+// what makes expiry certain when a timer was never started. Both are needed and
+// neither replaces the other.
+//
+// The workflow NAME is passed in rather than declared here, and that is not
+// ceremony: the name is registered by the worker and persisted in history, so
+// two constants that must match would be one more place to drift. This package
+// cannot import the Temporal adapter, so the composition root — which imports
+// both — hands over the one constant.
+//
+// Started only on an ISSUE. A resend needs no second timer: the run already
+// waiting re-reads the deadline every time it wakes, so an extended window is
+// simply a longer sleep.
+func WithLifecycle(s workflow.Starter, workflowName string) Option {
+	return func(r *InvitationMail) {
+		r.lifecycleStarter = s
+		r.lifecycle = workflowName
+	}
 }
 
 // NewInvitationMail builds the reactor.
@@ -140,6 +170,11 @@ func NewInvitationMail(
 
 // Name is the persistent subscription group.
 func (r *InvitationMail) Name() string { return InvitationReactorName }
+
+// Timed reports whether the per-invitation timer is wired. Exposed for the same
+// reason Durable is: a reactor that mails but starts no timer looks identical
+// from the outside until an invitation should have expired and did not.
+func (r *InvitationMail) Timed() bool { return r.lifecycleStarter != nil && r.lifecycle != "" }
 
 // Durable reports whether delivery goes through a workflow. Exposed so a
 // composition-root test can assert which path a binary actually wired — the two
@@ -221,12 +256,70 @@ func (r *InvitationMail) React(ctx context.Context, env eventsourcing.Envelope) 
 	}
 
 	if r.starter != nil {
-		return r.start(ctx, n, key)
-	}
-	if err := r.dispatch.Dispatch(ctx, n); err != nil {
+		if err := r.start(ctx, n, key); err != nil {
+			return err
+		}
+	} else if err := r.dispatch.Dispatch(ctx, n); err != nil {
 		return fmt.Errorf("workspace/reactor: delivering %s: %w", InvitationTemplate, err)
 	}
+
+	// The timer, AFTER the mail. Both orders leave a window, and this is the
+	// harmless one: a failure here means the invitation exists with a link in
+	// somebody's inbox and no timer, which the reconciliation sweep closes. The
+	// reverse would start a timer for an invitation nobody was told about.
+	//
+	// Only on an issue. A resend needs no second timer — the run already waiting
+	// re-reads the deadline every time it wakes.
+	if env.Type == invitationIssuedType {
+		return r.startLifecycle(ctx, invitationID, orgID)
+	}
 	return nil
+}
+
+// startLifecycle begins the per-invitation timer.
+//
+// Keyed on the INVITATION and not on the event, unlike the mail: there is
+// exactly one timer per invitation for its whole life, and a redelivered issue
+// must find the existing run rather than start a second one that would expire
+// the same invitation twice.
+//
+// ErrAlreadyStarted is therefore the NORMAL outcome on every redelivery, and it
+// is success. Anything else means no timer is running, and it is returned so the
+// event comes back.
+func (r *InvitationMail) startLifecycle(ctx context.Context, invitationID, orgID string) error {
+	if r.lifecycleStarter == nil || r.lifecycle == "" {
+		// No durable work in this deployment. The invitation still expires —
+		// through the reconciliation sweep — but nothing reminds, and that is a
+		// property of the deployment rather than a failure here.
+		return nil
+	}
+	_, err := r.lifecycleStarter.Start(ctx, workflow.Start{
+		ID:    "invitation-lifecycle:" + invitationID,
+		Name:  r.lifecycle,
+		Input: InvitationLifecycleArgs{InvitationID: invitationID, OrgID: orgID},
+	})
+	if errors.Is(err, workflow.ErrAlreadyStarted) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("workspace/reactor: starting the timer for %s: %w", invitationID, err)
+	}
+	return nil
+}
+
+// InvitationLifecycleArgs is what the timer is started with.
+//
+// Ids and nothing else. Workflow input is written to history, which is durable
+// and replicated, so ADR-002 applies to it exactly as it does to the event log —
+// and it deliberately carries NO DEADLINE, because a resend moves it and a timer
+// that trusted its input would expire an invitation whose link is still live.
+//
+// It mirrors the adapter's input type rather than importing it, for the reason
+// Link does: a reactor that could reach into the Temporal adapter is one that
+// will eventually make a decision for it.
+type InvitationLifecycleArgs struct {
+	InvitationID string
+	OrgID        string
 }
 
 // subject decodes the event and pulls out the three things a link needs.

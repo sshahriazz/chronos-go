@@ -151,3 +151,53 @@ func Fingerprint(digest []byte) string {
 	}
 	return fmt.Sprintf("%x", digest[:n])
 }
+
+// IssueUntil mints a link that dies with the invitation rather than seven days
+// from now.
+//
+// # Why a reminder needs this
+//
+// A reminder has to carry a working link, and there is no way back from a digest
+// — so it cannot resend the original, it has to mint. Minting through Issue
+// would give the new link a fresh seven-day window, which is a reminder that
+// silently EXTENDS the invitation every time it fires. Repeated, that is an
+// invitation that never expires and a seat that never comes back.
+//
+// So the token is minted normally and STORED with the invitation's own deadline.
+// The digest encodes no expiry — the store row is what bounds it — so capping
+// costs nothing and the two can never disagree.
+//
+// The old link still dies first, exactly as it does for a resend. A reminder is
+// a second copy of the mail, and two live links for one invitation means either
+// can be redeemed.
+func (i *InvitationIssuer) IssueUntil(
+	ctx context.Context, invitationID, orgID string, expiresAt time.Time,
+) (InvitationLink, error) {
+	if expiresAt.IsZero() {
+		return InvitationLink{}, errs.Internalf("a link needs a deadline; without one the " +
+			"store would keep it live forever")
+	}
+
+	link, err := i.Issue(ctx, invitationID, orgID)
+	if err != nil {
+		return InvitationLink{}, err
+	}
+	if !expiresAt.Before(link.ExpiresAt) {
+		// The invitation outlasts a fresh window, which cannot happen today —
+		// the TTLs are the same constant — and is harmless if it ever does: the
+		// shorter of the two applies, and it is already stored.
+		return link, nil
+	}
+
+	// Re-store under the invitation's deadline. Issue already dropped every
+	// earlier digest, so this replaces exactly one row.
+	if _, err := i.tokens.RevokeAll(ctx, invitationID); err != nil {
+		return InvitationLink{}, errs.Internalf("voiding the link just minted").Wrap(err)
+	}
+	digest := secret.Digest(PurposeInvitation, link.Plaintext)
+	if err := i.tokens.Issue(ctx, digest, invitationID, orgID, expiresAt.UTC()); err != nil {
+		return InvitationLink{}, errs.Internalf("storing the reminder's link").Wrap(err)
+	}
+	link.ExpiresAt = expiresAt.UTC()
+	return link, nil
+}

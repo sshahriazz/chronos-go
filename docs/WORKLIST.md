@@ -255,6 +255,14 @@ satisfied at the composition root.
       re-run. Same family as the one below: deactivation racing the rest of the
       package. NOT investigated; recorded so a second sighting is a pattern
       rather than a surprise.
+- [ ] **Timing-sensitive unit tests fail under load.** Two seen once each while
+      running the full suite repeatedly:
+      `identity/app TestTwoConcurrentResetsProduceExactlyOnePasswordChange` and
+      `argon2id TestACancelledCallerDoesNotWaitForASlot`. Both pass in
+      isolation, both pass on a stashed clean tree, and `make check` passes on
+      the next run — so they are load sensitivity rather than regressions. Four
+      distinct flakes are now recorded here; that is enough of a pattern to be
+      worth a deliberate pass rather than four more sightings.
 - [ ] **The integration suite is not repeatably runnable in one day.** Two per-IP
       buckets exhaust after several full runs — `mail_caller:daily` (a daily mail
       cap) and `username_check` — and the failures then look like broken

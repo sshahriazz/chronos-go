@@ -890,3 +890,41 @@ func (s *Settlements) Expire(ctx context.Context, invitationID string) (bool, er
 	}
 	return true, nil
 }
+
+// InvitationState is what a timer needs to decide what to do next.
+//
+// Read from the AGGREGATE, never the projection: the per-invitation workflow
+// wakes to decide whether to remind, expire or stop, and a projection that lags
+// would have it remind about an invitation somebody already accepted.
+type InvitationState struct {
+	Exists      bool
+	Pending     bool
+	OrgID       string
+	WorkspaceID string
+	SubjectID   string
+	ExpiresAt   time.Time
+}
+
+// State reports where an invitation currently is.
+//
+// The window is the interesting field. A resend MOVES it, so anything sleeping
+// until a deadline has to re-read rather than trust the one it was started with
+// — otherwise a resent invitation is expired at its original deadline while a
+// live link sits in somebody's inbox.
+func (s *Settlements) State(ctx context.Context, invitationID string) (InvitationState, error) {
+	if invitationID == "" {
+		return InvitationState{}, errs.ValidationFailedf("an invitation is required")
+	}
+	inv, err := s.repo.Load(ctx, domain.InvitationStreamKey(invitationID))
+	if err != nil {
+		return InvitationState{}, errs.Internalf("loading the invitation").Wrap(err)
+	}
+	return InvitationState{
+		Exists:      inv.Exists(),
+		Pending:     inv.Pending(),
+		OrgID:       inv.OrgID(),
+		WorkspaceID: inv.WorkspaceID(),
+		SubjectID:   inv.SubjectID(),
+		ExpiresAt:   inv.ExpiresAt(),
+	}, nil
+}

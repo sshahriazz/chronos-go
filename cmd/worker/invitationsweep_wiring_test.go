@@ -55,6 +55,16 @@ func TestTheInvitationSweepIsRegistered(t *testing.T) {
 			temporaladapter.SweepInvitationsWorkflow, names)
 	}
 
+	// The per-invitation timer, registered beside the sweep. It is what makes
+	// expiry timely and reminders possible at all; without it every invitation
+	// waits for the hourly reconciliation and nobody is ever nudged.
+	if !slices.Contains(names, temporaladapter.InvitationLifecycleWorkflow) {
+		t.Errorf("the worker does not answer to %s, so every timer the reactor starts is "+
+			"queued where nothing is listening: no reminder is ever sent and expiry falls "+
+			"back to the hourly sweep. Registered: %v",
+			temporaladapter.InvitationLifecycleWorkflow, names)
+	}
+
 	// BESIDE the others, not instead of them. A registration that displaced
 	// another would pass a containment check while stranding every workflow of
 	// the displaced kind that is in flight.

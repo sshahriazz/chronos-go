@@ -588,7 +588,23 @@ func (d *dependencies) newTemporalWorker(
 	if err != nil {
 		return nil, nil, fmt.Errorf("registering the invitation sweep: %w", err)
 	}
-	return w, append(names, swept2...), nil
+	names = append(names, swept2...)
+
+	// The per-invitation timer. It is what makes expiry TIMELY and reminders
+	// possible at all; the sweep above is what makes expiry certain.
+	ops, err := newInvitationLifecycleOps(d)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invitation lifecycle: %w", err)
+	}
+	lifecycle, err := temporaladapter.NewInvitationLifecycleActivities(ops)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invitation lifecycle activities: %w", err)
+	}
+	lifecycleNames, err := w.RegisterInvitationLifecycle(lifecycle)
+	if err != nil {
+		return nil, nil, fmt.Errorf("registering the invitation lifecycle: %w", err)
+	}
+	return w, append(names, lifecycleNames...), nil
 }
 
 // scheduleSweep makes the lapsed-reservation sweep recur.

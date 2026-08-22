@@ -500,3 +500,128 @@ func TestNamesArePermanent(t *testing.T) {
 		t.Errorf("Name() is %q", r.Name())
 	}
 }
+
+// AN ISSUE STARTS THE PER-INVITATION TIMER.
+//
+// Without it nothing reminds and nothing expires on time: the seat comes back
+// only when the hourly reconciliation happens to notice, and the person invited
+// is never nudged at all.
+func TestAnIssueStartsTheLifecycle(t *testing.T) {
+	starter, lifecycle := &stubStarter{}, &stubStarter{}
+	codec := testCodec(t)
+	r := newMail(t, &stubIssuer{}, &stubDispatcher{},
+		WithWorkflows(starter), WithLifecycle(lifecycle, "chronos.test.Lifecycle"))
+
+	if !r.Timed() {
+		t.Fatal("Timed() is false with a lifecycle starter wired")
+	}
+	if err := r.React(context.Background(), issuedEnvelope(t, codec)); err != nil {
+		t.Fatal(err)
+	}
+	if len(lifecycle.started) != 1 {
+		t.Fatalf("started %d timers, want 1", len(lifecycle.started))
+	}
+	if got := lifecycle.started[0].ID; got != "invitation-lifecycle:"+testInvitation {
+		t.Errorf("the timer's id is %q; keyed on anything but the invitation, a "+
+			"redelivered issue starts a SECOND timer that expires the same invitation "+
+			"twice", got)
+	}
+}
+
+// THE TIMER AND THE MAIL ARE INDEPENDENT.
+//
+// One option that quietly did both would be found out by somebody debugging why
+// an SMTP outage stopped parking events.
+func TestTheTimerDoesNotImplyDurableMail(t *testing.T) {
+	lifecycle, dispatch := &stubStarter{}, &stubDispatcher{}
+	codec := testCodec(t)
+	r := newMail(t, &stubIssuer{}, dispatch, WithLifecycle(lifecycle, "chronos.test.Lifecycle"))
+
+	if r.Durable() {
+		t.Fatal("wiring the timer also moved mail delivery onto a workflow")
+	}
+	if err := r.React(context.Background(), issuedEnvelope(t, codec)); err != nil {
+		t.Fatal(err)
+	}
+	if len(dispatch.sent) != 1 {
+		t.Errorf("the mail did not go out inline: %d dispatched", len(dispatch.sent))
+	}
+	if len(lifecycle.started) != 1 {
+		t.Errorf("started %d timers", len(lifecycle.started))
+	}
+}
+
+// A RESEND STARTS NO SECOND TIMER.
+//
+// The run already waiting re-reads the deadline every time it wakes, so an
+// extended window is simply a longer sleep. A second timer would expire the same
+// invitation twice — releasing two seats for one hold.
+func TestAResendStartsNoSecondTimer(t *testing.T) {
+	lifecycle := &stubStarter{}
+	codec := testCodec(t)
+	r := newMail(t, &stubIssuer{}, &stubDispatcher{},
+		WithLifecycle(lifecycle, "chronos.test.Lifecycle"))
+
+	env := envelopeFor(t, codec, &contract.InvitationTokenRotated{
+		InvitationID: testInvitation, WorkspaceID: testWorkspace, OrgID: testOrg,
+		SubjectID: testSubject, ExpiresAt: testNow.Add(7 * 24 * time.Hour), RotatedAt: testNow,
+	})
+	if err := r.React(context.Background(), env); err != nil {
+		t.Fatal(err)
+	}
+	if len(lifecycle.started) != 0 {
+		t.Fatalf("a resend started %d timers; a second one expires the same invitation "+
+			"twice, releasing two seats for one hold", len(lifecycle.started))
+	}
+}
+
+// AN ALREADY-STARTED TIMER IS SUCCESS.
+//
+// Every redelivery of an issue finds the run from the first delivery. Treating
+// that as an error would park an event whose invitation is perfectly timed.
+func TestAnAlreadyStartedTimerIsNotAnError(t *testing.T) {
+	lifecycle := &stubStarter{err: workflow.ErrAlreadyStarted}
+	codec := testCodec(t)
+	r := newMail(t, &stubIssuer{}, &stubDispatcher{},
+		WithLifecycle(lifecycle, "chronos.test.Lifecycle"))
+
+	if err := r.React(context.Background(), issuedEnvelope(t, codec)); err != nil {
+		t.Fatalf("a redelivered issue was reported as a failure: %v", err)
+	}
+}
+
+// A TIMER THAT DID NOT START IS REPORTED.
+//
+// Acking would leave an invitation with a live link, a spent seat and nothing
+// that will ever close it but the hourly sweep.
+func TestAFailedTimerIsReported(t *testing.T) {
+	lifecycle := &stubStarter{err: errors.New("temporal: unavailable")}
+	codec := testCodec(t)
+	r := newMail(t, &stubIssuer{}, &stubDispatcher{},
+		WithLifecycle(lifecycle, "chronos.test.Lifecycle"))
+
+	if err := r.React(context.Background(), issuedEnvelope(t, codec)); err == nil {
+		t.Fatal("a timer that never started was acked")
+	}
+}
+
+// WITHOUT A TIMER THE REACTOR STILL MAILS.
+//
+// The deployment without durable work: the invitation still expires, through the
+// reconciliation sweep, and nothing reminds. That is a property of the
+// deployment rather than a failure here.
+func TestWithoutALifecycleTheMailStillGoesOut(t *testing.T) {
+	dispatch := &stubDispatcher{}
+	codec := testCodec(t)
+	r := newMail(t, &stubIssuer{}, dispatch)
+
+	if r.Timed() {
+		t.Fatal("Timed() is true with no lifecycle wired")
+	}
+	if err := r.React(context.Background(), issuedEnvelope(t, codec)); err != nil {
+		t.Fatalf("no timer made the mail fail: %v", err)
+	}
+	if len(dispatch.sent) != 1 {
+		t.Errorf("dispatched %d", len(dispatch.sent))
+	}
+}

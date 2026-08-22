@@ -22,6 +22,7 @@ import (
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/platform/ids"
+	"github.com/chronos/chronos-go/internal/platform/notify"
 	"github.com/chronos/chronos-go/internal/platform/secret"
 )
 
@@ -117,6 +118,11 @@ func newInvitationMail(d *dependencies) (*workspacereactor.InvitationMail, error
 		// were never told. Conditional because the client is nil with
 		// TEMPORAL_ENABLED false, and that deployment must still deliver.
 		opts = append(opts, workspacereactor.WithWorkflows(d.temporal))
+
+		// And the per-invitation timer, whose NAME comes from the adapter that
+		// registers it — one constant rather than two that must match.
+		opts = append(opts, workspacereactor.WithLifecycle(
+			d.temporal, temporaladapter.InvitationLifecycleWorkflow))
 	}
 
 	r, err := workspacereactor.NewInvitationMail(
@@ -174,38 +180,9 @@ func newInvitationSweep(d *dependencies, log *slog.Logger) (*workspaceapp.Invita
 	if err != nil {
 		return nil, err
 	}
-	// The SETTLEMENT half only. Expiring touches the stream, the token store and
-	// the seat pool; issuing needs a blind indexer, an account directory and the
-	// vault, none of which this binary has and none of which a sweep has any
-	// business being able to reach.
-	repo := eventsourcing.NewRepository[*workspacedomain.Invitation](
-		d.store, workspaceCodec(), workspaceUpcasters(),
-		workspacedomain.InvitationCategory, workspacedomain.NewInvitation)
-
-	tokens, err := workspacepg.NewInvitationTokens(pgadapter.New(d.pool))
+	settlements, err := newInvitationSettlements(d)
 	if err != nil {
 		return nil, err
-	}
-	counter, err := workspacepg.NewMembership(pgadapter.New(d.pool))
-	if err != nil {
-		return nil, err
-	}
-	reserver, err := newEntitlementReserver(d)
-	if err != nil {
-		return nil, err
-	}
-	seats, err := workspaceapp.NewSeats(workspaceapp.SeatsDeps{
-		Reserver: reserver, Members: counter,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("workspace seats: %w", err)
-	}
-
-	settlements, err := workspaceapp.NewSettlements(workspaceapp.SettlementsDeps{
-		Repo: repo, Tokens: tokens, Seats: seats, Now: clock.System{}.Now,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("workspace settlements: %w", err)
 	}
 	return workspaceapp.NewInvitationSweep(due, settlements, log)
 }
@@ -307,4 +284,165 @@ func (r *workerSeatReserver) Release(ctx context.Context, reservationID string) 
 
 func (r *workerSeatReserver) ReleaseFor(ctx context.Context, orgID, limitKey, subjectRef string) error {
 	return r.inner.ReleaseFor(ctx, orgID, limitKey, subjectRef)
+}
+
+// invitationLifecycleOps is the activity set's dependency, assembled here
+// because it spans three things no single layer owns: the aggregate (for state
+// and expiry), the link issuer, and the dispatcher.
+//
+// The composition root is the only place allowed to know all three, which is why
+// the orchestration lives here rather than in a use case that would have to hold
+// a notification dispatcher, or in a reactor that would have to hold a
+// repository.
+type invitationLifecycleOps struct {
+	settlements *workspaceapp.Settlements
+	issuer      *workspaceapp.InvitationIssuer
+	dispatch    *notify.Dispatcher
+}
+
+var _ temporaladapter.InvitationLifecycleOps = (*invitationLifecycleOps)(nil)
+
+func (o *invitationLifecycleOps) State(
+	ctx context.Context, invitationID string,
+) (temporaladapter.InvitationSnapshot, error) {
+	state, err := o.settlements.State(ctx, invitationID)
+	if err != nil {
+		return temporaladapter.InvitationSnapshot{}, err
+	}
+	return temporaladapter.InvitationSnapshot{
+		Exists: state.Exists, Pending: state.Pending, ExpiresAt: state.ExpiresAt,
+	}, nil
+}
+
+func (o *invitationLifecycleOps) Expire(ctx context.Context, invitationID string) (bool, error) {
+	return o.settlements.Expire(ctx, invitationID)
+}
+
+// Remind mints a fresh link and mails it.
+//
+// # Why it mints rather than resending the original
+//
+// There is no way back from a digest, so the original link cannot be recovered.
+// It mints with IssueUntil rather than Issue, so the new link inherits the
+// invitation's OWN deadline — minting a fresh seven-day window would make every
+// reminder silently extend the invitation, and repeated, that is an invitation
+// that never expires and a seat that never comes back.
+//
+// # Why it re-reads first
+//
+// The workflow decided to remind from a state it read a moment earlier. Between
+// then and now the invitation can have been accepted, and mailing somebody a
+// live link to an invitation they already took up is both confusing and a
+// credential they no longer need.
+func (o *invitationLifecycleOps) Remind(
+	ctx context.Context, invitationID, orgID string,
+) (bool, error) {
+	state, err := o.settlements.State(ctx, invitationID)
+	if err != nil {
+		return false, err
+	}
+	if !state.Exists || !state.Pending {
+		return false, nil
+	}
+
+	link, err := o.issuer.IssueUntil(ctx, invitationID, orgID, state.ExpiresAt)
+	if err != nil {
+		return false, err
+	}
+
+	// The SAME notification the issue path sends, deliberately: a reminder is a
+	// second copy of the invitation, not a different message, and giving it its
+	// own template would be a second place for the link's wording to drift.
+	n := notify.Notification{
+		Template:  workspacereactor.InvitationTemplate,
+		Class:     notify.Transactional,
+		Recipient: notify.Recipient{SubjectID: state.SubjectID, OrgID: orgID},
+		// EMAIL ONLY, for the reason the issue path gives: the link is a live
+		// credential, and in-app or push delivery would put it in a durable
+		// store.
+		Channels: []notify.Channel{notify.ChannelEmail},
+		OrgID:    orgID,
+		Data: map[string]any{
+			"Token":       link.Plaintext,
+			"ExpiresIn":   "less than 2 days",
+			"WorkspaceID": state.WorkspaceID,
+		},
+		OccurredAt: clock.System{}.Now().UTC(),
+		// Keyed by the LINK, exactly as the issue path is: a retried activity
+		// mints a second link and voids the first, so the two attempts are
+		// different deliveries and the earlier one's mail is already dead.
+		IdempotencyKey: "invitation-reminder:" + invitationID + ":" + link.Fingerprint,
+	}
+	if err := o.dispatch.Dispatch(ctx, n); err != nil {
+		return false, fmt.Errorf("delivering the invitation reminder: %w", err)
+	}
+	return true, nil
+}
+
+// newInvitationLifecycleOps assembles them, or reports why it could not.
+func newInvitationLifecycleOps(d *dependencies) (*invitationLifecycleOps, error) {
+	if d.invitations == nil {
+		return nil, errors.New("no invitation issuer: a reminder has to mint a link, and " +
+			"the original cannot be recovered from its digest")
+	}
+	if d.invitationSweep == nil {
+		return nil, errors.New("no invitation sweep: its settlements are what the lifecycle " +
+			"reads state through, so the two cannot disagree about an invitation")
+	}
+	if d.notify == nil {
+		return nil, errors.New("no dispatcher: the reminder would mint a link and mail nobody")
+	}
+
+	settlements, err := newInvitationSettlements(d)
+	if err != nil {
+		return nil, err
+	}
+	return &invitationLifecycleOps{
+		settlements: settlements, issuer: d.invitations, dispatch: d.notify,
+	}, nil
+}
+
+// newInvitationSettlements builds the CLOSING half of the invitation lifecycle.
+//
+// Shared by the sweep and the per-invitation workflow, deliberately: they act on
+// the same invitations and must not disagree about one. Two constructions would
+// be two chances for the seat pool or the token store to differ, and the
+// disagreement would only ever show up as a seat that does not come back.
+//
+// Only the closing half. Expiring touches the stream, the token store and the
+// seat pool; issuing needs a blind indexer, an account directory and the vault —
+// none of which this binary has, and none of which a timer has any business
+// being able to reach.
+func newInvitationSettlements(d *dependencies) (*workspaceapp.Settlements, error) {
+	if d.pool == nil || d.store == nil {
+		return nil, errors.New("no read model or event store: a settlement reads the " +
+			"invitation's stream and writes its seat back")
+	}
+
+	repo := eventsourcing.NewRepository[*workspacedomain.Invitation](
+		d.store, workspaceCodec(), workspaceUpcasters(),
+		workspacedomain.InvitationCategory, workspacedomain.NewInvitation)
+
+	tokens, err := workspacepg.NewInvitationTokens(pgadapter.New(d.pool))
+	if err != nil {
+		return nil, err
+	}
+	counter, err := workspacepg.NewMembership(pgadapter.New(d.pool))
+	if err != nil {
+		return nil, err
+	}
+	reserver, err := newEntitlementReserver(d)
+	if err != nil {
+		return nil, err
+	}
+	seats, err := workspaceapp.NewSeats(workspaceapp.SeatsDeps{
+		Reserver: reserver, Members: counter,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("workspace seats: %w", err)
+	}
+
+	return workspaceapp.NewSettlements(workspaceapp.SettlementsDeps{
+		Repo: repo, Tokens: tokens, Seats: seats, Now: clock.System{}.Now,
+	})
 }
