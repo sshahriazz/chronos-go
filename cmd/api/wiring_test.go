@@ -114,6 +114,17 @@ func testConfig(t *testing.T) *config.Config {
 			"2222222222222222222222222222222222222222222222222222222222222222",
 		"IDENTITY_TOTP_SEAL_KEY": "" +
 			"3333333333333333333333333333333333333333333333333333333333333333",
+
+		// A TEST-mode Stripe key, for the same reason as the identity keys
+		// above: syntactically valid and cryptographically worthless. Without
+		// it buildBilling refuses, and every composition-root test for the
+		// billing service would assert that nothing was built — which passes
+		// while proving the opposite of what it claims.
+		//
+		// No network call happens at construction, so the key is never used. A
+		// `_live_` key here would be refused by the provisioner's own guard,
+		// which is the point of that guard.
+		"STRIPE_SECRET_KEY": "sk_test_wiring_fixture_not_a_real_key",
 	} {
 		t.Setenv(k, v)
 	}

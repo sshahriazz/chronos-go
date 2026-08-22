@@ -274,6 +274,60 @@ components:
       description: 'Set to the string `1` when `message` is base64url-encoded; omit it otherwise. This is NOT a boolean: the protocol compares the value against `1` exactly, so `true` is treated as not-encoded and the still-encoded message reaches the parser as literal JSON.'
       enum:
         - "1"
+    chronos.billing.v1.CreateBillingPortalSessionRequest:
+      type: object
+      properties:
+        returnUrl:
+          type: string
+          examples:
+            - https://app.example.com/settings/billing
+          title: return_url
+          maxLength: 2048
+          minLength: 8
+          pattern: ^https://
+          format: uri
+          description: |-
+            Where Stripe returns the customer when they are finished.
+
+             Required, and validated as an absolute HTTPS URL rather than accepted as
+             free text. This value is handed to Stripe and Stripe redirects a browser to
+             it, so an unvalidated one turns a billing call into an open redirect — the
+             classic phishing primitive, wearing our domain's session.
+
+             The bound is the published one and the enforced one both: `uri` here is
+             protovalidate's absolute-URI rule, and the pattern pins the scheme.
+      title: CreateBillingPortalSessionRequest
+      required:
+        - returnUrl
+      additionalProperties: false
+      description: |-
+        CreateBillingPortalSessionRequest asks for a signed link into Stripe's
+         Customer Portal.
+    chronos.billing.v1.CreateBillingPortalSessionResponse:
+      type: object
+      properties:
+        url:
+          type: string
+          examples:
+            - https://billing.stripe.com/p/session/live_YWNjdF8xMjM
+          title: url
+          maxLength: 2048
+          pattern: ^https://
+          description: |-
+            The Portal URL. Short-lived and single-use — Stripe expires it, and this
+             system stores nothing about it.
+
+             Redirect the browser here. Do not embed it in an iframe: Stripe sets frame
+             headers that refuse it, and a customer who cannot see the page cannot pay.
+
+             The pattern is DOCUMENTATION of Stripe's shape, not a rule this server
+             enforces — a response field has no protovalidate to enforce it, and pinning
+             the host would make a Stripe change look like our bug. It says the one thing
+             a client must be able to rely on: this is an absolute https URL, safe to put
+             in a redirect.
+      title: CreateBillingPortalSessionResponse
+      additionalProperties: false
+      description: CreateBillingPortalSessionResponse carries the door.
     chronos.errors.v1.ErrorDetail:
       type: object
       title: Error detail
@@ -4643,6 +4697,88 @@ components:
         warm, which an idle deadline alone cannot do. Revocation through
         `RevokeSession` or `RevokeAllSessions` is immediate.
 paths:
+  /chronos.billing.v1.BillingService/CreateBillingPortalSession:
+    post:
+      tags:
+        - BillingService
+      summary: |-
+        CreateBillingPortalSession returns a signed link into Stripe's Customer
+         Portal for the caller's organization.
+      description: |-
+        # This is how a trial becomes revenue
+
+         The trial is cardless (ORG-WORKSPACE-SCOPE §3), and the subscription is
+         created with `trial_settings.end_behavior.missing_payment_method = pause`.
+         So a trial that ends with no card leaves the organization `Suspended` —
+         unreachable, not gone, and reversible the moment a card arrives. THIS is
+         the call that lets it arrive. Without it a trial has exactly one outcome.
+
+         The subscription created at trial start is the subscription the
+         organization keeps for its whole life (billing.md §5 case 25): the Portal
+         updates it rather than replacing it, so the subscription id is stable,
+         billing history stays continuous, and there is never more than one
+         subscription per organization.
+
+         # Why it is BILLING_MANAGE, and why that class is never blocked
+
+         Gate 4 refuses ordinary writes once an organization is suspended. If it
+         refused this one, a suspended organization could never pay, and suspension
+         — which exists to be reversible — would be terminal. Locking a past-due
+         customer out of the page where they would pay you is self-inflicted revenue
+         loss, so `BILLING_MANAGE` is permitted in every organization state.
+
+         # Who may call it
+
+         `billing_manager`, which organization.md §5.1 resolves to the OWNER ALONE.
+         An organization admin holds `billing_viewer` instead and can see spend and
+         invoices without being able to change what the company is committed to
+         (ADR-027) — because the Portal can cancel the subscription and change the
+         plan, and those are the owner's decisions.
+
+         Returns `CONFLICT` if the organization has no Stripe customer yet, which is
+         the provisioning window: creation appends the event and a reactor mirrors it
+         to Stripe seconds later. It is a state that passes on its own, so the
+         remedy is to retry rather than to report a fault.
+      operationId: BillingService_CreateBillingPortalSession
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.billing.v1.CreateBillingPortalSessionRequest'
+            example:
+              returnUrl: https://app.example.com/settings/billing
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.billing.v1.CreateBillingPortalSessionResponse'
   /chronos.identity.v1.IdentityService/Authenticate:
     post:
       tags:
@@ -8435,6 +8571,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/chronos.workspace.v1.RevokeInvitationResponse'
 tags:
+  - name: BillingService
+    description: BillingService is the commercial self-service surface.
   - name: IdentityService
     description: |-
       IdentityService is the account, its credentials and its sessions.

@@ -17,6 +17,7 @@ import (
 	// what routes() walks. Anything not imported here is invisible to the
 	// check — which is why crossCheckAgainstSources exists and fails when the
 	// .proto sources on disk describe an RPC the registry does not carry.
+	_ "github.com/chronos/chronos-go/gen/proto/chronos/billing/v1"
 	_ "github.com/chronos/chronos-go/gen/proto/chronos/errors/v1"
 	_ "github.com/chronos/chronos-go/gen/proto/chronos/identity/v1"
 	_ "github.com/chronos/chronos-go/gen/proto/chronos/notification/v1"

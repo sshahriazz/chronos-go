@@ -1,0 +1,138 @@
+syntax = "proto3";
+
+// Package billing is the wire contract for money.
+//
+// It is deliberately small, and the reason is the rule billing.md §1 states:
+// **Stripe owns subscriptions and invoices; we own the plan catalogue and the
+// mapping to organization lifecycle.** Anything this service could compute — a
+// total, a proration, a tax amount — is a second implementation of arithmetic
+// Stripe already did, and two implementations of the same arithmetic disagree
+// eventually. So there is no "add a card" method here, no "change plan", no
+// "cancel": those are the Customer Portal's, and this service's job is to hand
+// the customer a signed door to it.
+//
+// # Why a hosted portal rather than our own billing screens
+//
+// A card field of ours is a PCI surface, a UI to maintain, and a second place
+// where a subscription can be changed. The Portal does update payment method,
+// view and download invoices, change plan, cancel, and — the one that matters
+// most for a cardless trial — RESUME A PAUSED SUBSCRIPTION. Every one of those
+// arrives back as a webhook, which is why the webhook handler re-fetches rather
+// than trusting a payload: for a change made inside Stripe's UI, the webhook is
+// the only signal this system ever gets.
+package chronos.billing.v1;
+
+import "buf/validate/validate.proto";
+import "chronos/options/v1/options.proto";
+import "gnostic/openapi/v3/annotations.proto";
+
+// CreateBillingPortalSessionRequest asks for a signed link into Stripe's
+// Customer Portal.
+message CreateBillingPortalSessionRequest {
+  // Where Stripe returns the customer when they are finished.
+  //
+  // Required, and validated as an absolute HTTPS URL rather than accepted as
+  // free text. This value is handed to Stripe and Stripe redirects a browser to
+  // it, so an unvalidated one turns a billing call into an open redirect — the
+  // classic phishing primitive, wearing our domain's session.
+  //
+  // The bound is the published one and the enforced one both: `uri` here is
+  // protovalidate's absolute-URI rule, and the pattern pins the scheme.
+  string return_url = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "https://app.example.com/settings/billing"}
+      max_length: 2048
+    },
+    (buf.validate.field).string = {
+      min_len: 8
+      max_len: 2048
+      uri: true
+      pattern: "^https://"
+    },
+    (buf.validate.field).required = true
+  ];
+}
+
+// CreateBillingPortalSessionResponse carries the door.
+message CreateBillingPortalSessionResponse {
+  // The Portal URL. Short-lived and single-use — Stripe expires it, and this
+  // system stores nothing about it.
+  //
+  // Redirect the browser here. Do not embed it in an iframe: Stripe sets frame
+  // headers that refuse it, and a customer who cannot see the page cannot pay.
+  //
+  // The pattern is DOCUMENTATION of Stripe's shape, not a rule this server
+  // enforces — a response field has no protovalidate to enforce it, and pinning
+  // the host would make a Stripe change look like our bug. It says the one thing
+  // a client must be able to rely on: this is an absolute https URL, safe to put
+  // in a redirect.
+  string url = 1 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "https://billing.stripe.com/p/session/live_YWNjdF8xMjM"}
+    max_length: 2048
+    pattern: "^https://"
+  }];
+}
+
+// BillingService is the commercial self-service surface.
+service BillingService {
+  // CreateBillingPortalSession returns a signed link into Stripe's Customer
+  // Portal for the caller's organization.
+  //
+  // # This is how a trial becomes revenue
+  //
+  // The trial is cardless (ORG-WORKSPACE-SCOPE §3), and the subscription is
+  // created with `trial_settings.end_behavior.missing_payment_method = pause`.
+  // So a trial that ends with no card leaves the organization `Suspended` —
+  // unreachable, not gone, and reversible the moment a card arrives. THIS is
+  // the call that lets it arrive. Without it a trial has exactly one outcome.
+  //
+  // The subscription created at trial start is the subscription the
+  // organization keeps for its whole life (billing.md §5 case 25): the Portal
+  // updates it rather than replacing it, so the subscription id is stable,
+  // billing history stays continuous, and there is never more than one
+  // subscription per organization.
+  //
+  // # Why it is BILLING_MANAGE, and why that class is never blocked
+  //
+  // Gate 4 refuses ordinary writes once an organization is suspended. If it
+  // refused this one, a suspended organization could never pay, and suspension
+  // — which exists to be reversible — would be terminal. Locking a past-due
+  // customer out of the page where they would pay you is self-inflicted revenue
+  // loss, so `BILLING_MANAGE` is permitted in every organization state.
+  //
+  // # Who may call it
+  //
+  // `billing_manager`, which organization.md §5.1 resolves to the OWNER ALONE.
+  // An organization admin holds `billing_viewer` instead and can see spend and
+  // invoices without being able to change what the company is committed to
+  // (ADR-027) — because the Portal can cancel the subscription and change the
+  // plan, and those are the owner's decisions.
+  //
+  // Returns `CONFLICT` if the organization has no Stripe customer yet, which is
+  // the provisioning window: creation appends the event and a reactor mirrors it
+  // to Stripe seconds later. It is a state that passes on its own, so the
+  // remedy is to retry rather than to report a fault.
+  rpc CreateBillingPortalSession(CreateBillingPortalSessionRequest) returns (CreateBillingPortalSessionResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "billing_manager"
+      resource_type: "organization"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_BILLING_MANAGE;
+
+    // A MUTATING class, so it carries an Idempotency-Key. The header is
+    // described once, in proto/openapi.base.yaml's components, and every
+    // operation that requires it references that one description.
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+}

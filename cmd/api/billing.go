@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	stripeadapter "github.com/chronos/chronos-go/internal/adapter/stripe"
 	billingpg "github.com/chronos/chronos-go/internal/modules/billing/adapter/postgres"
 	billingapi "github.com/chronos/chronos-go/internal/modules/billing/api"
+	billingapp "github.com/chronos/chronos-go/internal/modules/billing/app"
 	orgapp "github.com/chronos/chronos-go/internal/modules/organization/app"
 	orgdomain "github.com/chronos/chronos-go/internal/modules/organization/domain"
 	"github.com/chronos/chronos-go/internal/platform/config"
@@ -75,4 +77,81 @@ func (d *dependencies) buildStripeWebhook(
 		Events:   events,
 		Log:      log,
 	})
+}
+
+// orgCustomers answers "which Stripe customer is this organization", from the
+// ORGANIZATION AGGREGATE rather than from a projection.
+//
+// # Why the aggregate and not org_status_view
+//
+// Two reasons, and the second is the one that bites. The view is what gate 3
+// reads on EVERY request and its own comment says to keep it small, so a column
+// only the billing portal needs would widen the hottest row in the system for
+// its rarest caller.
+//
+// And a projection lags. An organization whose provisioning reactor has just
+// appended `TrialStarted` would have a Stripe customer and a view that does not
+// yet say so — and the caller would be told to wait for something that has
+// already happened. The aggregate is authority and cannot be behind itself.
+//
+// The cost is one stream read per portal session. A portal session is a person
+// deliberately clicking "manage billing", not a request path.
+type orgCustomers struct {
+	repo *eventsourcing.Repository[*orgdomain.Organization]
+}
+
+var _ billingapp.Customers = (*orgCustomers)(nil)
+
+func (c *orgCustomers) CustomerID(ctx context.Context, orgID string) (string, error) {
+	org, err := c.repo.Load(ctx, orgID)
+	if err != nil {
+		return "", fmt.Errorf("loading organization %s: %w", orgID, err)
+	}
+	if !org.Exists() {
+		// Gate 1 resolved this organization from a membership, so it exists; a
+		// stream that says otherwise means the id reaching here is not the one
+		// that was authorised. Reported as a failure rather than as "not
+		// provisioned yet", because waiting will not fix it.
+		return "", fmt.Errorf("organization %s has no stream", orgID)
+	}
+	// Empty is not an error here — it is the provisioning window, and the use
+	// case turns it into the retryable answer.
+	return org.StripeCustomerID(), nil
+}
+
+// buildBilling assembles the billing service, or explains why it cannot.
+//
+// # What its absence costs
+//
+// The trial is cardless and ends in `pause`, so an organization that never adds
+// a card is suspended — reversibly, by design. The Customer Portal is the ONLY
+// way a card is ever added. Without this service every trial has exactly one
+// outcome, no customer can pay, and no suspended tenant can recover.
+func (d *dependencies) buildBilling(cfg *config.Config) (*billingapi.Service, error) {
+	if cfg.Stripe.SecretKey.Expose() == "" {
+		return nil, errors.New("STRIPE_SECRET_KEY is not set, so no portal session can be " +
+			"minted and no customer can ever add a card")
+	}
+	if d.store == nil {
+		return nil, errors.New("no event store: the Stripe customer id lives on the " +
+			"organization aggregate")
+	}
+
+	portal, err := stripeadapter.NewPortal(stripeadapter.PortalConfig{
+		SecretKey: cfg.Stripe.SecretKey.Expose(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("stripe portal: %w", err)
+	}
+
+	repo := eventsourcing.NewRepository[*orgdomain.Organization](
+		d.store, d.codec, d.upcasters, orgdomain.Category, orgdomain.NewOrganization)
+
+	sessions, err := billingapp.NewPortalSessions(billingapp.PortalSessionsDeps{
+		Portal: portal, Customers: &orgCustomers{repo: repo},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("portal sessions: %w", err)
+	}
+	return billingapi.New(billingapi.Deps{Sessions: sessions})
 }

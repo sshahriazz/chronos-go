@@ -3,6 +3,7 @@ package main
 import (
 	"log/slog"
 
+	"github.com/chronos/chronos-go/gen/proto/chronos/billing/v1/billingv1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/identity/v1/identityv1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/notification/v1/notificationv1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/organization/v1/organizationv1connect"
@@ -30,6 +31,7 @@ func gatedServices() []protoreflect.FullName {
 		profilev1connect.ProfileServiceName,
 		organizationv1connect.OrganizationServiceName,
 		workspacev1connect.WorkspaceServiceName,
+		billingv1connect.BillingServiceName,
 	}
 }
 

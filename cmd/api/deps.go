@@ -13,6 +13,7 @@ import (
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
 	"github.com/chronos/chronos-go/internal/adapter/seaweedfs"
 	valkeyadapter "github.com/chronos/chronos-go/internal/adapter/valkey"
+	billingapi "github.com/chronos/chronos-go/internal/modules/billing/api"
 	entitlementapp "github.com/chronos/chronos-go/internal/modules/entitlement/app"
 	"github.com/chronos/chronos-go/internal/modules/identity"
 	"github.com/chronos/chronos-go/internal/modules/identity/adapter/argon2id"
@@ -173,6 +174,13 @@ type dependencies struct {
 	profile      *profileapi.Service
 	organization *orgapi.Service
 	workspace    *workspaceapi.Service
+
+	// billing is the commercial self-service surface: one RPC, which mints a
+	// signed link into Stripe's hosted Customer Portal. Everything a customer
+	// can change about their subscription happens there and arrives back as a
+	// webhook, which is why the webhook handler re-fetches rather than trusting
+	// a payload.
+	billing *billingapi.Service
 
 	// reserver is entitlement's use case, held because TWO things need it: gate
 	// 4 reserves through it, and the workspace handler COMMITS through it. A
@@ -641,6 +649,14 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 			"for the lifetime of this process", "error", err)
 	} else {
 		d.organization = svc
+	}
+
+	if svc, err := d.buildBilling(cfg); err != nil {
+		log.Error("the billing service is NOT constructed; the Customer Portal is the only "+
+			"way a card is ever added, so every trial has exactly one outcome and no "+
+			"suspended tenant can recover", "error", err)
+	} else {
+		d.billing = svc
 	}
 
 	if svc, err := d.buildWorkspace(log); err != nil {

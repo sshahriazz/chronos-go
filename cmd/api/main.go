@@ -19,6 +19,7 @@ import (
 	connectrpc "connectrpc.com/connect"
 	"connectrpc.com/grpcreflect"
 	"connectrpc.com/validate"
+	"github.com/chronos/chronos-go/gen/proto/chronos/billing/v1/billingv1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/identity/v1/identityv1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/notification/v1/notificationv1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/organization/v1/organizationv1connect"
@@ -334,6 +335,14 @@ func registerServices(
 	} else {
 		mux.Handle(organizationv1connect.NewOrganizationServiceHandler(d.organization, opts...))
 		served = append(served, organizationv1connect.OrganizationServiceName)
+	}
+
+	if d.billing == nil {
+		log.Error("BillingService is NOT registered; the Customer Portal is the only way a " +
+			"card is ever added, so no trial can convert and no suspended tenant can pay")
+	} else {
+		mux.Handle(billingv1connect.NewBillingServiceHandler(d.billing, opts...))
+		served = append(served, billingv1connect.BillingServiceName)
 	}
 
 	if d.workspace == nil {
