@@ -22,6 +22,14 @@ func RegisterEvents(codec *eventcodec.JSON) {
 	eventcodec.Register[contract.MemberJoined](codec)
 	eventcodec.Register[contract.MemberRoleChanged](codec)
 	eventcodec.Register[contract.MemberRemoved](codec)
+
+	eventcodec.Register[contract.InvitationIssued](codec)
+	eventcodec.Register[contract.InvitationTokenRotated](codec)
+	eventcodec.Register[contract.InvitationAccepted](codec)
+	eventcodec.Register[contract.InvitationRevoked](codec)
+	eventcodec.Register[contract.InvitationDeclined](codec)
+	eventcodec.Register[contract.InvitationExpired](codec)
+	eventcodec.Register[contract.InvitationUndeliverable](codec)
 }
 
 // RegisterSchemas declares the current schema version of every workspace event
@@ -47,5 +55,13 @@ func eventTypes() []string {
 		(&contract.MemberJoined{}).EventType(),
 		(&contract.MemberRoleChanged{}).EventType(),
 		(&contract.MemberRemoved{}).EventType(),
+
+		(&contract.InvitationIssued{}).EventType(),
+		(&contract.InvitationTokenRotated{}).EventType(),
+		(&contract.InvitationAccepted{}).EventType(),
+		(&contract.InvitationRevoked{}).EventType(),
+		(&contract.InvitationDeclined{}).EventType(),
+		(&contract.InvitationExpired{}).EventType(),
+		(&contract.InvitationUndeliverable{}).EventType(),
 	}
 }

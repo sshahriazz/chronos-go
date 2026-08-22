@@ -539,6 +539,44 @@ func identityNotifications(cat *notify.Catalogue) {
 			"the event whose seat accounting matters most, and the notification and the " +
 			"seat are independent — the seat is returned whether or not any mail is sent")
 
+	// Invitations. Unlike every other workspace event above, these have NO
+	// audience problem: an invitation is issued to a SubjectID, which is exactly
+	// what notify addresses, and the vault resolves it to an address at send
+	// time. They are silent because the message itself does not exist yet — the
+	// template, and the activity that renders a link carrying a live credential,
+	// are the next step in this slice (WORKLIST 5g). InvitationIssued and
+	// InvitationTokenRotated become `On` there, and they are the first workspace
+	// events that will.
+	cat.Silent[workspaceevents.InvitationIssued](
+		"THE invitation mail, and the only reason invitations exist. Silent only until the " +
+			"template and the vault-addressed send activity land (WORKLIST 5g); the " +
+			"recipient is a subject, so unlike the rest of this module there is nothing " +
+			"missing but the message")
+	cat.Silent[workspaceevents.InvitationTokenRotated](
+		"a resend, which is the same mail with a new link. It becomes On with the issue, " +
+			"and it is rate-limited at the command rather than here — a notification " +
+			"decision cannot stop somebody clicking resend")
+	cat.Silent[workspaceevents.InvitationAccepted](
+		"the acceptor is looking at the screen that accepted it. What is worth sending is " +
+			"the INVITER's confirmation that their invitation was taken up, and that " +
+			"audience is the workspace's admins rather than a subject")
+	cat.Silent[workspaceevents.InvitationDeclined](
+		"the same audience, and the more useful of the two: an inviter who is not told a " +
+			"decline happened will chase somebody who has already said no")
+	cat.Silent[workspaceevents.InvitationRevoked](
+		"telling somebody an invitation they may never have opened has been withdrawn " +
+			"invites a question nobody wants to answer. The seat is what matters here, and " +
+			"the seat is returned whether or not any mail is sent")
+	cat.Silent[workspaceevents.InvitationExpired](
+		"a reminder BEFORE the deadline is the message worth sending, and that is the " +
+			"workflow's timer rather than this event — by the time this fires the window " +
+			"has already closed")
+	cat.Silent[workspaceevents.InvitationUndeliverable](
+		"the inviter must be told, or they resend forever — workspace.md §5 says so " +
+			"explicitly. It stays silent only because the address it would report is " +
+			"personal data, so the message has to name the invitation rather than quote " +
+			"the address, and that template is 5g's")
+
 	cat.Silent[workspaceevents.WorkspaceAdminAdded](
 		"an authority change worth telling the RECIPIENT about, which is a subject notify " +
 			"can already address. It stays silent only because the workspace has no member " +
