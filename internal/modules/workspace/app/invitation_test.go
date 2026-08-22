@@ -170,6 +170,7 @@ type inviteHarness struct {
 	memberships *eventsourcing.Repository[*domain.Membership]
 	workspaceID string
 	clock       *testClock
+	issuer      *app.InvitationIssuer
 }
 
 // testClock is a clock a test can move.
@@ -239,7 +240,7 @@ func newInviteHarness(t *testing.T, o inviteOpts) *inviteHarness {
 	invitations, err := app.NewInvitations(app.InvitationsDeps{
 		Repo: repo, Workspaces: workspaces, Memberships: memberships,
 		Appender: store, Schemas: noSchemas{},
-		Tokens: tokens, Minter: minter,
+		Tokens:  tokens,
 		Indexer: fakeIndexer{err: o.indexErr}, Dir: dir, Subs: fakeSubs{err: o.suspended},
 		Vault: vault, Subjects: subjects, Seats: seats, Now: now,
 	})
@@ -247,7 +248,15 @@ func newInviteHarness(t *testing.T, o inviteOpts) *inviteHarness {
 		t.Fatalf("NewInvitations: %v", err)
 	}
 
-	_ = clock
+	// The ISSUER, which is the reactor's half. The use case appends the event
+	// and mints nothing; whoever sends the mail mints the link, because nothing
+	// that survives the request can recover a plaintext from a digest.
+	issuer, err := app.NewInvitationIssuer(app.InvitationIssuerDeps{
+		Clock: clock, Tokens: tokens, Minter: minter,
+	})
+	if err != nil {
+		t.Fatalf("NewInvitationIssuer: %v", err)
+	}
 
 	// A REAL workspace, opened through its own aggregate. Acceptance revalidates
 	// that it is still active, and a fabricated one would skip the check this
@@ -272,15 +281,34 @@ func newInviteHarness(t *testing.T, o inviteOpts) *inviteHarness {
 	return &inviteHarness{
 		invitations: invitations, store: store, tokens: tokens,
 		vault: vault, subjects: subjects, reserver: reserver, counter: counter,
-		memberships: memberships, workspaceID: inviteWS, clock: clock,
+		memberships: memberships, workspaceID: inviteWS, clock: clock, issuer: issuer,
 	}
 }
 
-func (h *inviteHarness) issue(role contract.MemberRole) (app.IssueInvitationResult, error) {
-	return h.invitations.Issue(context.Background(), app.IssueInvitationCommand{
+// issue appends the invitation AND mints its link, which is the two halves
+// production splits between the handler and the reactor.
+//
+// The link is returned here because every test below needs one to redeem. In
+// production it never crosses this boundary: the reactor mints it, puts it in
+// the mail and discards it.
+func (h *inviteHarness) issue(role contract.MemberRole) (issuedInvitation, error) {
+	result, err := h.invitations.Issue(context.Background(), app.IssueInvitationCommand{
 		OrgID: testOrg, WorkspaceID: inviteWS, Email: inviteeEmail,
 		Role: role, InvitedBy: founder, IdempotencyKey: "key-invite",
 	})
+	if err != nil {
+		return issuedInvitation{IssueInvitationResult: result}, err
+	}
+	link, err := h.issuer.Issue(context.Background(), result.InvitationID, testOrg)
+	return issuedInvitation{
+		IssueInvitationResult: result, Token: link.Plaintext,
+	}, err
+}
+
+// issuedInvitation is what the two halves produce together.
+type issuedInvitation struct {
+	app.IssueInvitationResult
+	Token string
 }
 
 // invitationStreams counts how many invitations were appended.
@@ -607,28 +635,43 @@ func TestTheTokenAndTheInvitationShareAWindow(t *testing.T) {
 	}
 }
 
-// A TOKEN THAT CANNOT BE STORED IS A PARTIAL SUCCESS, not a rollback.
+// THE INVITATION SURVIVES A LINK THAT CANNOT BE STORED.
 //
-// The invitation exists and holds its seat by then. Reporting a plain failure
-// would have the caller issue a second one — a second seat and a second pending
-// invitation for one person — so the error says to RESEND.
-func TestAFailedTokenLeavesTheInvitationAndSaysToResend(t *testing.T) {
+// Minting moved off the request path, and this is what that bought. The handler
+// appends the invitation and mints nothing, so a mail system or a token store
+// that is down costs a REDELIVERY rather than a failed invitation — the reactor
+// reports the failure, the event comes back, and the next attempt issues a fresh
+// link.
+//
+// The earlier design returned the plaintext up through the use case and had to
+// call this a partial success, telling the caller to resend. That put a human in
+// a retry loop the platform already runs, and it was the visible end of a deeper
+// problem: a link minted in the handler is unreachable by the time anything
+// tries to send it.
+func TestALinkThatCannotBeStoredDoesNotLoseTheInvitation(t *testing.T) {
 	h := newInviteHarness(t, inviteOpts{tokenErr: errors.New("postgres: down")})
 
-	result, err := h.issue(contract.RoleMember)
-	if err == nil {
-		t.Fatal("an invitation with no live link was reported as a success")
-	}
-	if !strings.Contains(err.Error(), "resend") {
-		t.Errorf("the error does not say to resend: %v\nA caller who re-invites instead "+
-			"takes a second seat for one person", err)
+	result, err := h.invitations.Issue(context.Background(), app.IssueInvitationCommand{
+		OrgID: testOrg, WorkspaceID: inviteWS, Email: inviteeEmail,
+		Role: contract.RoleMember, InvitedBy: founder, IdempotencyKey: "key-invite",
+	})
+	if err != nil {
+		t.Fatalf("a token store outage failed the invitation itself: %v\nThe handler mints "+
+			"nothing, so the store cannot be on this path at all", err)
 	}
 	if result.InvitationID == "" {
-		t.Error("the invitation id was not returned, so the caller cannot resend the " +
-			"invitation that exists")
+		t.Fatal("no invitation id was returned")
 	}
-	if h.invitationStreams() == 0 {
-		t.Error("nothing was appended, so this is a rollback rather than a partial success")
+	if h.invitationStreams() != 1 {
+		t.Fatal("the invitation was not appended")
+	}
+
+	// The ISSUER is where the failure belongs, and it REPORTS it — silence here
+	// would leave an invitation holding a seat with no link and nothing to
+	// retry.
+	if _, err := h.issuer.Issue(context.Background(), result.InvitationID, testOrg); err == nil {
+		t.Fatal("the issuer reported success while storing nothing; the invitation holds a " +
+			"seat, has no live link, and no redelivery is coming")
 	}
 }
 
@@ -652,12 +695,6 @@ func TestInvitationsRefusesAnIncompleteWiring(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	minter, err := secret.New(map[secret.Purpose]time.Duration{
-		app.PurposeInvitation: app.InvitationTTL,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	full := app.InvitationsDeps{
 		Repo: repo,
 		Workspaces: eventsourcing.NewRepository[*domain.Workspace](
@@ -665,7 +702,7 @@ func TestInvitationsRefusesAnIncompleteWiring(t *testing.T) {
 		Memberships: eventsourcing.NewRepository[*domain.Membership](
 			store, jsonCodec{}, nil, domain.MembershipCategory, domain.NewMembership),
 		Appender: store, Schemas: noSchemas{},
-		Tokens: &fakeTokens{}, Minter: minter,
+		Tokens:  &fakeTokens{},
 		Indexer: fakeIndexer{}, Dir: fakeDirectory{}, Subs: fakeSubs{},
 		Vault: &fakeVault{}, Subjects: &fakeSubjects{}, Seats: seats, Now: time.Now,
 	}
@@ -686,7 +723,6 @@ func TestInvitationsRefusesAnIncompleteWiring(t *testing.T) {
 		{"no schemas", func(d *app.InvitationsDeps) { d.Schemas = nil }, "schema registry"},
 		{"no subscriptions", func(d *app.InvitationsDeps) { d.Subs = nil }, "subscription check"},
 		{"no token store", func(d *app.InvitationsDeps) { d.Tokens = nil }, "token store"},
-		{"no minter", func(d *app.InvitationsDeps) { d.Minter = nil }, "minter"},
 		{"no indexer", func(d *app.InvitationsDeps) { d.Indexer = nil }, "blind indexer"},
 		{"no directory", func(d *app.InvitationsDeps) { d.Dir = nil }, "directory"},
 		{"no vault", func(d *app.InvitationsDeps) { d.Vault = nil }, "vault"},
@@ -1374,14 +1410,20 @@ func TestResendingKillsTheOldLink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resent, err := h.invitations.Resend(context.Background(), app.ResendInvitationCommand{
+	if _, err := h.invitations.Resend(context.Background(), app.ResendInvitationCommand{
 		OrgID: testOrg, WorkspaceID: h.workspaceID,
 		InvitationID: issued.InvitationID, IdempotencyKey: "key-resend",
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("resending: %v", err)
 	}
-	if resent.Token == "" || resent.Token == issued.Token {
+
+	// The REACTOR'S half. Resend appends InvitationTokenRotated and mints
+	// nothing; the issuer is what voids the old link and produces the new one.
+	link, err := h.issuer.Issue(context.Background(), issued.InvitationID, testOrg)
+	if err != nil {
+		t.Fatalf("issuing the new link: %v", err)
+	}
+	if link.Plaintext == "" || link.Plaintext == issued.Token {
 		t.Fatal("the resend produced no new token, or the same one")
 	}
 	if len(h.tokens.issued) != 1 {
@@ -1394,7 +1436,7 @@ func TestResendingKillsTheOldLink(t *testing.T) {
 		t.Fatal("the old link still works, so a resent invitation has two live credentials")
 	}
 	// ...and the new one works.
-	if _, err := h.accept(resent.Token, acceptor); err != nil {
+	if _, err := h.accept(link.Plaintext, acceptor); err != nil {
 		t.Fatalf("the new link does not work, so a resend destroys the invitation: %v", err)
 	}
 }

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"time"
 
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
 	entitlementpg "github.com/chronos/chronos-go/internal/modules/entitlement/adapter/postgres"
@@ -17,7 +16,6 @@ import (
 	workspacedomain "github.com/chronos/chronos-go/internal/modules/workspace/domain"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/platform/ids"
-	"github.com/chronos/chronos-go/internal/platform/secret"
 	"github.com/chronos/chronos-go/internal/server/interceptor"
 )
 
@@ -166,16 +164,6 @@ func (d *dependencies) buildWorkspace(log *slog.Logger) (*workspaceapi.Service, 
 		return nil, fmt.Errorf("invitation token store: %w", err)
 	}
 
-	// This module's OWN lifetime table. platform/secret holds no policy, and an
-	// invitation's window is a decision about invitations (workspace.md §5's
-	// seven days) rather than about hashing.
-	invitationMinter, err := secret.New(map[secret.Purpose]time.Duration{
-		workspaceapp.PurposeInvitation: workspaceapp.InvitationTTL,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("invitation token minter: %w", err)
-	}
-
 	if d.subscriptions == nil {
 		return nil, errors.New("no subscription gate: acceptance revalidates that the " +
 			"organization still permits growth, and it cannot use the interceptor's — the " +
@@ -190,7 +178,6 @@ func (d *dependencies) buildWorkspace(log *slog.Logger) (*workspaceapi.Service, 
 		Schemas:     d.upcasters,
 		Subs:        &joinPermission{gate: d.subscriptions},
 		Tokens:      invitationTokens,
-		Minter:      invitationMinter,
 		Indexer:     d.emailIndex,
 		Dir:         d.accounts,
 		Vault:       &vaultAddresses{vault: d.piiVault},

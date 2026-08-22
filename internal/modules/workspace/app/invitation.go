@@ -36,11 +36,6 @@ type IssueInvitationResult struct {
 	Role         contract.MemberRole
 	SeatConsumed bool
 	ExpiresAt    time.Time
-
-	// Token is the plaintext, returned EXACTLY ONCE and only so the mail can
-	// carry it. It must never be logged, stored, or put in a response body — the
-	// API layer drops it, and the notification path is the only consumer.
-	Token string
 }
 
 // Invitations is the invitation use case.
@@ -51,7 +46,6 @@ type Invitations struct {
 	appender    eventsourcing.MultiAppender
 	schemas     eventsourcing.SchemaVersions
 	tokens      InvitationTokenStore
-	minter      *secret.Minter
 	indexer     EmailIndexer
 	dir         Directory
 	subs        Subscriptions
@@ -69,7 +63,6 @@ type InvitationsDeps struct {
 	Appender    eventsourcing.MultiAppender
 	Schemas     eventsourcing.SchemaVersions
 	Tokens      InvitationTokenStore
-	Minter      *secret.Minter
 	Indexer     EmailIndexer
 	Dir         Directory
 	Subs        Subscriptions
@@ -105,8 +98,6 @@ func NewInvitations(d InvitationsDeps) (*Invitations, error) {
 	case d.Tokens == nil:
 		return nil, fmt.Errorf("workspace: an invitation token store is required; without " +
 			"one an invitation is issued with no credential and can never be redeemed")
-	case d.Minter == nil:
-		return nil, fmt.Errorf("workspace: a token minter is required")
 	case d.Indexer == nil:
 		return nil, fmt.Errorf("workspace: a blind indexer is required; without one the " +
 			"event would have to carry the address itself (ADR-002)")
@@ -129,7 +120,7 @@ func NewInvitations(d InvitationsDeps) (*Invitations, error) {
 	return &Invitations{
 		repo: d.Repo, workspaces: d.Workspaces, memberships: d.Memberships,
 		appender: d.Appender, schemas: d.Schemas,
-		tokens: d.Tokens, minter: d.Minter, indexer: d.Indexer,
+		tokens: d.Tokens, indexer: d.Indexer,
 		dir: d.Dir, subs: d.Subs, vault: d.Vault, subjects: d.Subjects,
 		seats: d.Seats, now: d.Now,
 	}, nil
@@ -236,27 +227,20 @@ func (i *Invitations) Issue(
 		return IssueInvitationResult{}, errs.Internalf("issuing the invitation").Wrap(err)
 	}
 
-	result := IssueInvitationResult{
+	// NO TOKEN IS MINTED HERE. The reactor that consumes InvitationIssued mints
+	// it, because whoever SENDS the mail must hold the plaintext at the moment
+	// it is minted and nothing that survives this request can recover it
+	// afterwards — see InvitationIssuer.
+	//
+	// The cost is stated rather than hidden: this returns BEFORE any link
+	// exists, so an admin who resends one second later is asking about a link
+	// that may not have been issued yet. It is safe in either order because
+	// every issuance voids what came before, so whichever lands second is the
+	// one that survives and there is never more than one live link.
+	return IssueInvitationResult{
 		InvitationID: invitationID, Role: cmd.Role,
 		SeatConsumed: consumed, ExpiresAt: expiresAt,
-	}
-
-	minted, err := i.minter.Mint(PurposeInvitation, now)
-	if err != nil {
-		// The invitation EXISTS and holds its seat. Reported as a partial
-		// success rather than a failure, because telling the caller it failed
-		// would have them issue a second one — a second seat, a second pending
-		// invitation, for one person.
-		return result, errs.Internalf("the invitation was issued but no link could be " +
-			"minted for it; resend to produce one")
-	}
-	if err := i.tokens.Issue(ctx, minted.Digest, invitationID, cmd.OrgID, minted.ExpiresAt); err != nil {
-		return result, errs.Internalf("the invitation was issued but its link could not be " +
-			"stored; resend to produce one").Wrap(err)
-	}
-
-	result.Token = minted.Plaintext
-	return result, nil
+	}, nil
 }
 
 func (c IssueInvitationCommand) validate() error {
@@ -643,10 +627,6 @@ type ResendInvitationCommand struct {
 // ResendInvitationResult reports the new window.
 type ResendInvitationResult struct {
 	ExpiresAt time.Time
-
-	// Token is the plaintext, returned exactly once so the mail can carry it.
-	// The API layer drops it.
-	Token string
 }
 
 // Resend issues a fresh link and extends the window.
@@ -691,21 +671,9 @@ func (i *Invitations) Resend(
 		return ResendInvitationResult{}, errs.Conflictf("%s", err)
 	}
 
-	minted, err := i.minter.Mint(PurposeInvitation, now)
-	if err != nil {
-		return ResendInvitationResult{}, errs.Internalf("minting a new link").Wrap(err)
-	}
-
-	// FIRST. See the doc comment: two live links is the failure this ordering
-	// exists to make impossible.
-	if _, err := i.tokens.RevokeAll(ctx, cmd.InvitationID); err != nil {
-		return ResendInvitationResult{}, errs.Internalf("dropping the previous link").Wrap(err)
-	}
-	if err := i.tokens.Issue(ctx, minted.Digest, cmd.InvitationID, cmd.OrgID,
-		minted.ExpiresAt); err != nil {
-		return ResendInvitationResult{}, errs.Internalf("storing the new link").Wrap(err)
-	}
-
+	// AGAIN, no minting here. The reactor consumes InvitationTokenRotated and
+	// mints — voiding the previous link first, which is what makes "the old
+	// token stays dead" a property of the issuer rather than of this ordering.
 	if _, err := i.repo.Save(ctx, domain.InvitationStreamKey(cmd.InvitationID), inv,
 		cmd.IdempotencyKey, eventsourcing.Metadata{
 			OrgID: cmd.OrgID, WorkspaceID: inv.WorkspaceID(), OccurredAt: now,
@@ -717,7 +685,7 @@ func (i *Invitations) Resend(
 		return ResendInvitationResult{}, errs.Internalf("recording the resend").Wrap(err)
 	}
 
-	return ResendInvitationResult{ExpiresAt: expiresAt, Token: minted.Plaintext}, nil
+	return ResendInvitationResult{ExpiresAt: expiresAt}, nil
 }
 
 // settle loads an invitation an ADMINISTRATOR named and applies a terminal

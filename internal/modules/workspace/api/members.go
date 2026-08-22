@@ -144,17 +144,12 @@ func (s *Service) InviteToWorkspace(
 		IdempotencyKey: key,
 	})
 	if err != nil {
-		// A PARTIAL success reaches here: the invitation exists and holds its
-		// seat, and only the link is missing. It is still an error to the caller,
-		// because an invitation nobody can redeem is not what they asked for —
-		// and the message says to resend rather than to re-invite, so they do not
-		// take a second seat for one person.
 		return nil, fail(err)
 	}
 
-	// result.Token is deliberately dropped here. It exists so the notification
-	// path can put it in the mail, and this is the layer that must not let it
-	// travel any further.
+	// The response carries no link, and there is none to carry: the handler
+	// mints nothing. The reactor that consumes InvitationIssued mints it, puts
+	// it in the mail and discards it — see app.InvitationIssuer.
 	return connect.NewResponse(&workspacev1.InviteToWorkspaceResponse{
 		InvitationId: result.InvitationID,
 		Role:         string(result.Role),
@@ -262,9 +257,9 @@ func (s *Service) ResendInvitation(
 		return nil, fail(err)
 	}
 
-	// result.Token is dropped here, exactly as it is on the issue path: the link
-	// belongs to the person at the address and to nobody else, least of all the
-	// administrator who pressed resend.
+	// No link here either. Resend appends InvitationTokenRotated; the reactor
+	// voids the old link and mints the new one, so the administrator who pressed
+	// resend never holds a credential addressed to somebody else.
 	return connect.NewResponse(&workspacev1.ResendInvitationResponse{
 		ExpiresAt: timestamppb.New(result.ExpiresAt.UTC()),
 	}), nil

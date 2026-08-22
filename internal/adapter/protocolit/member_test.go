@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -595,7 +594,7 @@ func TestInvitingEndToEnd(t *testing.T) {
 		// The token is not in the response, and not in the log — it is in the
 		// mail, which does not exist yet (WORKLIST 5g). So it is read from the
 		// credential store the same way the mail activity will: by digest.
-		token := h.invitationToken(t, ctx, invitationID)
+		token := h.invitationToken(t, ctx, invitationID, orgID)
 
 		accepted, err := h.workspace.AcceptInvitation(ctx,
 			authed(&workspacev1.AcceptInvitationRequest{Token: token}, invitee.bearer))
@@ -746,34 +745,30 @@ func (hh *harness) invitationIssued(
 
 // invitationToken installs a link the test knows the plaintext of.
 //
-// # Why the token cannot simply be read
+// # What it stands in for
 //
-// The plaintext exists in exactly one place — the mail — and the store holds only
-// a digest, which cannot be reversed. That is the whole point of storing one. The
-// mail does not exist yet (WORKLIST 5g), so there is no channel to read it from.
+// The reactor. Issuing appends InvitationIssued and mints NOTHING — whoever
+// sends the mail mints the link, because nothing that survives the request can
+// recover a plaintext from a digest (app.InvitationIssuer). The mail reactor is
+// WORKLIST 5g and does not exist yet, so this performs its one relevant step:
+// void whatever is outstanding, then store one digest.
 //
-// The alternatives were both worse. A test-only endpoint that returns a live
-// credential is a production path added to satisfy a test, and it is the kind
-// that survives into production. Skipping the test asserts nothing at all, which
-// is the failure this repository keeps finding in its own suite.
-//
-// So the test substitutes the DELIVERY, and nothing else. It replaces the
-// invitation's digests with one it minted — which is exactly what a resend does,
-// through the same store, the same purpose and the same expiry — and then drives
-// the real RPC. Every check on the accept path runs against the real thing:
-// the token store, the subscription gate, the workspace aggregate, the directory
-// and the seat pool.
-func (hh *harness) invitationToken(t *testing.T, ctx context.Context, invitationID string) string {
+// It is the same store, the same purpose and the same expiry the issuer uses. A
+// test-only endpoint returning a live credential was the alternative, and it is
+// the kind of production path that survives into production; skipping asserts
+// nothing at all. Every check on the accept path still runs against the real
+// thing: the token store, the subscription gate, the workspace aggregate, the
+// directory and the seat pool.
+func (hh *harness) invitationToken(
+	t *testing.T, ctx context.Context, invitationID, orgID string,
+) string {
 	t.Helper()
 
 	// The SERVER's clock, not this process's. Another test in this package
-	// travels the server hours or days forward to expire a session, and the
-	// server is what evaluates `expires_at > now` — so a window measured from
-	// real time is already closed by the time the lookup runs, and the symptom is
-	// an acceptance refused as NOT_FOUND for a link that was just installed.
-	//
-	// It passes in isolation and fails in a full run, which is the shape of
-	// interference a fixed timestamp hides.
+	// travels the server forward to expire a session, and the server is what
+	// evaluates `expires_at > now` — so a window measured from real time is
+	// already closed by the time the lookup runs, and the symptom is an
+	// acceptance refused as NOT_FOUND for a link that was just installed.
 	reading, err := hh.clockState(ctx, http.MethodGet, hh.clockURL+"/debug/clock")
 	if err != nil {
 		t.Fatalf("reading the server's clock: %v", err)
@@ -789,13 +784,8 @@ func (hh *harness) invitationToken(t *testing.T, ctx context.Context, invitation
 	// A SYSTEM transaction, because invitation_token carries no row security:
 	// redemption happens before any tenant scope exists (migration 00023).
 	err = hh.pg.InSystemTx(ctx, func(ctx context.Context, q db.Querier) error {
-		var orgID string
-		if err := q.QueryRow(ctx,
-			`SELECT org_id FROM invitation_token WHERE invitation_id = $1`,
-			invitationID).Scan(&orgID); err != nil {
-			return fmt.Errorf("the issuing path stored no digest for %s: %w",
-				invitationID, err)
-		}
+		// Void first, exactly as the issuer does: two live links for one
+		// invitation means either can be redeemed.
 		if _, err := q.Exec(ctx,
 			`DELETE FROM invitation_token WHERE invitation_id = $1`, invitationID); err != nil {
 			return err
