@@ -236,3 +236,155 @@ func mustExec(t *testing.T, err error) {
 		t.Fatalf("statement failed: %v", err)
 	}
 }
+
+// The team projection's statements, run against the real schema.
+//
+// Asserted at this level for the reason the invitation ones are: these are
+// properties of the STATEMENTS — what a redelivered event does to a row a later
+// event already moved — and reproducing that end to end would need a
+// subscription to deliver out of order, which it does not.
+func TestTeamProjectionStatements(t *testing.T) {
+	ctx := context.Background()
+	pool := openPool(t)
+
+	orgID := "org_" + ids.New[ids.Org](time.Now(), ids.Entropy()).String()[4:]
+
+	scoped := func(t *testing.T, fn func(q *workspacedb.Queries)) {
+		t.Helper()
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		if _, err := tx.Exec(ctx, "SELECT set_config('app.org_id', $1, true)", orgID); err != nil {
+			t.Fatalf("scope: %v", err)
+		}
+		fn(workspacedb.New(tx))
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+	}
+
+	newTeam := func() (teamID, workspaceID string) {
+		return "team_" + ids.New[ids.Team](time.Now(), ids.Entropy()).String()[5:],
+			"ws_" + ids.New[ids.Workspace](time.Now(), ids.Entropy()).String()[3:]
+	}
+
+	// A DELETED TEAM IS NOT RESURRECTED BY A REDELIVERED CREATION.
+	//
+	// The same defect the invitation upsert had. `status`, `name` and
+	// `deleted_at` are written by LATER events, so a creation that arrives again
+	// after a deletion would put the team back on the screen — and, because its
+	// row would read `active`, make its id look reusable to anything checking
+	// this table. access.md §7.5 is the whole reason the row is kept at all.
+	t.Run("a redelivered creation does not resurrect a deleted team", func(t *testing.T) {
+		teamID, workspaceID := newTeam()
+		created := time.Now().UTC().Truncate(time.Microsecond)
+
+		insert := workspacedb.UpsertTeamParams{
+			TeamID: teamID, WorkspaceID: workspaceID, OrgID: orgID,
+			Name: "Engineering", CreatedBy: "subj_x", CreatedAt: ts(created),
+		}
+		scoped(t, func(q *workspacedb.Queries) {
+			mustExec(t, q.UpsertTeam(ctx, insert))
+			mustExec(t, q.DeleteTeam(ctx, workspacedb.DeleteTeamParams{
+				TeamID: teamID, DeletedAt: ts(created.Add(time.Hour)),
+			}))
+			// THE REDELIVERY, byte-identical to the first creation.
+			mustExec(t, q.UpsertTeam(ctx, insert))
+		})
+
+		var status string
+		var deletedAt pgtype.Timestamptz
+		if err := scopedRow(t, pool, orgID,
+			`SELECT status, deleted_at FROM team_view WHERE team_id = $1`,
+			teamID).Scan(&status, &deletedAt); err != nil {
+			t.Fatal(err)
+		}
+		if status != "deleted" {
+			t.Fatalf("a redelivered creation moved the team back to %q. It returns to the "+
+				"team list, and its id reads as live to anything checking this table — "+
+				"which is exactly what access.md §7.5 keeps the row to prevent", status)
+		}
+		if !deletedAt.Valid {
+			t.Error("deleted_at was cleared, so 'when did this team go' is unanswerable")
+		}
+	})
+
+	// A REDELIVERED CREATION DOES NOT UNDO A RENAME.
+	t.Run("a redelivered creation does not undo a rename", func(t *testing.T) {
+		teamID, workspaceID := newTeam()
+		created := time.Now().UTC().Truncate(time.Microsecond)
+
+		insert := workspacedb.UpsertTeamParams{
+			TeamID: teamID, WorkspaceID: workspaceID, OrgID: orgID,
+			Name: "Engineering", CreatedBy: "subj_x", CreatedAt: ts(created),
+		}
+		scoped(t, func(q *workspacedb.Queries) {
+			mustExec(t, q.UpsertTeam(ctx, insert))
+			mustExec(t, q.RenameTeam(ctx, workspacedb.RenameTeamParams{
+				TeamID: teamID, Name: "Platform",
+			}))
+			mustExec(t, q.UpsertTeam(ctx, insert))
+		})
+
+		var name string
+		if err := scopedRow(t, pool, orgID,
+			`SELECT name FROM team_view WHERE team_id = $1`, teamID).Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		if name != "Platform" {
+			t.Fatalf("the name is %q after a redelivered creation, want the RENAMED one; "+
+				"every team that was ever redelivered reverts to its day-one name", name)
+		}
+	})
+
+	// DELETING A TEAM REMOVES ITS MEMBERSHIP, in the same batch.
+	//
+	// Splitting the two across two projections with two checkpoints would let a
+	// rebuild leave members attached to a deleted team — a team that grants to
+	// people it no longer contains.
+	t.Run("deleting a team removes its membership", func(t *testing.T) {
+		teamID, workspaceID := newTeam()
+		created := time.Now().UTC().Truncate(time.Microsecond)
+
+		scoped(t, func(q *workspacedb.Queries) {
+			mustExec(t, q.UpsertTeam(ctx, workspacedb.UpsertTeamParams{
+				TeamID: teamID, WorkspaceID: workspaceID, OrgID: orgID,
+				Name: "Engineering", CreatedBy: "subj_x", CreatedAt: ts(created),
+			}))
+			for _, subject := range []string{"subj_a", "subj_b"} {
+				mustExec(t, q.UpsertTeamMember(ctx, workspacedb.UpsertTeamMemberParams{
+					TeamID: teamID, WorkspaceID: workspaceID, OrgID: orgID,
+					SubjectID: subject, AddedAt: ts(created),
+				}))
+			}
+			mustExec(t, q.DeleteTeam(ctx, workspacedb.DeleteTeamParams{
+				TeamID: teamID, DeletedAt: ts(created.Add(time.Hour)),
+			}))
+			mustExec(t, q.DeleteTeamMembers(ctx, teamID))
+		})
+
+		var members int
+		if err := scopedRow(t, pool, orgID,
+			`SELECT count(*) FROM team_member_view WHERE team_id = $1`,
+			teamID).Scan(&members); err != nil {
+			t.Fatal(err)
+		}
+		if members != 0 {
+			t.Fatalf("%d members survive a deleted team; the team still grants to people "+
+				"it no longer contains", members)
+		}
+
+		// The TEAM's row is still there, which is the half that matters for
+		// §7.5: a DELETE would make the id look free.
+		var status string
+		if err := scopedRow(t, pool, orgID,
+			`SELECT status FROM team_view WHERE team_id = $1`, teamID).Scan(&status); err != nil {
+			t.Fatalf("the team's row was removed, so its id reads as free: %v", err)
+		}
+		if status != "deleted" {
+			t.Errorf("status is %q", status)
+		}
+	})
+}

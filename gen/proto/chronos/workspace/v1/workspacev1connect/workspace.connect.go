@@ -80,6 +80,18 @@ const (
 	// WorkspaceServiceListWorkspaceInvitationsProcedure is the fully-qualified name of the
 	// WorkspaceService's ListWorkspaceInvitations RPC.
 	WorkspaceServiceListWorkspaceInvitationsProcedure = "/chronos.workspace.v1.WorkspaceService/ListWorkspaceInvitations"
+	// WorkspaceServiceCreateTeamProcedure is the fully-qualified name of the WorkspaceService's
+	// CreateTeam RPC.
+	WorkspaceServiceCreateTeamProcedure = "/chronos.workspace.v1.WorkspaceService/CreateTeam"
+	// WorkspaceServiceRenameTeamProcedure is the fully-qualified name of the WorkspaceService's
+	// RenameTeam RPC.
+	WorkspaceServiceRenameTeamProcedure = "/chronos.workspace.v1.WorkspaceService/RenameTeam"
+	// WorkspaceServiceDeleteTeamProcedure is the fully-qualified name of the WorkspaceService's
+	// DeleteTeam RPC.
+	WorkspaceServiceDeleteTeamProcedure = "/chronos.workspace.v1.WorkspaceService/DeleteTeam"
+	// WorkspaceServiceListTeamsProcedure is the fully-qualified name of the WorkspaceService's
+	// ListTeams RPC.
+	WorkspaceServiceListTeamsProcedure = "/chronos.workspace.v1.WorkspaceService/ListTeams"
 )
 
 // WorkspaceServiceClient is a client for the chronos.workspace.v1.WorkspaceService service.
@@ -256,6 +268,41 @@ type WorkspaceServiceClient interface {
 	// Closed: seeing what is outstanding is exactly what somebody winding an
 	// organization down needs.
 	ListWorkspaceInvitations(context.Context, *connect.Request[v1.ListWorkspaceInvitationsRequest]) (*connect.Response[v1.ListWorkspaceInvitationsResponse], error)
+	// CreateTeam opens a team inside a workspace.
+	//
+	// # It costs no quota and no seat
+	//
+	// A team is a grouping of people who are ALREADY in the workspace and already
+	// hold whatever seat their membership took. Creating one grants nobody
+	// anything until something is shared with it — which is why this declares no
+	// `(chronos.options.v1.entitlement)`.
+	//
+	// WRITE rather than GROW for the same reason: nothing here adds a person to
+	// the organization, so there is nothing for the growth gate to stop.
+	CreateTeam(context.Context, *connect.Request[v1.CreateTeamRequest]) (*connect.Response[v1.CreateTeamResponse], error)
+	// RenameTeam changes a team's display name.
+	//
+	// It grants and revokes nothing: the access engine knows a team by its id, so
+	// a rename is invisible to every tuple naming it.
+	RenameTeam(context.Context, *connect.Request[v1.RenameTeamRequest]) (*connect.Response[v1.RenameTeamResponse], error)
+	// DeleteTeam ends a team.
+	//
+	// # Terminal, and the id is never reused
+	//
+	// access.md §7.5: grants target `team:x#member`, so a recreated id would
+	// silently inherit the deleted team's access. There is deliberately no
+	// RestoreTeam — restoring would BE reusing the id.
+	DeleteTeam(context.Context, *connect.Request[v1.DeleteTeamRequest]) (*connect.Response[v1.DeleteTeamResponse], error)
+	// ListTeams returns one page of a workspace's teams.
+	//
+	// `member` on the workspace, not `admin`: a team is a grouping of colleagues
+	// and knowing which ones exist is ordinary collaboration, unlike the
+	// invitation list — which names who has been ASKED to join and is not a
+	// member's business.
+	//
+	// READ, so it is permitted in every organization state including Suspended and
+	// Closed.
+	ListTeams(context.Context, *connect.Request[v1.ListTeamsRequest]) (*connect.Response[v1.ListTeamsResponse], error)
 }
 
 // NewWorkspaceServiceClient constructs a client for the chronos.workspace.v1.WorkspaceService
@@ -329,6 +376,30 @@ func NewWorkspaceServiceClient(httpClient connect.HTTPClient, baseURL string, op
 			connect.WithSchema(workspaceServiceMethods.ByName("ListWorkspaceInvitations")),
 			connect.WithClientOptions(opts...),
 		),
+		createTeam: connect.NewClient[v1.CreateTeamRequest, v1.CreateTeamResponse](
+			httpClient,
+			baseURL+WorkspaceServiceCreateTeamProcedure,
+			connect.WithSchema(workspaceServiceMethods.ByName("CreateTeam")),
+			connect.WithClientOptions(opts...),
+		),
+		renameTeam: connect.NewClient[v1.RenameTeamRequest, v1.RenameTeamResponse](
+			httpClient,
+			baseURL+WorkspaceServiceRenameTeamProcedure,
+			connect.WithSchema(workspaceServiceMethods.ByName("RenameTeam")),
+			connect.WithClientOptions(opts...),
+		),
+		deleteTeam: connect.NewClient[v1.DeleteTeamRequest, v1.DeleteTeamResponse](
+			httpClient,
+			baseURL+WorkspaceServiceDeleteTeamProcedure,
+			connect.WithSchema(workspaceServiceMethods.ByName("DeleteTeam")),
+			connect.WithClientOptions(opts...),
+		),
+		listTeams: connect.NewClient[v1.ListTeamsRequest, v1.ListTeamsResponse](
+			httpClient,
+			baseURL+WorkspaceServiceListTeamsProcedure,
+			connect.WithSchema(workspaceServiceMethods.ByName("ListTeams")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -344,6 +415,10 @@ type workspaceServiceClient struct {
 	resendInvitation          *connect.Client[v1.ResendInvitationRequest, v1.ResendInvitationResponse]
 	declineInvitation         *connect.Client[v1.DeclineInvitationRequest, v1.DeclineInvitationResponse]
 	listWorkspaceInvitations  *connect.Client[v1.ListWorkspaceInvitationsRequest, v1.ListWorkspaceInvitationsResponse]
+	createTeam                *connect.Client[v1.CreateTeamRequest, v1.CreateTeamResponse]
+	renameTeam                *connect.Client[v1.RenameTeamRequest, v1.RenameTeamResponse]
+	deleteTeam                *connect.Client[v1.DeleteTeamRequest, v1.DeleteTeamResponse]
+	listTeams                 *connect.Client[v1.ListTeamsRequest, v1.ListTeamsResponse]
 }
 
 // CreateWorkspace calls chronos.workspace.v1.WorkspaceService.CreateWorkspace.
@@ -394,6 +469,26 @@ func (c *workspaceServiceClient) DeclineInvitation(ctx context.Context, req *con
 // ListWorkspaceInvitations calls chronos.workspace.v1.WorkspaceService.ListWorkspaceInvitations.
 func (c *workspaceServiceClient) ListWorkspaceInvitations(ctx context.Context, req *connect.Request[v1.ListWorkspaceInvitationsRequest]) (*connect.Response[v1.ListWorkspaceInvitationsResponse], error) {
 	return c.listWorkspaceInvitations.CallUnary(ctx, req)
+}
+
+// CreateTeam calls chronos.workspace.v1.WorkspaceService.CreateTeam.
+func (c *workspaceServiceClient) CreateTeam(ctx context.Context, req *connect.Request[v1.CreateTeamRequest]) (*connect.Response[v1.CreateTeamResponse], error) {
+	return c.createTeam.CallUnary(ctx, req)
+}
+
+// RenameTeam calls chronos.workspace.v1.WorkspaceService.RenameTeam.
+func (c *workspaceServiceClient) RenameTeam(ctx context.Context, req *connect.Request[v1.RenameTeamRequest]) (*connect.Response[v1.RenameTeamResponse], error) {
+	return c.renameTeam.CallUnary(ctx, req)
+}
+
+// DeleteTeam calls chronos.workspace.v1.WorkspaceService.DeleteTeam.
+func (c *workspaceServiceClient) DeleteTeam(ctx context.Context, req *connect.Request[v1.DeleteTeamRequest]) (*connect.Response[v1.DeleteTeamResponse], error) {
+	return c.deleteTeam.CallUnary(ctx, req)
+}
+
+// ListTeams calls chronos.workspace.v1.WorkspaceService.ListTeams.
+func (c *workspaceServiceClient) ListTeams(ctx context.Context, req *connect.Request[v1.ListTeamsRequest]) (*connect.Response[v1.ListTeamsResponse], error) {
+	return c.listTeams.CallUnary(ctx, req)
 }
 
 // WorkspaceServiceHandler is an implementation of the chronos.workspace.v1.WorkspaceService
@@ -571,6 +666,41 @@ type WorkspaceServiceHandler interface {
 	// Closed: seeing what is outstanding is exactly what somebody winding an
 	// organization down needs.
 	ListWorkspaceInvitations(context.Context, *connect.Request[v1.ListWorkspaceInvitationsRequest]) (*connect.Response[v1.ListWorkspaceInvitationsResponse], error)
+	// CreateTeam opens a team inside a workspace.
+	//
+	// # It costs no quota and no seat
+	//
+	// A team is a grouping of people who are ALREADY in the workspace and already
+	// hold whatever seat their membership took. Creating one grants nobody
+	// anything until something is shared with it — which is why this declares no
+	// `(chronos.options.v1.entitlement)`.
+	//
+	// WRITE rather than GROW for the same reason: nothing here adds a person to
+	// the organization, so there is nothing for the growth gate to stop.
+	CreateTeam(context.Context, *connect.Request[v1.CreateTeamRequest]) (*connect.Response[v1.CreateTeamResponse], error)
+	// RenameTeam changes a team's display name.
+	//
+	// It grants and revokes nothing: the access engine knows a team by its id, so
+	// a rename is invisible to every tuple naming it.
+	RenameTeam(context.Context, *connect.Request[v1.RenameTeamRequest]) (*connect.Response[v1.RenameTeamResponse], error)
+	// DeleteTeam ends a team.
+	//
+	// # Terminal, and the id is never reused
+	//
+	// access.md §7.5: grants target `team:x#member`, so a recreated id would
+	// silently inherit the deleted team's access. There is deliberately no
+	// RestoreTeam — restoring would BE reusing the id.
+	DeleteTeam(context.Context, *connect.Request[v1.DeleteTeamRequest]) (*connect.Response[v1.DeleteTeamResponse], error)
+	// ListTeams returns one page of a workspace's teams.
+	//
+	// `member` on the workspace, not `admin`: a team is a grouping of colleagues
+	// and knowing which ones exist is ordinary collaboration, unlike the
+	// invitation list — which names who has been ASKED to join and is not a
+	// member's business.
+	//
+	// READ, so it is permitted in every organization state including Suspended and
+	// Closed.
+	ListTeams(context.Context, *connect.Request[v1.ListTeamsRequest]) (*connect.Response[v1.ListTeamsResponse], error)
 }
 
 // NewWorkspaceServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -640,6 +770,30 @@ func NewWorkspaceServiceHandler(svc WorkspaceServiceHandler, opts ...connect.Han
 		connect.WithSchema(workspaceServiceMethods.ByName("ListWorkspaceInvitations")),
 		connect.WithHandlerOptions(opts...),
 	)
+	workspaceServiceCreateTeamHandler := connect.NewUnaryHandler(
+		WorkspaceServiceCreateTeamProcedure,
+		svc.CreateTeam,
+		connect.WithSchema(workspaceServiceMethods.ByName("CreateTeam")),
+		connect.WithHandlerOptions(opts...),
+	)
+	workspaceServiceRenameTeamHandler := connect.NewUnaryHandler(
+		WorkspaceServiceRenameTeamProcedure,
+		svc.RenameTeam,
+		connect.WithSchema(workspaceServiceMethods.ByName("RenameTeam")),
+		connect.WithHandlerOptions(opts...),
+	)
+	workspaceServiceDeleteTeamHandler := connect.NewUnaryHandler(
+		WorkspaceServiceDeleteTeamProcedure,
+		svc.DeleteTeam,
+		connect.WithSchema(workspaceServiceMethods.ByName("DeleteTeam")),
+		connect.WithHandlerOptions(opts...),
+	)
+	workspaceServiceListTeamsHandler := connect.NewUnaryHandler(
+		WorkspaceServiceListTeamsProcedure,
+		svc.ListTeams,
+		connect.WithSchema(workspaceServiceMethods.ByName("ListTeams")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/chronos.workspace.v1.WorkspaceService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case WorkspaceServiceCreateWorkspaceProcedure:
@@ -662,6 +816,14 @@ func NewWorkspaceServiceHandler(svc WorkspaceServiceHandler, opts ...connect.Han
 			workspaceServiceDeclineInvitationHandler.ServeHTTP(w, r)
 		case WorkspaceServiceListWorkspaceInvitationsProcedure:
 			workspaceServiceListWorkspaceInvitationsHandler.ServeHTTP(w, r)
+		case WorkspaceServiceCreateTeamProcedure:
+			workspaceServiceCreateTeamHandler.ServeHTTP(w, r)
+		case WorkspaceServiceRenameTeamProcedure:
+			workspaceServiceRenameTeamHandler.ServeHTTP(w, r)
+		case WorkspaceServiceDeleteTeamProcedure:
+			workspaceServiceDeleteTeamHandler.ServeHTTP(w, r)
+		case WorkspaceServiceListTeamsProcedure:
+			workspaceServiceListTeamsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -709,4 +871,20 @@ func (UnimplementedWorkspaceServiceHandler) DeclineInvitation(context.Context, *
 
 func (UnimplementedWorkspaceServiceHandler) ListWorkspaceInvitations(context.Context, *connect.Request[v1.ListWorkspaceInvitationsRequest]) (*connect.Response[v1.ListWorkspaceInvitationsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.ListWorkspaceInvitations is not implemented"))
+}
+
+func (UnimplementedWorkspaceServiceHandler) CreateTeam(context.Context, *connect.Request[v1.CreateTeamRequest]) (*connect.Response[v1.CreateTeamResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.CreateTeam is not implemented"))
+}
+
+func (UnimplementedWorkspaceServiceHandler) RenameTeam(context.Context, *connect.Request[v1.RenameTeamRequest]) (*connect.Response[v1.RenameTeamResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.RenameTeam is not implemented"))
+}
+
+func (UnimplementedWorkspaceServiceHandler) DeleteTeam(context.Context, *connect.Request[v1.DeleteTeamRequest]) (*connect.Response[v1.DeleteTeamResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.DeleteTeam is not implemented"))
+}
+
+func (UnimplementedWorkspaceServiceHandler) ListTeams(context.Context, *connect.Request[v1.ListTeamsRequest]) (*connect.Response[v1.ListTeamsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.ListTeams is not implemented"))
 }

@@ -50,6 +50,21 @@ type InvitationList interface {
 	List(ctx context.Context, query app.ListInvitationsQuery) (app.InvitationPage, error)
 }
 
+// TeamLifecycle is workspace's team write side, narrowed to what this layer
+// calls.
+type TeamLifecycle interface {
+	Create(ctx context.Context, cmd app.CreateTeamCommand) (app.CreateTeamResult, error)
+	Rename(ctx context.Context, cmd app.RenameTeamCommand) error
+	Delete(ctx context.Context, cmd app.DeleteTeamCommand) error
+}
+
+// TeamList is workspace's team read side. Separate from TeamLifecycle for the
+// reason InvitationList is separate: it WRITES NOTHING, and the split is what
+// makes that structural.
+type TeamList interface {
+	List(ctx context.Context, query app.ListTeamsQuery) (app.TeamPage, error)
+}
+
 // Service serves WorkspaceService.
 type Service struct {
 	workspacev1connect.UnimplementedWorkspaceServiceHandler
@@ -58,6 +73,8 @@ type Service struct {
 	members           Membership
 	invitations       Invitation
 	invitationQueries InvitationList
+	teams             TeamLifecycle
+	teamQueries       TeamList
 }
 
 // Deps is what Service needs.
@@ -66,6 +83,8 @@ type Deps struct {
 	Members           Membership
 	Invitations       Invitation
 	InvitationQueries InvitationList
+	Teams             TeamLifecycle
+	TeamQueries       TeamList
 }
 
 func New(d Deps) (*Service, error) {
@@ -87,10 +106,17 @@ func New(d Deps) (*Service, error) {
 		return nil, fmt.Errorf("workspace: an invitation reader is required; without one " +
 			"the projection is written by a projector and read by nothing, which is a " +
 			"table that can be silently wrong forever")
+	case d.Teams == nil:
+		return nil, fmt.Errorf("workspace: a team use case is required; without one every " +
+			"team RPC answers UNIMPLEMENTED, which reads as a deployment that is behind")
+	case d.TeamQueries == nil:
+		return nil, fmt.Errorf("workspace: a team reader is required; without one team_view " +
+			"is written by a projector and read by nothing")
 	}
 	return &Service{
 		creation: d.Creation, members: d.Members,
 		invitations: d.Invitations, invitationQueries: d.InvitationQueries,
+		teams: d.Teams, teamQueries: d.TeamQueries,
 	}, nil
 }
 

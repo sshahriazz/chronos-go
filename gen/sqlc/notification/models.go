@@ -252,6 +252,27 @@ type StripeWebhookEvent struct {
 	LastError   string
 }
 
+// Membership per (team, subject). A team member must also be a workspace member.
+type TeamMemberView struct {
+	TeamID      string
+	WorkspaceID string
+	OrgID       string
+	SubjectID   string
+	AddedAt     pgtype.Timestamptz
+}
+
+// Teams per workspace. Screens and enumeration only; the aggregate is authority. Deleted rows are kept, because team ids are never reused.
+type TeamView struct {
+	TeamID      string
+	WorkspaceID string
+	OrgID       string
+	Name        string
+	Status      string
+	CreatedBy   string
+	CreatedAt   pgtype.Timestamptz
+	DeletedAt   pgtype.Timestamptz
+}
+
 type TenantProbe struct {
 	ID          string
 	OrgID       string

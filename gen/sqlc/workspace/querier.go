@@ -29,6 +29,16 @@ type Querier interface {
 	// whether one goes back. A number rather than a boolean, because a boolean
 	// answers only the first question.
 	CountWorkspaceMemberships(ctx context.Context, arg CountWorkspaceMembershipsParams) (int64, error)
+	// A status change, never a DELETE.
+	//
+	// access.md §7.5: a team id is never reused, because grants target
+	// `team:x#member` and a reused id would silently inherit the deleted team's
+	// access. Removing the row would make the id look free to anything that checked
+	// this table.
+	DeleteTeam(ctx context.Context, arg DeleteTeamParams) error
+	DeleteTeamMember(ctx context.Context, arg DeleteTeamMemberParams) error
+	// Every member of one team, for a deletion.
+	DeleteTeamMembers(ctx context.Context, teamID string) error
 	DeleteWorkspaceMember(ctx context.Context, arg DeleteWorkspaceMemberParams) error
 	// A resend moved the deadline.
 	//
@@ -67,6 +77,12 @@ type Querier interface {
 	// makes progress against the worst of the backlog rather than a random slice of
 	// it.
 	ListDueInvitations(ctx context.Context, arg ListDueInvitationsParams) ([]ListDueInvitationsRow, error)
+	// The team screen, alphabetical.
+	//
+	// Keyset paging on `(name, team_id)`, because an offset shifts under a
+	// concurrent creation and silently skips a row. The id breaks ties: two teams
+	// may share a name, and a cursor on the name alone would either skip or repeat.
+	ListTeams(ctx context.Context, arg ListTeamsParams) ([]ListTeamsRow, error)
 	// The admin screen: who is outstanding in this workspace.
 	//
 	// Ordered by expiry so the ones about to lapse are at the top, which is the
@@ -124,6 +140,10 @@ type Querier interface {
 	// because they left their last workspace would lock an owner out of their own
 	// tenant at gate 1.
 	RemoveOrgMemberIfWorkspaceOnly(ctx context.Context, arg RemoveOrgMemberIfWorkspaceOnlyParams) error
+	// Guarded on `active`, which is what makes a replay idempotent: renaming a
+	// deleted team would put a name back on a row whose whole purpose is to record
+	// that the id is spent.
+	RenameTeam(ctx context.Context, arg RenameTeamParams) error
 	// Drop every outstanding digest for one invitation.
 	//
 	// Two callers, and they need the same statement for opposite reasons. A RESEND
@@ -143,8 +163,21 @@ type Querier interface {
 	// Retention. A digest is not personal data, but it is evidence that a particular
 	// address was invited, and it has no purpose past its expiry.
 	SweepInvitationTokens(ctx context.Context) (int64, error)
+	// Who is in this team.
+	//
+	// Also what DELETION enumerates: every member's tuple has to be removed, and
+	// this is the only place that can say who they were.
+	TeamMembers(ctx context.Context, teamID string) ([]string, error)
+	// Which teams is this person in, in this workspace?
+	//
+	// What removing somebody from the WORKSPACE has to ask: a team member must be a
+	// workspace member (workspace.md §6), so losing the second has to lose the
+	// first — otherwise a team keeps granting to somebody who is no longer here.
+	TeamsForSubject(ctx context.Context, arg TeamsForSubjectParams) ([]string, error)
 	TruncateInvitations(ctx context.Context) error
 	TruncateOrgMembers(ctx context.Context) error
+	TruncateTeamMembers(ctx context.Context) error
+	TruncateTeams(ctx context.Context) error
 	TruncateWorkspaceMembers(ctx context.Context) error
 	// Queries for invitation_view.
 	//
@@ -181,6 +214,23 @@ type Querier interface {
 	// projection has to reflect it. This one DOES overwrite, which is correct in the
 	// other direction: an org admin grant outranks the row a workspace join left.
 	UpsertOrgMember(ctx context.Context, arg UpsertOrgMemberParams) error
+	// Queries for team_view and team_member_view.
+	//
+	// Screens and enumeration only. Every DECISION about a team is taken against the
+	// aggregate: a projection lags, and a decision taken from one can be taken twice
+	// with two different answers.
+	// Upsert, because a projector replays: the same event WILL arrive twice.
+	//
+	// The conflict clause touches only what the CREATION event owns. `status`,
+	// `name` and `deleted_at` are written by later events — a rename moves the
+	// second, a deletion the other two — so a redelivered creation must not write
+	// any of them, or it resurrects a deleted team onto the screen and renames it
+	// back to what it was called on day one.
+	//
+	// On a genuine rebuild the INSERT path runs, so all three are set correctly
+	// there and the later events move them again, in order.
+	UpsertTeam(ctx context.Context, arg UpsertTeamParams) error
+	UpsertTeamMember(ctx context.Context, arg UpsertTeamMemberParams) error
 	// Queries for workspace membership, and for the organization membership index
 	// that workspace membership feeds.
 	//

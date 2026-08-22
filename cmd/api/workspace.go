@@ -218,8 +218,26 @@ func (d *dependencies) buildWorkspace(log *slog.Logger) (*workspaceapi.Service, 
 		return nil, fmt.Errorf("invitation queries: %w", err)
 	}
 
+	teamRepo := eventsourcing.NewRepository[*workspacedomain.Team](
+		d.store, d.codec, d.upcasters, workspacedomain.TeamCategory, workspacedomain.NewTeam)
+	teams, err := workspaceapp.NewTeams(workspaceapp.TeamsDeps{
+		Repo: teamRepo, Now: d.clock.Now,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("workspace teams: %w", err)
+	}
+	teamReads, err := workspacepg.NewTeamReads(pgadapter.New(d.pool))
+	if err != nil {
+		return nil, fmt.Errorf("team reads: %w", err)
+	}
+	teamQueries, err := workspaceapp.NewTeamQueries(teamReads)
+	if err != nil {
+		return nil, fmt.Errorf("team queries: %w", err)
+	}
+
 	return workspaceapi.New(workspaceapi.Deps{
 		Creation: creation, Members: members,
 		Invitations: invitations, InvitationQueries: invitationQueries,
+		Teams: teams, TeamQueries: teamQueries,
 	})
 }

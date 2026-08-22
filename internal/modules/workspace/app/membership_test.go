@@ -151,6 +151,20 @@ func (jsonCodec) Unmarshal(eventType string, payload []byte) (eventsourcing.Even
 		return decode[contract.InvitationExpired](payload)
 	case (&contract.InvitationUndeliverable{}).EventType():
 		return decode[contract.InvitationUndeliverable](payload)
+	case (&contract.TeamCreated{}).EventType():
+		return decode[contract.TeamCreated](payload)
+	case (&contract.TeamRenamed{}).EventType():
+		return decode[contract.TeamRenamed](payload)
+	case (&contract.TeamMaintainerAdded{}).EventType():
+		return decode[contract.TeamMaintainerAdded](payload)
+	case (&contract.TeamMaintainerRemoved{}).EventType():
+		return decode[contract.TeamMaintainerRemoved](payload)
+	case (&contract.TeamDeleted{}).EventType():
+		return decode[contract.TeamDeleted](payload)
+	case (&contract.TeamMemberAdded{}).EventType():
+		return decode[contract.TeamMemberAdded](payload)
+	case (&contract.TeamMemberRemoved{}).EventType():
+		return decode[contract.TeamMemberRemoved](payload)
 	default:
 		// A HARD ERROR, matching the real codec. Returning (nil, nil) makes an
 		// unregistered type replay as though it never happened — which is how an

@@ -3579,6 +3579,63 @@ components:
       title: ChangeWorkspaceMemberRoleResponse
       additionalProperties: false
       description: ChangeWorkspaceMemberRoleResponse reports the role now held.
+    chronos.workspace.v1.CreateTeamRequest:
+      type: object
+      properties:
+        workspaceId:
+          type: string
+          examples:
+            - ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: workspace_id
+          maxLength: 29
+          pattern: ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            Which workspace. Read by the authz gate, which asks for `admin` on THIS
+             object.
+        name:
+          type: string
+          examples:
+            - Engineering
+          title: name
+          maxLength: 60
+          minLength: 1
+          pattern: ^\S(.*\S)?$
+          description: |-
+            The display name people read.
+
+             It carries no meaning to the access engine, which knows a team only by its
+             id — so a rename is invisible to every tuple naming the team.
+      title: CreateTeamRequest
+      additionalProperties: false
+      description: CreateTeamRequest opens a team inside a workspace.
+    chronos.workspace.v1.CreateTeamResponse:
+      type: object
+      properties:
+        teamId:
+          type: string
+          examples:
+            - team_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: team_id
+          maxLength: 31
+          pattern: ^team_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            The team's public id, a prefixed ULID (ADR-030).
+
+             It is NEVER REUSED, and that is load-bearing rather than tidy: grants target
+             `team:x#member`, so a recreated id would silently inherit the deleted team's
+             access (access.md §7.5).
+        name:
+          type: string
+          examples:
+            - Engineering
+          title: name
+          maxLength: 60
+          minLength: 1
+          pattern: ^\S(.*\S)?$
+          description: The name as stored, which is the trimmed form of what was sent.
+      title: CreateTeamResponse
+      additionalProperties: false
+      description: CreateTeamResponse names what was created.
     chronos.workspace.v1.CreateWorkspaceRequest:
       type: object
       properties:
@@ -3658,6 +3715,35 @@ components:
          or never existed. A response that distinguished them would let anybody holding
          a guess learn they had guessed a live invitation — and would tell somebody
          with an old mail whether the organization still exists.
+    chronos.workspace.v1.DeleteTeamRequest:
+      type: object
+      properties:
+        workspaceId:
+          type: string
+          examples:
+            - ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: workspace_id
+          maxLength: 29
+          pattern: ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            Which workspace. Read by the authz gate, which asks for `admin` on THIS
+             object.
+        teamId:
+          type: string
+          examples:
+            - team_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: team_id
+          maxLength: 31
+          pattern: ^team_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: Which team.
+      title: DeleteTeamRequest
+      additionalProperties: false
+      description: DeleteTeamRequest ends a team.
+    chronos.workspace.v1.DeleteTeamResponse:
+      type: object
+      title: DeleteTeamResponse
+      additionalProperties: false
+      description: DeleteTeamResponse is empty.
     chronos.workspace.v1.InviteToWorkspaceRequest:
       type: object
       properties:
@@ -3757,6 +3843,64 @@ components:
          it is the person at the address — putting it in this response would hand it to
          the inviter, who could then join as somebody else. It also never echoes the
          address back, so the response cannot be used to confirm what was typed.
+    chronos.workspace.v1.ListTeamsRequest:
+      type: object
+      properties:
+        workspaceId:
+          type: string
+          examples:
+            - ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: workspace_id
+          maxLength: 29
+          pattern: ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            Which workspace. Read by the authz gate, which asks for `admin` on THIS
+             object.
+        pageSize:
+          type: integer
+          examples:
+            - "50"
+          title: page_size
+          maximum: 200
+          minimum: 0
+          format: int32
+          description: |-
+            How many to return. Zero takes the default; an oversized request is CLAMPED
+             rather than refused, which is why the maximum is published and not enforced.
+        pageToken:
+          type: string
+          examples:
+            - PLACEHOLDER-opaque-cursor-from-a-previous-response
+          title: page_token
+          maxLength: 1024
+          pattern: ^[A-Za-z0-9_-]*$
+          description: An opaque cursor from a previous response. Empty starts at the beginning.
+      title: ListTeamsRequest
+      additionalProperties: false
+      description: ListTeamsRequest asks for one page of a workspace's teams.
+    chronos.workspace.v1.ListTeamsResponse:
+      type: object
+      properties:
+        teams:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.workspace.v1.Team'
+          title: teams
+          maxItems: 200
+          description: |-
+            The page, alphabetical. DELETED teams are absent: their rows are kept so an
+             id can never look free, but a deleted team is not something to render.
+        nextPageToken:
+          type: string
+          examples:
+            - PLACEHOLDER-opaque-cursor-for-the-next-page
+          title: next_page_token
+          maxLength: 1024
+          pattern: ^[A-Za-z0-9_-]*$
+          description: Empty on the last page.
+      title: ListTeamsResponse
+      additionalProperties: false
+      description: ListTeamsResponse is one page.
     chronos.workspace.v1.ListWorkspaceInvitationsRequest:
       type: object
       properties:
@@ -3878,6 +4022,46 @@ components:
       title: RemoveWorkspaceMemberResponse
       additionalProperties: false
       description: RemoveWorkspaceMemberResponse reports what the removal returned.
+    chronos.workspace.v1.RenameTeamRequest:
+      type: object
+      properties:
+        workspaceId:
+          type: string
+          examples:
+            - ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: workspace_id
+          maxLength: 29
+          pattern: ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            Which workspace. Read by the authz gate, which asks for `admin` on THIS
+             object.
+        teamId:
+          type: string
+          examples:
+            - team_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: team_id
+          maxLength: 31
+          pattern: ^team_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: Which team.
+        name:
+          type: string
+          examples:
+            - Engineering
+          title: name
+          maxLength: 60
+          minLength: 1
+          pattern: ^\S(.*\S)?$
+          description: The new display name.
+      title: RenameTeamRequest
+      additionalProperties: false
+      description: RenameTeamRequest changes a team's display name.
+    chronos.workspace.v1.RenameTeamResponse:
+      type: object
+      title: RenameTeamResponse
+      additionalProperties: false
+      description: |-
+        RenameTeamResponse is empty. The name that was stored is the trimmed form of
+         what was sent, and the caller sent it.
     chronos.workspace.v1.ResendInvitationRequest:
       type: object
       properties:
@@ -3956,6 +4140,42 @@ components:
       title: RevokeInvitationResponse
       additionalProperties: false
       description: RevokeInvitationResponse reports what the withdrawal returned.
+    chronos.workspace.v1.Team:
+      type: object
+      properties:
+        teamId:
+          type: string
+          examples:
+            - team_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: team_id
+          maxLength: 31
+          pattern: ^team_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: The team's public id.
+        name:
+          type: string
+          examples:
+            - Engineering
+          title: name
+          maxLength: 60
+          minLength: 1
+          pattern: ^\S(.*\S)?$
+          description: The display name.
+        createdBy:
+          type: string
+          examples:
+            - subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: created_by
+          maxLength: 31
+          pattern: ^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: Who created it, by pseudonym. They are its first maintainer.
+        createdAt:
+          title: created_at
+          description: When it was created.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: Team
+      additionalProperties: false
+      description: Team is one entry in the team list.
     chronos.workspace.v1.WorkspaceInvitation:
       type: object
       properties:
@@ -7213,6 +7433,62 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.workspace.v1.ChangeWorkspaceMemberRoleResponse'
+  /chronos.workspace.v1.WorkspaceService/CreateTeam:
+    post:
+      tags:
+        - WorkspaceService
+      summary: CreateTeam opens a team inside a workspace.
+      description: |-
+        # It costs no quota and no seat
+
+         A team is a grouping of people who are ALREADY in the workspace and already
+         hold whatever seat their membership took. Creating one grants nobody
+         anything until something is shared with it — which is why this declares no
+         `(chronos.options.v1.entitlement)`.
+
+         WRITE rather than GROW for the same reason: nothing here adds a person to
+         the organization, so there is nothing for the growth gate to stop.
+      operationId: WorkspaceService_CreateTeam
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.workspace.v1.CreateTeamRequest'
+            example:
+              workspaceId: ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              name: Engineering
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.workspace.v1.CreateTeamResponse'
   /chronos.workspace.v1.WorkspaceService/CreateWorkspace:
     post:
       tags:
@@ -7331,6 +7607,58 @@ paths:
               schema:
                 $ref: '#/components/schemas/chronos.workspace.v1.DeclineInvitationResponse'
       security: []
+  /chronos.workspace.v1.WorkspaceService/DeleteTeam:
+    post:
+      tags:
+        - WorkspaceService
+      summary: DeleteTeam ends a team.
+      description: |-
+        # Terminal, and the id is never reused
+
+         access.md §7.5: grants target `team:x#member`, so a recreated id would
+         silently inherit the deleted team's access. There is deliberately no
+         RestoreTeam — restoring would BE reusing the id.
+      operationId: WorkspaceService_DeleteTeam
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.workspace.v1.DeleteTeamRequest'
+            example:
+              workspaceId: ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              teamId: team_01ARZ3NDEKTSV4RRFFQ69G5FAV
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.workspace.v1.DeleteTeamResponse'
   /chronos.workspace.v1.WorkspaceService/InviteToWorkspace:
     post:
       tags:
@@ -7402,6 +7730,55 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.workspace.v1.InviteToWorkspaceResponse'
+  /chronos.workspace.v1.WorkspaceService/ListTeams:
+    post:
+      tags:
+        - WorkspaceService
+      summary: ListTeams returns one page of a workspace's teams.
+      description: |-
+        `member` on the workspace, not `admin`: a team is a grouping of colleagues
+         and knowing which ones exist is ordinary collaboration, unlike the
+         invitation list — which names who has been ASKED to join and is not a
+         member's business.
+
+         READ, so it is permitted in every organization state including Suspended and
+         Closed.
+      operationId: WorkspaceService_ListTeams
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.workspace.v1.ListTeamsRequest'
+            example:
+              workspaceId: ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              pageSize: "50"
+              pageToken: PLACEHOLDER-opaque-cursor-from-a-previous-response
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.workspace.v1.ListTeamsResponse'
   /chronos.workspace.v1.WorkspaceService/ListWorkspaceInvitations:
     post:
       tags:
@@ -7514,6 +7891,56 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.workspace.v1.RemoveWorkspaceMemberResponse'
+  /chronos.workspace.v1.WorkspaceService/RenameTeam:
+    post:
+      tags:
+        - WorkspaceService
+      summary: RenameTeam changes a team's display name.
+      description: |-
+        It grants and revokes nothing: the access engine knows a team by its id, so
+         a rename is invisible to every tuple naming it.
+      operationId: WorkspaceService_RenameTeam
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.workspace.v1.RenameTeamRequest'
+            example:
+              workspaceId: ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              teamId: team_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              name: Engineering
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.workspace.v1.RenameTeamResponse'
   /chronos.workspace.v1.WorkspaceService/ResendInvitation:
     post:
       tags:

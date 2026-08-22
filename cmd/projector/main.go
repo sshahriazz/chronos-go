@@ -266,6 +266,7 @@ func projections(codec *eventcodec.JSON) []projection.Projection {
 		workspaceprojection.NewOrgMembers(codec),
 		workspaceprojection.NewMembers(codec),
 		workspaceprojection.NewInvitations(codec),
+		workspaceprojection.NewTeams(codec),
 
 		identityprojection.NewUser(codec),
 		identityprojection.NewSession(codec),

@@ -256,7 +256,7 @@ confirmed at the latency level too (a check through a 1000-member team costs
       nested: the engine could model `team#member` referencing another team, and
       the reason not to is that nesting makes effective membership non-obvious to
       the people managing it, which is the problem teams exist to solve.
-- [ ] **6b — create, rename, delete, and the projection.**
+- [x] **6b — create, rename, delete, and the projection.**
 - [ ] **6c — membership.** A team member must already be a workspace member;
       adding a non-member is refused rather than implicitly admitting them.
       Maintainers manage membership without being workspace admins.
