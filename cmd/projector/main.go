@@ -33,6 +33,7 @@ import (
 	organizationprojection "github.com/chronos/chronos-go/internal/modules/organization/projection"
 	"github.com/chronos/chronos-go/internal/modules/profile"
 	profileprojection "github.com/chronos/chronos-go/internal/modules/profile/projection"
+	"github.com/chronos/chronos-go/internal/modules/workspace"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/config"
 	"github.com/chronos/chronos-go/internal/platform/obs"
@@ -255,6 +256,7 @@ func projections(codec *eventcodec.JSON) []projection.Projection {
 		profileprojection.NewProfile(codec),
 
 		organizationprojection.NewStatus(codec),
+		organizationprojection.NewMembers(codec),
 
 		identityprojection.NewUser(codec),
 		identityprojection.NewSession(codec),
@@ -280,6 +282,7 @@ func registerEvents(codec *eventcodec.JSON) {
 	notification.RegisterEvents(codec)
 	profile.RegisterEvents(codec)
 	organization.RegisterEvents(codec)
+	workspace.RegisterEvents(codec)
 
 	// Identity registers its own types, from the module's composition surface.
 	// Listing them here as well would be a second place to forget one, and the

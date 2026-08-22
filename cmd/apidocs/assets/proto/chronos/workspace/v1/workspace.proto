@@ -1,0 +1,125 @@
+syntax = "proto3";
+
+// Package workspace is the wire contract for the collaboration boundary: the
+// spaces inside an organization where work actually happens.
+//
+// Three properties of this schema are load-bearing.
+//
+// **A workspace lives inside exactly one organization, and never names it.**
+// There is no `org_id` field on any request. The organization comes from the
+// resolved tenant scope, and a request that could name its own would be a
+// request to create a workspace inside somebody else's tenant.
+//
+// **Creating one CONSUMES QUOTA**, which is why `CreateWorkspace` declares
+// `(chronos.options.v1.entitlement)`. The declaration is what makes gate 4 run:
+// without it the RPC is ungated and the plan's workspace cap does not apply.
+//
+// **The creator is its first admin**, from the creation event itself rather than
+// a second one. A workspace that existed for even one event with no admin would
+// violate the never-zero rule from birth, and a replay would reproduce that.
+package chronos.workspace.v1;
+
+import "buf/validate/validate.proto";
+import "chronos/options/v1/options.proto";
+import "gnostic/openapi/v3/annotations.proto";
+
+// CreateWorkspaceRequest opens a workspace in the caller's organization.
+message CreateWorkspaceRequest {
+  // The display name people read. Free text within a bound.
+  string name = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "Engineering"}
+      max_length: 80
+      pattern: "^\\S(.*\\S)?$"
+    },
+    (buf.validate.field).string = {
+      min_len: 1
+      max_len: 80
+      pattern: "^\\S(.*\\S)?$"
+    }
+  ];
+}
+
+// CreateWorkspaceResponse names what was created.
+message CreateWorkspaceResponse {
+  // The workspace's public id, a prefixed ULID (ADR-030).
+  string workspace_id = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 29
+    },
+    (buf.validate.field).string = {
+      max_len: 29
+      pattern: "^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // The name as stored, which is the trimmed form of what was sent.
+  //
+  // Carries the SAME pattern as the request. A response string is published to
+  // clients exactly as a request string is, and a generated client validating
+  // what it receives must be given the shape to validate against.
+  string name = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "Engineering"}
+      max_length: 80
+      pattern: "^\\S(.*\\S)?$"
+    },
+    (buf.validate.field).string = {
+      max_len: 80
+      pattern: "^\\S(.*\\S)?$"
+    }
+  ];
+
+  // The lifecycle status. Always `active` for a workspace just created.
+  string status = 3 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "active"}
+      max_length: 16
+    },
+    (buf.validate.field).string = {
+      max_len: 16
+      in: ["active", "archived", "deleted"]
+    }
+  ];
+}
+
+// WorkspaceService is the collaboration surface.
+service WorkspaceService {
+  // CreateWorkspace opens a workspace in the caller's organization.
+  //
+  // # It runs the whole pipeline, in order
+  //
+  // organization.md §6: authz (org `admin`) -> subscription (`grow`, so blocked
+  // outside Trialing and Active) -> entitlement (`workspaces.count` reserved) ->
+  // handler. This is the first RPC in the system to declare an entitlement, and
+  // therefore the first that gate 4 has ever run for.
+  //
+  // The `grow` class matters as much as the entitlement: a past-due organization
+  // is refused here while its existing workspaces keep working, which is
+  // organization.md §5.2's rule that growth stops before work does.
+  rpc CreateWorkspace(CreateWorkspaceRequest) returns (CreateWorkspaceResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "admin"
+      resource_type: "organization"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_GROW;
+    option (chronos.options.v1.entitlement) = "workspaces.count";
+
+    // A MUTATION, so it carries an Idempotency-Key. The header is described
+    // once, in proto/openapi.base.yaml's components, and every operation that
+    // requires it references that one description.
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+}

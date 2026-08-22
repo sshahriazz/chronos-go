@@ -153,13 +153,21 @@ Trial caps: **3 workspaces, 5 seats**.
 - [x] check -> reserve -> commit/release in POSTGRES, not Valkey. **Two
       concurrent reservations for the last unit: exactly one wins**, and 5 of 5
       runs fail without the advisory lock.
-- [>] Gate 4, the `Entitlements` interface that has never had an implementation
+- [x] Gate 4, the `Entitlements` interface that had never had an implementation
 
 ### Then workspace, gated from the start
 
-- [ ] `Workspace` aggregate, never-zero-admins, inheritance
-- [ ] `CreateWorkspace` running authz -> subscription -> entitlement -> handler
+- [x] `Workspace` aggregate, never-zero-admins (proved by mutation), archive/restore
+- [x] `CreateWorkspace` declaring `authz(admin on organization)` + `GROW` +
+      `entitlement(workspaces.count)` — the FIRST RPC to declare an entitlement,
+      so the first that gate 4 has ever run for
+- [x] **1b finished, because this needed it:** gate 1 (`OrgResolver`, verifying
+      membership rather than trusting a header), the `org_member_index`
+      projection, and the ACCESS PROJECTOR writing tuples from the event log
+- [x] **cmd/api now boots with all six gates wired and zero ERROR lines**
+- [ ] End-to-end proof: 3 workspaces succeed, the 4th is refused
 - [ ] Seat accounting: one person per ORGANIZATION, not per membership
+- [ ] Revocation tombstones (ADR-045) — still nothing revokes yet
 
 ## Then
 - [ ] **Slice 4** — workspace + membership

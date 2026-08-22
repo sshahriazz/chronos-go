@@ -20,3 +20,9 @@ type organization
     define owner: [user]
 
 type user
+
+type workspace
+  relations
+    define admin: [user] or admin from parent
+    define member: [user] or admin
+    define parent: [organization]

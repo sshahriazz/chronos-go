@@ -8,6 +8,7 @@ import (
 	"github.com/chronos/chronos-go/gen/proto/chronos/organization/v1/organizationv1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/profile/v1/profilev1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/system/v1/systemv1connect"
+	"github.com/chronos/chronos-go/gen/proto/chronos/workspace/v1/workspacev1connect"
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
 	"github.com/chronos/chronos-go/internal/server/interceptor"
 	"github.com/chronos/chronos-go/internal/server/policy"
@@ -28,6 +29,7 @@ func gatedServices() []protoreflect.FullName {
 		notificationv1connect.NotificationServiceName,
 		profilev1connect.ProfileServiceName,
 		organizationv1connect.OrganizationServiceName,
+		workspacev1connect.WorkspaceServiceName,
 	}
 }
 
@@ -110,6 +112,13 @@ func (d *dependencies) startGates(log *slog.Logger) {
 		// through a helper rather than directly.
 		Authn: authenticatorOrNil(d.authn),
 		Authz: d.authz,
+
+		// Gate 4. Nil until entitlement is constructed, and the pipeline
+		// refuses any method declaring an entitlement while it is — an unwired
+		// gate is an error, not a skip.
+		Org:           d.orgContext,
+		Subscriptions: d.subscriptions,
+		Entitlements:  d.entitlements,
 		// Org, Subscriptions and Entitlements belong to modules that do not exist
 		// yet. Left nil DELIBERATELY: a method declaring one of those gates is
 		// refused with ErrGateUnavailable, which is the correct answer for an

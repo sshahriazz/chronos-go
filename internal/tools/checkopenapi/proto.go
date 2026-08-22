@@ -24,6 +24,7 @@ import (
 	_ "github.com/chronos/chronos-go/gen/proto/chronos/organization/v1"
 	_ "github.com/chronos/chronos-go/gen/proto/chronos/profile/v1"
 	_ "github.com/chronos/chronos-go/gen/proto/chronos/system/v1"
+	_ "github.com/chronos/chronos-go/gen/proto/chronos/workspace/v1"
 )
 
 // protoPackagePrefix limits the registry walk to this repository's own schema.

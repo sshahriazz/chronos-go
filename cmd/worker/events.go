@@ -11,6 +11,8 @@ import (
 	orgevents "github.com/chronos/chronos-go/internal/modules/organization/contract"
 	"github.com/chronos/chronos-go/internal/modules/profile"
 	profilecontract "github.com/chronos/chronos-go/internal/modules/profile/contract"
+	"github.com/chronos/chronos-go/internal/modules/workspace"
+	workspaceevents "github.com/chronos/chronos-go/internal/modules/workspace/contract"
 	"github.com/chronos/chronos-go/internal/platform/notify"
 )
 
@@ -51,6 +53,7 @@ func registerEvents(codec *eventcodec.JSON) {
 	identity.RegisterEvents(codec)
 	profile.RegisterEvents(codec)
 	organization.RegisterEvents(codec)
+	workspace.RegisterEvents(codec)
 }
 
 // notifications declares what each event sends, and to whom.
@@ -498,6 +501,33 @@ func identityNotifications(cat *notify.Catalogue) {
 		"an authority change worth telling the RECIPIENT about — being made an admin is a " +
 			"fact about them. It is silent only until the audience exists; the pattern to " +
 			"copy is identity's, where a change to someone's own authority is Security class")
+	// ── workspace ──────────────────────────────────────────────────────────
+	//
+	// Silent for the same reason organization's are: the audience for a
+	// workspace event is its MEMBERS, and notify addresses a SUBJECT. Resolving
+	// a membership is exactly what this module will provide and does not yet —
+	// there are no members, only admins inside the aggregate. Each becomes an
+	// `On` when there is a set to address.
+	cat.Silent[workspaceevents.WorkspaceCreated](
+		"the creator is looking at the screen that created it. The message worth sending is " +
+			"to the OTHER members, and there are none until invitations exist")
+	cat.Silent[workspaceevents.WorkspaceRenamed](
+		"a display-name change. Worth a realtime nudge on the workspace channel rather than " +
+			"mail, and that is the projector's publish, not a notification")
+	cat.Silent[workspaceevents.WorkspaceArchived](
+		"read-only from now on, which every member needs to know — and which needs a member " +
+			"list to tell. Archiving is reversible and destroys nothing, so the urgency is " +
+			"lower than a suspension")
+	cat.Silent[workspaceevents.WorkspaceRestored](
+		"the reverse, and the same audience problem")
+	cat.Silent[workspaceevents.WorkspaceAdminAdded](
+		"an authority change worth telling the RECIPIENT about, which is a subject notify " +
+			"can already address. It stays silent only because the workspace has no member " +
+			"list to place them in yet; this is the first of these to become an On")
+	cat.Silent[workspaceevents.WorkspaceAdminRemoved](
+		"the more important half: losing administration silently is how somebody discovers " +
+			"it by being refused. Security class when it lands")
+
 	// The four reservation events are the uniqueness MECHANISM, not facts a
 	// person acts on — the same call identity's EmailReserved and
 	// UsernameReserved trio gets, for the same reason. What a person hears about

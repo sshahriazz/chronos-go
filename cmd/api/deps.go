@@ -13,6 +13,7 @@ import (
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
 	"github.com/chronos/chronos-go/internal/adapter/seaweedfs"
 	valkeyadapter "github.com/chronos/chronos-go/internal/adapter/valkey"
+	entitlementapp "github.com/chronos/chronos-go/internal/modules/entitlement/app"
 	"github.com/chronos/chronos-go/internal/modules/identity"
 	"github.com/chronos/chronos-go/internal/modules/identity/adapter/argon2id"
 	identityapi "github.com/chronos/chronos-go/internal/modules/identity/api"
@@ -23,6 +24,8 @@ import (
 	orgapi "github.com/chronos/chronos-go/internal/modules/organization/api"
 	"github.com/chronos/chronos-go/internal/modules/profile"
 	profileapi "github.com/chronos/chronos-go/internal/modules/profile/api"
+	"github.com/chronos/chronos-go/internal/modules/workspace"
+	workspaceapi "github.com/chronos/chronos-go/internal/modules/workspace/api"
 	"github.com/chronos/chronos-go/internal/platform/authz"
 	"github.com/chronos/chronos-go/internal/platform/blob"
 	"github.com/chronos/chronos-go/internal/platform/clientip"
@@ -157,6 +160,16 @@ type dependencies struct {
 	// widens the aggregate that guards authentication (ADR-020's reasoning).
 	profile      *profileapi.Service
 	organization *orgapi.Service
+	workspace    *workspaceapi.Service
+
+	// reserver is entitlement's use case, held because TWO things need it: gate
+	// 4 reserves through it, and the workspace handler COMMITS through it. A
+	// second instance would be a second view of the same table, which is fine —
+	// but a second CATALOGUE would not be, and this keeps one of each.
+	reserver      *entitlementapp.Reserver
+	entitlements  interceptor.Entitlements
+	subscriptions interceptor.Subscriptions
+	orgContext    interceptor.OrgResolver
 
 	// counter backs the authentication attempt ceiling. Nil when Valkey is
 	// unreachable — and identity is then refused outright, because a login path
@@ -305,11 +318,13 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 	notification.RegisterSchemas(d.upcasters)
 	profile.RegisterSchemas(d.upcasters)
 	organization.RegisterSchemas(d.upcasters)
+	workspace.RegisterSchemas(d.upcasters)
 	d.codec = eventcodec.NewJSON(d.upcasters)
 	identity.RegisterEvents(d.codec)
 	notification.RegisterEvents(d.codec)
 	profile.RegisterEvents(d.codec)
 	organization.RegisterEvents(d.codec)
+	workspace.RegisterEvents(d.codec)
 
 	// ---- PostgreSQL: lazy pool, no connection attempted here -------------
 	if pool, err := pgadapter.NewPool(context.Background(), cfg.Postgres.AppDSN(), cfg.Postgres.MaxConns); err != nil {
@@ -521,6 +536,30 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 	// Identity LAST: it needs the pool, the store, the vault and the counter, and
 	// a thing constructed before what it depends on is how a composition root
 	// grows a nil that nobody notices until a request arrives.
+	// Gates 3 and 4 BEFORE startIdentity, because that is what assembles the
+	// enforcement pipeline — a gate constructed after it is a gate the pipeline
+	// never sees, and every method needing it is refused for the process's life.
+	// That is not hypothetical: entitlement was built afterwards at first, and
+	// the startup log correctly reported it as blocking while the object existed.
+	if gate, err := d.buildOrgContext(log); err != nil {
+		log.Error("the org-context gate is NOT constructed; every method that is not "+
+			"self-scoped is refused for the lifetime of this process", "error", err)
+	} else {
+		d.orgContext = gate
+	}
+	if gate, err := d.buildSubscriptions(log); err != nil {
+		log.Error("the subscription gate is NOT constructed; every organization-scoped "+
+			"method is refused for the lifetime of this process", "error", err)
+	} else {
+		d.subscriptions = gate
+	}
+	if gate, err := d.buildEntitlements(log); err != nil {
+		log.Error("the entitlement gate is NOT constructed; every RPC declaring an "+
+			"entitlement is refused for the lifetime of this process", "error", err)
+	} else {
+		d.entitlements = gate
+	}
+
 	d.startIdentity(cfg, log)
 
 	// The object store. Constructed here because it was constructed by NO binary
@@ -576,6 +615,13 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 			"for the lifetime of this process", "error", err)
 	} else {
 		d.organization = svc
+	}
+
+	if svc, err := d.buildWorkspace(log); err != nil {
+		log.Error("the workspace service is NOT constructed; no workspace can be created "+
+			"for the lifetime of this process", "error", err)
+	} else {
+		d.workspace = svc
 	}
 
 	return d, func() {

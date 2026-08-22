@@ -8,6 +8,7 @@ import (
 	"github.com/chronos/chronos-go/internal/modules/notification"
 	"github.com/chronos/chronos-go/internal/modules/organization"
 	"github.com/chronos/chronos-go/internal/modules/profile"
+	"github.com/chronos/chronos-go/internal/modules/workspace"
 )
 
 // Every module this binary WRITES has its events registered in the codec.
@@ -65,6 +66,7 @@ func TestTheCodecRegistersEveryModuleThisBinaryWrites(t *testing.T) {
 		{"notification", notification.EventTypes()},
 		{"profile", profile.EventTypes()},
 		{"organization", organization.EventTypes()},
+		{"workspace", workspace.EventTypes()},
 	} {
 		if len(module.types) == 0 {
 			t.Fatalf("%s declares no event types; this test would assert nothing", module.name)

@@ -87,6 +87,14 @@ type NotificationPreference struct {
 	UpdatedAt pgtype.Timestamptz
 }
 
+// Membership per (org, subject). Gate 1 verifies against it; seat counting will too.
+type OrgMemberIndex struct {
+	OrgID     string
+	SubjectID string
+	Role      string
+	JoinedAt  pgtype.Timestamptz
+}
+
 // Subscription status per organization. Read by gate 3 on every request; keep it small.
 type OrgStatusView struct {
 	OrgID                string

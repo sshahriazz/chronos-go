@@ -20,6 +20,18 @@ type Querier interface {
 	GetOrgStatus(ctx context.Context, orgID string) (string, error)
 	// The fuller row, for the billing screen and for reconciliation.
 	GetOrgStatusRow(ctx context.Context, orgID string) (GetOrgStatusRowRow, error)
+	// Does this person belong to this organization, and as what?
+	//
+	// Gate 1's verification. Filtered by subject_id as well as org_id, which is the
+	// containment control: the caller names an organization, and this is what stops
+	// them naming one they have nothing to do with.
+	OrgMembership(ctx context.Context, arg OrgMembershipParams) (string, error)
+	// Every organization this person belongs to, oldest first.
+	//
+	// Gate 1 uses it when no organization was named: one membership is an
+	// unambiguous answer, and more than one is a request that has to say which.
+	OrgsForSubject(ctx context.Context, subjectID string) ([]OrgsForSubjectRow, error)
+	RemoveOrgMember(ctx context.Context, arg RemoveOrgMemberParams) error
 	// Move the status without touching the Stripe columns.
 	//
 	// Separate from the upsert because most lifecycle events change ONLY the
@@ -27,9 +39,17 @@ type Querier interface {
 	// restating the subscription id it is not changing — which is how a projector
 	// blanks a column it never meant to touch.
 	SetOrgStatus(ctx context.Context, arg SetOrgStatusParams) error
+	TruncateOrgMembers(ctx context.Context) error
 	// TRUNCATE, not DELETE: a rebuild runs in an unscoped system transaction where
 	// RLS hides every row, so DELETE would remove none (ADR-019).
 	TruncateOrgStatus(ctx context.Context) error
+	// Queries for the organization membership index.
+	// Upsert, because a projector replays: the same event WILL arrive twice.
+	//
+	// joined_at is untouched on conflict — a replay must not move when somebody
+	// joined — but the ROLE is updated, because a promotion is a real change and
+	// the projection has to reflect it.
+	UpsertOrgMember(ctx context.Context, arg UpsertOrgMemberParams) error
 	// Queries for the organization status projection.
 	//
 	// Every one is keyed by org_id and runs inside a tenant-scoped transaction, so

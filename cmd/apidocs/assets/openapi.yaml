@@ -3388,6 +3388,59 @@ components:
         - HEALTH_DEGRADED
         - HEALTH_DOWN
       description: Health is a dependency's current state.
+    chronos.workspace.v1.CreateWorkspaceRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          examples:
+            - Engineering
+          title: name
+          maxLength: 80
+          minLength: 1
+          pattern: ^\S(.*\S)?$
+          description: The display name people read. Free text within a bound.
+      title: CreateWorkspaceRequest
+      additionalProperties: false
+      description: CreateWorkspaceRequest opens a workspace in the caller's organization.
+    chronos.workspace.v1.CreateWorkspaceResponse:
+      type: object
+      properties:
+        workspaceId:
+          type: string
+          examples:
+            - ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: workspace_id
+          maxLength: 29
+          pattern: ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: The workspace's public id, a prefixed ULID (ADR-030).
+        name:
+          type: string
+          examples:
+            - Engineering
+          title: name
+          maxLength: 80
+          pattern: ^\S(.*\S)?$
+          description: |-
+            The name as stored, which is the trimmed form of what was sent.
+
+             Carries the SAME pattern as the request. A response string is published to
+             clients exactly as a request string is, and a generated client validating
+             what it receives must be given the shape to validate against.
+        status:
+          type: string
+          examples:
+            - active
+          title: status
+          maxLength: 16
+          enum:
+            - active
+            - archived
+            - deleted
+          description: The lifecycle status. Always `active` for a workspace just created.
+      title: CreateWorkspaceResponse
+      additionalProperties: false
+      description: CreateWorkspaceResponse names what was created.
     compression:
       title: compression
       type: string
@@ -6383,6 +6436,62 @@ paths:
                     lastCheckedAt: '2026-08-14T11:04:55Z'
                     latencyMs: '1004'
       security: []
+  /chronos.workspace.v1.WorkspaceService/CreateWorkspace:
+    post:
+      tags:
+        - WorkspaceService
+      summary: CreateWorkspace opens a workspace in the caller's organization.
+      description: |-
+        # It runs the whole pipeline, in order
+
+         organization.md §6: authz (org `admin`) -> subscription (`grow`, so blocked
+         outside Trialing and Active) -> entitlement (`workspaces.count` reserved) ->
+         handler. This is the first RPC in the system to declare an entitlement, and
+         therefore the first that gate 4 has ever run for.
+
+         The `grow` class matters as much as the entitlement: a past-due organization
+         is refused here while its existing workspaces keep working, which is
+         organization.md §5.2's rule that growth stops before work does.
+      operationId: WorkspaceService_CreateWorkspace
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.workspace.v1.CreateWorkspaceRequest'
+            example:
+              name: Engineering
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.workspace.v1.CreateWorkspaceResponse'
 tags:
   - name: IdentityService
     description: |-
@@ -6456,3 +6565,5 @@ tags:
        their own colleagues.
   - name: SystemService
     description: SystemService reports server and dependency state.
+  - name: WorkspaceService
+    description: WorkspaceService is the collaboration surface.

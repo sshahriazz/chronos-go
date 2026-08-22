@@ -18,6 +18,7 @@ import (
 
 	identitydomain "github.com/chronos/chronos-go/internal/modules/identity/domain"
 	orgdomain "github.com/chronos/chronos-go/internal/modules/organization/domain"
+	workspacedomain "github.com/chronos/chronos-go/internal/modules/workspace/domain"
 	"github.com/chronos/chronos-go/internal/platform/authz/model"
 )
 
@@ -30,6 +31,7 @@ func Fragments() []model.Fragment {
 	return []model.Fragment{
 		identitydomain.AccessFragment(),
 		orgdomain.AccessFragment(),
+		workspacedomain.AccessFragment(),
 	}
 }
 

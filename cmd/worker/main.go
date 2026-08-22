@@ -392,6 +392,17 @@ func reactors(codec *eventcodec.JSON, d *dependencies) []reactor.Reactor {
 		rs = append(rs, r)
 	}
 
+	// The authorization graph. Without it every non-self-scoped method is
+	// DENIED — correctly, and silently.
+	if r, err := newAccessTuples(codec, d); err != nil {
+		slog.Default().Error("the access tuple projector is NOT registered; NOTHING will be "+
+			"granted in the authorization graph, so every organization- and "+
+			"workspace-scoped method is denied for the lifetime of this process",
+			"error", err)
+	} else {
+		rs = append(rs, r)
+	}
+
 	// Provisioning: the reactor that turns a created organization into a usable
 	// one. Its own group, so a Stripe outage parks on its own queue rather than
 	// sharing retries with every notification in the system.

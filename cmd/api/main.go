@@ -24,6 +24,7 @@ import (
 	"github.com/chronos/chronos-go/gen/proto/chronos/organization/v1/organizationv1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/profile/v1/profilev1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/system/v1/systemv1connect"
+	"github.com/chronos/chronos-go/gen/proto/chronos/workspace/v1/workspacev1connect"
 	billingapi "github.com/chronos/chronos-go/internal/modules/billing/api"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/config"
@@ -333,6 +334,14 @@ func registerServices(
 	} else {
 		mux.Handle(organizationv1connect.NewOrganizationServiceHandler(d.organization, opts...))
 		served = append(served, organizationv1connect.OrganizationServiceName)
+	}
+
+	if d.workspace == nil {
+		log.Error("WorkspaceService is NOT registered; no workspace can be created and every " +
+			"workspace RPC answers 'unimplemented'")
+	} else {
+		mux.Handle(workspacev1connect.NewWorkspaceServiceHandler(d.workspace, opts...))
+		served = append(served, workspacev1connect.WorkspaceServiceName)
 	}
 
 	log.Info("connect services registered", "services", served)
