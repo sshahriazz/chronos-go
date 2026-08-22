@@ -81,6 +81,7 @@ import (
 	"github.com/chronos/chronos-go/internal/platform/projection"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/kurrent-io/KurrentDB-Client-Go/kurrentdb"
+	"github.com/valkey-io/valkey-go"
 )
 
 // ---------------------------------------------------------------------------
@@ -284,6 +285,14 @@ func newHarness() (*harness, error) {
 	hh.client = identityv1connect.NewIdentityServiceClient(hh.http, hh.baseURL)
 
 	if err := hh.dialInfra(env, indexKey, sealKey, pepperKey); err != nil {
+		return nil, err
+	}
+	// BEFORE the server starts, so nothing this run does is measured against a
+	// budget a previous run spent. See protocolit's copy for the whole argument;
+	// the short version is that every test here calls from 127.0.0.1, so the
+	// suite shares one per-caller bucket and the daily ones do not refill within
+	// a working day.
+	if err := resetPerCallerLimits(env); err != nil {
 		return nil, err
 	}
 	if err := hh.startServer(root, env); err != nil {
@@ -938,4 +947,50 @@ func (hh *harness) accountsRegisteredFor(
 		}
 	}
 	return subjects
+}
+
+// resetPerCallerLimits clears the per-IP counters this suite spends.
+//
+// The same reset protocolit performs, and for the same reason: several rate
+// limits are scoped to the CALLER's address, every test here calls from
+// 127.0.0.1, and the daily ones do not refill within a working day. Without it
+// the second or third full run fails with RATE_LIMITED in tests that have
+// nothing to do with rate limiting.
+//
+// The limits themselves are NOT raised for tests. They are security controls
+// whose numbers cmd/api/identity.go argues against specific attacks, and a knob
+// that relaxes them is a knob that can relax them in production. Clearing a
+// counter changes no behaviour; raising a ceiling changes what is permitted.
+//
+// clearCallerCeiling in resend_integration_test.go stays. It clears the same
+// keys mid-test, immediately before measuring a ceiling — this one only
+// guarantees the run STARTS clean, and a test that spends the budget itself
+// still has to reset before it counts.
+func resetPerCallerLimits(env map[string]string) error {
+	addr := envOr(env, "VALKEY_ADDR", "localhost:6379")
+	client, err := valkey.NewClient(valkey.ClientOption{
+		InitAddress:  []string{addr},
+		Password:     env["VALKEY_PASSWORD"],
+		DisableCache: true,
+	})
+	if err != nil {
+		return fmt.Errorf("dialling valkey at %s to reset the rate-limit counters: %w",
+			addr, err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	for _, pattern := range []string{"mail_address:*", "mail_caller:*", "username_check:*", "authn:*"} {
+		keys, err := client.Do(ctx, client.B().Keys().Pattern(pattern).Build()).AsStrSlice()
+		if err != nil {
+			return fmt.Errorf("listing %s: %w", pattern, err)
+		}
+		if len(keys) == 0 {
+			continue
+		}
+		if err := client.Do(ctx, client.B().Del().Key(keys...).Build()).Error(); err != nil {
+			return fmt.Errorf("clearing %s: %w", pattern, err)
+		}
+	}
+	return nil
 }

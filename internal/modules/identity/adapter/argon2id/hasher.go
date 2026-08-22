@@ -201,6 +201,19 @@ func New(pepper *PepperKeys, params Params, opts ...Option) (*Hasher, error) {
 // whether the account exists or the password was right. A shed that depended on
 // the answer would be an oracle.
 func (h *Hasher) acquire(ctx context.Context) (release func(), err error) {
+	// BEFORE the fast path, not only on the wait. A caller that has already hung
+	// up gets ~50 ms of memory-hard work done on its behalf otherwise — and,
+	// worse, occupies one of the slots this bound exists to ration, so a live
+	// caller is shed to finish work nobody will read.
+	//
+	// It also makes "a cancelled caller is refused" true regardless of whether a
+	// slot happens to be free, which is what a caller can actually reason about.
+	// Checking only on the wait path made the answer depend on load: busy meant
+	// refused, idle meant served.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	select {
 	case h.slots <- struct{}{}:
 		return func() { <-h.slots }, nil

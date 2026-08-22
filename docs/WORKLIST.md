@@ -259,21 +259,25 @@ satisfied at the composition root.
       re-run. Same family as the one below: deactivation racing the rest of the
       package. NOT investigated; recorded so a second sighting is a pattern
       rather than a surprise.
-- [ ] **Timing-sensitive unit tests fail under load.** Two seen once each while
-      running the full suite repeatedly:
-      `identity/app TestTwoConcurrentResetsProduceExactlyOnePasswordChange` and
-      `argon2id TestACancelledCallerDoesNotWaitForASlot`. Both pass in
-      isolation, both pass on a stashed clean tree, and `make check` passes on
-      the next run — so they are load sensitivity rather than regressions. Four
-      distinct flakes are now recorded here; that is enough of a pattern to be
-      worth a deliberate pass rather than four more sightings.
-- [ ] **The integration suite is not repeatably runnable in one day.** Two per-IP
-      buckets exhaust after several full runs — `mail_caller:daily` (a daily mail
-      cap) and `username_check` — and the failures then look like broken
-      features: `RequestPasswordReset`, `ResendEmailVerification` and
-      `TestAnUnknownFieldIsDiscarded` all fail with RATE_LIMITED. The controls
-      are correct; the suite has no way to reset them. Clearing the keys in
-      Valkey is the current workaround.
+- [x] **Timing-sensitive unit tests fail under load** — both fixed at the root,
+      and neither was load sensitivity.
+      `argon2id TestACancelledCallerDoesNotWaitForASlot` found a real defect: the
+      hasher consulted the context only on the WAIT path, so a caller that had
+      already hung up was SERVED whenever a slot was free. The test occupied the
+      one slot first, but signalled before it was inside Hash — so it raced, and
+      the answer depended on load. Fixed in the hasher; split into the two
+      properties it was conflating.
+      `identity/app TestTwoConcurrentResetsProduceExactlyOnePasswordChange`
+      pinned the stored verifier to the LAST-REPORTED winner, while the stored
+      value belongs to the last WRITER. Two independent orders; it passed
+      whenever they agreed. Now asserts membership.
+- [x] **The integration suite is not repeatably runnable in one day.** Both
+      harnesses now clear the per-IP counters before starting their server, which
+      is the test-suite equivalent of truncating a table. The LIMITS are
+      untouched: they are security controls whose numbers cmd/api/identity.go
+      argues against specific attacks, and a knob that relaxes them for tests is
+      a knob that can relax them in production. Verified by four consecutive full
+      protocolit runs and two of identityit, where the third used to fail.
 - [ ] `TestADeactivatedAccountCanGetBackIn` flake — 0/8 in isolation, so it
       needs concurrency with the rest of its package. Narrowed, not fixed.
 - [ ] `account_name` deprecated field — delete at the first release boundary.

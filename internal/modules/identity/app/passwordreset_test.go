@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1584,10 +1585,20 @@ func TestTwoConcurrentResetsProduceExactlyOnePasswordChange(t *testing.T) {
 	// password it was given. That is provable here and it is worth pinning: it
 	// catches a reset that appends PasswordChanged without replacing the
 	// credential, which would leave the log claiming a change that never happened.
+	//
+	// Membership, not order. When BOTH attempts succeed — which this fake allows,
+	// see the doc comment — the stored verifier belongs to whichever goroutine
+	// WROTE last, and `winners` is in the order the results channel happened to
+	// deliver them. Those two orders are independent, so pinning the last winner
+	// asserted a coincidence: it passed whenever the two agreed and failed
+	// whenever they did not, which under load was roughly one run in a hundred
+	// and looked like a concurrency defect in the handler.
 	stored := h.creds.verifier(h.user.SubjectID())
-	if len(winners) > 0 && stored != resetVerifierFor(winners[len(winners)-1]) {
-		t.Errorf("the stored verifier is %q, which matches no password that succeeded; "+
-			"a reset recorded a change it did not make", stored)
+	if len(winners) > 0 && !slices.ContainsFunc(winners, func(p string) bool {
+		return stored == resetVerifierFor(p)
+	}) {
+		t.Errorf("the stored verifier is %q, which matches none of the passwords that "+
+			"succeeded (%v); a reset recorded a change it did not make", stored, winners)
 	}
 
 	// One PasswordChanged per success, and no more. A retry that appended twice

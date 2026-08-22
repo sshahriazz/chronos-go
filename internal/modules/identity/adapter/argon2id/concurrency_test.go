@@ -177,27 +177,79 @@ func TestAtCapacityCallersAreShedNotQueuedForever(t *testing.T) {
 	}
 }
 
-// A caller whose context ends stops holding a slot.
+// A CALLER THAT HAS ALREADY HUNG UP IS REFUSED, free slot or not.
 //
-// Without this, a client that hung up still costs a full working set until its
-// hash finishes — so an attacker who opens connections and drops them
-// immediately gets the memory cost for free.
-func TestACancelledCallerDoesNotWaitForASlot(t *testing.T) {
+// This test used to occupy the single slot first and assert only that the
+// cancelled caller did not WAIT. That made it depend on a race it could not win:
+// the occupier signals before it is inside Hash, so the cancelled call often
+// found the slot free — and a free slot was SERVED, because the context was
+// consulted only on the wait path.
+//
+// The answer therefore depended on load. Busy meant refused, idle meant served,
+// and the test failed roughly one run in six under parallel load while the
+// behaviour it described was never actually guaranteed.
+//
+// The fix was in the hasher: the context is checked before the fast path. Doing
+// ~50 ms of memory-hard work for a caller who has hung up is waste, and it
+// occupies one of the slots the bound exists to ration — so a live caller is
+// shed to finish work nobody will read.
+func TestACancelledCallerIsRefusedEvenWithASlotFree(t *testing.T) {
 	pepper, err := argon2id.NewPepperKeys(map[int][]byte{1: keyBytes(t, 0xA1)}, 1)
 	if err != nil {
 		t.Fatalf("pepper: %v", err)
 	}
-	h, err := argon2id.New(pepper, testParams, argon2id.WithConcurrencyLimit(1, time.Minute))
+	// A limit of 4 and nothing else running: every slot is free, which is
+	// precisely the case the old test could not cover.
+	h, err := argon2id.New(pepper, testParams, argon2id.WithConcurrencyLimit(4, time.Minute))
 	if err != nil {
 		t.Fatalf("hasher: %v", err)
 	}
 	user, cred := newIDs(t)
 
-	// Fill the single slot and keep it busy.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	if _, err := h.Hash(ctx, "correct horse battery", user, cred); err == nil {
+		t.Fatal("a caller that had already hung up was served. The work is memory-hard " +
+			"and nobody will read it, and it occupies a slot the bound exists to ration")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("the refusal took %v; a cancelled context is answered from ctx.Err() and "+
+			"should not reach the hash at all", elapsed)
+	}
+	if n := h.InFlight(); n != 0 {
+		t.Errorf("%d slots are still held after refusing a cancelled caller", n)
+	}
+}
+
+// A CALLER CANCELLED WHILE WAITING IS RELEASED, rather than held to maxWait.
+//
+// The other half, and the one the entry check above cannot cover: here the
+// caller is live when it asks, finds every slot busy, and hangs up during the
+// wait. The context must beat the timer, or a client that gave up still costs a
+// working set for the rest of maxWait.
+func TestACallerCancelledWhileWaitingIsReleased(t *testing.T) {
+	pepper, err := argon2id.NewPepperKeys(map[int][]byte{1: keyBytes(t, 0xA1)}, 1)
+	if err != nil {
+		t.Fatalf("pepper: %v", err)
+	}
+	// A LONG maxWait, so "released early" and "waited it out" are minutes apart
+	// rather than seconds — the margin is what makes this survive a loaded
+	// machine, where the old test's 10-second threshold did not.
+	h, err := argon2id.New(pepper, testParams, argon2id.WithConcurrencyLimit(1, 10*time.Minute))
+	if err != nil {
+		t.Fatalf("hasher: %v", err)
+	}
+	user, cred := newIDs(t)
+
+	// Fill the only slot and hold it. The waiter below is what this test is
+	// about, so the occupier only has to keep the slot for the duration.
 	release := make(chan struct{})
-	occupied := make(chan struct{})
+	held := make(chan struct{})
 	go func() {
-		close(occupied)
+		_, _ = h.Hash(context.Background(), "correct horse battery", user, cred)
+		close(held)
 		for {
 			select {
 			case <-release:
@@ -209,22 +261,26 @@ func TestACancelledCallerDoesNotWaitForASlot(t *testing.T) {
 			}
 		}
 	}()
-	<-occupied
+	<-held
 	defer close(release)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // already dead when it asks
+	time.AfterFunc(200*time.Millisecond, cancel)
 
 	start := time.Now()
 	_, err = h.Hash(ctx, "correct horse battery", user, cred)
 	elapsed := time.Since(start)
 
 	if err == nil {
-		t.Fatal("a cancelled caller was served")
+		// It won the slot rather than waiting, which the occupier's loop makes
+		// unlikely but not impossible. Nothing to assert, and reporting a
+		// failure would make this test flaky in the direction the last one was.
+		t.Skip("the waiter won a slot instead of waiting; nothing to measure")
 	}
-	if elapsed > 10*time.Second {
-		t.Fatalf("a cancelled caller waited %v for a slot: the maxWait timer is consulted "+
-			"before the context, so a hung-up client still costs a working set", elapsed)
+	if elapsed > time.Minute {
+		t.Fatalf("a caller that hung up waited %v for a slot. The maxWait timer is "+
+			"consulted before the context, so a client that gave up still costs a working "+
+			"set for the rest of the window", elapsed)
 	}
 }
 

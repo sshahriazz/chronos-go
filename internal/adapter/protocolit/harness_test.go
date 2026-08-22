@@ -159,6 +159,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
+	"github.com/valkey-io/valkey-go"
 )
 
 // h is the one harness for the package: one cmd/api process, one set of
@@ -338,6 +339,11 @@ func newHarness() (*harness, error) {
 	hh.workspace = workspacev1connect.NewWorkspaceServiceClient(hh.http, hh.baseURL)
 
 	if err := hh.dialInfra(env); err != nil {
+		return nil, err
+	}
+	// BEFORE the server starts, so nothing this run does is measured against a
+	// budget a previous run spent.
+	if err := resetPerCallerLimits(env); err != nil {
 		return nil, err
 	}
 	if err := hh.startServer(root, env); err != nil {
@@ -1437,4 +1443,62 @@ func projectionRegistry(codec *eventcodec.JSON) []projection.Projection {
 		identityprojection.NewSession(codec),
 		identityprojection.NewReservation(codec),
 	}
+}
+
+// resetPerCallerLimits clears the per-IP counters this suite spends.
+//
+// # Why the suite cannot run twice without it
+//
+// Several rate limits are scoped to the CALLER's address, and every test in this
+// package calls from 127.0.0.1 — so the whole suite shares one bucket, and the
+// daily ones do not refill within a working day. The second or third full run
+// then fails in `RequestPasswordReset`, `ResendEmailVerification` and the
+// unknown-field test with RATE_LIMITED, which reads as three broken features
+// rather than as one exhausted budget.
+//
+// # Why the limits are not simply raised for tests
+//
+// Because they are security controls, and cmd/api/identity.go argues each number
+// against a specific attack: the per-address ceiling is the mail-bombing control
+// and the per-caller one is the enumeration control that lets the endpoint be
+// public at all. A config knob that relaxes them is a knob that can relax them in
+// production, and the failure mode there has no symptom. Clearing a COUNTER
+// changes no behaviour; raising a ceiling changes what the system permits.
+//
+// So this is the test-suite equivalent of truncating a table: the harness owns
+// the stack for this run, and it starts from a clean budget.
+//
+// A failure here fails the run rather than being logged and skipped. A harness
+// that quietly could not reset would leave exactly the residue it exists to
+// remove, and the failure would surface later as a feature that looks broken.
+func resetPerCallerLimits(env map[string]string) error {
+	addr := envOr(env, "VALKEY_ADDR", "localhost:6379")
+	client, err := valkey.NewClient(valkey.ClientOption{
+		InitAddress:  []string{addr},
+		Password:     env["VALKEY_PASSWORD"],
+		DisableCache: true,
+	})
+	if err != nil {
+		return fmt.Errorf("dialling valkey at %s to reset the rate-limit counters: %w",
+			addr, err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	// The prefixes cmd/api namespaces its counters with. Listed rather than
+	// wildcarded over everything, so a future counter that SHOULD survive
+	// between runs is not silently cleared by this.
+	for _, pattern := range []string{"mail_address:*", "mail_caller:*", "username_check:*", "authn:*"} {
+		keys, err := client.Do(ctx, client.B().Keys().Pattern(pattern).Build()).AsStrSlice()
+		if err != nil {
+			return fmt.Errorf("listing %s: %w", pattern, err)
+		}
+		if len(keys) == 0 {
+			continue
+		}
+		if err := client.Do(ctx, client.B().Del().Key(keys...).Build()).Error(); err != nil {
+			return fmt.Errorf("clearing %s: %w", pattern, err)
+		}
+	}
+	return nil
 }
