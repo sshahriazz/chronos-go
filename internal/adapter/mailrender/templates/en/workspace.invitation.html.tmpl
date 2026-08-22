@@ -1,0 +1,22 @@
+{{define "title"}}You have been invited to a Chronos workspace{{end}}
+{{define "content"}}
+{{/*
+  Both links are built HERE rather than passed in, from the base URL the
+  renderer already holds. One place knows how to turn a token into a URL, and
+  the token never has to be concatenated into a string in Go — where a log line,
+  an error message or a span attribute could pick it up on the way past.
+*/}}
+{{$accept := url (printf "/invitations/accept?token=%s" .Token)}}
+{{$decline := url (printf "/invitations/decline?token=%s" .Token)}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 20px;">You have been invited to join a workspace on Chronos.</p>
+<p style="margin:0 0 20px;">
+  <a href="{{$accept}}" style="display:inline-block;background:#1a1d21;color:#ffffff;text-decoration:none;padding:11px 20px;border-radius:6px;font-size:14px;font-weight:500;">Accept the invitation</a>
+</p>
+<p style="margin:0 0 14px;color:#6b7280;font-size:13px;">If the button does not work, paste this into your browser:<br>
+  <a href="{{$accept}}" style="color:#3b5bdb;word-break:break-all;">{{$accept}}</a>
+</p>
+<p style="margin:0 0 6px;color:#6b7280;font-size:13px;">This link expires in {{.ExpiresIn}} and can be used once.</p>
+<p style="margin:0 0 6px;color:#6b7280;font-size:13px;">Would rather not join? <a href="{{$decline}}" style="color:#3b5bdb;">Decline</a> — the seat held for you is released either way.</p>
+<p style="margin:0;color:#6b7280;font-size:13px;">If you were not expecting this, ignore the message. Nothing happens until you open one of the links above, and the invitation lapses on its own.</p>
+{{end}}

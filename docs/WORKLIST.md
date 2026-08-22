@@ -236,7 +236,7 @@ satisfied at the composition root.
       expiry; the old token stays dead.
 - [x] **5f — `invitation_view`** projection, keyed `(workspace_id, status,
       expires_at)`.
-- [ ] **5g — the invitation mail**, through the notification reactor and a
+- [x] **5g — the invitation mail**, through the notification reactor and a
       Temporal activity, addressed from the vault at send time (ADR-002).
 - [ ] **5h — the Temporal workflow**: expiry, reminders and seat release. The
       invitation outlives any request, so a timer in a handler cannot own it.

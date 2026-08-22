@@ -21,6 +21,7 @@ import (
 	"github.com/chronos/chronos-go/internal/adapter/webpush"
 	"github.com/chronos/chronos-go/internal/modules/identity/app"
 	notificationpg "github.com/chronos/chronos-go/internal/modules/notification/adapter/postgres"
+	workspaceapp "github.com/chronos/chronos-go/internal/modules/workspace/app"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/config"
 	"github.com/chronos/chronos-go/internal/platform/db"
@@ -123,6 +124,12 @@ type dependencies struct {
 	// mail — every account stays Pending, every address stays claimed, and
 	// nothing anywhere reports it (ADR-002, identity.md §7).
 	verification *app.VerificationIssuer
+
+	// invitations mints the emailed invitation link, for the same reason and
+	// with the same failure mode: issuing appends InvitationIssued and mints
+	// nothing, so a worker that cannot mint spends a seat, leaves the invitation
+	// Pending for seven days, and tells nobody it exists.
+	invitations *workspaceapp.InvitationIssuer
 
 	// retention deletes identity rows that can no longer affect a decision:
 	// spent TOTP steps, expired token digests, the secret half of dead sessions,
@@ -347,6 +354,17 @@ func newDependencies(cfg *config.Config, log *slog.Logger, codec *eventcodec.JSO
 			"address can never be registered again", "error", err)
 	} else {
 		d.verification = issuer
+	}
+
+	// The invitation-link issuer, held for the reason above it: a worker that
+	// cannot mint one must say so once at startup rather than run a reactor that
+	// consumes InvitationIssued and acks it having done nothing.
+	if issuer, err := newInvitationIssuer(d); err != nil {
+		log.Error("invitation mail is NOT wired; every invitation will spend a seat and "+
+			"mail nobody, so it sits pending until it expires and the person it was for "+
+			"never learns it existed", "error", err)
+	} else {
+		d.invitations = issuer
 	}
 
 	// Identity retention. Constructed before the worker for the same reason the

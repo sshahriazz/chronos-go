@@ -392,6 +392,17 @@ func reactors(codec *eventcodec.JSON, d *dependencies) []reactor.Reactor {
 		rs = append(rs, r)
 	}
 
+	// The invitation mail. Same structure as the verification mail and the same
+	// reason for being its own reactor: its payload is a credential that has to
+	// be MINTED, which no catalogue Data function can do.
+	if r, err := newInvitationMail(d); err != nil {
+		slog.Default().Error("the invitation-mail reactor is NOT registered; "+
+			"InvitationIssued will be consumed by nothing, so every invitation spends a "+
+			"seat, sits pending until it expires, and mails nobody", "error", err)
+	} else {
+		rs = append(rs, r)
+	}
+
 	// The authorization graph. Without it every non-self-scoped method is
 	// DENIED — correctly, and silently.
 	if r, err := newAccessTuples(codec, d, slog.Default()); err != nil {

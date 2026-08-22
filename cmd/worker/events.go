@@ -547,15 +547,24 @@ func identityNotifications(cat *notify.Catalogue) {
 	// are the next step in this slice (WORKLIST 5g). InvitationIssued and
 	// InvitationTokenRotated become `On` there, and they are the first workspace
 	// events that will.
+	// These two DO notify, and the catalogue is deliberately not where it
+	// happens. Their payload is a live credential that does not exist when the
+	// event is written — a Data function here receives only the decoded event,
+	// and there is no way back from a digest — so the link has to be MINTED by
+	// whoever sends the mail. That is workspace/reactor.InvitationMail, on its
+	// own subscription group, exactly as identity's verification mail is.
+	//
+	// Recorded here as Silent-with-a-reason rather than omitted, because the
+	// completeness gate's question is "does every event have a decision", and
+	// "another component owns this one" is a decision.
 	cat.Silent[workspaceevents.InvitationIssued](
-		"THE invitation mail, and the only reason invitations exist. Silent only until the " +
-			"template and the vault-addressed send activity land (WORKLIST 5g); the " +
-			"recipient is a subject, so unlike the rest of this module there is nothing " +
-			"missing but the message")
+		"handled by workspace-invitation-mail, which MINTS the link before sending it. A " +
+			"catalogue entry cannot: its Data function sees only the decoded event, and " +
+			"the event deliberately carries no token (ADR-002)")
 	cat.Silent[workspaceevents.InvitationTokenRotated](
-		"a resend, which is the same mail with a new link. It becomes On with the issue, " +
-			"and it is rate-limited at the command rather than here — a notification " +
-			"decision cannot stop somebody clicking resend")
+		"the same reactor and the same mail with a new link. Rate-limiting a resend " +
+			"belongs at the command, not here — a notification decision cannot stop " +
+			"somebody pressing the button")
 	cat.Silent[workspaceevents.InvitationAccepted](
 		"the acceptor is looking at the screen that accepted it. What is worth sending is " +
 			"the INVITER's confirmation that their invitation was taken up, and that " +

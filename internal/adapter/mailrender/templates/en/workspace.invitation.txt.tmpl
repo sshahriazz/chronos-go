@@ -1,0 +1,15 @@
+Hello{{if .Name}} {{.Name}}{{end}},
+
+You have been invited to join a workspace on Chronos.
+
+  {{url (printf "/invitations/accept?token=%s" .Token)}}
+
+This link expires in {{.ExpiresIn}} and can be used once.
+
+If you would rather not join, you can decline instead — the seat held for you
+is released either way:
+
+  {{url (printf "/invitations/decline?token=%s" .Token)}}
+
+If you were not expecting this, ignore the message. Nothing happens until you
+open one of the links above, and the invitation lapses on its own.
