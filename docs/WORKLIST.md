@@ -114,7 +114,7 @@ workspace.
 
 ---
 
-## Now: Billing — webhook ingestion
+## Billing — webhook ingestion  ✅ complete
 
 **Pulled forward for the same reason provisioning was.** Stripe pauses a
 cardless trial at day 14 and emits `customer.subscription.paused`. Without an
@@ -131,13 +131,24 @@ prevent.
 - [x] **Proved end to end with `stripe listen`:** cancelling a real trialing
       subscription drove `customer.subscription.deleted` through verification,
       dedupe, re-fetch and append, and the organization reached `closed`.
-- [ ] `customer.subscription.paused` at real trial end — needs a Stripe test
-      clock to reach day 14 without waiting for it
+- [x] **`customer.subscription.paused` at real trial end**, via a Stripe test
+      clock: a real subscription reaches day 14, Stripe pauses it, and the
+      organization suspends. `trial ended -> stripe paused -> org suspended`.
+
+## Now: Slice 3 — entitlement and the trial catalogue
+
+The caps a trial org actually gets: **3 workspaces, 5 seats**. Must land before
+`CreateWorkspace`, so that RPC is quota-gated from its first commit rather than
+retrofitted (organization.md §6 runs authz -> subscription -> entitlement ->
+handler).
+
+- [ ] The catalogue: features, limits, meters keyed by string
+- [ ] check -> reserve -> commit/release, so two concurrent requests cannot both
+      consume the last seat
+- [ ] Gate 4, and the `Entitlements` interface that has had no implementation
+- [ ] Seat accounting: one person per ORGANIZATION, not per membership
 
 ## Then
-
-- [ ] **Slice 3** — entitlement + trial catalogue (before workspace, so
-      `CreateWorkspace` is quota-gated from its first commit)
 - [ ] **Slice 4** — workspace + membership
 - [ ] **Slice 5** — invitations
 - [ ] **Slice 6** — teams

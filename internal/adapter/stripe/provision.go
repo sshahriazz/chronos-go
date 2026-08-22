@@ -11,6 +11,7 @@ package stripe
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	stripe "github.com/stripe/stripe-go/v86"
@@ -52,9 +53,10 @@ const orgMetadataKey = "chronos_org_id"
 
 // Provisioner creates the billing objects for a new organization.
 type Provisioner struct {
-	api       *stripe.Client
-	priceID   string
-	trialDays int64
+	api         *stripe.Client
+	priceID     string
+	trialDays   int64
+	testClockID string
 }
 
 var _ app.Provisioner = (*Provisioner)(nil)
@@ -64,6 +66,21 @@ type Config struct {
 	SecretKey string
 	PriceID   string
 	TrialDays int
+
+	// TestClockID attaches the customer to a Stripe TEST CLOCK.
+	//
+	// Empty in production, and refused outright against a live key by
+	// NewProvisioner. It exists because the single most important behaviour in
+	// the cardless design — a trial that LAPSES suspends the tenant — cannot
+	// otherwise be observed without waiting fourteen real days. A test clock
+	// moves Stripe's own view of time, so the real subscription really does
+	// reach its trial end and really does emit the event.
+	//
+	// The alternative is a test that builds its own customer and subscription
+	// alongside this code, which would prove that the TEST can create a trial
+	// rather than that this code does. Threading it through here keeps one
+	// creation path, which is the point.
+	TestClockID string
 }
 
 func NewProvisioner(cfg Config) (*Provisioner, error) {
@@ -76,11 +93,17 @@ func NewProvisioner(cfg Config) (*Provisioner, error) {
 	case cfg.TrialDays < 1 || cfg.TrialDays > 730:
 		return nil, fmt.Errorf("stripe: a trial of %d days is outside Stripe's 1..730",
 			cfg.TrialDays)
+	case cfg.TestClockID != "" && strings.Contains(cfg.SecretKey, "_live_"):
+		// A test clock cannot exist in live mode, so this can only mean a test
+		// configuration reached production. Refused at construction rather than
+		// failing per organization.
+		return nil, fmt.Errorf("stripe: a test clock was configured with a LIVE key")
 	}
 	return &Provisioner{
-		api:       stripe.NewClient(cfg.SecretKey),
-		priceID:   cfg.PriceID,
-		trialDays: int64(cfg.TrialDays),
+		api:         stripe.NewClient(cfg.SecretKey),
+		priceID:     cfg.PriceID,
+		trialDays:   int64(cfg.TrialDays),
+		testClockID: cfg.TestClockID,
 	}, nil
 }
 
@@ -167,6 +190,9 @@ func (p *Provisioner) findOrCreateCustomer(
 			orgMetadataKey:  orgID,
 			"chronos_owner": ownerSubject,
 		},
+	}
+	if p.testClockID != "" {
+		params.TestClock = stripe.String(p.testClockID)
 	}
 	// Derived, so a retry inside 24 hours is collapsed by Stripe itself.
 	params.SetIdempotencyKey("chronos-customer-" + orgID)
