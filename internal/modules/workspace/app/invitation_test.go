@@ -136,9 +136,23 @@ func (f *fakeTokens) Consume(ctx context.Context, digest []byte, now time.Time) 
 	return invitationID, orgID, nil
 }
 
+// RevokeAll actually DELETES, which the first version of this fake did not — it
+// recorded the call and left the digests in place, so every resend appeared to
+// leave one live link while leaving two. A fake that records intent instead of
+// performing it turns the assertion into a check that the code called something.
 func (f *fakeTokens) RevokeAll(_ context.Context, invitationID string) (int64, error) {
 	f.revoked = append(f.revoked, invitationID)
-	return 1, nil
+	kept := f.issued[:0]
+	var removed int64
+	for _, t := range f.issued {
+		if t.invitationID == invitationID {
+			removed++
+			continue
+		}
+		kept = append(kept, t)
+	}
+	f.issued = kept
+	return removed, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -155,7 +169,15 @@ type inviteHarness struct {
 	counter     *countingMembers
 	memberships *eventsourcing.Repository[*domain.Membership]
 	workspaceID string
+	clock       *testClock
 }
+
+// testClock is a clock a test can move.
+type testClock struct{ at time.Time }
+
+func (c *testClock) Now() time.Time { return c.at }
+
+func (c *testClock) advance(d time.Duration) { c.at = c.at.Add(d) }
 
 type inviteOpts struct {
 	knownAccount bool
@@ -172,7 +194,12 @@ type inviteOpts struct {
 func newInviteHarness(t *testing.T, o inviteOpts) *inviteHarness {
 	t.Helper()
 	store := newMemStore()
-	now := func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }
+
+	// MOVABLE, because a frozen clock cannot express a resend: the new window is
+	// measured from now, so with time standing still it lands exactly where the
+	// old one did — and "the resend extended the window" is unfalsifiable.
+	clock := &testClock{at: time.Unix(1_700_000_000, 0).UTC()}
+	now := clock.Now
 
 	repo := eventsourcing.NewRepository[*domain.Invitation](
 		store, jsonCodec{}, nil, domain.InvitationCategory, domain.NewInvitation)
@@ -220,6 +247,8 @@ func newInviteHarness(t *testing.T, o inviteOpts) *inviteHarness {
 		t.Fatalf("NewInvitations: %v", err)
 	}
 
+	_ = clock
+
 	// A REAL workspace, opened through its own aggregate. Acceptance revalidates
 	// that it is still active, and a fabricated one would skip the check this
 	// harness exists to exercise.
@@ -243,7 +272,7 @@ func newInviteHarness(t *testing.T, o inviteOpts) *inviteHarness {
 	return &inviteHarness{
 		invitations: invitations, store: store, tokens: tokens,
 		vault: vault, subjects: subjects, reserver: reserver, counter: counter,
-		memberships: memberships, workspaceID: inviteWS,
+		memberships: memberships, workspaceID: inviteWS, clock: clock,
 	}
 }
 
@@ -1064,5 +1093,372 @@ func TestASeatHeldByAPendingInvitationIsNotChargedTwice(t *testing.T) {
 	}
 	if got := len(h.reserver.reserved) - before; got != 0 {
 		t.Errorf("the pool grew by %d for a person who already held a seat", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// revoke, decline, resend
+// ---------------------------------------------------------------------------
+
+func (h *inviteHarness) revoke(invitationID string) (app.RevokeInvitationResult, error) {
+	return h.invitations.Revoke(context.Background(), app.RevokeInvitationCommand{
+		OrgID: testOrg, WorkspaceID: h.workspaceID, InvitationID: invitationID,
+		RevokedBy: founder, IdempotencyKey: "key-revoke-" + invitationID,
+	})
+}
+
+// REVOKING RETURNS THE SEAT AND KILLS THE LINK.
+//
+// Both matter and they fail differently. A revocation that left the seat held
+// charges for somebody who will never arrive; one that left the link live is not
+// a revocation at all.
+func TestRevokingReturnsTheSeatAndKillsTheLink(t *testing.T) {
+	h := newInviteHarness(t, inviteOpts{})
+	issued, err := h.issue(contract.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !issued.SeatConsumed {
+		t.Fatal("precondition: issuing took no seat")
+	}
+
+	result, err := h.revoke(issued.InvitationID)
+	if err != nil {
+		t.Fatalf("revoking: %v", err)
+	}
+	if !result.SeatReleased {
+		t.Error("the seat was not returned; the organization keeps paying for somebody " +
+			"who will never arrive")
+	}
+	if len(h.reserver.released) != 1 || h.reserver.released[0] != "seats.member" {
+		t.Errorf("released %v, want one member seat", h.reserver.released)
+	}
+	if len(h.tokens.revoked) == 0 {
+		t.Error("the link was not dropped")
+	}
+
+	// And the link genuinely cannot be redeemed, which is the property the two
+	// assertions above are proxies for.
+	if _, err := h.accept(issued.Token, acceptor); err == nil {
+		t.Fatal("a revoked invitation was accepted")
+	}
+
+	if inv := h.loadInvitation(t, issued.InvitationID); inv.Status() != domain.InvitationRevoked {
+		t.Errorf("the invitation is %s, want revoked", inv.Status())
+	}
+}
+
+// REVOKING RELEASES NOTHING WHEN NOTHING WAS TAKEN.
+//
+// The invitee was already in the organization at issue time, so the invitation
+// never held a seat — and handing one back would inflate the allowance by one
+// every time an invitation to an existing member is withdrawn.
+func TestRevokingAnInvitationThatTookNoSeatReleasesNone(t *testing.T) {
+	h := newInviteHarness(t, inviteOpts{knownAccount: true, existingWS: 2})
+	issued, err := h.issue(contract.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issued.SeatConsumed {
+		t.Fatal("precondition: issuing took a seat")
+	}
+
+	result, err := h.revoke(issued.InvitationID)
+	if err != nil {
+		t.Fatalf("revoking: %v", err)
+	}
+	if result.SeatReleased {
+		t.Fatal("a seat was returned for an invitation that never took one; the pool grows " +
+			"by one every time an invitation to an existing member is withdrawn")
+	}
+	if len(h.reserver.released) != 0 {
+		t.Errorf("released %v", h.reserver.released)
+	}
+}
+
+// AN INVITATION OF ANOTHER WORKSPACE CANNOT BE TOUCHED.
+//
+// The authz gate checked `admin` on the workspace the REQUEST named. Nothing
+// checks that the INVITATION belongs to it — an id is just a string — so without
+// this an admin of one workspace could revoke another's invitation and release a
+// seat from an organization they have nothing to do with.
+func TestAnInvitationOfAnotherWorkspaceIsNotFound(t *testing.T) {
+	// Both settlement paths are covered here rather than in two tests, because
+	// they share one guard and a test per path would let the guard be removed
+	// from one of them with the other still green.
+	h := newInviteHarness(t, inviteOpts{})
+	issued, err := h.issue(contract.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = h.invitations.Revoke(context.Background(), app.RevokeInvitationCommand{
+		OrgID: testOrg, WorkspaceID: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+		InvitationID: issued.InvitationID, RevokedBy: founder,
+		IdempotencyKey: "key-wrong-ws",
+	})
+	if err == nil {
+		t.Fatal("an invitation was revoked through a workspace it does not belong to")
+	}
+	if got := errs.ReasonOf(err); got != errs.NotFound {
+		t.Errorf("refused with %s, want NOT_FOUND: distinguishing 'not yours' from 'no "+
+			"such invitation' confirms the id exists (ADR-036)", got)
+	}
+
+	// A RESEND is checked too, and it is the more dangerous of the two: a
+	// revocation through the wrong workspace releases somebody else's seat, but a
+	// resend MINTS A LIVE CREDENTIAL for an invitation the caller has no standing
+	// over — and mails it to an address they never chose.
+	if _, err := h.invitations.Resend(context.Background(), app.ResendInvitationCommand{
+		OrgID: testOrg, WorkspaceID: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+		InvitationID: issued.InvitationID, IdempotencyKey: "key-resend-wrong-ws",
+	}); err == nil {
+		t.Fatal("an invitation was resent through a workspace it does not belong to, " +
+			"minting a live link for an invitation the caller has no standing over")
+	}
+	if _, err := h.invitations.Resend(context.Background(), app.ResendInvitationCommand{
+		OrgID: "org_01ARZ3NDEKTSV4RRFFQ69G5FAZ", WorkspaceID: h.workspaceID,
+		InvitationID: issued.InvitationID, IdempotencyKey: "key-resend-wrong-org",
+	}); err == nil {
+		t.Fatal("an invitation was resent from another organization's scope")
+	}
+
+	_, err = h.invitations.Revoke(context.Background(), app.RevokeInvitationCommand{
+		OrgID: "org_01ARZ3NDEKTSV4RRFFQ69G5FAZ", WorkspaceID: h.workspaceID,
+		InvitationID: issued.InvitationID, RevokedBy: founder,
+		IdempotencyKey: "key-wrong-org",
+	})
+	if err == nil {
+		t.Fatal("an invitation was revoked from another organization's scope")
+	}
+}
+
+// A SETTLED INVITATION CANNOT BE REVOKED AGAIN.
+//
+// The double-release: each settlement records SeatReleased and this path acts on
+// it, so a second revocation returns a second seat for one hold.
+func TestRevokingTwiceIsRefused(t *testing.T) {
+	h := newInviteHarness(t, inviteOpts{})
+	issued, err := h.issue(contract.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.revoke(issued.InvitationID); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = h.revoke(issued.InvitationID)
+	if err == nil {
+		t.Fatal("an invitation was revoked twice, returning two seats for one hold")
+	}
+	if got := errs.ReasonOf(err); got != errs.Conflict {
+		t.Errorf("refused with %s, want CONFLICT: an administrator who named this "+
+			"invitation is entitled to know it is already settled", got)
+	}
+	if len(h.reserver.released) != 1 {
+		t.Errorf("released %v seats across two revocations", h.reserver.released)
+	}
+}
+
+// DECLINING NEEDS ONLY THE TOKEN.
+//
+// The person declining may have no account. Requiring one would hold the seat
+// until expiry for everybody who is not interested, which is the case a decline
+// exists to shorten.
+func TestDecliningNeedsOnlyTheToken(t *testing.T) {
+	h := newInviteHarness(t, inviteOpts{})
+	issued, err := h.issue(contract.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.invitations.Decline(context.Background(), app.DeclineInvitationCommand{
+		Token: issued.Token, IdempotencyKey: "key-decline",
+	}); err != nil {
+		t.Fatalf("declining: %v", err)
+	}
+
+	inv := h.loadInvitation(t, issued.InvitationID)
+	if inv.Status() != domain.InvitationDeclined {
+		t.Errorf("the invitation is %s, want declined — distinct from revoked, because "+
+			"re-inviting somebody who said no is a decision a human should make "+
+			"deliberately", inv.Status())
+	}
+	if len(h.reserver.released) != 1 {
+		t.Errorf("released %v, want the seat back", h.reserver.released)
+	}
+	if _, err := h.accept(issued.Token, acceptor); err == nil {
+		t.Fatal("a declined invitation was accepted")
+	}
+}
+
+// A SUSPENDED ORGANIZATION CANNOT BLOCK A DECLINE.
+//
+// The one place on these paths that skips the subscription check. Refusing would
+// hold the seat until expiry for somebody who has already said no — and the
+// person saying no has no way to influence whether the organization pays its
+// bill.
+func TestDecliningWorksWhileTheOrganizationIsSuspended(t *testing.T) {
+	h := newInviteHarness(t, inviteOpts{})
+	issued, err := h.issue(contract.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Accepting is refused once suspended; declining is not. Both are asserted
+	// against ONE harness so the difference is the check and not the fixture.
+	suspended := newInviteHarness(t, inviteOpts{
+		suspended: errs.OrgSuspendedf("this organization is suspended"),
+	})
+	suspendedIssue, err := suspended.issue(contract.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := suspended.accept(suspendedIssue.Token, acceptor); err == nil {
+		t.Fatal("precondition: acceptance was not refused, so this proves nothing")
+	}
+	if err := suspended.invitations.Decline(context.Background(), app.DeclineInvitationCommand{
+		Token: suspendedIssue.Token, IdempotencyKey: "key-decline-suspended",
+	}); err != nil {
+		t.Fatalf("a suspended organization blocked a decline: %v\nThe seat is then held "+
+			"until expiry for somebody who has already said no", err)
+	}
+	_ = issued
+}
+
+// A DECLINE REVEALS NOTHING.
+//
+// Every refusal on this path is NOT_FOUND, including "already declined". An
+// unauthenticated caller learns nothing from the difference, and a caller
+// holding a guess learns nothing from a live one.
+func TestDecliningRevealsNothing(t *testing.T) {
+	h := newInviteHarness(t, inviteOpts{})
+	issued, err := h.issue(contract.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.invitations.Decline(context.Background(), app.DeclineInvitationCommand{
+		Token: issued.Token, IdempotencyKey: "key-d1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, token := range map[string]string{
+		"already declined": issued.Token,
+		"never existed":    strings.Repeat("A", 43),
+		"empty":            "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := h.invitations.Decline(context.Background(), app.DeclineInvitationCommand{
+				Token: token, IdempotencyKey: "key-d-" + name,
+			})
+			if err == nil {
+				t.Fatal("accepted it")
+			}
+			if got := errs.ReasonOf(err); got != errs.NotFound {
+				t.Errorf("refused with %s, want NOT_FOUND for every case", got)
+			}
+		})
+	}
+}
+
+// A RESEND LEAVES EXACTLY ONE LIVE LINK.
+//
+// This is "the old token stays dead" (workspace.md §5). Two live credentials for
+// one invitation means either can be redeemed, and a resend is precisely when a
+// second copy of the mail is in flight.
+func TestResendingKillsTheOldLink(t *testing.T) {
+	h := newInviteHarness(t, inviteOpts{})
+	issued, err := h.issue(contract.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resent, err := h.invitations.Resend(context.Background(), app.ResendInvitationCommand{
+		OrgID: testOrg, WorkspaceID: h.workspaceID,
+		InvitationID: issued.InvitationID, IdempotencyKey: "key-resend",
+	})
+	if err != nil {
+		t.Fatalf("resending: %v", err)
+	}
+	if resent.Token == "" || resent.Token == issued.Token {
+		t.Fatal("the resend produced no new token, or the same one")
+	}
+	if len(h.tokens.issued) != 1 {
+		t.Fatalf("%d links are live after a resend; either can be redeemed, and one of "+
+			"them is in an older mail", len(h.tokens.issued))
+	}
+
+	// The OLD link is dead...
+	if _, err := h.accept(issued.Token, acceptor); err == nil {
+		t.Fatal("the old link still works, so a resent invitation has two live credentials")
+	}
+	// ...and the new one works.
+	if _, err := h.accept(resent.Token, acceptor); err != nil {
+		t.Fatalf("the new link does not work, so a resend destroys the invitation: %v", err)
+	}
+}
+
+// A RESEND EXTENDS THE WINDOW AND TAKES NO SECOND SEAT.
+//
+// Same invitation: same id, same seat, same authorisation. Re-inviting instead
+// would take a second seat for one person and lose the link to the original.
+func TestResendingExtendsTheWindowAndCostsNothing(t *testing.T) {
+	h := newInviteHarness(t, inviteOpts{})
+	issued, err := h.issue(contract.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := len(h.reserver.reserved)
+
+	// A day passes, which is what makes the extension observable: the new window
+	// is measured from now, so a resend at the same instant lands where the old
+	// one did.
+	h.clock.advance(24 * time.Hour)
+
+	resent, err := h.invitations.Resend(context.Background(), app.ResendInvitationCommand{
+		OrgID: testOrg, WorkspaceID: h.workspaceID,
+		InvitationID: issued.InvitationID, IdempotencyKey: "key-resend2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resent.ExpiresAt.After(issued.ExpiresAt) {
+		t.Errorf("the window did not move: %s then %s. A link that arrived after the "+
+			"original window closed is useless", issued.ExpiresAt, resent.ExpiresAt)
+	}
+	if got := len(h.reserver.reserved) - before; got != 0 {
+		t.Errorf("the resend reserved %d more seats for one person", got)
+	}
+	if inv := h.loadInvitation(t, issued.InvitationID); inv.InvitationID() != issued.InvitationID {
+		t.Error("the resend created a different invitation")
+	}
+}
+
+// A SETTLED INVITATION CANNOT BE RESENT.
+//
+// Resending one would put a live credential back on an invitation that was
+// revoked, declined or already redeemed — "the old token stays dead" read
+// backwards.
+func TestResendingASettledInvitationIsRefused(t *testing.T) {
+	h := newInviteHarness(t, inviteOpts{})
+	issued, err := h.issue(contract.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.revoke(issued.InvitationID); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = h.invitations.Resend(context.Background(), app.ResendInvitationCommand{
+		OrgID: testOrg, WorkspaceID: h.workspaceID,
+		InvitationID: issued.InvitationID, IdempotencyKey: "key-resend3",
+	})
+	if err == nil {
+		t.Fatal("a revoked invitation was resent, putting a live credential back on an " +
+			"invitation that was deliberately withdrawn")
+	}
+	if len(h.tokens.issued) != 0 {
+		t.Errorf("%d links are live for a revoked invitation", len(h.tokens.issued))
 	}
 }

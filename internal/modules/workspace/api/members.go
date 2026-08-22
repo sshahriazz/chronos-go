@@ -202,3 +202,95 @@ func (s *Service) AcceptInvitation(
 		AlreadyMember: result.AlreadyMember,
 	}), nil
 }
+
+// RevokeInvitation withdraws an outstanding invitation.
+func (s *Service) RevokeInvitation(
+	ctx context.Context, req *connect.Request[workspacev1.RevokeInvitationRequest],
+) (*connect.Response[workspacev1.RevokeInvitationResponse], error) {
+	tenant, err := db.RequireTenant(ctx)
+	if err != nil {
+		return nil, fail(errs.Internalf("no tenant scope reached the workspace handler; " +
+			"gate 1 resolved no organization").Wrap(err))
+	}
+	revoker, err := callerSubject(ctx)
+	if err != nil {
+		return nil, fail(err)
+	}
+	key, err := idempotencyKey(req.Header())
+	if err != nil {
+		return nil, fail(err)
+	}
+
+	result, err := s.invitations.Revoke(ctx, app.RevokeInvitationCommand{
+		OrgID:          tenant.OrgID,
+		WorkspaceID:    req.Msg.GetWorkspaceId(),
+		InvitationID:   req.Msg.GetInvitationId(),
+		RevokedBy:      revoker,
+		IdempotencyKey: key,
+	})
+	if err != nil {
+		return nil, fail(err)
+	}
+
+	return connect.NewResponse(&workspacev1.RevokeInvitationResponse{
+		SeatReleased: result.SeatReleased,
+	}), nil
+}
+
+// ResendInvitation issues a fresh link and extends the window.
+func (s *Service) ResendInvitation(
+	ctx context.Context, req *connect.Request[workspacev1.ResendInvitationRequest],
+) (*connect.Response[workspacev1.ResendInvitationResponse], error) {
+	tenant, err := db.RequireTenant(ctx)
+	if err != nil {
+		return nil, fail(errs.Internalf("no tenant scope reached the workspace handler; " +
+			"gate 1 resolved no organization").Wrap(err))
+	}
+	key, err := idempotencyKey(req.Header())
+	if err != nil {
+		return nil, fail(err)
+	}
+
+	result, err := s.invitations.Resend(ctx, app.ResendInvitationCommand{
+		OrgID:          tenant.OrgID,
+		WorkspaceID:    req.Msg.GetWorkspaceId(),
+		InvitationID:   req.Msg.GetInvitationId(),
+		IdempotencyKey: key,
+	})
+	if err != nil {
+		return nil, fail(err)
+	}
+
+	// result.Token is dropped here, exactly as it is on the issue path: the link
+	// belongs to the person at the address and to nobody else, least of all the
+	// administrator who pressed resend.
+	return connect.NewResponse(&workspacev1.ResendInvitationResponse{
+		ExpiresAt: timestamppb.New(result.ExpiresAt.UTC()),
+	}), nil
+}
+
+// DeclineInvitation refuses an invitation.
+//
+// PUBLIC: no tenant scope and no caller. The person declining may have no
+// account, and requiring one to say no would hold the seat until expiry for
+// everybody who is not interested — which is the case a decline exists to
+// shorten. The token is the authorization, and nothing on this path grants
+// anything.
+func (s *Service) DeclineInvitation(
+	ctx context.Context, req *connect.Request[workspacev1.DeclineInvitationRequest],
+) (*connect.Response[workspacev1.DeclineInvitationResponse], error) {
+	key, err := idempotencyKey(req.Header())
+	if err != nil {
+		return nil, fail(err)
+	}
+
+	if err := s.invitations.Decline(ctx, app.DeclineInvitationCommand{
+		Token:          req.Msg.GetToken(),
+		IdempotencyKey: key,
+	}); err != nil {
+		return nil, fail(err)
+	}
+
+	// EMPTY, and identical whether the token was real, spent or invented.
+	return connect.NewResponse(&workspacev1.DeclineInvitationResponse{}), nil
+}

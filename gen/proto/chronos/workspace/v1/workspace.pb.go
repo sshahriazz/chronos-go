@@ -800,6 +800,305 @@ func (x *AcceptInvitationResponse) GetAlreadyMember() bool {
 	return false
 }
 
+// RevokeInvitationRequest withdraws an outstanding invitation.
+type RevokeInvitationRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Which workspace. Read by the authz gate, which asks for `admin` on THIS
+	// object.
+	WorkspaceId string `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	// Which invitation.
+	InvitationId  string `protobuf:"bytes,2,opt,name=invitation_id,json=invitationId,proto3" json:"invitation_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RevokeInvitationRequest) Reset() {
+	*x = RevokeInvitationRequest{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokeInvitationRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokeInvitationRequest) ProtoMessage() {}
+
+func (x *RevokeInvitationRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokeInvitationRequest.ProtoReflect.Descriptor instead.
+func (*RevokeInvitationRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *RevokeInvitationRequest) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
+}
+
+func (x *RevokeInvitationRequest) GetInvitationId() string {
+	if x != nil {
+		return x.InvitationId
+	}
+	return ""
+}
+
+// RevokeInvitationResponse reports what the withdrawal returned.
+type RevokeInvitationResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Whether a seat went back to the pool.
+	//
+	// False when issuing took none — the invitee was already in the organization,
+	// and revoking an invitation to somebody who is already there frees nothing.
+	SeatReleased  bool `protobuf:"varint,1,opt,name=seat_released,json=seatReleased,proto3" json:"seat_released,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RevokeInvitationResponse) Reset() {
+	*x = RevokeInvitationResponse{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokeInvitationResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokeInvitationResponse) ProtoMessage() {}
+
+func (x *RevokeInvitationResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokeInvitationResponse.ProtoReflect.Descriptor instead.
+func (*RevokeInvitationResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *RevokeInvitationResponse) GetSeatReleased() bool {
+	if x != nil {
+		return x.SeatReleased
+	}
+	return false
+}
+
+// ResendInvitationRequest issues a fresh link for an outstanding invitation.
+type ResendInvitationRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Which workspace. Read by the authz gate, which asks for `admin` on THIS
+	// object.
+	WorkspaceId string `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	// Which invitation.
+	InvitationId  string `protobuf:"bytes,2,opt,name=invitation_id,json=invitationId,proto3" json:"invitation_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResendInvitationRequest) Reset() {
+	*x = ResendInvitationRequest{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResendInvitationRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResendInvitationRequest) ProtoMessage() {}
+
+func (x *ResendInvitationRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResendInvitationRequest.ProtoReflect.Descriptor instead.
+func (*ResendInvitationRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *ResendInvitationRequest) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
+}
+
+func (x *ResendInvitationRequest) GetInvitationId() string {
+	if x != nil {
+		return x.InvitationId
+	}
+	return ""
+}
+
+// ResendInvitationResponse reports the new window.
+//
+// It carries NO TOKEN, for the reason InviteToWorkspaceResponse does not: the
+// link is a credential and the only party entitled to it is the person at the
+// address.
+type ResendInvitationResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// When the new link stops working.
+	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,1,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResendInvitationResponse) Reset() {
+	*x = ResendInvitationResponse{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResendInvitationResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResendInvitationResponse) ProtoMessage() {}
+
+func (x *ResendInvitationResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResendInvitationResponse.ProtoReflect.Descriptor instead.
+func (*ResendInvitationResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ResendInvitationResponse) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
+// DeclineInvitationRequest refuses an invitation.
+type DeclineInvitationRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The token from the link.
+	Token         string `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeclineInvitationRequest) Reset() {
+	*x = DeclineInvitationRequest{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeclineInvitationRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeclineInvitationRequest) ProtoMessage() {}
+
+func (x *DeclineInvitationRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeclineInvitationRequest.ProtoReflect.Descriptor instead.
+func (*DeclineInvitationRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *DeclineInvitationRequest) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+// DeclineInvitationResponse is empty.
+//
+// Deliberately: the reply is identical whether the token was real, already spent
+// or never existed. A response that distinguished them would let anybody holding
+// a guess learn they had guessed a live invitation — and would tell somebody
+// with an old mail whether the organization still exists.
+type DeclineInvitationResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeclineInvitationResponse) Reset() {
+	*x = DeclineInvitationResponse{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeclineInvitationResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeclineInvitationResponse) ProtoMessage() {}
+
+func (x *DeclineInvitationResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeclineInvitationResponse.ProtoReflect.Descriptor instead.
+func (*DeclineInvitationResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{17}
+}
+
 var File_chronos_workspace_v1_workspace_proto protoreflect.FileDescriptor
 
 const file_chronos_workspace_v1_workspace_proto_rawDesc = "" +
@@ -848,7 +1147,21 @@ const file_chronos_workspace_v1_workspace_proto_rawDesc = "" +
 	"\fworkspace_id\x18\x01 \x01(\tBO\xbaG#:\x1f\x12\x1dws_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1d\xbaH&r$\x18\x1d2 ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\vworkspaceId\x12h\n" +
 	"\x06org_id\x18\x02 \x01(\tBQ\xbaG$: \x12\x1eorg_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1e\xbaH'r%\x18\x1e2!^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\x05orgId\x12@\n" +
 	"\x04role\x18\x03 \x01(\tB,\xbaG\f:\b\x12\x06memberx\x10\xbaH\x1ar\x18\x18\x10R\x05adminR\x06memberR\x05guestR\x04role\x12%\n" +
-	"\x0ealready_member\x18\x04 \x01(\bR\ralreadyMember2\xb3\v\n" +
+	"\x0ealready_member\x18\x04 \x01(\bR\ralreadyMember\"\x85\x02\n" +
+	"\x17RevokeInvitationRequest\x12r\n" +
+	"\fworkspace_id\x18\x01 \x01(\tBO\xbaG#:\x1f\x12\x1dws_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1d\xbaH&r$\x18\x1d2 ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\vworkspaceId\x12v\n" +
+	"\rinvitation_id\x18\x02 \x01(\tBQ\xbaG$: \x12\x1einv_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1e\xbaH'r%\x18\x1e2!^inv_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\finvitationId\"?\n" +
+	"\x18RevokeInvitationResponse\x12#\n" +
+	"\rseat_released\x18\x01 \x01(\bR\fseatReleased\"\x85\x02\n" +
+	"\x17ResendInvitationRequest\x12r\n" +
+	"\fworkspace_id\x18\x01 \x01(\tBO\xbaG#:\x1f\x12\x1dws_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1d\xbaH&r$\x18\x1d2 ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\vworkspaceId\x12v\n" +
+	"\rinvitation_id\x18\x02 \x01(\tBQ\xbaG$: \x12\x1einv_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1e\xbaH'r%\x18\x1e2!^inv_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\finvitationId\"U\n" +
+	"\x18ResendInvitationResponse\x129\n" +
+	"\n" +
+	"expires_at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"\x83\x01\n" +
+	"\x18DeclineInvitationRequest\x12g\n" +
+	"\x05token\x18\x01 \x01(\tBQ\xbaG1:-\x12+3q2-7wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAx+\xbaH\x1ar\x182\x13^[A-Za-z0-9_-]{43}$\x98\x01+R\x05token\"\x1b\n" +
+	"\x19DeclineInvitationResponse2\xd6\x10\n" +
 	"\x10WorkspaceService\x12\xed\x01\n" +
 	"\x0fCreateWorkspace\x12,.chronos.workspace.v1.CreateWorkspaceRequest\x1a-.chronos.workspace.v1.CreateWorkspaceResponse\"}\xbaGI2G\n" +
 	"E\n" +
@@ -879,7 +1192,21 @@ const file_chronos_workspace_v1_workspace_proto_rawDesc = "" +
 	"E\n" +
 	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
 	"$#/components/schemas/idempotency-key\xca\xf3\x18\f\n" +
-	"\x04self\x12\x04user\xd0\xf3\x18\x02B\xe6\x01\n" +
+	"\x04self\x12\x04user\xd0\xf3\x18\x02\x12\xe7\x01\n" +
+	"\x10RevokeInvitation\x12-.chronos.workspace.v1.RevokeInvitationRequest\x1a..chronos.workspace.v1.RevokeInvitationResponse\"t\xbaGI2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-key\xca\xf3\x18 \n" +
+	"\x05admin\x12\tworkspace\x1a\fworkspace_id\xd0\xf3\x18\x02\x12\xe7\x01\n" +
+	"\x10ResendInvitation\x12-.chronos.workspace.v1.ResendInvitationRequest\x1a..chronos.workspace.v1.ResendInvitationResponse\"t\xbaGI2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-key\xca\xf3\x18 \n" +
+	"\x05admin\x12\tworkspace\x1a\fworkspace_id\xd0\xf3\x18\x03\x12\xcc\x01\n" +
+	"\x11DeclineInvitation\x12..chronos.workspace.v1.DeclineInvitationRequest\x1a/.chronos.workspace.v1.DeclineInvitationResponse\"V\xbaGK2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-keyZ\x00\xd0\xf3\x18\x02\xe8\xf3\x18\x01B\xe6\x01\n" +
 	"\x18com.chronos.workspace.v1B\x0eWorkspaceProtoP\x01ZHgithub.com/chronos/chronos-go/gen/proto/chronos/workspace/v1;workspacev1\xa2\x02\x03CWX\xaa\x02\x14Chronos.Workspace.V1\xca\x02\x14Chronos\\Workspace\\V1\xe2\x02 Chronos\\Workspace\\V1\\GPBMetadata\xea\x02\x16Chronos::Workspace::V1b\x06proto3"
 
 var (
@@ -894,7 +1221,7 @@ func file_chronos_workspace_v1_workspace_proto_rawDescGZIP() []byte {
 	return file_chronos_workspace_v1_workspace_proto_rawDescData
 }
 
-var file_chronos_workspace_v1_workspace_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_chronos_workspace_v1_workspace_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_chronos_workspace_v1_workspace_proto_goTypes = []any{
 	(*CreateWorkspaceRequest)(nil),            // 0: chronos.workspace.v1.CreateWorkspaceRequest
 	(*CreateWorkspaceResponse)(nil),           // 1: chronos.workspace.v1.CreateWorkspaceResponse
@@ -908,27 +1235,40 @@ var file_chronos_workspace_v1_workspace_proto_goTypes = []any{
 	(*InviteToWorkspaceResponse)(nil),         // 9: chronos.workspace.v1.InviteToWorkspaceResponse
 	(*AcceptInvitationRequest)(nil),           // 10: chronos.workspace.v1.AcceptInvitationRequest
 	(*AcceptInvitationResponse)(nil),          // 11: chronos.workspace.v1.AcceptInvitationResponse
-	(*timestamppb.Timestamp)(nil),             // 12: google.protobuf.Timestamp
+	(*RevokeInvitationRequest)(nil),           // 12: chronos.workspace.v1.RevokeInvitationRequest
+	(*RevokeInvitationResponse)(nil),          // 13: chronos.workspace.v1.RevokeInvitationResponse
+	(*ResendInvitationRequest)(nil),           // 14: chronos.workspace.v1.ResendInvitationRequest
+	(*ResendInvitationResponse)(nil),          // 15: chronos.workspace.v1.ResendInvitationResponse
+	(*DeclineInvitationRequest)(nil),          // 16: chronos.workspace.v1.DeclineInvitationRequest
+	(*DeclineInvitationResponse)(nil),         // 17: chronos.workspace.v1.DeclineInvitationResponse
+	(*timestamppb.Timestamp)(nil),             // 18: google.protobuf.Timestamp
 }
 var file_chronos_workspace_v1_workspace_proto_depIdxs = []int32{
-	12, // 0: chronos.workspace.v1.InviteToWorkspaceResponse.expires_at:type_name -> google.protobuf.Timestamp
-	0,  // 1: chronos.workspace.v1.WorkspaceService.CreateWorkspace:input_type -> chronos.workspace.v1.CreateWorkspaceRequest
-	2,  // 2: chronos.workspace.v1.WorkspaceService.AddWorkspaceMember:input_type -> chronos.workspace.v1.AddWorkspaceMemberRequest
-	4,  // 3: chronos.workspace.v1.WorkspaceService.RemoveWorkspaceMember:input_type -> chronos.workspace.v1.RemoveWorkspaceMemberRequest
-	6,  // 4: chronos.workspace.v1.WorkspaceService.ChangeWorkspaceMemberRole:input_type -> chronos.workspace.v1.ChangeWorkspaceMemberRoleRequest
-	8,  // 5: chronos.workspace.v1.WorkspaceService.InviteToWorkspace:input_type -> chronos.workspace.v1.InviteToWorkspaceRequest
-	10, // 6: chronos.workspace.v1.WorkspaceService.AcceptInvitation:input_type -> chronos.workspace.v1.AcceptInvitationRequest
-	1,  // 7: chronos.workspace.v1.WorkspaceService.CreateWorkspace:output_type -> chronos.workspace.v1.CreateWorkspaceResponse
-	3,  // 8: chronos.workspace.v1.WorkspaceService.AddWorkspaceMember:output_type -> chronos.workspace.v1.AddWorkspaceMemberResponse
-	5,  // 9: chronos.workspace.v1.WorkspaceService.RemoveWorkspaceMember:output_type -> chronos.workspace.v1.RemoveWorkspaceMemberResponse
-	7,  // 10: chronos.workspace.v1.WorkspaceService.ChangeWorkspaceMemberRole:output_type -> chronos.workspace.v1.ChangeWorkspaceMemberRoleResponse
-	9,  // 11: chronos.workspace.v1.WorkspaceService.InviteToWorkspace:output_type -> chronos.workspace.v1.InviteToWorkspaceResponse
-	11, // 12: chronos.workspace.v1.WorkspaceService.AcceptInvitation:output_type -> chronos.workspace.v1.AcceptInvitationResponse
-	7,  // [7:13] is the sub-list for method output_type
-	1,  // [1:7] is the sub-list for method input_type
-	1,  // [1:1] is the sub-list for extension type_name
-	1,  // [1:1] is the sub-list for extension extendee
-	0,  // [0:1] is the sub-list for field type_name
+	18, // 0: chronos.workspace.v1.InviteToWorkspaceResponse.expires_at:type_name -> google.protobuf.Timestamp
+	18, // 1: chronos.workspace.v1.ResendInvitationResponse.expires_at:type_name -> google.protobuf.Timestamp
+	0,  // 2: chronos.workspace.v1.WorkspaceService.CreateWorkspace:input_type -> chronos.workspace.v1.CreateWorkspaceRequest
+	2,  // 3: chronos.workspace.v1.WorkspaceService.AddWorkspaceMember:input_type -> chronos.workspace.v1.AddWorkspaceMemberRequest
+	4,  // 4: chronos.workspace.v1.WorkspaceService.RemoveWorkspaceMember:input_type -> chronos.workspace.v1.RemoveWorkspaceMemberRequest
+	6,  // 5: chronos.workspace.v1.WorkspaceService.ChangeWorkspaceMemberRole:input_type -> chronos.workspace.v1.ChangeWorkspaceMemberRoleRequest
+	8,  // 6: chronos.workspace.v1.WorkspaceService.InviteToWorkspace:input_type -> chronos.workspace.v1.InviteToWorkspaceRequest
+	10, // 7: chronos.workspace.v1.WorkspaceService.AcceptInvitation:input_type -> chronos.workspace.v1.AcceptInvitationRequest
+	12, // 8: chronos.workspace.v1.WorkspaceService.RevokeInvitation:input_type -> chronos.workspace.v1.RevokeInvitationRequest
+	14, // 9: chronos.workspace.v1.WorkspaceService.ResendInvitation:input_type -> chronos.workspace.v1.ResendInvitationRequest
+	16, // 10: chronos.workspace.v1.WorkspaceService.DeclineInvitation:input_type -> chronos.workspace.v1.DeclineInvitationRequest
+	1,  // 11: chronos.workspace.v1.WorkspaceService.CreateWorkspace:output_type -> chronos.workspace.v1.CreateWorkspaceResponse
+	3,  // 12: chronos.workspace.v1.WorkspaceService.AddWorkspaceMember:output_type -> chronos.workspace.v1.AddWorkspaceMemberResponse
+	5,  // 13: chronos.workspace.v1.WorkspaceService.RemoveWorkspaceMember:output_type -> chronos.workspace.v1.RemoveWorkspaceMemberResponse
+	7,  // 14: chronos.workspace.v1.WorkspaceService.ChangeWorkspaceMemberRole:output_type -> chronos.workspace.v1.ChangeWorkspaceMemberRoleResponse
+	9,  // 15: chronos.workspace.v1.WorkspaceService.InviteToWorkspace:output_type -> chronos.workspace.v1.InviteToWorkspaceResponse
+	11, // 16: chronos.workspace.v1.WorkspaceService.AcceptInvitation:output_type -> chronos.workspace.v1.AcceptInvitationResponse
+	13, // 17: chronos.workspace.v1.WorkspaceService.RevokeInvitation:output_type -> chronos.workspace.v1.RevokeInvitationResponse
+	15, // 18: chronos.workspace.v1.WorkspaceService.ResendInvitation:output_type -> chronos.workspace.v1.ResendInvitationResponse
+	17, // 19: chronos.workspace.v1.WorkspaceService.DeclineInvitation:output_type -> chronos.workspace.v1.DeclineInvitationResponse
+	11, // [11:20] is the sub-list for method output_type
+	2,  // [2:11] is the sub-list for method input_type
+	2,  // [2:2] is the sub-list for extension type_name
+	2,  // [2:2] is the sub-list for extension extendee
+	0,  // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_chronos_workspace_v1_workspace_proto_init() }
@@ -942,7 +1282,7 @@ func file_chronos_workspace_v1_workspace_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chronos_workspace_v1_workspace_proto_rawDesc), len(file_chronos_workspace_v1_workspace_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   12,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

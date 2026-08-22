@@ -36,6 +36,9 @@ type Membership interface {
 type Invitation interface {
 	Issue(ctx context.Context, cmd app.IssueInvitationCommand) (app.IssueInvitationResult, error)
 	Accept(ctx context.Context, cmd app.AcceptInvitationCommand) (app.AcceptInvitationResult, error)
+	Revoke(ctx context.Context, cmd app.RevokeInvitationCommand) (app.RevokeInvitationResult, error)
+	Resend(ctx context.Context, cmd app.ResendInvitationCommand) (app.ResendInvitationResult, error)
+	Decline(ctx context.Context, cmd app.DeclineInvitationCommand) error
 }
 
 // Service serves WorkspaceService.

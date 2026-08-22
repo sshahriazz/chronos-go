@@ -534,3 +534,284 @@ func (i *Invitations) pending(
 	}
 	return out
 }
+
+// RevokeInvitationCommand withdraws an outstanding invitation.
+type RevokeInvitationCommand struct {
+	OrgID       string
+	WorkspaceID string
+
+	InvitationID string
+
+	// RevokedBy is the administrator who withdrew it, empty when the revocation
+	// was a consequence rather than a decision.
+	RevokedBy string
+
+	IdempotencyKey string
+}
+
+// RevokeInvitationResult reports what the withdrawal returned.
+type RevokeInvitationResult struct{ SeatReleased bool }
+
+// Revoke withdraws an outstanding invitation.
+//
+// # The order, and why the append comes first
+//
+// Append, then kill the links, then return the seat. Every step after the append
+// is idempotent and retriable, and none of them can fail in a way that grants
+// anything: the invitation is already settled, so a live link left behind cannot
+// be redeemed — Accept refuses anything that is not Pending.
+//
+// The reverse order is what would hurt. Returning the seat before the append
+// means a failed append leaves a seat back in the pool for an invitation that is
+// still outstanding, and the organization can then over-issue: the pool grows by
+// one for every revocation that did not finish. Under-releasing is a customer
+// paying for something gone, which an audit finds and a support ticket fixes;
+// over-releasing is a limit that silently does not apply.
+func (i *Invitations) Revoke(
+	ctx context.Context, cmd RevokeInvitationCommand,
+) (RevokeInvitationResult, error) {
+	inv, err := i.settle(ctx, cmd.OrgID, cmd.WorkspaceID, cmd.InvitationID, cmd.IdempotencyKey,
+		func(inv *domain.Invitation, now time.Time) error {
+			return inv.Revoke(cmd.RevokedBy, now)
+		})
+	if err != nil {
+		return RevokeInvitationResult{}, err
+	}
+	return RevokeInvitationResult{SeatReleased: inv.SeatConsumed()}, nil
+}
+
+// DeclineInvitationCommand refuses an invitation.
+type DeclineInvitationCommand struct {
+	// Token is the plaintext from the link, and the ONLY authorization. The
+	// person declining may have no account at all.
+	Token string
+
+	IdempotencyKey string
+}
+
+// Decline refuses an invitation.
+//
+// Everything it can do is a release: a seat goes back and a link dies. There is
+// no privilege for a stolen token to escalate, which is what makes an
+// unauthenticated caller safe here and not on the acceptance path.
+func (i *Invitations) Decline(ctx context.Context, cmd DeclineInvitationCommand) error {
+	if cmd.IdempotencyKey == "" {
+		return errs.ValidationFailedf("an Idempotency-Key is required on every mutating request")
+	}
+	if cmd.Token == "" {
+		return errs.NotFoundf("not found")
+	}
+
+	now := i.now().UTC()
+	digest := secret.Digest(PurposeInvitation, cmd.Token)
+
+	invitationID, orgID, err := i.tokens.Lookup(ctx, digest, now)
+	if err != nil {
+		return errs.NotFoundf("not found")
+	}
+
+	inv, err := i.repo.Load(ctx, domain.InvitationStreamKey(invitationID))
+	if err != nil {
+		return errs.Internalf("loading the invitation").Wrap(err)
+	}
+
+	// NO subscription check, deliberately, and it is the one place on these
+	// paths that skips one. A suspended organization must still be able to have
+	// its invitations declined: refusing would hold the seat until expiry for
+	// somebody who has already said no, and the person saying no has no way to
+	// influence whether the organization pays its bill.
+	if _, err := i.settleLoaded(ctx, inv, orgID, inv.WorkspaceID(), cmd.IdempotencyKey,
+		func(inv *domain.Invitation, now time.Time) error { return inv.Decline(now) }); err != nil {
+		// NOT_FOUND for everything, including a settled invitation. An
+		// unauthenticated caller learns nothing from the difference between "you
+		// already declined" and "there is no such invitation".
+		return errs.NotFoundf("not found")
+	}
+	return nil
+}
+
+// ResendInvitationCommand issues a fresh link for an outstanding invitation.
+type ResendInvitationCommand struct {
+	OrgID       string
+	WorkspaceID string
+
+	InvitationID string
+
+	IdempotencyKey string
+}
+
+// ResendInvitationResult reports the new window.
+type ResendInvitationResult struct {
+	ExpiresAt time.Time
+
+	// Token is the plaintext, returned exactly once so the mail can carry it.
+	// The API layer drops it.
+	Token string
+}
+
+// Resend issues a fresh link and extends the window.
+//
+// # The old link dies FIRST
+//
+// Every outstanding digest is dropped before the new one is stored, so exactly
+// one link is live afterwards. The order is the whole of "the old token stays
+// dead": storing the new one first leaves a window — however short — in which
+// two credentials redeem one invitation, and a resend is precisely when a second
+// copy of the mail is in flight.
+//
+// The cost of this order is the harmless one. If the process dies between the
+// two, the invitation has NO live link: it still holds its seat, and another
+// resend produces one. That is a support request; two live links is a second
+// person joining.
+func (i *Invitations) Resend(
+	ctx context.Context, cmd ResendInvitationCommand,
+) (ResendInvitationResult, error) {
+	switch {
+	case cmd.OrgID == "":
+		return ResendInvitationResult{}, errs.Internalf("no organization reached the resend " +
+			"handler; gate 1 resolved none")
+	case cmd.InvitationID == "":
+		return ResendInvitationResult{}, errs.ValidationFailedf("an invitation is required")
+	case cmd.IdempotencyKey == "":
+		return ResendInvitationResult{}, errs.ValidationFailedf(
+			"an Idempotency-Key is required on every mutating request")
+	}
+
+	now := i.now().UTC()
+	inv, err := i.repo.Load(ctx, domain.InvitationStreamKey(cmd.InvitationID))
+	if err != nil {
+		return ResendInvitationResult{}, errs.Internalf("loading the invitation").Wrap(err)
+	}
+	if err := i.belongsHere(inv, cmd.OrgID, cmd.WorkspaceID); err != nil {
+		return ResendInvitationResult{}, err
+	}
+
+	expiresAt := now.Add(InvitationTTL)
+	if err := inv.RotateToken(expiresAt, now); err != nil {
+		return ResendInvitationResult{}, errs.Conflictf("%s", err)
+	}
+
+	minted, err := i.minter.Mint(PurposeInvitation, now)
+	if err != nil {
+		return ResendInvitationResult{}, errs.Internalf("minting a new link").Wrap(err)
+	}
+
+	// FIRST. See the doc comment: two live links is the failure this ordering
+	// exists to make impossible.
+	if _, err := i.tokens.RevokeAll(ctx, cmd.InvitationID); err != nil {
+		return ResendInvitationResult{}, errs.Internalf("dropping the previous link").Wrap(err)
+	}
+	if err := i.tokens.Issue(ctx, minted.Digest, cmd.InvitationID, cmd.OrgID,
+		minted.ExpiresAt); err != nil {
+		return ResendInvitationResult{}, errs.Internalf("storing the new link").Wrap(err)
+	}
+
+	if _, err := i.repo.Save(ctx, domain.InvitationStreamKey(cmd.InvitationID), inv,
+		cmd.IdempotencyKey, eventsourcing.Metadata{
+			OrgID: cmd.OrgID, WorkspaceID: inv.WorkspaceID(), OccurredAt: now,
+		},
+	); err != nil {
+		if errors.Is(err, eventsourcing.ErrWrongExpectedRevision) {
+			return ResendInvitationResult{}, errs.Conflictf("this invitation changed concurrently")
+		}
+		return ResendInvitationResult{}, errs.Internalf("recording the resend").Wrap(err)
+	}
+
+	return ResendInvitationResult{ExpiresAt: expiresAt, Token: minted.Plaintext}, nil
+}
+
+// settle loads an invitation an ADMINISTRATOR named and applies a terminal
+// transition to it.
+func (i *Invitations) settle(
+	ctx context.Context, orgID, workspaceID, invitationID, key string,
+	apply func(*domain.Invitation, time.Time) error,
+) (*domain.Invitation, error) {
+	switch {
+	case orgID == "":
+		return nil, errs.Internalf("no organization reached the handler; gate 1 resolved none")
+	case invitationID == "":
+		return nil, errs.ValidationFailedf("an invitation is required")
+	case key == "":
+		return nil, errs.ValidationFailedf(
+			"an Idempotency-Key is required on every mutating request")
+	}
+
+	inv, err := i.repo.Load(ctx, domain.InvitationStreamKey(invitationID))
+	if err != nil {
+		return nil, errs.Internalf("loading the invitation").Wrap(err)
+	}
+	if err := i.belongsHere(inv, orgID, workspaceID); err != nil {
+		return nil, err
+	}
+	return i.settleLoaded(ctx, inv, orgID, workspaceID, key, apply)
+}
+
+// settleLoaded applies a terminal transition and cleans up after it.
+//
+// Append, then kill the links, then return the seat — see Revoke for why that
+// order and not the reverse.
+func (i *Invitations) settleLoaded(
+	ctx context.Context, inv *domain.Invitation, orgID, workspaceID, key string,
+	apply func(*domain.Invitation, time.Time) error,
+) (*domain.Invitation, error) {
+	now := i.now().UTC()
+	seatConsumed := inv.SeatConsumed()
+	role := inv.Role()
+	subjectID := inv.SubjectID()
+
+	if err := apply(inv, now); err != nil {
+		// CONFLICT and not NOT_FOUND: an administrator who named this invitation
+		// is entitled to know it has already been settled, and "not found" would
+		// send them looking for a typo.
+		return nil, errs.Conflictf("%s", err)
+	}
+
+	if _, err := i.repo.Save(ctx, domain.InvitationStreamKey(inv.InvitationID()), inv, key,
+		eventsourcing.Metadata{OrgID: orgID, WorkspaceID: workspaceID, OccurredAt: now},
+	); err != nil {
+		if errors.Is(err, eventsourcing.ErrWrongExpectedRevision) {
+			return nil, errs.Conflictf("this invitation changed concurrently")
+		}
+		return nil, errs.Internalf("settling the invitation").Wrap(err)
+	}
+
+	// The link dies. After the append, because the append is what makes it
+	// unredeemable — a live digest for a settled invitation is refused by
+	// Accept, so this is defence in depth rather than the control itself.
+	if _, err := i.tokens.RevokeAll(ctx, inv.InvitationID()); err != nil {
+		return inv, errs.Internalf("the invitation was settled but its link was not " +
+			"dropped; it cannot be redeemed, because acceptance refuses anything that is " +
+			"not pending").Wrap(err)
+	}
+
+	// The seat comes back last, and only if one was taken. Releasing one that
+	// was never taken inflates the allowance every time it happens.
+	if seatConsumed {
+		if _, err := i.seats.ReleaseOnRemoval(ctx, orgID, subjectID, role, 0); err != nil {
+			return inv, errs.Internalf("the invitation was settled but its seat was not " +
+				"returned; the organization is paying for somebody who will not arrive").
+				Wrap(err)
+		}
+	}
+	return inv, nil
+}
+
+// belongsHere refuses an invitation that is not the caller's to touch.
+//
+// The authz gate checked `admin` on the WORKSPACE the request named. Nothing
+// checked that the INVITATION belongs to that workspace — an id is just a
+// string, and an admin of one workspace naming another's invitation would
+// otherwise revoke it and release a seat from an organization they have nothing
+// to do with.
+//
+// NOT_FOUND, never a message that distinguishes "no such invitation" from "not
+// yours": both would confirm an id exists (ADR-036).
+func (i *Invitations) belongsHere(inv *domain.Invitation, orgID, workspaceID string) error {
+	if !inv.Exists() || inv.OrgID() != orgID {
+		return errs.NotFoundf("not found")
+	}
+	if workspaceID != "" && inv.WorkspaceID() != workspaceID {
+		return errs.NotFoundf("not found")
+	}
+	return nil
+}

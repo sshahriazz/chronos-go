@@ -441,6 +441,104 @@ message AcceptInvitationResponse {
   bool already_member = 4;
 }
 
+// RevokeInvitationRequest withdraws an outstanding invitation.
+message RevokeInvitationRequest {
+  // Which workspace. Read by the authz gate, which asks for `admin` on THIS
+  // object.
+  string workspace_id = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 29
+    },
+    (buf.validate.field).string = {
+      max_len: 29
+      pattern: "^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Which invitation.
+  string invitation_id = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "inv_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 30
+    },
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^inv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
+// RevokeInvitationResponse reports what the withdrawal returned.
+message RevokeInvitationResponse {
+  // Whether a seat went back to the pool.
+  //
+  // False when issuing took none — the invitee was already in the organization,
+  // and revoking an invitation to somebody who is already there frees nothing.
+  bool seat_released = 1;
+}
+
+// ResendInvitationRequest issues a fresh link for an outstanding invitation.
+message ResendInvitationRequest {
+  // Which workspace. Read by the authz gate, which asks for `admin` on THIS
+  // object.
+  string workspace_id = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 29
+    },
+    (buf.validate.field).string = {
+      max_len: 29
+      pattern: "^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Which invitation.
+  string invitation_id = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "inv_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 30
+    },
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^inv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
+// ResendInvitationResponse reports the new window.
+//
+// It carries NO TOKEN, for the reason InviteToWorkspaceResponse does not: the
+// link is a credential and the only party entitled to it is the person at the
+// address.
+message ResendInvitationResponse {
+  // When the new link stops working.
+  google.protobuf.Timestamp expires_at = 1;
+}
+
+// DeclineInvitationRequest refuses an invitation.
+message DeclineInvitationRequest {
+  // The token from the link.
+  string token = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "3q2-7wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}
+      max_length: 43
+    },
+    (buf.validate.field).string = {
+      len: 43
+      pattern: "^[A-Za-z0-9_-]{43}$"
+    }
+  ];
+}
+
+// DeclineInvitationResponse is empty.
+//
+// Deliberately: the reply is identical whether the token was real, already spent
+// or never existed. A response that distinguished them would let anybody holding
+// a guess learn they had guessed a live invitation — and would tell somebody
+// with an old mail whether the organization still exists.
+message DeclineInvitationResponse {}
+
 // WorkspaceService is the collaboration surface.
 service WorkspaceService {
   // CreateWorkspace opens a workspace in the caller's organization.
@@ -678,6 +776,113 @@ service WorkspaceService {
 
     // A MUTATION, so it carries an Idempotency-Key.
     option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // RevokeInvitation withdraws an outstanding invitation.
+  //
+  // WRITE, not GROW: a revocation returns capacity rather than taking it, so
+  // gating it at GROW would stop a past-due organization from reducing what it
+  // owes — the opposite of what organization.md §5.2 is for.
+  //
+  // The seat comes back if issuing took one, and every outstanding link for the
+  // invitation dies. Both matter: a revocation that left the link live is not a
+  // revocation, and one that left the seat held charges for somebody who will
+  // never arrive.
+  rpc RevokeInvitation(RevokeInvitationRequest) returns (RevokeInvitationResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "admin"
+      resource_type: "workspace"
+      resource_id_field: "workspace_id"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // ResendInvitation issues a fresh link and extends the window.
+  //
+  // # The old link stops working
+  //
+  // Every outstanding digest for the invitation is dropped before the new one is
+  // stored, so exactly one link is live afterwards. Without that, a resent
+  // invitation has two live credentials and either can be redeemed — which is
+  // the "old token stays dead" rule in workspace.md §5 read backwards.
+  //
+  // # It is the SAME invitation
+  //
+  // Same id, same seat, same authorisation: only the credential and the deadline
+  // change. Re-inviting instead would take a second seat for one person and lose
+  // the link to the original.
+  //
+  // GROW rather than WRITE, because a resend is how an organization keeps
+  // pursuing a seat it is holding — it should stop when growth stops.
+  rpc ResendInvitation(ResendInvitationRequest) returns (ResendInvitationResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "admin"
+      resource_type: "workspace"
+      resource_id_field: "workspace_id"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_GROW;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // DeclineInvitation refuses an invitation.
+  //
+  // # Public, because the person declining may have no account
+  //
+  // Most invitations go to people who have never used this system. Requiring
+  // them to register in order to say no would be absurd, and it would mean the
+  // seat stays held until expiry for everybody who is not interested — which is
+  // the case a decline exists to shorten.
+  //
+  // The TOKEN is the authorization, exactly as it is for acceptance: 256 bits
+  // from crypto/rand that exist only in the recipient's mail. Nothing here
+  // grants anything — a decline can only release a seat and kill a link — so
+  // there is no privilege for a stolen token to escalate.
+  //
+  // Distinct from a revocation, and the distinction is not cosmetic: re-inviting
+  // somebody who declined is a decision a human should make deliberately, while
+  // re-inviting after an accidental revocation is routine.
+  rpc DeclineInvitation(DeclineInvitationRequest) returns (DeclineInvitationResponse) {
+    option (chronos.options.v1.public) = true;
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    option (gnostic.openapi.v3.operation) = {
+      security: [{}]
       parameters: [
         {
           parameter: {

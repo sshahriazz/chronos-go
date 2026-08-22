@@ -68,6 +68,15 @@ const (
 	// WorkspaceServiceAcceptInvitationProcedure is the fully-qualified name of the WorkspaceService's
 	// AcceptInvitation RPC.
 	WorkspaceServiceAcceptInvitationProcedure = "/chronos.workspace.v1.WorkspaceService/AcceptInvitation"
+	// WorkspaceServiceRevokeInvitationProcedure is the fully-qualified name of the WorkspaceService's
+	// RevokeInvitation RPC.
+	WorkspaceServiceRevokeInvitationProcedure = "/chronos.workspace.v1.WorkspaceService/RevokeInvitation"
+	// WorkspaceServiceResendInvitationProcedure is the fully-qualified name of the WorkspaceService's
+	// ResendInvitation RPC.
+	WorkspaceServiceResendInvitationProcedure = "/chronos.workspace.v1.WorkspaceService/ResendInvitation"
+	// WorkspaceServiceDeclineInvitationProcedure is the fully-qualified name of the WorkspaceService's
+	// DeclineInvitation RPC.
+	WorkspaceServiceDeclineInvitationProcedure = "/chronos.workspace.v1.WorkspaceService/DeclineInvitation"
 )
 
 // WorkspaceServiceClient is a client for the chronos.workspace.v1.WorkspaceService service.
@@ -187,6 +196,53 @@ type WorkspaceServiceClient interface {
 	// second one for the same person, which is the mistake charging at issue
 	// exists to avoid.
 	AcceptInvitation(context.Context, *connect.Request[v1.AcceptInvitationRequest]) (*connect.Response[v1.AcceptInvitationResponse], error)
+	// RevokeInvitation withdraws an outstanding invitation.
+	//
+	// WRITE, not GROW: a revocation returns capacity rather than taking it, so
+	// gating it at GROW would stop a past-due organization from reducing what it
+	// owes — the opposite of what organization.md §5.2 is for.
+	//
+	// The seat comes back if issuing took one, and every outstanding link for the
+	// invitation dies. Both matter: a revocation that left the link live is not a
+	// revocation, and one that left the seat held charges for somebody who will
+	// never arrive.
+	RevokeInvitation(context.Context, *connect.Request[v1.RevokeInvitationRequest]) (*connect.Response[v1.RevokeInvitationResponse], error)
+	// ResendInvitation issues a fresh link and extends the window.
+	//
+	// # The old link stops working
+	//
+	// Every outstanding digest for the invitation is dropped before the new one is
+	// stored, so exactly one link is live afterwards. Without that, a resent
+	// invitation has two live credentials and either can be redeemed — which is
+	// the "old token stays dead" rule in workspace.md §5 read backwards.
+	//
+	// # It is the SAME invitation
+	//
+	// Same id, same seat, same authorisation: only the credential and the deadline
+	// change. Re-inviting instead would take a second seat for one person and lose
+	// the link to the original.
+	//
+	// GROW rather than WRITE, because a resend is how an organization keeps
+	// pursuing a seat it is holding — it should stop when growth stops.
+	ResendInvitation(context.Context, *connect.Request[v1.ResendInvitationRequest]) (*connect.Response[v1.ResendInvitationResponse], error)
+	// DeclineInvitation refuses an invitation.
+	//
+	// # Public, because the person declining may have no account
+	//
+	// Most invitations go to people who have never used this system. Requiring
+	// them to register in order to say no would be absurd, and it would mean the
+	// seat stays held until expiry for everybody who is not interested — which is
+	// the case a decline exists to shorten.
+	//
+	// The TOKEN is the authorization, exactly as it is for acceptance: 256 bits
+	// from crypto/rand that exist only in the recipient's mail. Nothing here
+	// grants anything — a decline can only release a seat and kill a link — so
+	// there is no privilege for a stolen token to escalate.
+	//
+	// Distinct from a revocation, and the distinction is not cosmetic: re-inviting
+	// somebody who declined is a decision a human should make deliberately, while
+	// re-inviting after an accidental revocation is routine.
+	DeclineInvitation(context.Context, *connect.Request[v1.DeclineInvitationRequest]) (*connect.Response[v1.DeclineInvitationResponse], error)
 }
 
 // NewWorkspaceServiceClient constructs a client for the chronos.workspace.v1.WorkspaceService
@@ -236,6 +292,24 @@ func NewWorkspaceServiceClient(httpClient connect.HTTPClient, baseURL string, op
 			connect.WithSchema(workspaceServiceMethods.ByName("AcceptInvitation")),
 			connect.WithClientOptions(opts...),
 		),
+		revokeInvitation: connect.NewClient[v1.RevokeInvitationRequest, v1.RevokeInvitationResponse](
+			httpClient,
+			baseURL+WorkspaceServiceRevokeInvitationProcedure,
+			connect.WithSchema(workspaceServiceMethods.ByName("RevokeInvitation")),
+			connect.WithClientOptions(opts...),
+		),
+		resendInvitation: connect.NewClient[v1.ResendInvitationRequest, v1.ResendInvitationResponse](
+			httpClient,
+			baseURL+WorkspaceServiceResendInvitationProcedure,
+			connect.WithSchema(workspaceServiceMethods.ByName("ResendInvitation")),
+			connect.WithClientOptions(opts...),
+		),
+		declineInvitation: connect.NewClient[v1.DeclineInvitationRequest, v1.DeclineInvitationResponse](
+			httpClient,
+			baseURL+WorkspaceServiceDeclineInvitationProcedure,
+			connect.WithSchema(workspaceServiceMethods.ByName("DeclineInvitation")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -247,6 +321,9 @@ type workspaceServiceClient struct {
 	changeWorkspaceMemberRole *connect.Client[v1.ChangeWorkspaceMemberRoleRequest, v1.ChangeWorkspaceMemberRoleResponse]
 	inviteToWorkspace         *connect.Client[v1.InviteToWorkspaceRequest, v1.InviteToWorkspaceResponse]
 	acceptInvitation          *connect.Client[v1.AcceptInvitationRequest, v1.AcceptInvitationResponse]
+	revokeInvitation          *connect.Client[v1.RevokeInvitationRequest, v1.RevokeInvitationResponse]
+	resendInvitation          *connect.Client[v1.ResendInvitationRequest, v1.ResendInvitationResponse]
+	declineInvitation         *connect.Client[v1.DeclineInvitationRequest, v1.DeclineInvitationResponse]
 }
 
 // CreateWorkspace calls chronos.workspace.v1.WorkspaceService.CreateWorkspace.
@@ -277,6 +354,21 @@ func (c *workspaceServiceClient) InviteToWorkspace(ctx context.Context, req *con
 // AcceptInvitation calls chronos.workspace.v1.WorkspaceService.AcceptInvitation.
 func (c *workspaceServiceClient) AcceptInvitation(ctx context.Context, req *connect.Request[v1.AcceptInvitationRequest]) (*connect.Response[v1.AcceptInvitationResponse], error) {
 	return c.acceptInvitation.CallUnary(ctx, req)
+}
+
+// RevokeInvitation calls chronos.workspace.v1.WorkspaceService.RevokeInvitation.
+func (c *workspaceServiceClient) RevokeInvitation(ctx context.Context, req *connect.Request[v1.RevokeInvitationRequest]) (*connect.Response[v1.RevokeInvitationResponse], error) {
+	return c.revokeInvitation.CallUnary(ctx, req)
+}
+
+// ResendInvitation calls chronos.workspace.v1.WorkspaceService.ResendInvitation.
+func (c *workspaceServiceClient) ResendInvitation(ctx context.Context, req *connect.Request[v1.ResendInvitationRequest]) (*connect.Response[v1.ResendInvitationResponse], error) {
+	return c.resendInvitation.CallUnary(ctx, req)
+}
+
+// DeclineInvitation calls chronos.workspace.v1.WorkspaceService.DeclineInvitation.
+func (c *workspaceServiceClient) DeclineInvitation(ctx context.Context, req *connect.Request[v1.DeclineInvitationRequest]) (*connect.Response[v1.DeclineInvitationResponse], error) {
+	return c.declineInvitation.CallUnary(ctx, req)
 }
 
 // WorkspaceServiceHandler is an implementation of the chronos.workspace.v1.WorkspaceService
@@ -397,6 +489,53 @@ type WorkspaceServiceHandler interface {
 	// second one for the same person, which is the mistake charging at issue
 	// exists to avoid.
 	AcceptInvitation(context.Context, *connect.Request[v1.AcceptInvitationRequest]) (*connect.Response[v1.AcceptInvitationResponse], error)
+	// RevokeInvitation withdraws an outstanding invitation.
+	//
+	// WRITE, not GROW: a revocation returns capacity rather than taking it, so
+	// gating it at GROW would stop a past-due organization from reducing what it
+	// owes — the opposite of what organization.md §5.2 is for.
+	//
+	// The seat comes back if issuing took one, and every outstanding link for the
+	// invitation dies. Both matter: a revocation that left the link live is not a
+	// revocation, and one that left the seat held charges for somebody who will
+	// never arrive.
+	RevokeInvitation(context.Context, *connect.Request[v1.RevokeInvitationRequest]) (*connect.Response[v1.RevokeInvitationResponse], error)
+	// ResendInvitation issues a fresh link and extends the window.
+	//
+	// # The old link stops working
+	//
+	// Every outstanding digest for the invitation is dropped before the new one is
+	// stored, so exactly one link is live afterwards. Without that, a resent
+	// invitation has two live credentials and either can be redeemed — which is
+	// the "old token stays dead" rule in workspace.md §5 read backwards.
+	//
+	// # It is the SAME invitation
+	//
+	// Same id, same seat, same authorisation: only the credential and the deadline
+	// change. Re-inviting instead would take a second seat for one person and lose
+	// the link to the original.
+	//
+	// GROW rather than WRITE, because a resend is how an organization keeps
+	// pursuing a seat it is holding — it should stop when growth stops.
+	ResendInvitation(context.Context, *connect.Request[v1.ResendInvitationRequest]) (*connect.Response[v1.ResendInvitationResponse], error)
+	// DeclineInvitation refuses an invitation.
+	//
+	// # Public, because the person declining may have no account
+	//
+	// Most invitations go to people who have never used this system. Requiring
+	// them to register in order to say no would be absurd, and it would mean the
+	// seat stays held until expiry for everybody who is not interested — which is
+	// the case a decline exists to shorten.
+	//
+	// The TOKEN is the authorization, exactly as it is for acceptance: 256 bits
+	// from crypto/rand that exist only in the recipient's mail. Nothing here
+	// grants anything — a decline can only release a seat and kill a link — so
+	// there is no privilege for a stolen token to escalate.
+	//
+	// Distinct from a revocation, and the distinction is not cosmetic: re-inviting
+	// somebody who declined is a decision a human should make deliberately, while
+	// re-inviting after an accidental revocation is routine.
+	DeclineInvitation(context.Context, *connect.Request[v1.DeclineInvitationRequest]) (*connect.Response[v1.DeclineInvitationResponse], error)
 }
 
 // NewWorkspaceServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -442,6 +581,24 @@ func NewWorkspaceServiceHandler(svc WorkspaceServiceHandler, opts ...connect.Han
 		connect.WithSchema(workspaceServiceMethods.ByName("AcceptInvitation")),
 		connect.WithHandlerOptions(opts...),
 	)
+	workspaceServiceRevokeInvitationHandler := connect.NewUnaryHandler(
+		WorkspaceServiceRevokeInvitationProcedure,
+		svc.RevokeInvitation,
+		connect.WithSchema(workspaceServiceMethods.ByName("RevokeInvitation")),
+		connect.WithHandlerOptions(opts...),
+	)
+	workspaceServiceResendInvitationHandler := connect.NewUnaryHandler(
+		WorkspaceServiceResendInvitationProcedure,
+		svc.ResendInvitation,
+		connect.WithSchema(workspaceServiceMethods.ByName("ResendInvitation")),
+		connect.WithHandlerOptions(opts...),
+	)
+	workspaceServiceDeclineInvitationHandler := connect.NewUnaryHandler(
+		WorkspaceServiceDeclineInvitationProcedure,
+		svc.DeclineInvitation,
+		connect.WithSchema(workspaceServiceMethods.ByName("DeclineInvitation")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/chronos.workspace.v1.WorkspaceService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case WorkspaceServiceCreateWorkspaceProcedure:
@@ -456,6 +613,12 @@ func NewWorkspaceServiceHandler(svc WorkspaceServiceHandler, opts ...connect.Han
 			workspaceServiceInviteToWorkspaceHandler.ServeHTTP(w, r)
 		case WorkspaceServiceAcceptInvitationProcedure:
 			workspaceServiceAcceptInvitationHandler.ServeHTTP(w, r)
+		case WorkspaceServiceRevokeInvitationProcedure:
+			workspaceServiceRevokeInvitationHandler.ServeHTTP(w, r)
+		case WorkspaceServiceResendInvitationProcedure:
+			workspaceServiceResendInvitationHandler.ServeHTTP(w, r)
+		case WorkspaceServiceDeclineInvitationProcedure:
+			workspaceServiceDeclineInvitationHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -487,4 +650,16 @@ func (UnimplementedWorkspaceServiceHandler) InviteToWorkspace(context.Context, *
 
 func (UnimplementedWorkspaceServiceHandler) AcceptInvitation(context.Context, *connect.Request[v1.AcceptInvitationRequest]) (*connect.Response[v1.AcceptInvitationResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.AcceptInvitation is not implemented"))
+}
+
+func (UnimplementedWorkspaceServiceHandler) RevokeInvitation(context.Context, *connect.Request[v1.RevokeInvitationRequest]) (*connect.Response[v1.RevokeInvitationResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.RevokeInvitation is not implemented"))
+}
+
+func (UnimplementedWorkspaceServiceHandler) ResendInvitation(context.Context, *connect.Request[v1.ResendInvitationRequest]) (*connect.Response[v1.ResendInvitationResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.ResendInvitation is not implemented"))
+}
+
+func (UnimplementedWorkspaceServiceHandler) DeclineInvitation(context.Context, *connect.Request[v1.DeclineInvitationRequest]) (*connect.Response[v1.DeclineInvitationResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.DeclineInvitation is not implemented"))
 }
