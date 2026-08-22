@@ -941,6 +941,178 @@ message ListTeamsResponse {
   ];
 }
 
+// AddTeamMemberRequest puts a workspace member into a team.
+message AddTeamMemberRequest {
+  // Which workspace. Read by the authz gate, which asks for `member` on THIS
+  // object — see the RPCs for why it is member and not admin.
+  string workspace_id = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 29
+    },
+    (buf.validate.field).string = {
+      max_len: 29
+      pattern: "^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Which team.
+  string team_id = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "team_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 31
+    },
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^team_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Whose membership changes, by pseudonym.
+  string subject_id = 3 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "subj_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 31
+    },
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
+// AddTeamMemberResponse is empty.
+message AddTeamMemberResponse {}
+
+// RemoveTeamMemberRequest takes somebody out of a team.
+message RemoveTeamMemberRequest {
+  // Which workspace. Read by the authz gate, which asks for `member` on THIS
+  // object — see the RPCs for why it is member and not admin.
+  string workspace_id = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 29
+    },
+    (buf.validate.field).string = {
+      max_len: 29
+      pattern: "^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Which team.
+  string team_id = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "team_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 31
+    },
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^team_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Whose membership changes, by pseudonym.
+  string subject_id = 3 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "subj_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 31
+    },
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
+// RemoveTeamMemberResponse is empty.
+message RemoveTeamMemberResponse {}
+
+// AddTeamMaintainerRequest grants the right to manage a team.
+message AddTeamMaintainerRequest {
+  // Which workspace. Read by the authz gate, which asks for `member` on THIS
+  // object — see the RPCs for why it is member and not admin.
+  string workspace_id = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 29
+    },
+    (buf.validate.field).string = {
+      max_len: 29
+      pattern: "^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Which team.
+  string team_id = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "team_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 31
+    },
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^team_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Whose membership changes, by pseudonym.
+  string subject_id = 3 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "subj_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 31
+    },
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
+// AddTeamMaintainerResponse is empty.
+message AddTeamMaintainerResponse {}
+
+// RemoveTeamMaintainerRequest withdraws that right.
+message RemoveTeamMaintainerRequest {
+  // Which workspace. Read by the authz gate, which asks for `member` on THIS
+  // object — see the RPCs for why it is member and not admin.
+  string workspace_id = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 29
+    },
+    (buf.validate.field).string = {
+      max_len: 29
+      pattern: "^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Which team.
+  string team_id = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "team_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 31
+    },
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^team_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Whose membership changes, by pseudonym.
+  string subject_id = 3 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "subj_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 31
+    },
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
+// RemoveTeamMaintainerResponse is empty.
+message RemoveTeamMaintainerResponse {}
+
 // WorkspaceService is the collaboration surface.
 service WorkspaceService {
   // CreateWorkspace opens a workspace in the caller's organization.
@@ -1420,5 +1592,137 @@ service WorkspaceService {
       resource_id_field: "workspace_id"
     };
     option (chronos.options.v1.operation) = OPERATION_CLASS_READ;
+  }
+
+  // AddTeamMember puts a workspace member into a team.
+  //
+  // # Why the gate asks for `member` and not `admin`
+  //
+  // workspace.md §6 requires that MAINTAINERS manage a team's membership without
+  // being workspace admins — the people who know who belongs in a team are
+  // usually not the people who administer the workspace. So the gate cannot ask
+  // for `admin`, and the question it would have to ask instead is half in the
+  // graph and half in an aggregate: "a maintainer of THIS team, or an admin".
+  //
+  // Maintainers are deliberately not in the graph. A `maintainer` relation would
+  // need one tuple per maintainer per team, kept in step with the roster by a
+  // projector, and the roster is already the aggregate's — a second copy that
+  // lags the first.
+  //
+  // So the gate bounds this to the tenant by requiring workspace membership, and
+  // the handler takes the real decision against the aggregate, where it is not
+  // eventually consistent.
+  //
+  // # The subject must ALREADY be a workspace member
+  //
+  // A team groups people who are here; it is never a way in. Adding a non-member
+  // is refused rather than implicitly admitting them, because admitting would
+  // hand anybody who maintains a team a way to put a stranger in the workspace
+  // with no invitation, no seat and no entitlement check.
+  //
+  // WRITE and not GROW for the same reason: nothing here adds a person to the
+  // organization, so there is nothing for the growth gate to stop.
+  rpc AddTeamMember(AddTeamMemberRequest) returns (AddTeamMemberResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "member"
+      resource_type: "workspace"
+      resource_id_field: "workspace_id"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // RemoveTeamMember takes somebody out of a team.
+  //
+  // It releases no seat: they are still a workspace member, and the seat belongs
+  // to that membership.
+  rpc RemoveTeamMember(RemoveTeamMemberRequest) returns (RemoveTeamMemberResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "member"
+      resource_type: "workspace"
+      resource_id_field: "workspace_id"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // AddTeamMaintainer grants somebody the right to manage a team.
+  //
+  // They must be a workspace member for the reason a team member must be: a
+  // maintainer who is not in the workspace could add people to a team inside it
+  // while having no standing there at all.
+  rpc AddTeamMaintainer(AddTeamMaintainerRequest) returns (AddTeamMaintainerResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "member"
+      resource_type: "workspace"
+      resource_id_field: "workspace_id"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // RemoveTeamMaintainer withdraws that right.
+  //
+  // NEVER the last one. A team with no maintainer cannot have its membership
+  // managed by anybody who is not a workspace admin, and nothing outside the
+  // team can appoint one — appointing is itself a maintainer's act. Refused with
+  // CONFLICT: the request is well formed and the caller is permitted, and it is
+  // the current state that says no.
+  rpc RemoveTeamMaintainer(RemoveTeamMaintainerRequest) returns (RemoveTeamMaintainerResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "member"
+      resource_type: "workspace"
+      resource_id_field: "workspace_id"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
   }
 }

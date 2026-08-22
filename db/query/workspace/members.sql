@@ -74,3 +74,16 @@ DELETE FROM org_member_index WHERE org_id = $1 AND subject_id = $2;
 
 -- name: TruncateOrgMembers :exec
 TRUNCATE TABLE org_member_index;
+
+-- name: IsWorkspaceMember :one
+-- Is this person in this workspace?
+--
+-- The guard workspace.md §6 asks for: a team member must ALREADY be a workspace
+-- member, and adding a non-member is refused rather than implicitly admitting
+-- them. Without it a team is a side entrance — anybody who maintains one could
+-- put a stranger in the workspace with no invitation, no seat and no
+-- entitlement check.
+SELECT EXISTS (
+    SELECT 1 FROM workspace_member_view
+    WHERE workspace_id = $1 AND subject_id = $2
+);

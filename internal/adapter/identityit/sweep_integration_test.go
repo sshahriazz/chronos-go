@@ -177,9 +177,31 @@ type onlyIndex struct {
 	sawWanted bool
 }
 
+// scanLimit is what the INNER query is asked for, regardless of the sweep's own
+// limit, and it is the difference between this test passing and it degrading
+// with the age of the database.
+//
+// ListLapsedReservations is `ORDER BY expires_at LIMIT n`. This test's own
+// reservation is the newest lapsed row in the table, so it sorts LAST — behind
+// every unreleased squat every previous run of this suite left behind. Against a
+// dev database with more than `n` of those it falls off the page, the filter
+// returns nothing, and the failure reads as "the sweep cannot find lapsed
+// reservations, so the 48h bound is not enforced by anything" — a true sentence
+// about a mechanism that is working.
+//
+// Paging cannot fix it: the filter drops the other rows before the sweep can
+// release them, so the same first page comes back forever. Asking for a page
+// large enough to contain the whole table is what makes the filter's job — find
+// ONE known row — independent of how many rows are beside it. The sweep's own
+// limit still governs what it releases, which is what the test measures.
+const scanLimit = 1_000_000
+
 func (o *onlyIndex) ListLapsed(
 	ctx context.Context, deadline time.Time, limit int,
 ) ([]app.LapsedReservation, error) {
+	if limit < scanLimit {
+		limit = scanLimit
+	}
 	rows, err := o.inner.ListLapsed(ctx, deadline, limit)
 	if err != nil {
 		return nil, err

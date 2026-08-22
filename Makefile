@@ -366,8 +366,22 @@ test-integration: ## Integration tests against the running stack (make up first)
 	@# -timeout 20m matches CI. The identity suite alone is ~240s and growing, and
 	@# go test's 10-minute default kills the binary with a bare "signal: terminated"
 	@# and no failing test name, which reads as a crash rather than a timeout.
+	@#
+	@# -p 1 runs ONE package at a time, and it is not a performance knob. These
+	@# suites share one database, one event store and one authorization graph, so
+	@# the default (a package per core) has them contending for global state that
+	@# is global on purpose: a projection rebuild takes a single-writer advisory
+	@# lease, and a concurrent package taking the same lease fails with
+	@# `cannot rebuild while another instance is running it` — a correct refusal,
+	@# reported as a test failure. Reservation and idempotency suites collide the
+	@# same way on rows keyed by address.
+	@#
+	@# The failures it produces are the worst kind: they name a real invariant,
+	@# they pass on a re-run in isolation, and so they train people to re-run
+	@# rather than read. Serialising is the honest fix; making the assertions
+	@# tolerant would delete the invariant instead of the contention.
 	@set -a; [ -f .env ] && . ./.env; set +a; \
-	go test -tags=integration ./... -count=1 -timeout 20m
+	go test -tags=integration ./... -count=1 -timeout 20m -p 1
 
 .PHONY: cover
 cover: ## Test with coverage summary

@@ -9,6 +9,7 @@ import (
 	identityapp "github.com/chronos/chronos-go/internal/modules/identity/app"
 	identitycontract "github.com/chronos/chronos-go/internal/modules/identity/contract"
 	workspaceapp "github.com/chronos/chronos-go/internal/modules/workspace/app"
+	"github.com/chronos/chronos-go/internal/platform/authz"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/db"
 	"github.com/chronos/chronos-go/internal/platform/ids"
@@ -182,4 +183,31 @@ func (p *joinPermission) PermitJoin(ctx context.Context, orgID string) error {
 	// relationship that is exactly what the acceptance is about to create.
 	scoped := db.WithTenant(ctx, db.Tenant{OrgID: orgID})
 	return p.gate.Permit(scoped, optionsv1.OperationClass_OPERATION_CLASS_GROW)
+}
+
+// workspaceAdmins answers "may this person administer this workspace".
+//
+// It asks the GUARD rather than the checker, so a revocation tombstone denies
+// before the projector has caught up (ADR-045). That matters here more than on
+// most paths: the answer decides whether somebody may change who is in a team,
+// and a removed admin who kept that power for the length of projector lag could
+// use it.
+//
+// Wired at the composition root because the workspace module declares the port
+// and cannot reach the Guard, which is the server's.
+type workspaceAdmins struct{ guard *authz.Guard }
+
+var _ workspaceapp.WorkspaceAdmins = (*workspaceAdmins)(nil)
+
+func (a *workspaceAdmins) IsAdmin(ctx context.Context, workspaceID, subjectID string) (bool, error) {
+	decision := a.guard.Check(ctx, authz.Query{
+		Principal: authz.Principal{Kind: authz.KindUser, ID: subjectID},
+		Relation:  "admin",
+		Resource:  authz.ResourceRef{Type: "workspace", ID: workspaceID},
+	})
+	// Decision's zero value DENIES, so an unreachable OpenFGA answers false here
+	// rather than erroring — which is the fail-closed direction (ADR-010) and the
+	// one the caller wants: a team change refused during an outage is recoverable,
+	// and one permitted during an outage is not.
+	return decision.Allowed(), nil
 }

@@ -197,6 +197,53 @@ func (q *Queries) TeamsForSubject(ctx context.Context, arg TeamsForSubjectParams
 	return items, nil
 }
 
+const TeamsOfMember = `-- name: TeamsOfMember :many
+SELECT team_id
+FROM team_member_view
+WHERE workspace_id = $1 AND subject_id = $2
+ORDER BY team_id
+`
+
+type TeamsOfMemberParams struct {
+	WorkspaceID string
+	SubjectID   string
+}
+
+// Which teams inside this workspace is this person in?
+//
+// The cascade workspace.md §6 requires in the other direction: a team member
+// must be a workspace member, so losing the second has to lose the first.
+// Without it somebody removed from a workspace keeps `team:x member user:y` in
+// the access graph, and the first thing shared with that team reaches a person
+// who was removed — with no event, no log line and nothing to notice.
+//
+// Scoped to ONE workspace rather than the whole organization, because that is
+// what a removal is: leaving one workspace has to leave its teams and must not
+// touch the teams of another workspace the person is still in.
+//
+// Unbounded, unlike every other list here, and deliberately: this is not a page
+// for a screen but the complete set a single removal has to settle, and a page
+// would silently leave the remainder attached.
+func (q *Queries) TeamsOfMember(ctx context.Context, arg TeamsOfMemberParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, TeamsOfMember, arg.WorkspaceID, arg.SubjectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var team_id string
+		if err := rows.Scan(&team_id); err != nil {
+			return nil, err
+		}
+		items = append(items, team_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const TruncateTeamMembers = `-- name: TruncateTeamMembers :exec
 TRUNCATE TABLE team_member_view
 `

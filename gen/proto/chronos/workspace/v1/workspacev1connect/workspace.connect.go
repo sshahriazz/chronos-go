@@ -92,6 +92,18 @@ const (
 	// WorkspaceServiceListTeamsProcedure is the fully-qualified name of the WorkspaceService's
 	// ListTeams RPC.
 	WorkspaceServiceListTeamsProcedure = "/chronos.workspace.v1.WorkspaceService/ListTeams"
+	// WorkspaceServiceAddTeamMemberProcedure is the fully-qualified name of the WorkspaceService's
+	// AddTeamMember RPC.
+	WorkspaceServiceAddTeamMemberProcedure = "/chronos.workspace.v1.WorkspaceService/AddTeamMember"
+	// WorkspaceServiceRemoveTeamMemberProcedure is the fully-qualified name of the WorkspaceService's
+	// RemoveTeamMember RPC.
+	WorkspaceServiceRemoveTeamMemberProcedure = "/chronos.workspace.v1.WorkspaceService/RemoveTeamMember"
+	// WorkspaceServiceAddTeamMaintainerProcedure is the fully-qualified name of the WorkspaceService's
+	// AddTeamMaintainer RPC.
+	WorkspaceServiceAddTeamMaintainerProcedure = "/chronos.workspace.v1.WorkspaceService/AddTeamMaintainer"
+	// WorkspaceServiceRemoveTeamMaintainerProcedure is the fully-qualified name of the
+	// WorkspaceService's RemoveTeamMaintainer RPC.
+	WorkspaceServiceRemoveTeamMaintainerProcedure = "/chronos.workspace.v1.WorkspaceService/RemoveTeamMaintainer"
 )
 
 // WorkspaceServiceClient is a client for the chronos.workspace.v1.WorkspaceService service.
@@ -303,6 +315,54 @@ type WorkspaceServiceClient interface {
 	// READ, so it is permitted in every organization state including Suspended and
 	// Closed.
 	ListTeams(context.Context, *connect.Request[v1.ListTeamsRequest]) (*connect.Response[v1.ListTeamsResponse], error)
+	// AddTeamMember puts a workspace member into a team.
+	//
+	// # Why the gate asks for `member` and not `admin`
+	//
+	// workspace.md §6 requires that MAINTAINERS manage a team's membership without
+	// being workspace admins — the people who know who belongs in a team are
+	// usually not the people who administer the workspace. So the gate cannot ask
+	// for `admin`, and the question it would have to ask instead is half in the
+	// graph and half in an aggregate: "a maintainer of THIS team, or an admin".
+	//
+	// Maintainers are deliberately not in the graph. A `maintainer` relation would
+	// need one tuple per maintainer per team, kept in step with the roster by a
+	// projector, and the roster is already the aggregate's — a second copy that
+	// lags the first.
+	//
+	// So the gate bounds this to the tenant by requiring workspace membership, and
+	// the handler takes the real decision against the aggregate, where it is not
+	// eventually consistent.
+	//
+	// # The subject must ALREADY be a workspace member
+	//
+	// A team groups people who are here; it is never a way in. Adding a non-member
+	// is refused rather than implicitly admitting them, because admitting would
+	// hand anybody who maintains a team a way to put a stranger in the workspace
+	// with no invitation, no seat and no entitlement check.
+	//
+	// WRITE and not GROW for the same reason: nothing here adds a person to the
+	// organization, so there is nothing for the growth gate to stop.
+	AddTeamMember(context.Context, *connect.Request[v1.AddTeamMemberRequest]) (*connect.Response[v1.AddTeamMemberResponse], error)
+	// RemoveTeamMember takes somebody out of a team.
+	//
+	// It releases no seat: they are still a workspace member, and the seat belongs
+	// to that membership.
+	RemoveTeamMember(context.Context, *connect.Request[v1.RemoveTeamMemberRequest]) (*connect.Response[v1.RemoveTeamMemberResponse], error)
+	// AddTeamMaintainer grants somebody the right to manage a team.
+	//
+	// They must be a workspace member for the reason a team member must be: a
+	// maintainer who is not in the workspace could add people to a team inside it
+	// while having no standing there at all.
+	AddTeamMaintainer(context.Context, *connect.Request[v1.AddTeamMaintainerRequest]) (*connect.Response[v1.AddTeamMaintainerResponse], error)
+	// RemoveTeamMaintainer withdraws that right.
+	//
+	// NEVER the last one. A team with no maintainer cannot have its membership
+	// managed by anybody who is not a workspace admin, and nothing outside the
+	// team can appoint one — appointing is itself a maintainer's act. Refused with
+	// CONFLICT: the request is well formed and the caller is permitted, and it is
+	// the current state that says no.
+	RemoveTeamMaintainer(context.Context, *connect.Request[v1.RemoveTeamMaintainerRequest]) (*connect.Response[v1.RemoveTeamMaintainerResponse], error)
 }
 
 // NewWorkspaceServiceClient constructs a client for the chronos.workspace.v1.WorkspaceService
@@ -400,6 +460,30 @@ func NewWorkspaceServiceClient(httpClient connect.HTTPClient, baseURL string, op
 			connect.WithSchema(workspaceServiceMethods.ByName("ListTeams")),
 			connect.WithClientOptions(opts...),
 		),
+		addTeamMember: connect.NewClient[v1.AddTeamMemberRequest, v1.AddTeamMemberResponse](
+			httpClient,
+			baseURL+WorkspaceServiceAddTeamMemberProcedure,
+			connect.WithSchema(workspaceServiceMethods.ByName("AddTeamMember")),
+			connect.WithClientOptions(opts...),
+		),
+		removeTeamMember: connect.NewClient[v1.RemoveTeamMemberRequest, v1.RemoveTeamMemberResponse](
+			httpClient,
+			baseURL+WorkspaceServiceRemoveTeamMemberProcedure,
+			connect.WithSchema(workspaceServiceMethods.ByName("RemoveTeamMember")),
+			connect.WithClientOptions(opts...),
+		),
+		addTeamMaintainer: connect.NewClient[v1.AddTeamMaintainerRequest, v1.AddTeamMaintainerResponse](
+			httpClient,
+			baseURL+WorkspaceServiceAddTeamMaintainerProcedure,
+			connect.WithSchema(workspaceServiceMethods.ByName("AddTeamMaintainer")),
+			connect.WithClientOptions(opts...),
+		),
+		removeTeamMaintainer: connect.NewClient[v1.RemoveTeamMaintainerRequest, v1.RemoveTeamMaintainerResponse](
+			httpClient,
+			baseURL+WorkspaceServiceRemoveTeamMaintainerProcedure,
+			connect.WithSchema(workspaceServiceMethods.ByName("RemoveTeamMaintainer")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -419,6 +503,10 @@ type workspaceServiceClient struct {
 	renameTeam                *connect.Client[v1.RenameTeamRequest, v1.RenameTeamResponse]
 	deleteTeam                *connect.Client[v1.DeleteTeamRequest, v1.DeleteTeamResponse]
 	listTeams                 *connect.Client[v1.ListTeamsRequest, v1.ListTeamsResponse]
+	addTeamMember             *connect.Client[v1.AddTeamMemberRequest, v1.AddTeamMemberResponse]
+	removeTeamMember          *connect.Client[v1.RemoveTeamMemberRequest, v1.RemoveTeamMemberResponse]
+	addTeamMaintainer         *connect.Client[v1.AddTeamMaintainerRequest, v1.AddTeamMaintainerResponse]
+	removeTeamMaintainer      *connect.Client[v1.RemoveTeamMaintainerRequest, v1.RemoveTeamMaintainerResponse]
 }
 
 // CreateWorkspace calls chronos.workspace.v1.WorkspaceService.CreateWorkspace.
@@ -489,6 +577,26 @@ func (c *workspaceServiceClient) DeleteTeam(ctx context.Context, req *connect.Re
 // ListTeams calls chronos.workspace.v1.WorkspaceService.ListTeams.
 func (c *workspaceServiceClient) ListTeams(ctx context.Context, req *connect.Request[v1.ListTeamsRequest]) (*connect.Response[v1.ListTeamsResponse], error) {
 	return c.listTeams.CallUnary(ctx, req)
+}
+
+// AddTeamMember calls chronos.workspace.v1.WorkspaceService.AddTeamMember.
+func (c *workspaceServiceClient) AddTeamMember(ctx context.Context, req *connect.Request[v1.AddTeamMemberRequest]) (*connect.Response[v1.AddTeamMemberResponse], error) {
+	return c.addTeamMember.CallUnary(ctx, req)
+}
+
+// RemoveTeamMember calls chronos.workspace.v1.WorkspaceService.RemoveTeamMember.
+func (c *workspaceServiceClient) RemoveTeamMember(ctx context.Context, req *connect.Request[v1.RemoveTeamMemberRequest]) (*connect.Response[v1.RemoveTeamMemberResponse], error) {
+	return c.removeTeamMember.CallUnary(ctx, req)
+}
+
+// AddTeamMaintainer calls chronos.workspace.v1.WorkspaceService.AddTeamMaintainer.
+func (c *workspaceServiceClient) AddTeamMaintainer(ctx context.Context, req *connect.Request[v1.AddTeamMaintainerRequest]) (*connect.Response[v1.AddTeamMaintainerResponse], error) {
+	return c.addTeamMaintainer.CallUnary(ctx, req)
+}
+
+// RemoveTeamMaintainer calls chronos.workspace.v1.WorkspaceService.RemoveTeamMaintainer.
+func (c *workspaceServiceClient) RemoveTeamMaintainer(ctx context.Context, req *connect.Request[v1.RemoveTeamMaintainerRequest]) (*connect.Response[v1.RemoveTeamMaintainerResponse], error) {
+	return c.removeTeamMaintainer.CallUnary(ctx, req)
 }
 
 // WorkspaceServiceHandler is an implementation of the chronos.workspace.v1.WorkspaceService
@@ -701,6 +809,54 @@ type WorkspaceServiceHandler interface {
 	// READ, so it is permitted in every organization state including Suspended and
 	// Closed.
 	ListTeams(context.Context, *connect.Request[v1.ListTeamsRequest]) (*connect.Response[v1.ListTeamsResponse], error)
+	// AddTeamMember puts a workspace member into a team.
+	//
+	// # Why the gate asks for `member` and not `admin`
+	//
+	// workspace.md §6 requires that MAINTAINERS manage a team's membership without
+	// being workspace admins — the people who know who belongs in a team are
+	// usually not the people who administer the workspace. So the gate cannot ask
+	// for `admin`, and the question it would have to ask instead is half in the
+	// graph and half in an aggregate: "a maintainer of THIS team, or an admin".
+	//
+	// Maintainers are deliberately not in the graph. A `maintainer` relation would
+	// need one tuple per maintainer per team, kept in step with the roster by a
+	// projector, and the roster is already the aggregate's — a second copy that
+	// lags the first.
+	//
+	// So the gate bounds this to the tenant by requiring workspace membership, and
+	// the handler takes the real decision against the aggregate, where it is not
+	// eventually consistent.
+	//
+	// # The subject must ALREADY be a workspace member
+	//
+	// A team groups people who are here; it is never a way in. Adding a non-member
+	// is refused rather than implicitly admitting them, because admitting would
+	// hand anybody who maintains a team a way to put a stranger in the workspace
+	// with no invitation, no seat and no entitlement check.
+	//
+	// WRITE and not GROW for the same reason: nothing here adds a person to the
+	// organization, so there is nothing for the growth gate to stop.
+	AddTeamMember(context.Context, *connect.Request[v1.AddTeamMemberRequest]) (*connect.Response[v1.AddTeamMemberResponse], error)
+	// RemoveTeamMember takes somebody out of a team.
+	//
+	// It releases no seat: they are still a workspace member, and the seat belongs
+	// to that membership.
+	RemoveTeamMember(context.Context, *connect.Request[v1.RemoveTeamMemberRequest]) (*connect.Response[v1.RemoveTeamMemberResponse], error)
+	// AddTeamMaintainer grants somebody the right to manage a team.
+	//
+	// They must be a workspace member for the reason a team member must be: a
+	// maintainer who is not in the workspace could add people to a team inside it
+	// while having no standing there at all.
+	AddTeamMaintainer(context.Context, *connect.Request[v1.AddTeamMaintainerRequest]) (*connect.Response[v1.AddTeamMaintainerResponse], error)
+	// RemoveTeamMaintainer withdraws that right.
+	//
+	// NEVER the last one. A team with no maintainer cannot have its membership
+	// managed by anybody who is not a workspace admin, and nothing outside the
+	// team can appoint one — appointing is itself a maintainer's act. Refused with
+	// CONFLICT: the request is well formed and the caller is permitted, and it is
+	// the current state that says no.
+	RemoveTeamMaintainer(context.Context, *connect.Request[v1.RemoveTeamMaintainerRequest]) (*connect.Response[v1.RemoveTeamMaintainerResponse], error)
 }
 
 // NewWorkspaceServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -794,6 +950,30 @@ func NewWorkspaceServiceHandler(svc WorkspaceServiceHandler, opts ...connect.Han
 		connect.WithSchema(workspaceServiceMethods.ByName("ListTeams")),
 		connect.WithHandlerOptions(opts...),
 	)
+	workspaceServiceAddTeamMemberHandler := connect.NewUnaryHandler(
+		WorkspaceServiceAddTeamMemberProcedure,
+		svc.AddTeamMember,
+		connect.WithSchema(workspaceServiceMethods.ByName("AddTeamMember")),
+		connect.WithHandlerOptions(opts...),
+	)
+	workspaceServiceRemoveTeamMemberHandler := connect.NewUnaryHandler(
+		WorkspaceServiceRemoveTeamMemberProcedure,
+		svc.RemoveTeamMember,
+		connect.WithSchema(workspaceServiceMethods.ByName("RemoveTeamMember")),
+		connect.WithHandlerOptions(opts...),
+	)
+	workspaceServiceAddTeamMaintainerHandler := connect.NewUnaryHandler(
+		WorkspaceServiceAddTeamMaintainerProcedure,
+		svc.AddTeamMaintainer,
+		connect.WithSchema(workspaceServiceMethods.ByName("AddTeamMaintainer")),
+		connect.WithHandlerOptions(opts...),
+	)
+	workspaceServiceRemoveTeamMaintainerHandler := connect.NewUnaryHandler(
+		WorkspaceServiceRemoveTeamMaintainerProcedure,
+		svc.RemoveTeamMaintainer,
+		connect.WithSchema(workspaceServiceMethods.ByName("RemoveTeamMaintainer")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/chronos.workspace.v1.WorkspaceService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case WorkspaceServiceCreateWorkspaceProcedure:
@@ -824,6 +1004,14 @@ func NewWorkspaceServiceHandler(svc WorkspaceServiceHandler, opts ...connect.Han
 			workspaceServiceDeleteTeamHandler.ServeHTTP(w, r)
 		case WorkspaceServiceListTeamsProcedure:
 			workspaceServiceListTeamsHandler.ServeHTTP(w, r)
+		case WorkspaceServiceAddTeamMemberProcedure:
+			workspaceServiceAddTeamMemberHandler.ServeHTTP(w, r)
+		case WorkspaceServiceRemoveTeamMemberProcedure:
+			workspaceServiceRemoveTeamMemberHandler.ServeHTTP(w, r)
+		case WorkspaceServiceAddTeamMaintainerProcedure:
+			workspaceServiceAddTeamMaintainerHandler.ServeHTTP(w, r)
+		case WorkspaceServiceRemoveTeamMaintainerProcedure:
+			workspaceServiceRemoveTeamMaintainerHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -887,4 +1075,20 @@ func (UnimplementedWorkspaceServiceHandler) DeleteTeam(context.Context, *connect
 
 func (UnimplementedWorkspaceServiceHandler) ListTeams(context.Context, *connect.Request[v1.ListTeamsRequest]) (*connect.Response[v1.ListTeamsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.ListTeams is not implemented"))
+}
+
+func (UnimplementedWorkspaceServiceHandler) AddTeamMember(context.Context, *connect.Request[v1.AddTeamMemberRequest]) (*connect.Response[v1.AddTeamMemberResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.AddTeamMember is not implemented"))
+}
+
+func (UnimplementedWorkspaceServiceHandler) RemoveTeamMember(context.Context, *connect.Request[v1.RemoveTeamMemberRequest]) (*connect.Response[v1.RemoveTeamMemberResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.RemoveTeamMember is not implemented"))
+}
+
+func (UnimplementedWorkspaceServiceHandler) AddTeamMaintainer(context.Context, *connect.Request[v1.AddTeamMaintainerRequest]) (*connect.Response[v1.AddTeamMaintainerResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.AddTeamMaintainer is not implemented"))
+}
+
+func (UnimplementedWorkspaceServiceHandler) RemoveTeamMaintainer(context.Context, *connect.Request[v1.RemoveTeamMaintainerRequest]) (*connect.Response[v1.RemoveTeamMaintainerResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.workspace.v1.WorkspaceService.RemoveTeamMaintainer is not implemented"))
 }

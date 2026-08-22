@@ -257,9 +257,34 @@ confirmed at the latency level too (a check through a 1000-member team costs
       the reason not to is that nesting makes effective membership non-obvious to
       the people managing it, which is the problem teams exist to solve.
 - [x] **6b — create, rename, delete, and the projection.**
-- [ ] **6c — membership.** A team member must already be a workspace member;
+- [x] **6c — membership.** A team member must already be a workspace member;
       adding a non-member is refused rather than implicitly admitting them.
       Maintainers manage membership without being workspace admins.
+
+      Three things landed with it that the line above does not say. The
+      `team:x member user:y` tuples, without which a team is a list in Postgres
+      the access engine has never heard of and every grant to a team silently
+      resolves to nobody. The authorization decision, which the gate cannot take
+      — it admits any workspace member, because maintainers must manage their own
+      team — so the handler carries "a maintainer of THIS team, or an admin of
+      the workspace", and an unreadable admin answer denies. And the DEPARTURE
+      CASCADE below.
+
+### The departure cascade, which was a live gap
+
+workspace.md §6 runs in both directions: a team member must be a workspace
+member, so **leaving the workspace has to leave its teams**. Only the first
+direction had code. The second is a permission that outlives its grant — a
+removed person keeps `team:x member user:y`, and the first thing ever shared
+with that team reaches them, with no event and no log line.
+
+It landed here rather than being deferred with the deletion cascade because the
+two are not alike. This one is reachable by an ordinary removal, and the fix is
+bounded: `team_member_view` is already indexed on `(workspace_id, subject_id)`,
+so enumeration is one query. `workspace-team-departure` is its own subscription
+group, not a second job inside `workspace-inviter-departure`, because the two
+react to DIFFERENT subsets of `MemberRemoved` — that one ignores a removal with
+`SeatReleased=false`, this one must not, since the rule is per workspace.
 
 ### Deferred, deliberately: the deletion cascade
 
@@ -281,6 +306,12 @@ implementation to throw away.
 So it is written down here rather than half-built: **the cascade lands with the
 first feature that can grant to a team**, and until then the invariant it
 protects is held by ids that are never reused.
+
+Deleting a team also leaves its `team:x member user:y` edges in the graph, for
+the same reason and with the same remedy — they are inert until something can
+grant to a team, and removing them needs the member list, which the access
+reactor cannot read without racing the projector that empties the same table on
+that event. Both land together.
 
 ## Then
 - [ ] **Billing** — Stripe, per [BILLING-PLAN.md](BILLING-PLAN.md). Additive

@@ -236,3 +236,77 @@ func TestTheFilterCoversMembershipStreams(t *testing.T) {
 			tuples.Filter().StreamPrefixes)
 	}
 }
+
+// JOINING A TEAM WRITES THE EDGE A GRANT RESOLVES THROUGH.
+//
+// `team:eng member user:x` is what makes a grant to `team:eng#member` reach
+// anybody. Without it a team is a list in Postgres the access engine has never
+// heard of, and every share with a team grants nothing — silently, because a
+// grant that resolves to nobody denies, and denying is what a healthy graph
+// looks like from outside.
+func TestJoiningATeamWritesTheMembershipEdge(t *testing.T) {
+	const teamID = "team_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+
+	w := react(t, &workspacecontract.TeamMemberAdded{
+		TeamID: teamID, WorkspaceID: wsID, OrgID: "org_x",
+		SubjectID: subjID, AddedBy: "subj_admin", AddedAt: time.Unix(0, 0).UTC(),
+	}, decoder[workspacecontract.TeamMemberAdded]())
+
+	want := authz.Tuple{
+		Subject:  authz.Subject{Principal: authz.Principal{Kind: authz.KindUser, ID: subjID}},
+		Relation: "member",
+		Resource: authz.ResourceRef{Type: "team", ID: teamID},
+	}
+	if len(w.written) != 1 || w.written[0] != want {
+		t.Fatalf("wrote %v, want the team membership edge; without it every grant to this "+
+			"team resolves to nobody", w.written)
+	}
+}
+
+// LEAVING A TEAM REMOVES IT.
+//
+// Whatever was shared with the team stops reaching them, which is the point of
+// removing somebody from it.
+func TestLeavingATeamRemovesTheMembershipEdge(t *testing.T) {
+	const teamID = "team_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+
+	w := react(t, &workspacecontract.TeamMemberRemoved{
+		TeamID: teamID, WorkspaceID: wsID, OrgID: "org_x",
+		SubjectID: subjID, RemovedAt: time.Unix(0, 0).UTC(),
+	}, decoder[workspacecontract.TeamMemberRemoved]())
+
+	if len(w.deleted) != 1 {
+		t.Fatalf("deleted %v, want the team membership edge; the person keeps everything "+
+			"that was shared with the team they just left", w.deleted)
+	}
+	if len(w.written) != 0 {
+		t.Errorf("a removal wrote %v", w.written)
+	}
+}
+
+// THE FILTER COVERS TEAM STREAMS.
+//
+// Asserted separately from the handlers because it fails INDEPENDENTLY of them:
+// every handler above can be correct and never run, and a reactor that matches
+// nothing looks exactly like a quiet system.
+func TestTheFilterCoversTeamStreams(t *testing.T) {
+	tuples, err := NewTuples(&recordingWriter{}, oneEventCodec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := tuples.Filter().StreamPrefixes
+
+	for _, want := range []string{"team-", "teammember-"} {
+		var found bool
+		for _, p := range got {
+			if p == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("the filter is %v and does not include %q, so every team membership "+
+				"change is skipped before React sees it — and a grant that never lands "+
+				"denies, which is what a healthy graph looks like from outside", got, want)
+		}
+	}
+}

@@ -414,6 +414,18 @@ func reactors(codec *eventcodec.JSON, d *dependencies) []reactor.Reactor {
 		rs = append(rs, r)
 	}
 
+	// A workspace removal's other half. workspace.md §6 runs in both directions:
+	// a team member must be a workspace member, so leaving the workspace has to
+	// leave its teams. Without it a removed person keeps `team:x member user:y`
+	// in the access graph.
+	if r, err := newTeamDeparture(d); err != nil {
+		slog.Default().Error("the team-departure reactor is NOT registered; everybody "+
+			"removed from a workspace stays in its teams, so the first thing ever shared "+
+			"with one of those teams reaches somebody who was removed", "error", err)
+	} else {
+		rs = append(rs, r)
+	}
+
 	// The authorization graph. Without it every non-self-scoped method is
 	// DENIED — correctly, and silently.
 	if r, err := newAccessTuples(codec, d, slog.Default()); err != nil {

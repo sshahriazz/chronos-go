@@ -44,3 +44,26 @@ func (m *Membership) WorkspaceCount(ctx context.Context, orgID, subjectID string
 	}
 	return int(n), nil
 }
+
+// IsMember reports whether somebody belongs to a workspace.
+//
+// A TENANT transaction, like the count above and for the same reason: gate 1 has
+// resolved the scope by the time any use case calls this, so the row security
+// policy makes another organization's rows invisible rather than merely
+// unmatched — and this answer is a BOOLEAN, which is the shape where a missing
+// filter produces a plausible answer rather than an empty result.
+func (m *Membership) IsMember(ctx context.Context, workspaceID, subjectID string) (bool, error) {
+	if workspaceID == "" || subjectID == "" {
+		return false, fmt.Errorf("workspace: checking membership needs both a workspace " +
+			"and a subject")
+	}
+	var member bool
+	err := m.tx.InTenantTx(ctx, func(ctx context.Context, q db.Querier) error {
+		return q.QueryRow(ctx, workspacedb.IsWorkspaceMember, workspaceID, subjectID).Scan(&member)
+	})
+	if err != nil {
+		return false, fmt.Errorf("workspace: checking whether %s is in %s: %w",
+			subjectID, workspaceID, err)
+	}
+	return member, nil
+}

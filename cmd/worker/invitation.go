@@ -511,3 +511,39 @@ func departureCodec() *eventcodec.JSON {
 	organization.RegisterEvents(codec)
 	return codec
 }
+
+// newTeamDeparture builds the reactor that takes somebody out of a workspace's
+// teams when they leave it.
+//
+// Its own reactor and its own subscription group rather than a second job inside
+// newInviterDeparture, for two reasons that both bite. The two react to
+// DIFFERENT subsets of the same event — that one ignores a removal with
+// SeatReleased=false, this one must not, because the rule is per workspace — and
+// sharing a group would make a failure in either park the other's work.
+func newTeamDeparture(d *dependencies) (*workspacereactor.TeamDeparture, error) {
+	if d.pool == nil {
+		return nil, errors.New("no read model: the work list is team_member_view, so nothing " +
+			"can find which teams a departing member was in")
+	}
+	if d.store == nil {
+		return nil, errors.New("no event store: a team departure is recorded as events, so " +
+			"there is nothing to append the removals to")
+	}
+
+	roster, err := workspacepg.NewTeamRosters(pgadapter.New(d.pool))
+	if err != nil {
+		return nil, err
+	}
+	codec := workspaceCodec()
+	memberships := eventsourcing.NewRepository[*workspacedomain.TeamMembership](
+		d.store, codec, workspaceUpcasters(),
+		workspacedomain.TeamMembershipCategory, workspacedomain.NewTeamMembership)
+
+	departures, err := workspaceapp.NewTeamDepartures(workspaceapp.TeamDeparturesDeps{
+		Memberships: memberships, Roster: roster, Now: clock.System{}.Now,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("team departures: %w", err)
+	}
+	return workspacereactor.NewTeamDeparture(departures, codec)
+}

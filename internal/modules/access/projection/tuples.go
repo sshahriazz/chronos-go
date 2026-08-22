@@ -69,6 +69,13 @@ func (t *Tuples) Filter() eventsourcing.SubscriptionFilter {
 			// silently is the operative word, because grants that never land
 			// deny, and denying is what a healthy graph looks like from outside.
 			"membership-",
+
+			// Team membership, which is what makes a team a grantable subject
+			// worth anything: `team:eng member user:x` is the tuple a grant to
+			// `team:eng#member` resolves through. Without it a team is a list in
+			// Postgres that the access engine has never heard of.
+			"team-",
+			"teammember-",
 		},
 	}
 }
@@ -136,6 +143,28 @@ func (t *Tuples) React(ctx context.Context, env eventsourcing.Envelope) error {
 		}
 		return t.writer.Write(ctx, workspaceMember(e.WorkspaceID, e.SubjectID, e.To))
 
+	// TeamDeleted is DELIBERATELY not handled here, and this comment is the
+	// record of it rather than an omission a reader has to notice.
+	//
+	// Deleting a team leaves its `team:x member user:y` edges in the graph. They
+	// are inert: an edge only grants something when a GRANT resolves through it,
+	// a grant to a team is a share, sharing needs resources, and feature
+	// verticals inside a workspace are out of scope (ADR-006). So no tuple that
+	// could use these exists, and the id is never reused, which is what
+	// access.md §7.5 asks for.
+	//
+	// Cleaning them up here is not possible with what this reactor has: it would
+	// need the member list, which lives in a projection it cannot read, and
+	// reading one would race the projector that empties the same table on this
+	// event. The cleanup belongs with the CASCADE §7.5 also requires — remove
+	// every grant naming the team — and both need the grants projection that
+	// arrives with sharing. They land together.
+	case *workspacecontract.TeamMemberAdded:
+		return t.writer.Write(ctx, []authz.Tuple{teamMember(e.TeamID, e.SubjectID)})
+
+	case *workspacecontract.TeamMemberRemoved:
+		return t.writer.Delete(ctx, []authz.Tuple{teamMember(e.TeamID, e.SubjectID)})
+
 	case *workspacecontract.MemberRemoved:
 		// This is what CONFIRMS the tombstone the removal handler laid. The
 		// writer deletes the tuple and then clears it, in that order, so a
@@ -196,4 +225,17 @@ func workspaceMember(workspaceID, subjectID string, role workspacecontract.Membe
 		Relation: "member",
 		Resource: authz.ResourceRef{Type: "workspace", ID: workspaceID},
 	}}
+}
+
+// teamMember is the edge a grant to a team resolves through.
+//
+// One tuple per person per team, and one tuple for the GRANT however large the
+// team is — which is the whole economics access.md §4 measured. The membership
+// edges are the cost of the team; the grant is not.
+func teamMember(teamID, subjectID string) authz.Tuple {
+	return authz.Tuple{
+		Subject:  authz.Subject{Principal: authz.Principal{Kind: authz.KindUser, ID: subjectID}},
+		Relation: "member",
+		Resource: authz.ResourceRef{Type: "team", ID: teamID},
+	}
 }

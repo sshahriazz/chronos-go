@@ -122,3 +122,43 @@ func TestInvitationMailCanDecodeItsOwnEvent(t *testing.T) {
 	// Any other error is expected here: this test has no Postgres to mint a link
 	// against. What it asserts is that the failure is not a decode failure.
 }
+
+// THE TEAM-DEPARTURE REACTOR IS REGISTERED.
+//
+// A reactor no binary registers delivers nothing, silently — and this one's
+// silence is a permission that outlives its grant: everybody removed from a
+// workspace keeps `team:x member user:y`, so the first thing ever shared with
+// one of those teams reaches somebody who was removed. There is no error, no
+// parked event and no metric; the graph simply answers a question with a
+// membership nothing explains.
+//
+// Only a test of the COMPOSITION ROOT can see it. Every unit above it passes
+// whether or not this line exists.
+func TestTeamDepartureIsRegistered(t *testing.T) {
+	cfg := testConfig(t)
+	d, closeAll := newDependencies(cfg, slog.New(slog.DiscardHandler), newCodec())
+	defer closeAll()
+
+	found := find(reactors(newCodec(), d), workspacereactor.TeamDepartureReactorName)
+	if found == nil {
+		t.Fatalf("the worker registers no %q reactor: everybody removed from a workspace "+
+			"stays in its teams, and the access graph keeps granting through them",
+			workspacereactor.TeamDepartureReactorName)
+	}
+
+	// Its OWN group, not the inviter-departure one. They subscribe to the same
+	// event and react to different subsets of it — that one ignores a removal
+	// with SeatReleased=false, this one must not — so sharing a group would make
+	// a failure in either park the other's work.
+	if found.Name() == workspacereactor.DepartureReactorName {
+		t.Error("the team cascade shares the inviter-departure group; a failure in either " +
+			"now parks the other's work, and the two react to different subsets of the " +
+			"same event")
+	}
+
+	want := (&contract.MemberRemoved{}).EventType()
+	prefixes := found.Filter().EventTypePrefixes
+	if len(prefixes) != 1 || prefixes[0] != want {
+		t.Errorf("the registered reactor subscribes to %v, want exactly [%s]", prefixes, want)
+	}
+}

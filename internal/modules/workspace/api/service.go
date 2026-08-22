@@ -65,6 +65,14 @@ type TeamList interface {
 	List(ctx context.Context, query app.ListTeamsQuery) (app.TeamPage, error)
 }
 
+// TeamMembership is workspace's team-membership write side.
+type TeamMembership interface {
+	Add(ctx context.Context, cmd app.AddTeamMemberCommand) error
+	Remove(ctx context.Context, cmd app.RemoveTeamMemberCommand) error
+	AddMaintainer(ctx context.Context, cmd app.TeamMaintainerCommand) error
+	RemoveMaintainer(ctx context.Context, cmd app.TeamMaintainerCommand) error
+}
+
 // Service serves WorkspaceService.
 type Service struct {
 	workspacev1connect.UnimplementedWorkspaceServiceHandler
@@ -75,6 +83,7 @@ type Service struct {
 	invitationQueries InvitationList
 	teams             TeamLifecycle
 	teamQueries       TeamList
+	teamMembers       TeamMembership
 }
 
 // Deps is what Service needs.
@@ -85,6 +94,7 @@ type Deps struct {
 	InvitationQueries InvitationList
 	Teams             TeamLifecycle
 	TeamQueries       TeamList
+	TeamMembers       TeamMembership
 }
 
 func New(d Deps) (*Service, error) {
@@ -112,11 +122,15 @@ func New(d Deps) (*Service, error) {
 	case d.TeamQueries == nil:
 		return nil, fmt.Errorf("workspace: a team reader is required; without one team_view " +
 			"is written by a projector and read by nothing")
+	case d.TeamMembers == nil:
+		return nil, fmt.Errorf("workspace: a team membership use case is required; without " +
+			"one a team can be created and never filled, and every membership RPC answers " +
+			"UNIMPLEMENTED")
 	}
 	return &Service{
 		creation: d.Creation, members: d.Members,
 		invitations: d.Invitations, invitationQueries: d.InvitationQueries,
-		teams: d.Teams, teamQueries: d.TeamQueries,
+		teams: d.Teams, teamQueries: d.TeamQueries, teamMembers: d.TeamMembers,
 	}, nil
 }
 

@@ -235,9 +235,30 @@ func (d *dependencies) buildWorkspace(log *slog.Logger) (*workspaceapi.Service, 
 		return nil, fmt.Errorf("team queries: %w", err)
 	}
 
+	if d.authz == nil {
+		return nil, errors.New("no authorization guard: a team's membership may be changed " +
+			"by a maintainer OR a workspace admin, and without the second a team whose " +
+			"last maintainer leaves can never be managed again")
+	}
+
+	teamMembershipRepo := eventsourcing.NewRepository[*workspacedomain.TeamMembership](
+		d.store, d.codec, d.upcasters,
+		workspacedomain.TeamMembershipCategory, workspacedomain.NewTeamMembership)
+
+	teamMembers, err := workspaceapp.NewTeamMembers(workspaceapp.TeamMembersDeps{
+		Teams:       teamRepo,
+		Memberships: teamMembershipRepo,
+		Workspace:   counter,
+		Admins:      &workspaceAdmins{guard: d.authz},
+		Now:         d.clock.Now,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("workspace team members: %w", err)
+	}
+
 	return workspaceapi.New(workspaceapi.Deps{
 		Creation: creation, Members: members,
 		Invitations: invitations, InvitationQueries: invitationQueries,
-		Teams: teams, TeamQueries: teamQueries,
+		Teams: teams, TeamQueries: teamQueries, TeamMembers: teamMembers,
 	})
 }

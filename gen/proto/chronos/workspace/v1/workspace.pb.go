@@ -1852,6 +1852,414 @@ func (x *ListTeamsResponse) GetNextPageToken() string {
 	return ""
 }
 
+// AddTeamMemberRequest puts a workspace member into a team.
+type AddTeamMemberRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Which workspace. Read by the authz gate, which asks for `member` on THIS
+	// object — see the RPCs for why it is member and not admin.
+	WorkspaceId string `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	// Which team.
+	TeamId string `protobuf:"bytes,2,opt,name=team_id,json=teamId,proto3" json:"team_id,omitempty"`
+	// Whose membership changes, by pseudonym.
+	SubjectId     string `protobuf:"bytes,3,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AddTeamMemberRequest) Reset() {
+	*x = AddTeamMemberRequest{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddTeamMemberRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddTeamMemberRequest) ProtoMessage() {}
+
+func (x *AddTeamMemberRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddTeamMemberRequest.ProtoReflect.Descriptor instead.
+func (*AddTeamMemberRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *AddTeamMemberRequest) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
+}
+
+func (x *AddTeamMemberRequest) GetTeamId() string {
+	if x != nil {
+		return x.TeamId
+	}
+	return ""
+}
+
+func (x *AddTeamMemberRequest) GetSubjectId() string {
+	if x != nil {
+		return x.SubjectId
+	}
+	return ""
+}
+
+// AddTeamMemberResponse is empty.
+type AddTeamMemberResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AddTeamMemberResponse) Reset() {
+	*x = AddTeamMemberResponse{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddTeamMemberResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddTeamMemberResponse) ProtoMessage() {}
+
+func (x *AddTeamMemberResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddTeamMemberResponse.ProtoReflect.Descriptor instead.
+func (*AddTeamMemberResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{31}
+}
+
+// RemoveTeamMemberRequest takes somebody out of a team.
+type RemoveTeamMemberRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Which workspace. Read by the authz gate, which asks for `member` on THIS
+	// object — see the RPCs for why it is member and not admin.
+	WorkspaceId string `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	// Which team.
+	TeamId string `protobuf:"bytes,2,opt,name=team_id,json=teamId,proto3" json:"team_id,omitempty"`
+	// Whose membership changes, by pseudonym.
+	SubjectId     string `protobuf:"bytes,3,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoveTeamMemberRequest) Reset() {
+	*x = RemoveTeamMemberRequest{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoveTeamMemberRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoveTeamMemberRequest) ProtoMessage() {}
+
+func (x *RemoveTeamMemberRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoveTeamMemberRequest.ProtoReflect.Descriptor instead.
+func (*RemoveTeamMemberRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *RemoveTeamMemberRequest) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
+}
+
+func (x *RemoveTeamMemberRequest) GetTeamId() string {
+	if x != nil {
+		return x.TeamId
+	}
+	return ""
+}
+
+func (x *RemoveTeamMemberRequest) GetSubjectId() string {
+	if x != nil {
+		return x.SubjectId
+	}
+	return ""
+}
+
+// RemoveTeamMemberResponse is empty.
+type RemoveTeamMemberResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoveTeamMemberResponse) Reset() {
+	*x = RemoveTeamMemberResponse{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoveTeamMemberResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoveTeamMemberResponse) ProtoMessage() {}
+
+func (x *RemoveTeamMemberResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoveTeamMemberResponse.ProtoReflect.Descriptor instead.
+func (*RemoveTeamMemberResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{33}
+}
+
+// AddTeamMaintainerRequest grants the right to manage a team.
+type AddTeamMaintainerRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Which workspace. Read by the authz gate, which asks for `member` on THIS
+	// object — see the RPCs for why it is member and not admin.
+	WorkspaceId string `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	// Which team.
+	TeamId string `protobuf:"bytes,2,opt,name=team_id,json=teamId,proto3" json:"team_id,omitempty"`
+	// Whose membership changes, by pseudonym.
+	SubjectId     string `protobuf:"bytes,3,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AddTeamMaintainerRequest) Reset() {
+	*x = AddTeamMaintainerRequest{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddTeamMaintainerRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddTeamMaintainerRequest) ProtoMessage() {}
+
+func (x *AddTeamMaintainerRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddTeamMaintainerRequest.ProtoReflect.Descriptor instead.
+func (*AddTeamMaintainerRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *AddTeamMaintainerRequest) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
+}
+
+func (x *AddTeamMaintainerRequest) GetTeamId() string {
+	if x != nil {
+		return x.TeamId
+	}
+	return ""
+}
+
+func (x *AddTeamMaintainerRequest) GetSubjectId() string {
+	if x != nil {
+		return x.SubjectId
+	}
+	return ""
+}
+
+// AddTeamMaintainerResponse is empty.
+type AddTeamMaintainerResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AddTeamMaintainerResponse) Reset() {
+	*x = AddTeamMaintainerResponse{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddTeamMaintainerResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddTeamMaintainerResponse) ProtoMessage() {}
+
+func (x *AddTeamMaintainerResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddTeamMaintainerResponse.ProtoReflect.Descriptor instead.
+func (*AddTeamMaintainerResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{35}
+}
+
+// RemoveTeamMaintainerRequest withdraws that right.
+type RemoveTeamMaintainerRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Which workspace. Read by the authz gate, which asks for `member` on THIS
+	// object — see the RPCs for why it is member and not admin.
+	WorkspaceId string `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	// Which team.
+	TeamId string `protobuf:"bytes,2,opt,name=team_id,json=teamId,proto3" json:"team_id,omitempty"`
+	// Whose membership changes, by pseudonym.
+	SubjectId     string `protobuf:"bytes,3,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoveTeamMaintainerRequest) Reset() {
+	*x = RemoveTeamMaintainerRequest{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[36]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoveTeamMaintainerRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoveTeamMaintainerRequest) ProtoMessage() {}
+
+func (x *RemoveTeamMaintainerRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[36]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoveTeamMaintainerRequest.ProtoReflect.Descriptor instead.
+func (*RemoveTeamMaintainerRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{36}
+}
+
+func (x *RemoveTeamMaintainerRequest) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
+}
+
+func (x *RemoveTeamMaintainerRequest) GetTeamId() string {
+	if x != nil {
+		return x.TeamId
+	}
+	return ""
+}
+
+func (x *RemoveTeamMaintainerRequest) GetSubjectId() string {
+	if x != nil {
+		return x.SubjectId
+	}
+	return ""
+}
+
+// RemoveTeamMaintainerResponse is empty.
+type RemoveTeamMaintainerResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoveTeamMaintainerResponse) Reset() {
+	*x = RemoveTeamMaintainerResponse{}
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[37]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoveTeamMaintainerResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoveTeamMaintainerResponse) ProtoMessage() {}
+
+func (x *RemoveTeamMaintainerResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_workspace_v1_workspace_proto_msgTypes[37]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoveTeamMaintainerResponse.ProtoReflect.Descriptor instead.
+func (*RemoveTeamMaintainerResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_workspace_v1_workspace_proto_rawDescGZIP(), []int{37}
+}
+
 var File_chronos_workspace_v1_workspace_proto protoreflect.FileDescriptor
 
 const file_chronos_workspace_v1_workspace_proto_rawDesc = "" +
@@ -1964,7 +2372,31 @@ const file_chronos_workspace_v1_workspace_proto_rawDesc = "" +
 	"created_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\xc6\x01\n" +
 	"\x11ListTeamsResponse\x12;\n" +
 	"\x05teams\x18\x01 \x03(\v2\x1a.chronos.workspace.v1.TeamB\t\xbaH\x06\x92\x01\x03\x10\xc8\x01R\x05teams\x12t\n" +
-	"\x0fnext_page_token\x18\x02 \x01(\tBL\xbaG/:-\x12+PLACEHOLDER-opaque-cursor-for-the-next-page\xbaH\x17r\x15\x18\x80\b2\x10^[A-Za-z0-9_-]*$R\rnextPageToken2\x9e\x18\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tBL\xbaG/:-\x12+PLACEHOLDER-opaque-cursor-for-the-next-page\xbaH\x17r\x15\x18\x80\b2\x10^[A-Za-z0-9_-]*$R\rnextPageToken\"\xec\x02\n" +
+	"\x14AddTeamMemberRequest\x12r\n" +
+	"\fworkspace_id\x18\x01 \x01(\tBO\xbaG#:\x1f\x12\x1dws_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1d\xbaH&r$\x18\x1d2 ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\vworkspaceId\x12l\n" +
+	"\ateam_id\x18\x02 \x01(\tBS\xbaG%:!\x12\x1fteam_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\xbaH(r&\x18\x1f2\"^team_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\x06teamId\x12r\n" +
+	"\n" +
+	"subject_id\x18\x03 \x01(\tBS\xbaG%:!\x12\x1fsubj_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\xbaH(r&\x18\x1f2\"^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\tsubjectId\"\x17\n" +
+	"\x15AddTeamMemberResponse\"\xef\x02\n" +
+	"\x17RemoveTeamMemberRequest\x12r\n" +
+	"\fworkspace_id\x18\x01 \x01(\tBO\xbaG#:\x1f\x12\x1dws_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1d\xbaH&r$\x18\x1d2 ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\vworkspaceId\x12l\n" +
+	"\ateam_id\x18\x02 \x01(\tBS\xbaG%:!\x12\x1fteam_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\xbaH(r&\x18\x1f2\"^team_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\x06teamId\x12r\n" +
+	"\n" +
+	"subject_id\x18\x03 \x01(\tBS\xbaG%:!\x12\x1fsubj_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\xbaH(r&\x18\x1f2\"^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\tsubjectId\"\x1a\n" +
+	"\x18RemoveTeamMemberResponse\"\xf0\x02\n" +
+	"\x18AddTeamMaintainerRequest\x12r\n" +
+	"\fworkspace_id\x18\x01 \x01(\tBO\xbaG#:\x1f\x12\x1dws_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1d\xbaH&r$\x18\x1d2 ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\vworkspaceId\x12l\n" +
+	"\ateam_id\x18\x02 \x01(\tBS\xbaG%:!\x12\x1fteam_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\xbaH(r&\x18\x1f2\"^team_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\x06teamId\x12r\n" +
+	"\n" +
+	"subject_id\x18\x03 \x01(\tBS\xbaG%:!\x12\x1fsubj_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\xbaH(r&\x18\x1f2\"^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\tsubjectId\"\x1b\n" +
+	"\x19AddTeamMaintainerResponse\"\xf3\x02\n" +
+	"\x1bRemoveTeamMaintainerRequest\x12r\n" +
+	"\fworkspace_id\x18\x01 \x01(\tBO\xbaG#:\x1f\x12\x1dws_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1d\xbaH&r$\x18\x1d2 ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\vworkspaceId\x12l\n" +
+	"\ateam_id\x18\x02 \x01(\tBS\xbaG%:!\x12\x1fteam_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\xbaH(r&\x18\x1f2\"^team_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\x06teamId\x12r\n" +
+	"\n" +
+	"subject_id\x18\x03 \x01(\tBS\xbaG%:!\x12\x1fsubj_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\xbaH(r&\x18\x1f2\"^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\tsubjectId\"\x1e\n" +
+	"\x1cRemoveTeamMaintainerResponse2\xd0\x1f\n" +
 	"\x10WorkspaceService\x12\xed\x01\n" +
 	"\x0fCreateWorkspace\x12,.chronos.workspace.v1.CreateWorkspaceRequest\x1a-.chronos.workspace.v1.CreateWorkspaceResponse\"}\xbaGI2G\n" +
 	"E\n" +
@@ -2031,7 +2463,27 @@ const file_chronos_workspace_v1_workspace_proto_rawDesc = "" +
 	"$#/components/schemas/idempotency-key\xca\xf3\x18 \n" +
 	"\x05admin\x12\tworkspace\x1a\fworkspace_id\xd0\xf3\x18\x02\x12\x87\x01\n" +
 	"\tListTeams\x12&.chronos.workspace.v1.ListTeamsRequest\x1a'.chronos.workspace.v1.ListTeamsResponse\")\xca\xf3\x18!\n" +
-	"\x06member\x12\tworkspace\x1a\fworkspace_id\xd0\xf3\x18\x01B\xe6\x01\n" +
+	"\x06member\x12\tworkspace\x1a\fworkspace_id\xd0\xf3\x18\x01\x12\xdf\x01\n" +
+	"\rAddTeamMember\x12*.chronos.workspace.v1.AddTeamMemberRequest\x1a+.chronos.workspace.v1.AddTeamMemberResponse\"u\xbaGI2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-key\xca\xf3\x18!\n" +
+	"\x06member\x12\tworkspace\x1a\fworkspace_id\xd0\xf3\x18\x02\x12\xe8\x01\n" +
+	"\x10RemoveTeamMember\x12-.chronos.workspace.v1.RemoveTeamMemberRequest\x1a..chronos.workspace.v1.RemoveTeamMemberResponse\"u\xbaGI2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-key\xca\xf3\x18!\n" +
+	"\x06member\x12\tworkspace\x1a\fworkspace_id\xd0\xf3\x18\x02\x12\xeb\x01\n" +
+	"\x11AddTeamMaintainer\x12..chronos.workspace.v1.AddTeamMaintainerRequest\x1a/.chronos.workspace.v1.AddTeamMaintainerResponse\"u\xbaGI2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-key\xca\xf3\x18!\n" +
+	"\x06member\x12\tworkspace\x1a\fworkspace_id\xd0\xf3\x18\x02\x12\xf4\x01\n" +
+	"\x14RemoveTeamMaintainer\x121.chronos.workspace.v1.RemoveTeamMaintainerRequest\x1a2.chronos.workspace.v1.RemoveTeamMaintainerResponse\"u\xbaGI2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-key\xca\xf3\x18!\n" +
+	"\x06member\x12\tworkspace\x1a\fworkspace_id\xd0\xf3\x18\x02B\xe6\x01\n" +
 	"\x18com.chronos.workspace.v1B\x0eWorkspaceProtoP\x01ZHgithub.com/chronos/chronos-go/gen/proto/chronos/workspace/v1;workspacev1\xa2\x02\x03CWX\xaa\x02\x14Chronos.Workspace.V1\xca\x02\x14Chronos\\Workspace\\V1\xe2\x02 Chronos\\Workspace\\V1\\GPBMetadata\xea\x02\x16Chronos::Workspace::V1b\x06proto3"
 
 var (
@@ -2046,7 +2498,7 @@ func file_chronos_workspace_v1_workspace_proto_rawDescGZIP() []byte {
 	return file_chronos_workspace_v1_workspace_proto_rawDescData
 }
 
-var file_chronos_workspace_v1_workspace_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
+var file_chronos_workspace_v1_workspace_proto_msgTypes = make([]protoimpl.MessageInfo, 38)
 var file_chronos_workspace_v1_workspace_proto_goTypes = []any{
 	(*CreateWorkspaceRequest)(nil),            // 0: chronos.workspace.v1.CreateWorkspaceRequest
 	(*CreateWorkspaceResponse)(nil),           // 1: chronos.workspace.v1.CreateWorkspaceResponse
@@ -2078,15 +2530,23 @@ var file_chronos_workspace_v1_workspace_proto_goTypes = []any{
 	(*ListTeamsRequest)(nil),                  // 27: chronos.workspace.v1.ListTeamsRequest
 	(*Team)(nil),                              // 28: chronos.workspace.v1.Team
 	(*ListTeamsResponse)(nil),                 // 29: chronos.workspace.v1.ListTeamsResponse
-	(*timestamppb.Timestamp)(nil),             // 30: google.protobuf.Timestamp
+	(*AddTeamMemberRequest)(nil),              // 30: chronos.workspace.v1.AddTeamMemberRequest
+	(*AddTeamMemberResponse)(nil),             // 31: chronos.workspace.v1.AddTeamMemberResponse
+	(*RemoveTeamMemberRequest)(nil),           // 32: chronos.workspace.v1.RemoveTeamMemberRequest
+	(*RemoveTeamMemberResponse)(nil),          // 33: chronos.workspace.v1.RemoveTeamMemberResponse
+	(*AddTeamMaintainerRequest)(nil),          // 34: chronos.workspace.v1.AddTeamMaintainerRequest
+	(*AddTeamMaintainerResponse)(nil),         // 35: chronos.workspace.v1.AddTeamMaintainerResponse
+	(*RemoveTeamMaintainerRequest)(nil),       // 36: chronos.workspace.v1.RemoveTeamMaintainerRequest
+	(*RemoveTeamMaintainerResponse)(nil),      // 37: chronos.workspace.v1.RemoveTeamMaintainerResponse
+	(*timestamppb.Timestamp)(nil),             // 38: google.protobuf.Timestamp
 }
 var file_chronos_workspace_v1_workspace_proto_depIdxs = []int32{
-	30, // 0: chronos.workspace.v1.InviteToWorkspaceResponse.expires_at:type_name -> google.protobuf.Timestamp
-	30, // 1: chronos.workspace.v1.ResendInvitationResponse.expires_at:type_name -> google.protobuf.Timestamp
-	30, // 2: chronos.workspace.v1.WorkspaceInvitation.expires_at:type_name -> google.protobuf.Timestamp
-	30, // 3: chronos.workspace.v1.WorkspaceInvitation.issued_at:type_name -> google.protobuf.Timestamp
+	38, // 0: chronos.workspace.v1.InviteToWorkspaceResponse.expires_at:type_name -> google.protobuf.Timestamp
+	38, // 1: chronos.workspace.v1.ResendInvitationResponse.expires_at:type_name -> google.protobuf.Timestamp
+	38, // 2: chronos.workspace.v1.WorkspaceInvitation.expires_at:type_name -> google.protobuf.Timestamp
+	38, // 3: chronos.workspace.v1.WorkspaceInvitation.issued_at:type_name -> google.protobuf.Timestamp
 	19, // 4: chronos.workspace.v1.ListWorkspaceInvitationsResponse.invitations:type_name -> chronos.workspace.v1.WorkspaceInvitation
-	30, // 5: chronos.workspace.v1.Team.created_at:type_name -> google.protobuf.Timestamp
+	38, // 5: chronos.workspace.v1.Team.created_at:type_name -> google.protobuf.Timestamp
 	28, // 6: chronos.workspace.v1.ListTeamsResponse.teams:type_name -> chronos.workspace.v1.Team
 	0,  // 7: chronos.workspace.v1.WorkspaceService.CreateWorkspace:input_type -> chronos.workspace.v1.CreateWorkspaceRequest
 	2,  // 8: chronos.workspace.v1.WorkspaceService.AddWorkspaceMember:input_type -> chronos.workspace.v1.AddWorkspaceMemberRequest
@@ -2102,22 +2562,30 @@ var file_chronos_workspace_v1_workspace_proto_depIdxs = []int32{
 	23, // 18: chronos.workspace.v1.WorkspaceService.RenameTeam:input_type -> chronos.workspace.v1.RenameTeamRequest
 	25, // 19: chronos.workspace.v1.WorkspaceService.DeleteTeam:input_type -> chronos.workspace.v1.DeleteTeamRequest
 	27, // 20: chronos.workspace.v1.WorkspaceService.ListTeams:input_type -> chronos.workspace.v1.ListTeamsRequest
-	1,  // 21: chronos.workspace.v1.WorkspaceService.CreateWorkspace:output_type -> chronos.workspace.v1.CreateWorkspaceResponse
-	3,  // 22: chronos.workspace.v1.WorkspaceService.AddWorkspaceMember:output_type -> chronos.workspace.v1.AddWorkspaceMemberResponse
-	5,  // 23: chronos.workspace.v1.WorkspaceService.RemoveWorkspaceMember:output_type -> chronos.workspace.v1.RemoveWorkspaceMemberResponse
-	7,  // 24: chronos.workspace.v1.WorkspaceService.ChangeWorkspaceMemberRole:output_type -> chronos.workspace.v1.ChangeWorkspaceMemberRoleResponse
-	9,  // 25: chronos.workspace.v1.WorkspaceService.InviteToWorkspace:output_type -> chronos.workspace.v1.InviteToWorkspaceResponse
-	11, // 26: chronos.workspace.v1.WorkspaceService.AcceptInvitation:output_type -> chronos.workspace.v1.AcceptInvitationResponse
-	13, // 27: chronos.workspace.v1.WorkspaceService.RevokeInvitation:output_type -> chronos.workspace.v1.RevokeInvitationResponse
-	15, // 28: chronos.workspace.v1.WorkspaceService.ResendInvitation:output_type -> chronos.workspace.v1.ResendInvitationResponse
-	17, // 29: chronos.workspace.v1.WorkspaceService.DeclineInvitation:output_type -> chronos.workspace.v1.DeclineInvitationResponse
-	20, // 30: chronos.workspace.v1.WorkspaceService.ListWorkspaceInvitations:output_type -> chronos.workspace.v1.ListWorkspaceInvitationsResponse
-	22, // 31: chronos.workspace.v1.WorkspaceService.CreateTeam:output_type -> chronos.workspace.v1.CreateTeamResponse
-	24, // 32: chronos.workspace.v1.WorkspaceService.RenameTeam:output_type -> chronos.workspace.v1.RenameTeamResponse
-	26, // 33: chronos.workspace.v1.WorkspaceService.DeleteTeam:output_type -> chronos.workspace.v1.DeleteTeamResponse
-	29, // 34: chronos.workspace.v1.WorkspaceService.ListTeams:output_type -> chronos.workspace.v1.ListTeamsResponse
-	21, // [21:35] is the sub-list for method output_type
-	7,  // [7:21] is the sub-list for method input_type
+	30, // 21: chronos.workspace.v1.WorkspaceService.AddTeamMember:input_type -> chronos.workspace.v1.AddTeamMemberRequest
+	32, // 22: chronos.workspace.v1.WorkspaceService.RemoveTeamMember:input_type -> chronos.workspace.v1.RemoveTeamMemberRequest
+	34, // 23: chronos.workspace.v1.WorkspaceService.AddTeamMaintainer:input_type -> chronos.workspace.v1.AddTeamMaintainerRequest
+	36, // 24: chronos.workspace.v1.WorkspaceService.RemoveTeamMaintainer:input_type -> chronos.workspace.v1.RemoveTeamMaintainerRequest
+	1,  // 25: chronos.workspace.v1.WorkspaceService.CreateWorkspace:output_type -> chronos.workspace.v1.CreateWorkspaceResponse
+	3,  // 26: chronos.workspace.v1.WorkspaceService.AddWorkspaceMember:output_type -> chronos.workspace.v1.AddWorkspaceMemberResponse
+	5,  // 27: chronos.workspace.v1.WorkspaceService.RemoveWorkspaceMember:output_type -> chronos.workspace.v1.RemoveWorkspaceMemberResponse
+	7,  // 28: chronos.workspace.v1.WorkspaceService.ChangeWorkspaceMemberRole:output_type -> chronos.workspace.v1.ChangeWorkspaceMemberRoleResponse
+	9,  // 29: chronos.workspace.v1.WorkspaceService.InviteToWorkspace:output_type -> chronos.workspace.v1.InviteToWorkspaceResponse
+	11, // 30: chronos.workspace.v1.WorkspaceService.AcceptInvitation:output_type -> chronos.workspace.v1.AcceptInvitationResponse
+	13, // 31: chronos.workspace.v1.WorkspaceService.RevokeInvitation:output_type -> chronos.workspace.v1.RevokeInvitationResponse
+	15, // 32: chronos.workspace.v1.WorkspaceService.ResendInvitation:output_type -> chronos.workspace.v1.ResendInvitationResponse
+	17, // 33: chronos.workspace.v1.WorkspaceService.DeclineInvitation:output_type -> chronos.workspace.v1.DeclineInvitationResponse
+	20, // 34: chronos.workspace.v1.WorkspaceService.ListWorkspaceInvitations:output_type -> chronos.workspace.v1.ListWorkspaceInvitationsResponse
+	22, // 35: chronos.workspace.v1.WorkspaceService.CreateTeam:output_type -> chronos.workspace.v1.CreateTeamResponse
+	24, // 36: chronos.workspace.v1.WorkspaceService.RenameTeam:output_type -> chronos.workspace.v1.RenameTeamResponse
+	26, // 37: chronos.workspace.v1.WorkspaceService.DeleteTeam:output_type -> chronos.workspace.v1.DeleteTeamResponse
+	29, // 38: chronos.workspace.v1.WorkspaceService.ListTeams:output_type -> chronos.workspace.v1.ListTeamsResponse
+	31, // 39: chronos.workspace.v1.WorkspaceService.AddTeamMember:output_type -> chronos.workspace.v1.AddTeamMemberResponse
+	33, // 40: chronos.workspace.v1.WorkspaceService.RemoveTeamMember:output_type -> chronos.workspace.v1.RemoveTeamMemberResponse
+	35, // 41: chronos.workspace.v1.WorkspaceService.AddTeamMaintainer:output_type -> chronos.workspace.v1.AddTeamMaintainerResponse
+	37, // 42: chronos.workspace.v1.WorkspaceService.RemoveTeamMaintainer:output_type -> chronos.workspace.v1.RemoveTeamMaintainerResponse
+	25, // [25:43] is the sub-list for method output_type
+	7,  // [7:25] is the sub-list for method input_type
 	7,  // [7:7] is the sub-list for extension type_name
 	7,  // [7:7] is the sub-list for extension extendee
 	0,  // [0:7] is the sub-list for field type_name
@@ -2134,7 +2602,7 @@ func file_chronos_workspace_v1_workspace_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chronos_workspace_v1_workspace_proto_rawDesc), len(file_chronos_workspace_v1_workspace_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   30,
+			NumMessages:   38,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -84,3 +84,60 @@ func (r *TeamReads) ListByWorkspace(
 	}
 	return out, nil
 }
+
+// TeamRosters answers "which teams inside this workspace is this person in".
+//
+// Its own type rather than a method on TeamReads, because the caller is not a
+// screen: the departure cascade drives it, and it runs in a REACTOR, after a
+// removal, with no request and therefore no gate 1 to have resolved a scope.
+type TeamRosters struct{ system db.SystemTX }
+
+var _ app.TeamRoster = (*TeamRosters)(nil)
+
+func NewTeamRosters(system db.SystemTX) (*TeamRosters, error) {
+	if system == nil {
+		return nil, fmt.Errorf("workspace: a system transaction source is required")
+	}
+	return &TeamRosters{system: system}, nil
+}
+
+// TeamsOf lists every team of one workspace this person belongs to.
+//
+// # A SYSTEM transaction, and why that is not a shortcut
+//
+// A reactor has no request and no gate 1, so there is no `app.org_id` to set and
+// a tenant transaction would match nothing — which would look exactly like "this
+// person was in no teams" and silently skip the whole cascade. The isolation the
+// row security policy would give is supplied instead by the WHERE clause: the
+// workspace id comes from the event that has just been appended to that
+// workspace's own stream, so a cross-tenant row cannot be reached from it.
+func (r *TeamRosters) TeamsOf(
+	ctx context.Context, workspaceID, subjectID string,
+) ([]string, error) {
+	if workspaceID == "" || subjectID == "" {
+		return nil, fmt.Errorf("workspace: listing somebody's teams needs both a workspace " +
+			"and a subject")
+	}
+	var out []string
+	err := r.system.InSystemTx(ctx, func(ctx context.Context, q db.Querier) error {
+		rows, err := q.Query(ctx, workspacedb.TeamsOfMember, workspaceID, subjectID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var teamID string
+			if err := rows.Scan(&teamID); err != nil {
+				return err
+			}
+			out = append(out, teamID)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("workspace: listing %s's teams in %s: %w",
+			subjectID, workspaceID, err)
+	}
+	return out, nil
+}

@@ -3453,6 +3453,80 @@ components:
       title: AcceptInvitationResponse
       additionalProperties: false
       description: AcceptInvitationResponse names what was joined.
+    chronos.workspace.v1.AddTeamMaintainerRequest:
+      type: object
+      properties:
+        workspaceId:
+          type: string
+          examples:
+            - ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: workspace_id
+          maxLength: 29
+          pattern: ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            Which workspace. Read by the authz gate, which asks for `member` on THIS
+             object — see the RPCs for why it is member and not admin.
+        teamId:
+          type: string
+          examples:
+            - team_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: team_id
+          maxLength: 31
+          pattern: ^team_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: Which team.
+        subjectId:
+          type: string
+          examples:
+            - subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: subject_id
+          maxLength: 31
+          pattern: ^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: Whose membership changes, by pseudonym.
+      title: AddTeamMaintainerRequest
+      additionalProperties: false
+      description: AddTeamMaintainerRequest grants the right to manage a team.
+    chronos.workspace.v1.AddTeamMaintainerResponse:
+      type: object
+      title: AddTeamMaintainerResponse
+      additionalProperties: false
+      description: AddTeamMaintainerResponse is empty.
+    chronos.workspace.v1.AddTeamMemberRequest:
+      type: object
+      properties:
+        workspaceId:
+          type: string
+          examples:
+            - ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: workspace_id
+          maxLength: 29
+          pattern: ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            Which workspace. Read by the authz gate, which asks for `member` on THIS
+             object — see the RPCs for why it is member and not admin.
+        teamId:
+          type: string
+          examples:
+            - team_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: team_id
+          maxLength: 31
+          pattern: ^team_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: Which team.
+        subjectId:
+          type: string
+          examples:
+            - subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: subject_id
+          maxLength: 31
+          pattern: ^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: Whose membership changes, by pseudonym.
+      title: AddTeamMemberRequest
+      additionalProperties: false
+      description: AddTeamMemberRequest puts a workspace member into a team.
+    chronos.workspace.v1.AddTeamMemberResponse:
+      type: object
+      title: AddTeamMemberResponse
+      additionalProperties: false
+      description: AddTeamMemberResponse is empty.
     chronos.workspace.v1.AddWorkspaceMemberRequest:
       type: object
       properties:
@@ -3984,6 +4058,80 @@ components:
       title: ListWorkspaceInvitationsResponse
       additionalProperties: false
       description: ListWorkspaceInvitationsResponse is one page.
+    chronos.workspace.v1.RemoveTeamMaintainerRequest:
+      type: object
+      properties:
+        workspaceId:
+          type: string
+          examples:
+            - ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: workspace_id
+          maxLength: 29
+          pattern: ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            Which workspace. Read by the authz gate, which asks for `member` on THIS
+             object — see the RPCs for why it is member and not admin.
+        teamId:
+          type: string
+          examples:
+            - team_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: team_id
+          maxLength: 31
+          pattern: ^team_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: Which team.
+        subjectId:
+          type: string
+          examples:
+            - subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: subject_id
+          maxLength: 31
+          pattern: ^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: Whose membership changes, by pseudonym.
+      title: RemoveTeamMaintainerRequest
+      additionalProperties: false
+      description: RemoveTeamMaintainerRequest withdraws that right.
+    chronos.workspace.v1.RemoveTeamMaintainerResponse:
+      type: object
+      title: RemoveTeamMaintainerResponse
+      additionalProperties: false
+      description: RemoveTeamMaintainerResponse is empty.
+    chronos.workspace.v1.RemoveTeamMemberRequest:
+      type: object
+      properties:
+        workspaceId:
+          type: string
+          examples:
+            - ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: workspace_id
+          maxLength: 29
+          pattern: ^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            Which workspace. Read by the authz gate, which asks for `member` on THIS
+             object — see the RPCs for why it is member and not admin.
+        teamId:
+          type: string
+          examples:
+            - team_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: team_id
+          maxLength: 31
+          pattern: ^team_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: Which team.
+        subjectId:
+          type: string
+          examples:
+            - subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: subject_id
+          maxLength: 31
+          pattern: ^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: Whose membership changes, by pseudonym.
+      title: RemoveTeamMemberRequest
+      additionalProperties: false
+      description: RemoveTeamMemberRequest takes somebody out of a team.
+    chronos.workspace.v1.RemoveTeamMemberResponse:
+      type: object
+      title: RemoveTeamMemberResponse
+      additionalProperties: false
+      description: RemoveTeamMemberResponse is empty.
     chronos.workspace.v1.RemoveWorkspaceMemberRequest:
       type: object
       properties:
@@ -7309,6 +7457,131 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.workspace.v1.AcceptInvitationResponse'
+  /chronos.workspace.v1.WorkspaceService/AddTeamMaintainer:
+    post:
+      tags:
+        - WorkspaceService
+      summary: AddTeamMaintainer grants somebody the right to manage a team.
+      description: |-
+        They must be a workspace member for the reason a team member must be: a
+         maintainer who is not in the workspace could add people to a team inside it
+         while having no standing there at all.
+      operationId: WorkspaceService_AddTeamMaintainer
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.workspace.v1.AddTeamMaintainerRequest'
+            example:
+              workspaceId: ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              teamId: team_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              subjectId: subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.workspace.v1.AddTeamMaintainerResponse'
+  /chronos.workspace.v1.WorkspaceService/AddTeamMember:
+    post:
+      tags:
+        - WorkspaceService
+      summary: AddTeamMember puts a workspace member into a team.
+      description: |-
+        # Why the gate asks for `member` and not `admin`
+
+         workspace.md §6 requires that MAINTAINERS manage a team's membership without
+         being workspace admins — the people who know who belongs in a team are
+         usually not the people who administer the workspace. So the gate cannot ask
+         for `admin`, and the question it would have to ask instead is half in the
+         graph and half in an aggregate: "a maintainer of THIS team, or an admin".
+
+         Maintainers are deliberately not in the graph. A `maintainer` relation would
+         need one tuple per maintainer per team, kept in step with the roster by a
+         projector, and the roster is already the aggregate's — a second copy that
+         lags the first.
+
+         So the gate bounds this to the tenant by requiring workspace membership, and
+         the handler takes the real decision against the aggregate, where it is not
+         eventually consistent.
+
+         # The subject must ALREADY be a workspace member
+
+         A team groups people who are here; it is never a way in. Adding a non-member
+         is refused rather than implicitly admitting them, because admitting would
+         hand anybody who maintains a team a way to put a stranger in the workspace
+         with no invitation, no seat and no entitlement check.
+
+         WRITE and not GROW for the same reason: nothing here adds a person to the
+         organization, so there is nothing for the growth gate to stop.
+      operationId: WorkspaceService_AddTeamMember
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.workspace.v1.AddTeamMemberRequest'
+            example:
+              workspaceId: ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              teamId: team_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              subjectId: subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.workspace.v1.AddTeamMemberResponse'
   /chronos.workspace.v1.WorkspaceService/AddWorkspaceMember:
     post:
       tags:
@@ -7829,6 +8102,109 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.workspace.v1.ListWorkspaceInvitationsResponse'
+  /chronos.workspace.v1.WorkspaceService/RemoveTeamMaintainer:
+    post:
+      tags:
+        - WorkspaceService
+      summary: RemoveTeamMaintainer withdraws that right.
+      description: |-
+        NEVER the last one. A team with no maintainer cannot have its membership
+         managed by anybody who is not a workspace admin, and nothing outside the
+         team can appoint one — appointing is itself a maintainer's act. Refused with
+         CONFLICT: the request is well formed and the caller is permitted, and it is
+         the current state that says no.
+      operationId: WorkspaceService_RemoveTeamMaintainer
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.workspace.v1.RemoveTeamMaintainerRequest'
+            example:
+              workspaceId: ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              teamId: team_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              subjectId: subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.workspace.v1.RemoveTeamMaintainerResponse'
+  /chronos.workspace.v1.WorkspaceService/RemoveTeamMember:
+    post:
+      tags:
+        - WorkspaceService
+      summary: RemoveTeamMember takes somebody out of a team.
+      description: |-
+        It releases no seat: they are still a workspace member, and the seat belongs
+         to that membership.
+      operationId: WorkspaceService_RemoveTeamMember
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.workspace.v1.RemoveTeamMemberRequest'
+            example:
+              workspaceId: ws_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              teamId: team_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              subjectId: subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.workspace.v1.RemoveTeamMemberResponse'
   /chronos.workspace.v1.WorkspaceService/RemoveWorkspaceMember:
     post:
       tags:
