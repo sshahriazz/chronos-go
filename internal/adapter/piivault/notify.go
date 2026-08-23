@@ -41,7 +41,14 @@ func NewNotifyVault(v pii.Vault, defaultLocale, defaultTimezone string) *NotifyV
 // An erased subject is reported as notify.ErrSubjectErased, which the dispatcher
 // treats as a correct outcome rather than a failure: someone who exercised
 // erasure has no address, and retrying cannot conjure one (NOTIFICATIONS §4).
-func (n *NotifyVault) Resolve(ctx context.Context, subjectID string) (notify.Recipient, error) {
+//
+// `which` is where the platform's address choice becomes a vault field. It is
+// mapped here rather than named in `notify` because `notify` does not import
+// `pii`: the platform decides WHICH address in its own terms, and this is the
+// only place that has to know what the vault calls it.
+func (n *NotifyVault) Resolve(
+	ctx context.Context, subjectID string, which notify.AddressChoice,
+) (notify.Recipient, error) {
 	profile, err := n.vault.Profile(ctx, pii.SubjectID(subjectID))
 	switch {
 	case errors.Is(err, pii.ErrErased):
@@ -57,10 +64,26 @@ func (n *NotifyVault) Resolve(ctx context.Context, subjectID string) (notify.Rec
 		return notify.Recipient{}, fmt.Errorf("resolving subject %s: %w", subjectID, err)
 	}
 
-	address := profile.Get(pii.FieldEmail)
+	field := pii.FieldEmail
+	switch which {
+	case notify.AddressPending:
+		field = pii.FieldPendingEmail
+	case notify.AddressPrevious:
+		field = pii.FieldPreviousEmail
+	}
+	address := profile.Get(field)
 	if address == "" {
-		return notify.Recipient{}, fmt.Errorf("%w: %s has no email address",
-			notify.ErrNoAddress, subjectID)
+		// NO FALLBACK to the primary, and the absence of one is the point.
+		//
+		// The only notification that asks for the previous address is the one
+		// telling somebody their address was changed and offering the revert
+		// (identity.md §12). Falling back would send it to the address it was
+		// changed TO — the attacker's, in the attack the revert window exists to
+		// defeat — and it would do so precisely when something has already gone
+		// wrong. Failing is the safe direction: the notice is retried, and if it
+		// never succeeds nobody is told anything false.
+		return notify.Recipient{}, fmt.Errorf("%w: %s has no %s address",
+			notify.ErrNoAddress, subjectID, which)
 	}
 
 	r := notify.Recipient{

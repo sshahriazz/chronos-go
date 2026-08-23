@@ -86,6 +86,21 @@ type User struct {
 	state         State
 	emailVerified bool
 
+	// pendingIndex is the address an email change is claiming but has not yet
+	// proven, and pendingUntil is when that claim lapses.
+	//
+	// Both are blind indexes and instants — no address (ADR-002). They exist so
+	// VoidPendingIdentifierChange can record something: identity.md §4.4 requires
+	// a password reset to kill a pending change, and a reset cannot kill a state
+	// the aggregate does not hold.
+	pendingIndex contract.EmailIndex
+	pendingUntil time.Time
+
+	// revertIndex is the address this account moved AWAY from, and revertUntil is
+	// when the window to move back closes (identity.md §12).
+	revertIndex contract.EmailIndex
+	revertUntil time.Time
+
 	// username is the account's public handle (ADR-051), in the clear.
 	//
 	// It is held on the AGGREGATE and not read from user_view when a decision
@@ -251,6 +266,34 @@ func (u *User) Apply(e eventsourcing.Event) {
 	case *contract.EmailVerified:
 		u.emailVerified = true
 		u.emailIndex = ev.Index
+		// A verification CLEARS any pending change, which is identity.md §4.4
+		// applied in the transition rather than remembered by a caller: proving
+		// an identifier voids every pending identifier change, and the rule holds
+		// however the event got here — including on a replay of a log written by
+		// a build that enforced it somewhere else.
+		u.pendingIndex, u.pendingUntil = "", time.Time{}
+
+	case *contract.EmailChangeRequested:
+		u.pendingIndex = ev.ToIndex
+		u.pendingUntil = ev.ExpiresAt
+
+	case *contract.EmailChangeCancelled:
+		u.pendingIndex, u.pendingUntil = "", time.Time{}
+
+	case *contract.EmailChanged:
+		u.emailIndex = ev.ToIndex
+		u.emailVerified = true
+		u.pendingIndex, u.pendingUntil = "", time.Time{}
+		u.revertIndex, u.revertUntil = ev.FromIndex, ev.RevertibleUntil
+
+	case *contract.EmailChangeReverted:
+		u.emailIndex = ev.ToIndex
+		u.emailVerified = true
+		u.pendingIndex, u.pendingUntil = "", time.Time{}
+		// The window is spent. Reverting a revert would need its own window and
+		// its own proof, and offering one would let the two addresses be swapped
+		// back and forth indefinitely from whichever mailbox answered last.
+		u.revertIndex, u.revertUntil = "", time.Time{}
 
 	case *contract.UsernameAssigned:
 		u.username = ev.Username
@@ -573,18 +616,159 @@ func (u *User) HasUsablePassword() bool {
 	return ok
 }
 
+// PendingEmailIndex is the address an unproven email change is claiming, and
+// whether there is one at all.
+func (u *User) PendingEmailIndex() (contract.EmailIndex, bool) {
+	return u.pendingIndex, u.pendingIndex != ""
+}
+
+// RevertibleEmailIndex is the address this account moved away from and can still
+// move back to, and whether that window is open at `at`.
+func (u *User) RevertibleEmailIndex(at time.Time) (contract.EmailIndex, bool) {
+	if u.revertIndex == "" {
+		return "", false
+	}
+	return u.revertIndex, at.Before(u.revertUntil)
+}
+
+// RequestEmailChange claims a new address without switching to it.
+//
+// Nothing about the account moves here. It still answers to the old address,
+// still signs in with it, and still receives its mail there — identity.md §12
+// requires the NEW address to be proven first, because an attacker holding a
+// session would otherwise take ownership by naming an address they do not
+// control.
+//
+// A second request SUPERSEDES the first, recording the cancellation before the
+// new claim so the log says what happened to the address that is no longer being
+// claimed. That matters beyond tidiness: the reservation on the superseded
+// address is released off the back of that event, and without it a person who
+// mistyped an address once would hold it away from its real owner until the
+// lease ran out.
+func (u *User) RequestEmailChange(
+	to contract.EmailIndex, expiresAt, at time.Time,
+) error {
+	if err := u.mutable(); err != nil {
+		return err
+	}
+	switch {
+	case !u.emailVerified:
+		// An account that has not proven the address it HAS cannot ask to move.
+		// The route out of an unverified address is the verification link, or a
+		// fresh registration once the claim lapses — not a change that would let
+		// somebody chain unproven addresses indefinitely.
+		return errs.Conflictf("verify this account's current address first")
+	case to == "":
+		return errs.ValidationFailedf("an email index is required")
+	case to == u.emailIndex:
+		return errs.ValidationFailedf("that is already this account's address")
+	case !expiresAt.After(at):
+		return errs.ValidationFailedf("a pending change must expire in the future")
+	}
+
+	if u.pendingIndex == to {
+		// The same change, again. Records nothing rather than moving the
+		// deadline: extending on repeat would let one request hold an address
+		// indefinitely by being replayed, which is the renewal
+		// EmailReservation.Reserve refuses for the same reason.
+		return nil
+	}
+	if u.pendingIndex != "" {
+		eventsourcing.Record(u, &contract.EmailChangeCancelled{
+			SubjectID:   u.subjectID,
+			ToIndex:     u.pendingIndex,
+			Reason:      contract.CancelSuperseded,
+			CancelledAt: at.UTC(),
+		})
+	}
+	eventsourcing.Record(u, &contract.EmailChangeRequested{
+		SubjectID:   u.subjectID,
+		FromIndex:   u.emailIndex,
+		ToIndex:     to,
+		ExpiresAt:   expiresAt.UTC(),
+		RequestedAt: at.UTC(),
+	})
+	return nil
+}
+
+// CompleteEmailChange switches the account to the address it proved.
+//
+// Refused for anything but the pending index, and that refusal is what makes the
+// mailed token specific: a token proving address A must not be able to complete
+// a change to address B, however the two came to be outstanding at once.
+//
+// Refused once the pending change has LAPSED, for the reason
+// EmailReservation.Confirm refuses a lapsed claim: the address is available to
+// anybody after that, so completing would take it from whoever claimed it since.
+func (u *User) CompleteEmailChange(
+	to contract.EmailIndex, revertibleUntil, at time.Time,
+) error {
+	if err := u.mutable(); err != nil {
+		return err
+	}
+	if u.emailIndex == to && u.pendingIndex == "" {
+		// Already done. A second click of one link is not a failure.
+		return nil
+	}
+	switch {
+	case u.pendingIndex == "":
+		return errs.Conflictf("this account has no pending address change")
+	case u.pendingIndex != to:
+		return errs.Conflictf("this link is for a different address")
+	case !at.Before(u.pendingUntil):
+		return errs.Conflictf("this change request has expired; start again")
+	case !revertibleUntil.After(at):
+		return errs.ValidationFailedf("a revert window must end in the future")
+	}
+
+	eventsourcing.Record(u, &contract.EmailChanged{
+		SubjectID:       u.subjectID,
+		FromIndex:       u.emailIndex,
+		ToIndex:         to,
+		RevertibleUntil: revertibleUntil.UTC(),
+		ChangedAt:       at.UTC(),
+	})
+	return nil
+}
+
+// RevertEmailChange puts the previous address back.
+//
+// Reached from a link mailed to the OLD address, so whoever calls it has proven
+// control of the address the account had BEFORE the change. That is the whole
+// remedy: an attacker holding a session can move the address, and cannot stop
+// the real owner being told and undoing it.
+func (u *User) RevertEmailChange(at time.Time) error {
+	if err := u.mutable(); err != nil {
+		return err
+	}
+	if u.revertIndex == "" {
+		if u.emailVerified {
+			// Either it was never changed, or the revert already happened and
+			// cleared the window. A repeated click of one link is not a failure,
+			// so the second case answers success — but only when the account is
+			// in the state a completed revert leaves it in.
+			return nil
+		}
+		return errs.Conflictf("this account has no address change to undo")
+	}
+	if !at.Before(u.revertUntil) {
+		// The window is the security boundary and it has closed. After it the old
+		// address is available to anybody, so undoing would take it back from
+		// whoever claimed it since.
+		return errs.Conflictf("the window to undo this address change has closed")
+	}
+
+	eventsourcing.Record(u, &contract.EmailChangeReverted{
+		SubjectID:  u.subjectID,
+		FromIndex:  u.emailIndex,
+		ToIndex:    u.revertIndex,
+		RevertedAt: at.UTC(),
+	})
+	return nil
+}
+
 // VoidPendingIdentifierChange cancels an identifier change this account has
 // started but not completed.
-//
-// # What it does today, stated plainly: nothing
-//
-// There is no email-change flow in this module — no RPC, no use case, no event —
-// so no account can be holding a pending change and there is nothing here to
-// record. The method is written anyway, and it is called by the password reset
-// on every run, for exactly the reason Registration.VerifyEmail calls
-// RevokeAllSessions on a subject that provably has none:
-//
-//	the rule is free while it is a no-op and expensive to retrofit once it is not.
 //
 // # The rule it carries
 //
@@ -597,28 +781,53 @@ func (u *User) HasUsablePassword() bool {
 // reset — a reactor on PasswordChanged would leave a window, and the window is
 // the attack.
 //
-// # Where the enforcement actually lives today
+// # It used to record nothing, and now it does
 //
-// Not here, and saying so is the point of this comment. A pending change cannot
-// be COMPLETED without the live email-verification token that was mailed for it,
-// and the reset voids every outstanding token of every purpose for the subject
-// (app.TokenStore.RevokeAllPurposes). That is the half of the rule that is real
-// today. This method is the half that will matter the moment a pending change
-// becomes a fact the AGGREGATE holds rather than only a token in a table — and
-// when it does, the recording goes here and every existing caller inherits it
-// without being changed.
+// This method was written before the email-change flow existed and was called by
+// the password reset on every run while provably doing nothing, on the argument
+// that the rule is free while it is a no-op and expensive to retrofit once it is
+// not. The flow now exists, `pendingIndex` is now a state an event can set, and
+// every existing caller inherited the enforcement without being changed. That is
+// the argument paying out; it is recorded here because the next such no-op is
+// easier to justify with a case that actually landed.
 //
-// It returns an error rather than nothing so that the day it can refuse — an
-// account suspended mid-flight, a change already completed — the callers already
-// handle the refusal instead of acquiring a new error path.
+// # The other half of the rule, which was always real
+//
+// A pending change cannot be COMPLETED without the live token mailed for it, and
+// the reset voids every outstanding token of every purpose for the subject
+// (app.TokenStore.RevokeAllPurposes). So the flow was never exploitable in the
+// window between the two. This closes it in the aggregate as well, which is what
+// makes the state visible in the log rather than merely unreachable.
 func (u *User) VoidPendingIdentifierChange(at time.Time) error {
 	if err := u.mutable(); err != nil {
 		return err
 	}
-	// No branch, and no `if u.pendingIndex != ""`: the aggregate has no such
-	// field, because no event can set one. Adding a field for a state nothing
-	// produces would be a state nothing can test.
-	_ = at
+	if u.pendingIndex == "" {
+		return nil
+	}
+	eventsourcing.Record(u, &contract.EmailChangeCancelled{
+		SubjectID:   u.subjectID,
+		ToIndex:     u.pendingIndex,
+		Reason:      contract.CancelPasswordReset,
+		CancelledAt: at.UTC(),
+	})
+	return nil
+}
+
+// CancelEmailChange is the holder calling their own pending change off.
+func (u *User) CancelEmailChange(at time.Time) error {
+	if err := u.mutable(); err != nil {
+		return err
+	}
+	if u.pendingIndex == "" {
+		return nil
+	}
+	eventsourcing.Record(u, &contract.EmailChangeCancelled{
+		SubjectID:   u.subjectID,
+		ToIndex:     u.pendingIndex,
+		Reason:      contract.CancelByHolder,
+		CancelledAt: at.UTC(),
+	})
 	return nil
 }
 

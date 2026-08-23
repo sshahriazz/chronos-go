@@ -294,7 +294,7 @@ type vault struct {
 	err  error
 }
 
-func (v vault) Resolve(context.Context, string) (notify.Recipient, error) {
+func (v vault) Resolve(context.Context, string, notify.AddressChoice) (notify.Recipient, error) {
 	if v.err != nil {
 		return notify.Recipient{}, v.err
 	}

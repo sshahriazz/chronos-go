@@ -148,6 +148,11 @@ type Notification struct {
 	// recipient's preferences allow", which is the normal case.
 	Channels []Channel
 
+	// Address selects which of the recipient's addresses this goes to, carried
+	// from the catalogue's Spec. Zero is AddressPrimary — see AddressChoice for
+	// the one notification that is not, and why.
+	Address AddressChoice
+
 	// OrgID and WorkspaceID scope the notification, so the workspace's own
 	// channel policy can be consulted. Taken from the event's metadata.
 	OrgID       string
@@ -191,9 +196,64 @@ func (n Notification) Validate() error {
 type Vault interface {
 	// Resolve returns contact details for a subject.
 	//
+	// `which` selects WHICH of the subject's addresses. It is almost always
+	// AddressPrimary; see AddressChoice for the one notification that is not, and
+	// for why sending it to the primary would deliver it to an attacker.
+	//
 	// Returns ErrSubjectErased when the subject exercised erasure. That is not
 	// a failure: there is nothing to deliver to, and the send is skipped.
-	Resolve(ctx context.Context, subjectID string) (Recipient, error)
+	Resolve(ctx context.Context, subjectID string, which AddressChoice) (Recipient, error)
+}
+
+// AddressChoice selects which of a subject's addresses a notification goes to.
+//
+// # Why this exists, and it is one notification
+//
+// The dispatcher resolves the recipient from the vault at SEND time and
+// overwrites Recipient.Address with what it finds. That is right for every
+// notification but one: identity.md §12 requires an email change to notify the
+// OLD address, and by the time the reactor delivers the notice the vault holds
+// the NEW one. Sending to the primary would deliver "your address was changed,
+// revert here" to the address it was changed TO — which, in the attack the
+// revert window exists to defeat, is the attacker's mailbox.
+//
+// It is an enum here rather than a pii.Field because `notify` does not import
+// `pii` and should not: the platform decides WHICH address in its own terms and
+// the vault adapter maps it. A notify that knew the vault's field names would be
+// a platform package that has to change when the vault's schema does.
+type AddressChoice int
+
+const (
+	// AddressPrimary is the subject's current address. The default, and the zero
+	// value, so every existing notification keeps its behaviour without saying so.
+	AddressPrimary AddressChoice = iota
+
+	// AddressPending is an address an email change has claimed but not proven.
+	//
+	// The verification link for a change goes here and NOWHERE else: mailing it
+	// to the primary would send the proof of a new address to the old one, which
+	// proves nothing, and the whole point of §12 is that the new address is
+	// proven by somebody who can read it.
+	AddressPending
+
+	// AddressPrevious is the address the subject most recently moved AWAY from.
+	//
+	// Resolving it FAILS when there is none, rather than falling back to the
+	// primary. A fallback would silently send an email-change notice to the new
+	// address, which is the exact delivery this choice exists to prevent, and it
+	// would do so in the case where something has already gone wrong.
+	AddressPrevious
+)
+
+func (a AddressChoice) String() string {
+	switch a {
+	case AddressPending:
+		return "pending"
+	case AddressPrevious:
+		return "previous"
+	default:
+		return "primary"
+	}
 }
 
 // Preferences reports what a recipient has switched off.

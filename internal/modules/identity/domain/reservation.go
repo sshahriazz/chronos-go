@@ -17,6 +17,10 @@ const (
 	// ReleaseChanged is the owner moving to a different address.
 	ReleaseChanged = "changed"
 
+	// DemoteRevertWindow is a confirmed address the owner has changed away from,
+	// held open only long enough for them to change back (identity.md §12).
+	DemoteRevertWindow = "revert_window"
+
 	// ReleaseErased is the account being erased. The address becomes available
 	// again, which is deliberate: identifier reuse after erasure is a stated
 	// requirement (identity-features §12), and holding an address forever for an
@@ -142,6 +146,15 @@ func (r *EmailReservation) Apply(e eventsourcing.Event) {
 		// any later reader compare against a time that has passed and conclude a
 		// confirmed address is free.
 		r.expiresAt = time.Time{}
+
+	case *contract.EmailReservationDemoted:
+		// Still HELD, and by the same subject — that is what keeps the address
+		// unavailable to everyone else for the window. What changes is that it is
+		// no longer verified and now carries a deadline, so Available() and
+		// Reserve() treat it exactly as they treat a registration nobody proved:
+		// unavailable until it lapses, then reclaimable with a release recorded.
+		r.verified = false
+		r.expiresAt = ev.ExpiresAt
 
 	case *contract.EmailReleased:
 		r.held = false
@@ -344,6 +357,92 @@ func (r *EmailReservation) Release(subjectID, reason string, now time.Time) erro
 		SubjectID:  r.subjectID,
 		Reason:     reason,
 		ReleasedAt: now.UTC(),
+	})
+	return nil
+}
+
+// Demote turns a VERIFIED claim back into a leased one.
+//
+// # The one caller, and why the alternative is an attack
+//
+// An email change moves the account to a new address, and identity.md §12
+// requires a window in which the OLD address can undo it. Releasing the old
+// address at that moment looks like the tidy thing to do and is not: whoever
+// performed the change — an attacker holding a session, in the case the window
+// exists for — could immediately register the freed address themselves, and the
+// revert would then have nowhere to go back to.
+//
+// Holding it VERIFIED instead would work and would never end: the account would
+// own two addresses forever, and something would have to remember to release the
+// second. Demoting reuses the lapse the aggregate already implements — Reserve
+// releases a lapsed unverified claim before granting a new one — so the address
+// frees itself when the window closes and nothing has to sweep it.
+//
+// Refused for a claim held by somebody else, for the reason Confirm refuses one:
+// otherwise a change on one account could move another account's address.
+func (r *EmailReservation) Demote(
+	subjectID, reason string, expiresAt, now time.Time,
+) error {
+	switch {
+	case !r.held:
+		return errs.NotFoundf("this address is not reserved")
+	case r.subjectID != subjectID:
+		return errs.Conflictf("this address is reserved by another account")
+	case reason != DemoteRevertWindow:
+		// One reason exists. An unnamed one produces a log entry nobody can
+		// interpret later, exactly as Release argues.
+		return errs.ValidationFailedf("a demotion must state a known reason")
+	case !expiresAt.After(now):
+		// A deadline already past would make the address available the instant
+		// this is applied, which is the release this method exists to avoid.
+		return errs.ValidationFailedf("a demoted reservation must expire in the future")
+	}
+
+	if !r.verified {
+		// Already a lease. Recording again would MOVE the deadline, and moving it
+		// is how a caller could hold an address indefinitely by repeating one
+		// request — the same renewal Reserve refuses for the same reason.
+		return nil
+	}
+
+	eventsourcing.Record(r, &contract.EmailReservationDemoted{
+		Index:     r.index,
+		SubjectID: subjectID,
+		ExpiresAt: expiresAt.UTC(),
+		Reason:    reason,
+		DemotedAt: now.UTC(),
+	})
+	return nil
+}
+
+// Restore makes a demoted claim verified again.
+//
+// The revert path. It is not Confirm: Confirm proves an address for the first
+// time and refuses a lapsed claim outright, which is right for a verification
+// link and wrong here — this address was proven once already, and the question
+// is only whether the window is still open.
+//
+// Refused once the window has closed, and that refusal is the window. After it
+// the address is available to anybody, so restoring would take it back from
+// whoever claimed it in the meantime — the exact harm Confirm's lapse check
+// exists to prevent.
+func (r *EmailReservation) Restore(subjectID string, now time.Time) error {
+	switch {
+	case !r.held:
+		return errs.NotFoundf("this address is no longer reserved")
+	case r.subjectID != subjectID:
+		return errs.Conflictf("this address is reserved by another account")
+	}
+	if r.verified {
+		return nil // already restored; a repeated revert is not an error
+	}
+	if !now.Before(r.expiresAt) {
+		return errs.Conflictf("the window to change back to this address has closed")
+	}
+	eventsourcing.Record(r, &contract.EmailReservationConfirmed{
+		Index:       r.index,
+		SubjectID:   subjectID,
+		ConfirmedAt: now.UTC(),
 	})
 	return nil
 }

@@ -474,7 +474,7 @@ func (p preferencePort) Enabled(
 
 type stubVault struct{}
 
-func (stubVault) Resolve(_ context.Context, subjectID string) (notify.Recipient, error) {
+func (stubVault) Resolve(_ context.Context, subjectID string, _ notify.AddressChoice) (notify.Recipient, error) {
 	return notify.Recipient{SubjectID: subjectID, Address: "someone@example.test"}, nil
 }
 

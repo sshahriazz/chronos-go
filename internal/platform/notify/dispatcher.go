@@ -198,7 +198,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, n Notification) error {
 			}
 		}
 
-		resolved, err := d.vault.Resolve(ctx, n.Recipient.SubjectID)
+		resolved, err := d.vault.Resolve(ctx, n.Recipient.SubjectID, n.Address)
 		switch {
 		case errors.Is(err, ErrSubjectErased):
 			// Correct outcome, not an error. Someone who exercised erasure has
@@ -312,7 +312,7 @@ func (d *Dispatcher) allowed(ctx context.Context, n Notification, ch Channel) (b
 // tenant-facing fails loudly instead of panicking.
 type unconfiguredVault struct{}
 
-func (unconfiguredVault) Resolve(context.Context, string) (Recipient, error) {
+func (unconfiguredVault) Resolve(context.Context, string, AddressChoice) (Recipient, error) {
 	return Recipient{}, fmt.Errorf("%w: no PII vault is wired, so contact details "+
 		"for a tenant subject cannot be resolved", ErrNotConfigured)
 }

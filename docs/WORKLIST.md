@@ -729,6 +729,59 @@ already has a name for.
       order #10, "once there is something to operate". Large, and the gate for
       legal holds above.
 
+## In progress — email change (identity.md §12)
+
+- [ ] **Email change.** The last of the three flows §4.4 named as absent. The
+      absence is why IDENTITY-REVIEW C8's **unexpired email change** variant is
+      unreachable today, so building it makes that variant reachable and the
+      slice has to close it in the same commit.
+
+      **What §12 requires:** verify the NEW address before switching, notify the
+      OLD address, allow a revert window. Plus §4.4 in both directions —
+      confirming re-verifies, which voids every session; and a password reset
+      MUST void any PENDING change, or an attacker queues a change to their own
+      address, the victim recovers the account believing it secured, and the
+      queued change completes afterwards and hands it back.
+
+      **What is already waiting for it**, written before the flow existed and
+      inherited without changes:
+
+      - `domain.User.VoidPendingIdentifierChange` — called by the reset on every
+        run, records nothing today because no event can create a pending change.
+        The recording goes here.
+      - `Registration.VerifyEmail`'s unconditional `RevokeAllSessions`.
+      - `TokenStore.RevokeAllPurposes` on reset, which already voids the token a
+        pending change would need to complete. That is the half of the rule that
+        is real today; the aggregate half is what this adds.
+
+      **Three design decisions the spec did not settle:**
+
+      1. **The old address stays claimed for the revert window, and no sweep
+         releases it.** `EmailReservation` already lapses: an UNVERIFIED claim
+         with a deadline becomes available on its own, and `Reserve` self-heals
+         by recording `EmailReleased(expired)` before the new claim. So the old
+         address is DEMOTED from verified to an unverified lease ending at the
+         revert deadline. It stays unavailable to everyone else for the window
+         and frees itself afterwards.
+
+         Releasing it outright at change time does not work and the reason is an
+         attack: an attacker who changed the address could immediately register
+         the victim's old one and make the revert impossible.
+
+      2. **The revert needs the old address back, and it is not in the log**
+         (ADR-002). It goes in the vault as `FieldPreviousEmail`. It is the
+         person's own data, it belongs in a subject access request, and the next
+         change overwrites it.
+
+      3. **Notifying the old address after the switch needs the dispatcher to
+         resolve a field other than the primary.** The dispatcher resolves from
+         the vault by subject at SEND time and overwrites `Recipient.Address`,
+         so a notice on `EmailChanged` would go to the NEW address — to the
+         attacker — which is the exact opposite of what §12 asks for. So
+         `notify.Spec` gains an address choice, carried to the dispatcher and
+         mapped to a vault field in the adapter. `notify` does not import `pii`
+         and still does not: the choice is a notify-level enum.
+
 ## Parked
 
 - [ ] **The two deactivation flakes — NOT reproduced, and `-count=N` now works.**

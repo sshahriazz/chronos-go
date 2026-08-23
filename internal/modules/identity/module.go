@@ -26,6 +26,7 @@ func RegisterEvents(codec *eventcodec.JSON) {
 	eventcodec.Register[contract.EmailReservationConfirmed](codec)
 	eventcodec.Register[contract.EmailReleased](codec)
 	eventcodec.Register[contract.DuplicateRegistrationAttempted](codec)
+	eventcodec.Register[contract.EmailReservationDemoted](codec)
 
 	// Username reservation — the public handle's uniqueness mechanism (ADR-051).
 	eventcodec.Register[contract.UsernameReserved](codec)
@@ -35,6 +36,10 @@ func RegisterEvents(codec *eventcodec.JSON) {
 	eventcodec.Register[contract.UserRegistered](codec)
 	eventcodec.Register[contract.EmailVerificationRequested](codec)
 	eventcodec.Register[contract.EmailVerified](codec)
+	eventcodec.Register[contract.EmailChangeRequested](codec)
+	eventcodec.Register[contract.EmailChangeCancelled](codec)
+	eventcodec.Register[contract.EmailChanged](codec)
+	eventcodec.Register[contract.EmailChangeReverted](codec)
 	eventcodec.Register[contract.UsernameAssigned](codec)
 	eventcodec.Register[contract.UserActivated](codec)
 	eventcodec.Register[contract.UserDeactivated](codec)
@@ -117,12 +122,16 @@ func eventTypes() []string {
 	events := []eventsourcing.Event{
 		&contract.EmailReserved{}, &contract.EmailReservationConfirmed{},
 		&contract.EmailReleased{}, &contract.DuplicateRegistrationAttempted{},
+		&contract.EmailReservationDemoted{},
 
 		&contract.UsernameReserved{}, &contract.UsernameAssigned{},
 		&contract.UsernameTombstoned{},
 
 		&contract.UserRegistered{}, &contract.EmailVerificationRequested{},
-		&contract.EmailVerified{}, &contract.UserActivated{},
+		&contract.EmailVerified{},
+		&contract.EmailChangeRequested{}, &contract.EmailChangeCancelled{},
+		&contract.EmailChanged{}, &contract.EmailChangeReverted{},
+		&contract.UserActivated{},
 		&contract.UserDeactivated{}, &contract.UserReactivated{},
 		&contract.UserSuspended{}, &contract.UserDeletionRequested{},
 		&contract.UserDeletionCancelled{}, &contract.UserErased{},

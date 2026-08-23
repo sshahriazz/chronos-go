@@ -433,7 +433,7 @@ type fixedVault struct {
 	address, name, locale, tz string
 }
 
-func (v fixedVault) Resolve(context.Context, string) (notify.Recipient, error) {
+func (v fixedVault) Resolve(context.Context, string, notify.AddressChoice) (notify.Recipient, error) {
 	return notify.Recipient{
 		Address: v.address, Name: v.name, Locale: v.locale, Timezone: v.tz,
 	}, nil

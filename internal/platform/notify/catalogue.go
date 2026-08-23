@@ -91,6 +91,11 @@ type Spec struct {
 	// recipient's preferences allow.
 	Channels []Channel
 
+	// Address selects which of the recipient's addresses this goes to. The zero
+	// value is AddressPrimary, which is what every notification but one wants —
+	// see notify.AddressChoice.
+	Address AddressChoice
+
 	// Data extracts template input from the decoded event. It MUST NOT return
 	// personal data: the recipient is resolved separately from the vault, and
 	// anything identifying that came through here would end up in the event log

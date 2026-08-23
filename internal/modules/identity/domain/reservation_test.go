@@ -551,3 +551,171 @@ func TestTheNoticeHistoryIsBounded(t *testing.T) {
 		t.Error("a pruned history reported budget it does not have")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The revert window (identity.md §12)
+// ---------------------------------------------------------------------------
+
+func confirmedReservation(t *testing.T, subject string) *domain.EmailReservation {
+	t.Helper()
+	r := heldReservation(t, subject)
+	if err := r.Confirm(subject, at.Add(time.Minute)); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+	r.ClearUncommitted()
+	return r
+}
+
+// A DEMOTED ADDRESS IS STILL UNAVAILABLE TO EVERYONE ELSE.
+//
+// This is the whole reason the old address is demoted rather than released. In
+// the attack the revert window exists to defeat, the party who moved the address
+// is an attacker holding a session — and if the release freed the address, that
+// attacker could re-register it immediately and leave the revert with nowhere to
+// go back to.
+func TestADemotedAddressCannotBeTakenDuringTheWindow(t *testing.T) {
+	r := confirmedReservation(t, "subj_owner")
+	closesAt := at.Add(72 * time.Hour)
+
+	if err := r.Demote("subj_owner", domain.DemoteRevertWindow, closesAt, at.Add(time.Hour)); err != nil {
+		t.Fatalf("demote: %v", err)
+	}
+	if r.Verified() {
+		t.Error("a demoted claim is still verified, so it will never lapse and the " +
+			"address is held by this account forever")
+	}
+	if !r.Held() {
+		t.Fatal("a demoted claim was released; whoever performed the change can now " +
+			"re-register the address and the revert has nowhere to go")
+	}
+	if r.Available(at.Add(time.Hour)) {
+		t.Fatal("the old address is available DURING the revert window; an attacker who " +
+			"just moved it can take it and block the revert")
+	}
+}
+
+// AND IT FREES ITSELF AFTERWARDS, WITH NO SWEEP.
+//
+// The lapse Reserve already implements is what makes this work: a lapsed
+// unverified claim is released before the next is granted, so nothing has to
+// remember to release the old address when the window closes.
+func TestADemotedAddressLapsesAndIsReclaimable(t *testing.T) {
+	r := confirmedReservation(t, "subj_owner")
+	closesAt := at.Add(72 * time.Hour)
+	if err := r.Demote("subj_owner", domain.DemoteRevertWindow, closesAt, at.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	r.ClearUncommitted()
+
+	if !r.Available(closesAt) {
+		t.Fatal("the address is still unavailable at the instant the window closes; " +
+			"nothing else releases it, so it is held forever")
+	}
+	if err := r.Reserve(idxA, "subj_stranger", closesAt.Add(lease), closesAt); err != nil {
+		t.Fatalf("a stranger could not claim the lapsed address: %v", err)
+	}
+	// The release is RECORDED, so the log says what happened to the previous
+	// holder rather than showing a claim that silently changed hands.
+	got := r.Uncommitted()
+	if len(got) != 2 ||
+		got[0].EventType() != "identity.EmailReleased.v1" ||
+		got[1].EventType() != "identity.EmailReserved.v1" {
+		t.Fatalf("reclaiming recorded %v, want a release then a reservation",
+			typesOf(got))
+	}
+}
+
+// DEMOTING SOMEBODY ELSE'S ADDRESS IS REFUSED.
+func TestDemotingAnotherAccountsAddressIsRefused(t *testing.T) {
+	r := confirmedReservation(t, "subj_owner")
+	if err := r.Demote("subj_other", domain.DemoteRevertWindow, at.Add(72*time.Hour), at); err == nil {
+		t.Fatal("one account demoted another's address")
+	}
+}
+
+// A DEADLINE IN THE PAST IS REFUSED.
+//
+// It would make the address available the instant it was applied, which is
+// exactly the release this method exists to avoid.
+func TestDemotingWithAPastDeadlineIsRefused(t *testing.T) {
+	r := confirmedReservation(t, "subj_owner")
+	for _, deadline := range []time.Time{at.Add(-time.Hour), at} {
+		if err := r.Demote("subj_owner", domain.DemoteRevertWindow, deadline, at); err == nil {
+			t.Errorf("a demotion expiring at %s was accepted", deadline)
+		}
+	}
+}
+
+// REPEATING A DEMOTION DOES NOT MOVE THE DEADLINE.
+//
+// A deadline a caller can push out by repeating one request is an address held
+// indefinitely — the renewal Reserve refuses, for the same reason.
+func TestRepeatingADemotionDoesNotExtendTheWindow(t *testing.T) {
+	r := confirmedReservation(t, "subj_owner")
+	closesAt := at.Add(72 * time.Hour)
+	if err := r.Demote("subj_owner", domain.DemoteRevertWindow, closesAt, at); err != nil {
+		t.Fatal(err)
+	}
+	r.ClearUncommitted()
+
+	if err := r.Demote("subj_owner", domain.DemoteRevertWindow, at.Add(500*time.Hour), at); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.Uncommitted(); len(got) != 0 {
+		t.Fatalf("repeating a demotion recorded %v; the window can be pushed out "+
+			"indefinitely", typesOf(got))
+	}
+	if !r.Available(closesAt) {
+		t.Fatal("the original deadline was overwritten")
+	}
+}
+
+// RESTORE RE-VERIFIES, AND ONLY INSIDE THE WINDOW.
+func TestRestoringInsideTheWindowAndRefusingAfterIt(t *testing.T) {
+	closesAt := at.Add(72 * time.Hour)
+
+	inside := confirmedReservation(t, "subj_owner")
+	if err := inside.Demote("subj_owner", domain.DemoteRevertWindow, closesAt, at); err != nil {
+		t.Fatal(err)
+	}
+	inside.ClearUncommitted()
+	if err := inside.Restore("subj_owner", at.Add(time.Hour)); err != nil {
+		t.Fatalf("restoring inside the window: %v", err)
+	}
+	if !inside.Verified() {
+		t.Fatal("a restored claim is not verified, so it lapses on the old deadline and " +
+			"the account loses the address it just took back")
+	}
+	if inside.Available(closesAt.Add(time.Hour)) {
+		t.Error("a restored claim still becomes available when the old window closes")
+	}
+
+	after := confirmedReservation(t, "subj_owner")
+	if err := after.Demote("subj_owner", domain.DemoteRevertWindow, closesAt, at); err != nil {
+		t.Fatal(err)
+	}
+	if err := after.Restore("subj_owner", closesAt); err == nil {
+		t.Fatal("a restore succeeded at the exact instant the window closed; the address " +
+			"is available to anybody by then, so this takes it from whoever claimed it")
+	}
+}
+
+// RESTORING SOMEBODY ELSE'S ADDRESS IS REFUSED.
+func TestRestoringAnotherAccountsAddressIsRefused(t *testing.T) {
+	r := confirmedReservation(t, "subj_owner")
+	if err := r.Demote("subj_owner", domain.DemoteRevertWindow, at.Add(72*time.Hour), at); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Restore("subj_other", at.Add(time.Hour)); err == nil {
+		t.Fatal("one account restored another's address")
+	}
+}
+
+// typesOf names a slice of recorded events, for failure messages.
+func typesOf(es []eventsourcing.Event) []string {
+	out := make([]string, 0, len(es))
+	for _, e := range es {
+		out = append(out, e.EventType())
+	}
+	return out
+}

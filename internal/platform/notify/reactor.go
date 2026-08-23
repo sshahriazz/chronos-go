@@ -200,6 +200,7 @@ func (r *EventReactor) React(ctx context.Context, env eventsourcing.Envelope) er
 			Class:          spec.Class,
 			Recipient:      rcpt,
 			Channels:       spec.Channels,
+			Address:        spec.Address,
 			OrgID:          env.Meta.OrgID,
 			WorkspaceID:    env.Meta.WorkspaceID,
 			Data:           data,

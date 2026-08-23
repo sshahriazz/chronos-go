@@ -40,6 +40,26 @@ const (
 	// why it is here rather than in identity's own tables.
 	FieldEmail Field = "email"
 
+	// FieldPreviousEmail is the address an email change moved AWAY from.
+	//
+	// It exists because a revert has to put the old address back and the event
+	// log cannot hold it (ADR-002). identity.md §12 requires a revert window, and
+	// the window is worthless if the address it would restore is unrecoverable.
+	//
+	// It is the person's OWN address, so it belongs in a subject access request
+	// like every other field here — it is in AllFields for that reason and not by
+	// oversight. The next change overwrites it; nothing else clears it, which is
+	// the correct retention for a former identifier of the same person.
+	FieldPreviousEmail Field = "previous_email"
+
+	// FieldPendingEmail is an address an email change has claimed but not proven.
+	//
+	// The verification link for a change must be mailed to the NEW address, and
+	// until the change completes the vault's primary field still holds the old
+	// one — so without this there is nowhere to send it. It is cleared when the
+	// change completes or is cancelled.
+	FieldPendingEmail Field = "pending_email"
+
 	// FieldName is the display name.
 	FieldName Field = "name"
 
@@ -55,7 +75,10 @@ const (
 
 // AllFields is every field the vault stores. Used to answer a subject access
 // request without a human enumerating them from memory.
-var AllFields = []Field{FieldEmail, FieldName, FieldPhone, FieldLocale, FieldTimezone}
+var AllFields = []Field{
+	FieldEmail, FieldPendingEmail, FieldPreviousEmail,
+	FieldName, FieldPhone, FieldLocale, FieldTimezone,
+}
 
 // Valid reports whether a field is one the vault knows.
 func (f Field) Valid() bool {

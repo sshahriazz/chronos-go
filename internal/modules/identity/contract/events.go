@@ -855,3 +855,164 @@ type UsernameTombstoned struct {
 }
 
 func (*UsernameTombstoned) EventType() string { return "identity.UsernameTombstoned.v1" }
+
+// ---------------------------------------------------------------------------
+// Email change (identity.md §12)
+// ---------------------------------------------------------------------------
+
+// Cancellation reasons for a pending email change. Stored in the event, so they
+// are permanent strings rather than an enum whose meaning depends on ordering in
+// a Go file.
+const (
+	// CancelSuperseded is a second change request replacing the first. Routine.
+	CancelSuperseded = "superseded"
+
+	// CancelPasswordReset is identity.md §4.4 being enforced.
+	//
+	// The variant it closes is Sudhodanan & Paverd's "unexpired email change":
+	// an attacker queues a change to their own address, the victim recovers the
+	// account believing they have secured it, and the queued change completes
+	// afterwards and hands it straight back.
+	CancelPasswordReset = "password_reset"
+
+	// CancelByHolder is the account holder calling it off from a session.
+	CancelByHolder = "cancelled_by_holder"
+)
+
+// EmailChangeRequested records that an account asked to move to a new address.
+//
+// # Nothing has changed yet, and that is the whole design
+//
+// The account still answers to the old address, still signs in with it, and
+// still receives its mail there. What this records is a CLAIM on the new address
+// plus a deadline: identity.md §12 requires the new address to be proven before
+// the switch, so an attacker with a hijacked session cannot silently take
+// ownership by asserting an address they do not control.
+//
+// # Indexes, never addresses
+//
+// Both are blind indexes (ADR-002). The addresses themselves are in the vault,
+// and the token proving the new one is mailed by the reactor, which resolves it
+// there — no handler in this module ever holds either address.
+type EmailChangeRequested struct {
+	SubjectID string
+
+	// FromIndex is the address in force. Recorded so a reader of the log can see
+	// what the change was FROM without replaying the whole account.
+	FromIndex EmailIndex
+
+	// ToIndex is the address being claimed. The reservation on it is a separate
+	// fact on a different stream, for the same reason EmailVerified and
+	// EmailReservationConfirmed are separate.
+	ToIndex EmailIndex
+
+	// ExpiresAt is when the pending change lapses if it is never confirmed.
+	//
+	// It bounds the reservation on the new address as much as the change: a
+	// claim nobody proves must not hold an address away from its real owner
+	// forever, which is the same rule an unverified registration obeys.
+	ExpiresAt time.Time
+
+	RequestedAt time.Time
+}
+
+func (*EmailChangeRequested) EventType() string { return "identity.EmailChangeRequested.v1" }
+
+// EmailChangeCancelled ends a pending change without completing it.
+//
+// The reason is load-bearing rather than descriptive: `password_reset` is
+// identity.md §4.4 being enforced, and an operator asking "was this account's
+// pending change killed by a recovery" is asking a security question the log has
+// to answer.
+type EmailChangeCancelled struct {
+	SubjectID string
+
+	// ToIndex is the address that was being claimed and now is not. The
+	// reservation on it is released by its own event on its own stream.
+	ToIndex EmailIndex
+
+	Reason      string
+	CancelledAt time.Time
+}
+
+func (*EmailChangeCancelled) EventType() string { return "identity.EmailChangeCancelled.v1" }
+
+// EmailChanged is the switch itself.
+//
+// Appended only after the new address is proven by a token mailed to it, and in
+// the same atomic append as the reservation events for both addresses — the
+// account's identifier and the two claims backing it cannot disagree, so they
+// cannot be written separately.
+//
+// Per identity.md §4.4 this voids every session for the subject, with no
+// exception for the one that asked. The re-verification IS the trigger, so the
+// "unexpired session" variant is closed at the instant the identifier changes.
+type EmailChanged struct {
+	SubjectID string
+
+	FromIndex EmailIndex
+	ToIndex   EmailIndex
+
+	// RevertibleUntil is the end of the window in which the OLD address can undo
+	// this (identity.md §12).
+	//
+	// The old address is not released at this point; it is demoted to an
+	// unverified claim expiring here, so it stays unavailable to everybody else
+	// for the window and frees itself afterwards with no sweep. Releasing it
+	// outright would let whoever performed the change immediately re-register it
+	// and make the revert impossible — which is the attack the window exists to
+	// defeat.
+	RevertibleUntil time.Time
+
+	ChangedAt time.Time
+}
+
+func (*EmailChanged) EventType() string { return "identity.EmailChanged.v1" }
+
+// EmailChangeReverted puts the previous address back.
+//
+// Reached from a link mailed to the OLD address, so the party undoing the change
+// has proven control of the address the account had before it. That is the
+// remedy identity.md §12 asks for: an attacker holding a session can change the
+// address, but cannot stop the real owner being told and undoing it.
+//
+// It voids every session exactly as the change did, for the same reason — the
+// party who performed the change may still be holding one.
+type EmailChangeReverted struct {
+	SubjectID string
+
+	// FromIndex is the address being abandoned, which is the one the change
+	// moved TO. ToIndex is the address being restored.
+	FromIndex EmailIndex
+	ToIndex   EmailIndex
+
+	RevertedAt time.Time
+}
+
+func (*EmailChangeReverted) EventType() string { return "identity.EmailChangeReverted.v1" }
+
+// EmailReservationDemoted turns a VERIFIED claim back into a leased one.
+//
+// One producer: the old address during an email change's revert window. The
+// address stays held by the same subject, so nobody else can take it, but it now
+// carries a deadline — and `EmailReservation.Reserve` already releases a lapsed
+// unverified claim before granting a new one, so the address frees itself when
+// the window closes and no sweep has to remember it.
+//
+// It is a distinct event rather than a second EmailReserved because the log
+// should say what happened. "Reserved" for an address that was confirmed years
+// ago reads as a new registration; this reads as what it is.
+type EmailReservationDemoted struct {
+	Index     EmailIndex
+	SubjectID string
+
+	// ExpiresAt is when the claim lapses. For a revert window it is the same
+	// instant as EmailChanged.RevertibleUntil, so the address stops being
+	// reclaimable at exactly the moment the revert stops being possible.
+	ExpiresAt time.Time
+
+	Reason    string
+	DemotedAt time.Time
+}
+
+func (*EmailReservationDemoted) EventType() string { return "identity.EmailReservationDemoted.v1" }

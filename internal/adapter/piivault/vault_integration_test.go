@@ -257,7 +257,7 @@ func TestNotifyVaultResolvesAndRespectsErasure(t *testing.T) {
 	}
 
 	nv := piivault.NewNotifyVault(v, "en", "UTC")
-	r, err := nv.Resolve(ctx, string(id))
+	r, err := nv.Resolve(ctx, string(id), notify.AddressPrimary)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestNotifyVaultResolvesAndRespectsErasure(t *testing.T) {
 	if err := v.Erase(ctx, id); err != nil {
 		t.Fatal(err)
 	}
-	_, err = nv.Resolve(ctx, string(id))
+	_, err = nv.Resolve(ctx, string(id), notify.AddressPrimary)
 	if !errors.Is(err, notify.ErrSubjectErased) {
 		t.Fatalf("an erased subject must report ErrSubjectErased so the send is "+
 			"SKIPPED rather than retried forever, got %v", err)
@@ -287,11 +287,72 @@ func TestNotifyVaultDistinguishesMissingFromErased(t *testing.T) {
 	v, _ := newVault(t)
 	nv := piivault.NewNotifyVault(v, "en", "UTC")
 
-	_, err := nv.Resolve(context.Background(), string(subject(t)))
+	_, err := nv.Resolve(context.Background(), string(subject(t)), notify.AddressPrimary)
 	if errors.Is(err, notify.ErrSubjectErased) {
 		t.Fatal("a subject that never existed was reported as erased")
 	}
 	if !errors.Is(err, notify.ErrNoAddress) {
 		t.Fatalf("expected ErrNoAddress, got %v", err)
+	}
+}
+
+// THE PREVIOUS ADDRESS RESOLVES, AND FALLS BACK TO NOTHING.
+//
+// identity.md §12 requires an email change to notify the OLD address and offer
+// a revert. The dispatcher resolves the recipient at SEND time and overwrites
+// the address, so without this the notice goes to the address the account was
+// changed TO — which, in the attack the revert window exists to defeat, is the
+// attacker's mailbox.
+//
+// The second half is the one worth the test. A resolver that fell back to the
+// primary when no previous address is recorded would produce exactly that
+// delivery, silently, in the case where something has already gone wrong.
+func TestTheNotifyVaultResolvesThePreviousAddressAndNeverFallsBack(t *testing.T) {
+	v, _ := newVault(t)
+	ctx := context.Background()
+	id := subject(t)
+
+	if err := v.PutAll(ctx, id, map[pii.Field]string{
+		pii.FieldEmail: "new@example.test",
+		pii.FieldName:  "Sam Larsson",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	nv := piivault.NewNotifyVault(v, "en", "UTC")
+
+	// No previous address recorded: REFUSED, not answered with the primary.
+	if r, err := nv.Resolve(ctx, string(id), notify.AddressPrevious); err == nil {
+		t.Fatalf("resolving a previous address that was never recorded returned %q. The "+
+			"email-change notice would be delivered to the address the account was "+
+			"changed to", r.Address)
+	} else if !errors.Is(err, notify.ErrNoAddress) {
+		t.Errorf("expected ErrNoAddress, got %v", err)
+	}
+
+	if err := v.PutAll(ctx, id, map[pii.Field]string{
+		pii.FieldPreviousEmail: "old@example.test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	prev, err := nv.Resolve(ctx, string(id), notify.AddressPrevious)
+	if err != nil {
+		t.Fatalf("resolving the previous address: %v", err)
+	}
+	if prev.Address != "old@example.test" {
+		t.Fatalf("the previous address resolved to %q, want old@example.test", prev.Address)
+	}
+	// Everything else still comes from the same profile: it is one person.
+	if prev.Name != "Sam Larsson" {
+		t.Errorf("the previous-address recipient lost their name: %+v", prev)
+	}
+
+	// And the primary is untouched by any of it.
+	now, err := nv.Resolve(ctx, string(id), notify.AddressPrimary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if now.Address != "new@example.test" {
+		t.Fatalf("the primary address resolved to %q", now.Address)
 	}
 }

@@ -360,6 +360,23 @@ const (
 
 	// PurposePasswordReset authorises setting a new password.
 	PurposePasswordReset TokenPurpose = "password_reset"
+
+	// PurposeEmailChange proves control of an address an account is MOVING TO.
+	//
+	// Distinct from PurposeEmailVerification, and the separation is the control
+	// this type exists for. A verification token is issued to anybody who
+	// registers or asks for a resend; if a change accepted one, an attacker who
+	// can cause a verification mail for an address they own — by registering it —
+	// would hold a token that completes a change on somebody else's account.
+	PurposeEmailChange TokenPurpose = "email_change"
+
+	// PurposeEmailChangeRevert authorises undoing a completed change.
+	//
+	// Mailed to the address the account moved AWAY from, so whoever redeems it
+	// has proven control of the address the account had before. That is the whole
+	// remedy identity.md §12 asks for: an attacker holding a session can move the
+	// address and cannot stop the real owner undoing it.
+	PurposeEmailChangeRevert TokenPurpose = "email_change_revert"
 )
 
 // TokenStore holds single-use token digests.
@@ -524,6 +541,54 @@ type SubjectVault interface {
 	// PutAll stores several fields for one subject in one operation, so a failure
 	// cannot leave a half-populated profile behind.
 	PutAll(ctx context.Context, id pii.SubjectID, values map[pii.Field]string) error
+}
+
+// SubjectAddresses moves a subject's addresses between the vault's slots.
+//
+// # Why every method is a MOVE and none of them is a read
+//
+// SubjectVault above is deliberately write-only, and the reason it gives holds
+// here just as hard: a port that could read an address is a port through which
+// an address reaches a log line, an error message or an event. An email change
+// nevertheless has to move addresses around — the new one becomes primary, the
+// old one becomes the previous, the revert puts them back — and every one of
+// those needs the CURRENT value.
+//
+// So the moves happen inside the vault adapter and the values never cross this
+// boundary. The use case says which transition happened; the adapter is the only
+// code that sees an address. That is the same shape as the blind index: identity
+// works in pseudonyms and something else does the one operation that cannot.
+//
+// Each method is IDEMPOTENT, because each is called from a handler whose append
+// may be retried. Promoting when there is nothing pending, or restoring when
+// there is no previous address, changes nothing and is not an error — the
+// aggregate has already decided whether the transition is legal, and this must
+// not fail a retry that the aggregate correctly treats as a no-op.
+type SubjectAddresses interface {
+	// StagePending records the address an email change is claiming.
+	//
+	// The verification link for a change is mailed HERE and nowhere else: sending
+	// it to the primary would mail the proof of a new address to the old one,
+	// which proves nothing.
+	StagePending(ctx context.Context, id pii.SubjectID, address string) error
+
+	// PromotePending makes the pending address primary and the primary previous.
+	//
+	// The previous is kept because a revert has to put it back and the event log
+	// cannot hold it (ADR-002). identity.md §12 requires the revert window, and
+	// the window is worthless if the address it would restore is unrecoverable.
+	PromotePending(ctx context.Context, id pii.SubjectID) error
+
+	// DiscardPending forgets a claimed address that was never proven.
+	//
+	// Called when a change is cancelled or superseded. Without it, an address
+	// somebody typed by mistake stays in their vault record and in every subject
+	// access request that follows.
+	DiscardPending(ctx context.Context, id pii.SubjectID) error
+
+	// RestorePrevious undoes a completed change: the previous address becomes
+	// primary again.
+	RestorePrevious(ctx context.Context, id pii.SubjectID) error
 }
 
 // TokenDigest reduces a presented token to the value the store holds.
