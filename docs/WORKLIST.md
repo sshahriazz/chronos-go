@@ -599,9 +599,36 @@ already has a name for.
       unexported precisely so no test can forge a caller. Building it that way
       immediately paid: the first run failed every mutation with step-up, which
       was the min_aal gate working.
-- [ ] **Rectification (Art. 16)** — `PersonalDataCorrected`, a new event rather
-      than a rewrite. The log stays truthful: it recorded what we believed then,
-      and when we learned otherwise.
+- [x] **Rectification (Art. 16) — ALREADY SATISFIED, except for one field, and
+      that field is identity's not compliance's.**
+
+      Checked rather than assumed. compliance.md §6 asks for "a correction event,
+      never a rewrite", and the event-sourced design gives that for free: every
+      correction IS a new event and no projection is ever rewritten in place.
+      What remained was whether a person can actually correct each field.
+
+      - display name, locale, timezone, avatar — `UpdateProfile`, self-service ✓
+      - **email address — NOT CORRECTABLE.** identity.md §12 says so in terms:
+        "NOT BUILT — no RPC, no use case, no event."
+      - phone — no RPC, and no flow anywhere writes it.
+
+      So there is no `PersonalDataCorrected` event to add: inventing one for
+      fields `UpdateProfile` already corrects would be a second write path to the
+      same data. The gap is a missing identity FEATURE, not a missing compliance
+      mechanism.
+
+- [ ] **Email change — identity's, well specified, and the last real
+      rectification gap.** identity.md §12 already states what it must do:
+      verify the NEW address before switching, notify the OLD one, allow a revert
+      window, and obey §4.4 in both directions — re-verification voids every
+      session, and a password reset MUST void any PENDING change, or an attacker
+      queues a change to their own address and the victim's recovery hands the
+      account back afterwards.
+
+      Every primitive it needs already exists: token minting and single-use
+      consumption, the email reservation aggregate, the blind index, and a
+      `VerifyEmail` that already voids sessions. It is a slice of its own rather
+      than a step in a compliance one.
 - [ ] **Export and portability (Art. 15/20)** — the same traversal as erasure,
       which is why compliance.md §5 says they are built together: a traversal
       that misses data exports incompletely AND erases incompletely, and only
