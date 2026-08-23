@@ -399,3 +399,33 @@ WHERE email_index = $1 AND succeeded = false AND occurred_at > $2;
 -- with every other projection and because it does not accumulate dead tuples on
 -- a table that may be rebuilt repeatedly.
 TRUNCATE TABLE login_history_view, session_view, user_view;
+
+-- name: RevokeSessionsOfSubject :execrows
+-- End every live session for one subject.
+--
+-- Written by the SESSION projection when an account is erased. It belongs here
+-- rather than in an application use case for two reasons that both matter.
+--
+-- `session_view` has exactly one writer (CONVENTIONS §8) and it is that
+-- projection, so a use case appending revocation events per session would be a
+-- second path to the same rows.
+--
+-- And it must survive a REBUILD. Replaying `UserErased` re-runs this, so a
+-- projection rebuilt from position zero ends with the same empty set — whereas
+-- revocation events appended once would replay into rows that were already
+-- deleted, and a rebuild that resurrected a live session for an erased account
+-- is the failure with no symptom until somebody uses the token.
+UPDATE session_view
+SET revoked_at = $2
+WHERE subject_id = $1 AND revoked_at IS NULL;
+
+-- name: DeleteSessionTokensOfSubject :execrows
+-- Destroy the SECRET half for one subject's sessions.
+--
+-- The revocation above is enough to make `GetSessionByToken` return nothing —
+-- it checks `revoked_at` — so this is not what stops the token working. It is
+-- what stops the DIGEST existing, and an erasure that left digests behind would
+-- keep a derivative of a credential belonging to somebody who asked to be
+-- forgotten.
+DELETE FROM session_token
+WHERE session_id IN (SELECT session_id FROM session_view WHERE subject_id = $1);

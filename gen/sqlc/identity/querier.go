@@ -147,6 +147,14 @@ type Querier interface {
 	// should not have to re-derive three-valued logic to be sure this cannot delete a
 	// live claim.
 	DeleteReleasedReservations(ctx context.Context, releasedAt pgtype.Timestamptz) (int64, error)
+	// Destroy the SECRET half for one subject's sessions.
+	//
+	// The revocation above is enough to make `GetSessionByToken` return nothing —
+	// it checks `revoked_at` — so this is not what stops the token working. It is
+	// what stops the DIGEST existing, and an erasure that left digests behind would
+	// keep a derivative of a credential belonging to somebody who asked to be
+	// forgotten.
+	DeleteSessionTokensOfSubject(ctx context.Context, subjectID string) (int64, error)
 	// Lock out one authenticator.
 	//
 	// Per authenticator, never per account: locking the ACCOUNT on failed attempts
@@ -564,6 +572,21 @@ type Querier interface {
 	// before the victim recovered, and holds a live link that outlives the recovery.
 	RevokeAllTokensForSubject(ctx context.Context, subjectID string) (int64, error)
 	RevokeSession(ctx context.Context, sessionID string) (int64, error)
+	// End every live session for one subject.
+	//
+	// Written by the SESSION projection when an account is erased. It belongs here
+	// rather than in an application use case for two reasons that both matter.
+	//
+	// `session_view` has exactly one writer (CONVENTIONS §8) and it is that
+	// projection, so a use case appending revocation events per session would be a
+	// second path to the same rows.
+	//
+	// And it must survive a REBUILD. Replaying `UserErased` re-runs this, so a
+	// projection rebuilt from position zero ends with the same empty set — whereas
+	// revocation events appended once would replay into rows that were already
+	// deleted, and a rebuild that resurrected a live session for an erased account
+	// is the failure with no symptom until somebody uses the token.
+	RevokeSessionsOfSubject(ctx context.Context, arg RevokeSessionsOfSubjectParams) (int64, error)
 	// Drop every outstanding token of a purpose for a subject.
 	//
 	// Required by identity.md §7 rule 7: verification, reset and recovery void every

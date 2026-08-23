@@ -380,19 +380,18 @@ type RequestAccountDeletionResult struct {
 // # It appends one event and stops, on purpose
 //
 // Erasure is `compliance`'s work — destroy the key, and the personal data
-// becomes unreadable everywhere at once (ADR-002) — and that module does not
-// exist. What exists on the other side of this handoff, today, is nothing: no
-// reactor consumes identity.UserDeletionRequested, no Temporal workflow runs the
-// grace period, no notification catalogue entry mails the "deletion scheduled
-// for <date> — cancel" message NOTIFICATIONS.md §4 specifies, and there is no
-// command to cancel a request. The account keeps working, indefinitely.
+// becomes unreadable everywhere at once (ADR-002) — and the handoff is now
+// wired: `compliance-erasure` consumes this event and starts a Temporal
+// workflow that waits out the grace period, re-reading as it goes so a
+// cancellation stops it. At the deadline it confirms to the person, destroys the
+// subject key, and appends UserErased.
 //
-// Emitting the event anyway is the correct half to build first. The event is the
-// contract between the two modules; writing it now means compliance is built
-// against a real stream with real history rather than against a schema somebody
-// wrote from the documentation, and it means the projector's handling of it is
-// exercised by every rebuild from today rather than for the first time on the
-// day the consumer lands.
+// TWO CAVEATS, because neither is visible from here. The workflow needs Temporal:
+// with TEMPORAL_ENABLED=false the reactor refuses to be built and says so at
+// startup, because a thirty-day grace period has no inline fallback the way mail
+// does. And there is still no command to CANCEL a request — the aggregate has
+// `CancelDeletion` and nothing calls it, so the cancel link NOTIFICATIONS §4
+// specifies has no endpoint behind it yet.
 //
 // # No sessions are revoked, and that is deliberate
 //

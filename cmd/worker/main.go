@@ -431,6 +431,17 @@ func reactors(codec *eventcodec.JSON, d *dependencies) []reactor.Reactor {
 		rs = append(rs, r)
 	}
 
+	// The erasure clock. Without it a deletion request is recorded, a date is
+	// mailed to the person, and nothing ever runs — an unmet legal obligation
+	// whose only trace is an event nobody consumed.
+	if r, err := newErasureReactor(d); err != nil {
+		slog.Default().Error("the erasure reactor is NOT registered; every deletion request "+
+			"is consumed by nothing, the account keeps working indefinitely, and the "+
+			"statutory clock runs out with no record anywhere", "error", err)
+	} else {
+		rs = append(rs, r)
+	}
+
 	// The authorization graph. Without it every non-self-scoped method is
 	// DENIED — correctly, and silently.
 	if r, err := newAccessTuples(codec, d, slog.Default()); err != nil {

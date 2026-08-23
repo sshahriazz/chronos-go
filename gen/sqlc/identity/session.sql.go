@@ -85,6 +85,26 @@ func (q *Queries) CountRecentFailures(ctx context.Context, arg CountRecentFailur
 	return count, err
 }
 
+const DeleteSessionTokensOfSubject = `-- name: DeleteSessionTokensOfSubject :execrows
+DELETE FROM session_token
+WHERE session_id IN (SELECT session_id FROM session_view WHERE subject_id = $1)
+`
+
+// Destroy the SECRET half for one subject's sessions.
+//
+// The revocation above is enough to make `GetSessionByToken` return nothing —
+// it checks `revoked_at` — so this is not what stops the token working. It is
+// what stops the DIGEST existing, and an erasure that left digests behind would
+// keep a derivative of a credential belonging to somebody who asked to be
+// forgotten.
+func (q *Queries) DeleteSessionTokensOfSubject(ctx context.Context, subjectID string) (int64, error) {
+	result, err := q.db.Exec(ctx, DeleteSessionTokensOfSubject, subjectID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const ElevateSession = `-- name: ElevateSession :exec
 UPDATE session_view
 SET aal = $2, elevated_scope = $3, elevated_until = LEAST($4::timestamptz, absolute_expires_at)
@@ -682,6 +702,39 @@ WHERE session_id = $1 AND revoked_at IS NULL
 
 func (q *Queries) RevokeSession(ctx context.Context, sessionID string) (int64, error) {
 	result, err := q.db.Exec(ctx, RevokeSession, sessionID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const RevokeSessionsOfSubject = `-- name: RevokeSessionsOfSubject :execrows
+UPDATE session_view
+SET revoked_at = $2
+WHERE subject_id = $1 AND revoked_at IS NULL
+`
+
+type RevokeSessionsOfSubjectParams struct {
+	SubjectID string
+	RevokedAt pgtype.Timestamptz
+}
+
+// End every live session for one subject.
+//
+// Written by the SESSION projection when an account is erased. It belongs here
+// rather than in an application use case for two reasons that both matter.
+//
+// `session_view` has exactly one writer (CONVENTIONS §8) and it is that
+// projection, so a use case appending revocation events per session would be a
+// second path to the same rows.
+//
+// And it must survive a REBUILD. Replaying `UserErased` re-runs this, so a
+// projection rebuilt from position zero ends with the same empty set — whereas
+// revocation events appended once would replay into rows that were already
+// deleted, and a rebuild that resurrected a live session for an erased account
+// is the failure with no symptom until somebody uses the token.
+func (q *Queries) RevokeSessionsOfSubject(ctx context.Context, arg RevokeSessionsOfSubjectParams) (int64, error) {
+	result, err := q.db.Exec(ctx, RevokeSessionsOfSubject, arg.SubjectID, arg.RevokedAt)
 	if err != nil {
 		return 0, err
 	}

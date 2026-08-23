@@ -399,6 +399,61 @@ was. It needs an organization-member audience, which does not exist yet.
 
 ---
 
+## Now — compliance, the erasure path
+
+The stock-take found the one place this system promised something it could not
+do: a person could request deletion, we recorded it and mailed them a date, and
+nothing ever ran.
+
+- [x] **The domain.** `UserDeletionCancelled`, `UserErased`, a terminal
+      `StateErased` that `mutable()` refuses, and an `Erase` that requires an
+      outstanding request — the guard against a workflow started for the wrong
+      subject, which has no undo.
+- [x] **Identity's half.** Address reservation released, username TOMBSTONED
+      (not released — a published handle reissued is an impersonation vector
+      aimed at the person who left), account marked erased last so nothing
+      claims completion until it is complete.
+- [x] **Sessions.** Handled by the SESSION PROJECTION rather than a use case:
+      it owns `session_view` and `session_token` (CONVENTIONS §8), and it is the
+      only path that survives a rebuild. `GetSessionByToken` checks neither the
+      account's state nor its existence — deliberately, it runs on every
+      request — so without this an erased account's tokens keep resolving until
+      they expire.
+- [x] **The orchestration.** compliance's `Erasure`: confirm, destroy the key,
+      then identity's half. It owns none of the data it erases and reaches
+      everything through ports, which the import contract makes structural.
+- [x] **The grace period.** A Temporal workflow that re-reads on every wake, so
+      a cancellation actually stops it, and follows a deadline that moves.
+- [x] **The confirmation.** Sent BEFORE the destroy, because afterwards there is
+      no address to send it to, and stating what is retained — a confirmation
+      implying total deletion when tax records survive is a misleading statement
+      about processing.
+
+### What is NOT done, and is the next step
+
+- [ ] **No cancel endpoint.** The aggregate has `CancelDeletion` and nothing
+      calls it. The cancel link NOTIFICATIONS §4 specifies has no RPC behind it,
+      so the grace period is currently only usable by an operator with database
+      access. This is the largest remaining hole in the path.
+- [ ] **Erasure requires Temporal.** With `TEMPORAL_ENABLED=false` the reactor
+      refuses to build and logs it at startup. Unlike mail there is no inline
+      fallback — "wait thirty days, then act" has no synchronous equivalent — so
+      this is a deployment constraint rather than a defect, recorded because it
+      is invisible from the code that requests deletion.
+- [ ] **Legal holds and retention exemptions** (compliance.md §4 steps 2–3) are
+      not consulted. Nothing can place a hold yet, so there is nothing to check;
+      it becomes real with the `LegalHold` aggregate.
+- [ ] **The subject graph is not traversed** (step 4). Only identity holds
+      personal data today, so erasing it is erasing everything — but that stops
+      being true the moment a second module does, and the traversal is what
+      makes the guarantee hold then.
+- [ ] **No reconciliation sweep.** The workflow is durable, so a lost one is
+      unlikely rather than impossible; a sweep over overdue requests is the
+      backstop billing.md §5 case 15 uses for the same class of failure.
+- [ ] **The other five DSAR rights** — access, portability, rectification,
+      restriction, objection (compliance.md §3). Erasure was the one with a
+      hollow guarantee; the rest are unbuilt features.
+
 ## Parked
 
 - [ ] **The two deactivation flakes — NOT reproduced, and one plausible cause

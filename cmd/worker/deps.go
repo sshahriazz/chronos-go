@@ -19,6 +19,7 @@ import (
 	temporaladapter "github.com/chronos/chronos-go/internal/adapter/temporal"
 	valkeyadapter "github.com/chronos/chronos-go/internal/adapter/valkey"
 	"github.com/chronos/chronos-go/internal/adapter/webpush"
+	complianceapp "github.com/chronos/chronos-go/internal/modules/compliance/app"
 	"github.com/chronos/chronos-go/internal/modules/identity/app"
 	notificationpg "github.com/chronos/chronos-go/internal/modules/notification/adapter/postgres"
 	workspaceapp "github.com/chronos/chronos-go/internal/modules/workspace/app"
@@ -66,8 +67,13 @@ type dependencies struct {
 
 	// notify is the notification system. Mail is one channel under it; the
 	// in-app feed, web push and realtime plug in the same way (ADR-026).
-	notify   *notify.Dispatcher
-	vault    notify.Vault
+	notify *notify.Dispatcher
+	vault  notify.Vault
+
+	// piiVault is the concrete vault, kept beside the narrow `vault` above
+	// because erasure destroys a subject key and the notify view cannot express
+	// that — deliberately.
+	piiVault *piivault.Vault
 	renderer *mailrender.Renderer
 	operator string
 
@@ -159,6 +165,16 @@ type dependencies struct {
 	// visible as "re-sealing could not be constructed" rather than as nothing at
 	// all. Nothing else in this system reports a rotation that cannot finish.
 	reseal *app.KeyReseal
+
+	// accountErasure is identity's half: sessions, identifier reservations and
+	// the account's own terminal event. erasure is compliance's orchestration
+	// around it — confirm, destroy the key, then call the half above.
+	//
+	// Two fields rather than one because they belong to different modules and
+	// the import contract keeps them apart: compliance may not load identity's
+	// aggregates, so the composition root is where the two meet.
+	accountErasure *app.Erasure
+	erasure        *complianceapp.Erasure
 
 	closes []func()
 }
@@ -278,10 +294,15 @@ func newDependencies(cfg *config.Config, log *slog.Logger, codec *eventcodec.JSO
 					vaultOpts = append(vaultOpts, piivault.WithKeyCache(kc))
 				}
 			}
-			d.vault = piivault.NewNotifyVault(
-				piivault.New(pgadapter.New(d.pool),
-					openbao.NewKeyRing(bao, cfg.OpenBao.KEKName), vaultOpts...),
-				cfg.Mail.DefaultLocale, "UTC")
+			// Kept BOTH ways, like cmd/api does. `vault` is the narrow view the
+			// notification path uses to resolve an address; `piiVault` is the
+			// concrete one, and the erasure needs it because destroying a
+			// subject key is not something the notify view can express — nor
+			// should it be.
+			v := piivault.New(pgadapter.New(d.pool),
+				openbao.NewKeyRing(bao, cfg.OpenBao.KEKName), vaultOpts...)
+			d.piiVault = v
+			d.vault = piivault.NewNotifyVault(v, cfg.Mail.DefaultLocale, "UTC")
 			d.probes = append(d.probes, openbao.Probe{Client: bao})
 		}
 	}
@@ -394,6 +415,26 @@ func newDependencies(cfg *config.Config, log *slog.Logger, codec *eventcodec.JSO
 			"deployment", "error", err)
 	} else {
 		d.retention = retention
+	}
+
+	// Erasure, in two halves that meet only here: identity's, which knows what an
+	// account holds, and compliance's, which decides when and destroys the key.
+	//
+	// Loud rather than fatal like everything else in this binary (ADR-010), and
+	// the wording is the strongest available because nothing else reports it: a
+	// person asks to be forgotten, is told a date, and stays in the database
+	// after it, while every metric stays green.
+	if accounts, err := newAccountErasure(d); err != nil {
+		log.Error("identity's erasure half is NOT wired; every deletion request is recorded "+
+			"and never executed, and the account keeps working indefinitely", "error", err)
+	} else {
+		d.accountErasure = accounts
+		if erasure, err := newErasure(d, log); err != nil {
+			log.Error("the erasure orchestration is NOT wired; deletion requests are "+
+				"recorded and never executed", "error", err)
+		} else {
+			d.erasure = erasure
+		}
 	}
 
 	// Credential re-sealing. Constructed before the worker for the same reason as
@@ -604,7 +645,61 @@ func (d *dependencies) newTemporalWorker(
 	if err != nil {
 		return nil, nil, fmt.Errorf("registering the invitation lifecycle: %w", err)
 	}
-	return w, append(names, lifecycleNames...), nil
+	names = append(names, lifecycleNames...)
+
+	// The erasure clock. Unlike everything above it, an unregistered workflow
+	// here is not a delayed sweep or a missed reminder: it is a person who asked
+	// to be forgotten, was told a date, and is still in the database after it.
+	erasureNames, err := d.registerErasure(w)
+	if err != nil {
+		return nil, nil, err
+	}
+	return w, append(names, erasureNames...), nil
+}
+
+// registerErasure wires the grace-period workflow and its activities.
+func (d *dependencies) registerErasure(w *temporaladapter.Worker) ([]string, error) {
+	if d.erasure == nil {
+		return nil, errors.New("the erasure executor was not constructed; registering the " +
+			"workflow would queue runs that panic, and not registering it leaves every " +
+			"deletion request unexecuted")
+	}
+	if d.accountErasure == nil {
+		return nil, errors.New("identity's erasure half was not constructed")
+	}
+
+	state, err := temporaladapter.NewErasureState(erasureStateAdapter{accounts: d.accountErasure})
+	if err != nil {
+		return nil, fmt.Errorf("erasure state activity: %w", err)
+	}
+	execute, err := temporaladapter.NewExecuteErasure(d.erasure)
+	if err != nil {
+		return nil, fmt.Errorf("erasure activity: %w", err)
+	}
+	return w.RegisterErasure(state, execute)
+}
+
+// erasureStateAdapter narrows identity's use case to the activity's port.
+//
+// It also converts between two structurally identical snapshot types, which is
+// the cost of the import contract: a module may not import an adapter, and an
+// adapter may not import a module's internals, so the shape is declared twice
+// and matched here — in one place, where a mismatch is a compile error.
+type erasureStateAdapter struct{ accounts *app.Erasure }
+
+func (a erasureStateAdapter) ErasureState(
+	ctx context.Context, subjectID string,
+) (temporaladapter.ErasureSnapshot, error) {
+	s, err := a.accounts.State(ctx, subjectID)
+	if err != nil {
+		return temporaladapter.ErasureSnapshot{}, err
+	}
+	return temporaladapter.ErasureSnapshot{
+		Exists:       s.Exists,
+		Requested:    s.Requested,
+		Erased:       s.Erased,
+		ScheduledFor: s.ScheduledFor,
+	}, nil
 }
 
 // scheduleSweep makes the lapsed-reservation sweep recur.

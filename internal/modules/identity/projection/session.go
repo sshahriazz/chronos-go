@@ -71,6 +71,28 @@ func NewSession(codec eventsourcing.Codec) *Session {
 		return nil
 	})
 
+	// AN ERASED ACCOUNT LOSES EVERY SESSION, and this is where it happens.
+	//
+	// `GetSessionByToken` joins session_view and session_token and checks
+	// neither the account's state nor its existence — deliberately, because that
+	// query runs on every authenticated request and a join to user_view would be
+	// a third table on the hot path. The consequence is that an erased account's
+	// tokens keep resolving until they expire unless something removes them.
+	//
+	// It lives in the PROJECTION rather than in an erasure use case because this
+	// projection owns both tables (CONVENTIONS §8), and because it must survive
+	// a rebuild: replaying UserErased re-runs it, so a projection rebuilt from
+	// zero ends with the same empty set. Revocation events appended once would
+	// replay into rows already deleted, and a rebuild that resurrected a live
+	// session for an erased account has no symptom until somebody uses the token.
+	d.On[contract.UserErased](func(
+		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.UserErased,
+	) error {
+		w.Exec(identitydb.RevokeSessionsOfSubject, e.SubjectID, e.ErasedAt)
+		w.Exec(identitydb.DeleteSessionTokensOfSubject, e.SubjectID)
+		return nil
+	})
+
 	d.On[contract.SessionExpired](func(
 		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.SessionExpired,
 	) error {

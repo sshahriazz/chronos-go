@@ -1,0 +1,17 @@
+Hello{{if .Name}} {{.Name}}{{end}},
+
+Your Chronos account has been erased, as you asked.
+
+The key that made your personal data readable has been destroyed. Your name,
+your email address and everything else we held about you can no longer be read
+by anyone — including us. This is not a deletion flag; there is no copy to
+restore from, and no way to undo it.
+
+This is the last message you will receive from us at this address.
+
+What is retained, and why:
+{{range .Retained}}
+  - {{.}}
+{{end}}
+If you believe this was done without your permission, contact support. Please
+note that we can no longer look you up by name or address.

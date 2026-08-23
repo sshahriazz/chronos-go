@@ -56,6 +56,11 @@ func TestEveryTemplateRenders(t *testing.T) {
 					// fixture is the only place a template's data contract is
 					// checked before a customer sees the result.
 					"TrialEndsAt": time.Date(2026, 3, 28, 9, 26, 53, 0, time.UTC),
+
+					// A slice, so a template that ranges over it renders. The
+					// erasure confirmation must list what was retained, and a
+					// string here would range over its bytes.
+					"Retained": []string{"invoices, where a statutory period applies"},
 				},
 			})
 			if err != nil {
