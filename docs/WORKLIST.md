@@ -739,6 +739,48 @@ already has a name for.
       order #10, "once there is something to operate". Large, and the gate for
       legal holds above.
 
+## In progress — identity slice 2 (passkeys), and the rest of identity's scope
+
+**Why this surfaced late, stated plainly.** Passkeys were scoped as slice 2 from
+the beginning — `contract.MethodPasskey`'s own comment says "arrives in slice 2"
+— and this session followed the ordering it was given: billing, compliance, the
+plan catalogue, email change, export. None of it reached slice 2. What was wrong
+was reporting identity work as finished without ever publishing the inventory
+below, so the gap surfaced as an `operator` blocker instead of as a plan.
+
+**`operator` is HELD**, and it is blocked on this: operator.md §3 requires
+SSO-only sign-in with mandatory WebAuthn and explicitly no passwords and no TOTP
+fallback. A `cmd/operator` serving cross-tenant reads with no authentication is
+the most dangerous thing this codebase could ship.
+
+**The inventory.** Every event identity.md §13 declares and the codec does not
+register:
+
+| Gap | Where it is specified | State |
+| --- | --- | --- |
+| `PasskeyRegistered`, `PasskeyRemoved` | §4, ADR-057, IDENTITY-SLICE-1 C3 | slice 2 — IN PROGRESS |
+| `FederatedIdentityLinked`, `FederatedIdentityUnlinked` | §7, and §4.4's last unbuilt flow | not started |
+| `ApiKeyCreated`, `ApiKeyRotated`, `ApiKeyRevoked` | FEATURES.md, §8 | not started |
+| `ServiceAccountCreated` | FEATURES.md | not started |
+| `DeviceTrusted` | §9 | not started |
+| `SessionCompromiseDetected` | §9 | not started |
+| `SecondFactorSucceeded` | §13 (`SecondFactorChallenged` exists) | not started |
+
+**Slice 2's own carry-overs, from IDENTITY-SLICE-1 §"Outstanding":**
+
+- **C3** credential-ID uniqueness across every account — ADR-057 settles it as a
+  UNIQUE index plus a pre-insert check, with a negative test in the INTEGRATION
+  suite because what is being asserted is the index.
+- **C4** AAL3 undeliverable — already held: `contract.AssuranceLevel.Valid()`
+  admits AAL1 and AAL2 only, and ADR-057 explains why AAL3 is unreachable with
+  syncable authenticators.
+- **T1** `go-webauthn`'s `CloneWarning` — `FinishLogin` SUCCEEDS on a sign-count
+  regression and sets a flag. An application that never reads it has clone
+  detection that does nothing while every test passes, which is the exact failure
+  this repository shipped three times in notification adapters.
+- **T2** `pquerna/otp` at or above v1.5.0 — already satisfied (v1.5.0 in go.mod).
+  Recorded because no CVE was ever filed, so `govulncheck` will never report it.
+
 ## Done — email change (identity.md §12)
 
 - [x] **Email change.** Four RPCs, an aggregate, a reservation demotion, a mail
