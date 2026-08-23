@@ -735,6 +735,141 @@ type LiveSessions interface {
 	List(ctx context.Context, subjectID string, now time.Time) ([]ids.SessionID, error)
 }
 
+// PasskeyStore is the system of record for WebAuthn material (ADR-057).
+//
+// # It is not a projection, and that is the whole shape of it
+//
+// Nothing here is rebuildable from the event log. A public key never enters an
+// event, for the reason a password verifier does not: the log is permanent and
+// replicated, and a credential ID plus a public key is exactly the pair WebAuthn
+// L3 §7.1 step 27's takeover needs. So this port sits beside PasswordCredentials
+// in the one category of identity state written by the code that verifies rather
+// than by a projector.
+type PasskeyStore interface {
+	// Register stores a new credential, or reports ErrPasskeyAlreadyRegistered.
+	//
+	// The refusal is a SECURITY outcome and not a duplicate-key inconvenience:
+	// the credential id is unique across every account, so a collision means
+	// somebody is registering an id that already exists in this installation.
+	Register(ctx context.Context, c NewPasskey) error
+
+	// Find returns one credential by id, whoever owns it.
+	//
+	// Deliberately not scoped by subject: an assertion names the credential and
+	// the relying party looks it up to learn WHOSE it is. Scoping by a subject
+	// the caller supplied would trust the caller's claim about their own
+	// identity, which is what the ceremony exists to establish.
+	Find(ctx context.Context, credentialID string) (StoredPasskey, error)
+
+	// List returns every passkey an account holds, newest first.
+	List(ctx context.Context, subjectID string) ([]StoredPasskey, error)
+
+	// Advance moves the signature counter forward and reports what happened.
+	//
+	// The monotonic comparison belongs HERE rather than in a use case, because
+	// it is an atomic `UPDATE … WHERE sign_count < $new`. In Go it would be a
+	// read-modify-write that two concurrent logins can both win.
+	Advance(ctx context.Context, credentialID string, presented uint32, at time.Time) (SignCountOutcome, error)
+
+	// Remove deletes one credential, scoped to its owner.
+	Remove(ctx context.Context, credentialID, subjectID string) error
+
+	// Erase deletes every credential an account holds, returning how many.
+	//
+	// DELETED rather than crypto-shredded: this material is not encrypted under
+	// a subject key, so there is nothing to destroy that would make it
+	// unreadable. It is the one erasure path that removes rows.
+	Erase(ctx context.Context, subjectID string) (int, error)
+}
+
+// NewPasskey is a credential a completed registration ceremony produced.
+type NewPasskey struct {
+	CredentialID string
+	SubjectID    string
+
+	// PublicKey is the COSE key. Verification material: stored, never displayed,
+	// never logged, never placed in an event.
+	PublicKey []byte
+
+	SignCount uint32
+	AAGUID    []byte
+
+	// Transports are the authenticator's own hints — "usb", "internal",
+	// "hybrid" — so a browser can prompt for the right thing.
+	Transports []string
+
+	// UserVerified decides AAL2 versus AAL1 for this credential (identity.md
+	// §2), and BackupEligible/BackupState describe whether it syncs.
+	UserVerified   bool
+	BackupEligible bool
+	BackupState    bool
+
+	// Label is the person's own name for the device. Bounded before it gets
+	// here; it reaches a permanent event and a shared screen.
+	Label string
+
+	RegisteredAt time.Time
+}
+
+// StoredPasskey is one credential as the store holds it.
+type StoredPasskey struct {
+	CredentialID string
+	SubjectID    string
+	PublicKey    []byte
+	SignCount    uint32
+	AAGUID       []byte
+	Transports   []string
+
+	UserVerified   bool
+	BackupEligible bool
+	BackupState    bool
+
+	Label        string
+	RegisteredAt time.Time
+	LastUsedAt   time.Time
+
+	// CloneWarnedAt is non-zero once this credential's counter went backwards.
+	// Surfaced so a security screen can say so and an operator can ask when.
+	CloneWarnedAt time.Time
+}
+
+// SignCountOutcome is what an Advance did, and it has three shapes because the
+// counter has three meanings.
+//
+// Separated here rather than collapsed into an error, because two of the three
+// are entirely normal and the third is a warning rather than a denial. A caller
+// handed a bare error would have to guess which.
+type SignCountOutcome struct {
+	// Advanced is the ordinary case: the authenticator counted up.
+	Advanced bool
+
+	// Regressed means the presented counter was BELOW the stored one. It is a
+	// warning and a step-up, never a denial: the spec lists an out-of-order race
+	// as a benign cause, and this system treats concurrent sessions as ordinary
+	// (identity.md §6, §9). Denying would sign people out for using two devices.
+	Regressed bool
+
+	// Stored is the counter the row held, meaningful when Regressed. Reported
+	// because the DIFFERENCE is what separates a race — one or two behind — from
+	// a cloned authenticator replaying an old value.
+	Stored uint32
+}
+
+var (
+	// ErrPasskeyAlreadyRegistered means the credential id already exists in this
+	// installation, for this account or another.
+	//
+	// WebAuthn L3 §7.1 step 27. Its own error because the caller's response is
+	// specific and must never be "replace it": replacing a victim's registration
+	// with an attacker's is the takeover the uniqueness exists to prevent.
+	ErrPasskeyAlreadyRegistered = errors.New("identity: this passkey is already registered")
+
+	// ErrNoSuchPasskey means no credential is known by that id — or, for a
+	// removal, none by that id belonging to that account. One error for both, so
+	// a caller cannot use a removal to discover which ids exist.
+	ErrNoSuchPasskey = errors.New("identity: no such passkey")
+)
+
 // RevocationEpochs invalidates the authorization decisions cached for a
 // principal (ADR-045).
 //
