@@ -274,6 +274,14 @@ func TestACompletedResetVoidsEverythingAndKeepsTheSecondFactor(t *testing.T) {
 	if bearer == "" {
 		t.Fatal("CreateSession returned an empty bearer token")
 	}
+	// The token is minted by an APPEND and resolved from a PROJECTION, so there
+	// is a window in which CreateSession has returned a bearer that
+	// authenticates nothing. Under load — a full suite run rather than this test
+	// alone — the projector is far enough behind to land inside it, and the
+	// failure reads as "the reset broke the session" when the reset has not
+	// happened yet.
+	h.awaitSessionProjected(t, created.Msg.GetSessionId())
+
 	if _, err := h.client.GetUser(ctx, read(&identityv1.GetUserRequest{}, bearer)); err != nil {
 		t.Fatalf("the session does not work before the reset: %v\n%s", err, h.serverLogs())
 	}

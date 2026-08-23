@@ -37,6 +37,14 @@ type Organization struct {
 	stripeCustomerID     string
 	stripeSubscriptionID string
 	trialEndsAt          time.Time
+
+	// trialWarnedFor is the deadline the last warning was about, not a boolean.
+	//
+	// A boolean would make a warning unrepeatable for a trial that was EXTENDED
+	// — Stripe permits moving trial_end — so the customer would be warned about
+	// the old date and never about the new one. Comparing deadlines warns once
+	// per deadline, which is once per thing worth warning about.
+	trialWarnedFor time.Time
 }
 
 var _ eventsourcing.Root = (*Organization)(nil)
@@ -91,6 +99,8 @@ func (o *Organization) Apply(e eventsourcing.Event) {
 		o.stripeSubscriptionID = ev.StripeSubscriptionID
 		o.trialEndsAt = ev.TrialEndsAt
 		o.status = StatusTrialing
+	case *contract.OrganizationTrialEndingSoon:
+		o.trialWarnedFor = ev.TrialEndsAt
 	case *contract.OrganizationActivated:
 		o.status = StatusActive
 	case *contract.OrganizationPastDue:
@@ -151,6 +161,40 @@ func (o *Organization) StartTrial(customerID, subscriptionID string, endsAt, at 
 	eventsourcing.Record(o, &contract.OrganizationTrialStarted{
 		OrgID: o.orgID, StripeCustomerID: customerID, StripeSubscriptionID: subscriptionID,
 		TrialEndsAt: endsAt, StartedAt: at,
+	})
+	return nil
+}
+
+// WarnTrialEnding records that the trial-ending warning was issued.
+//
+// # Once, and only while trialing
+//
+// A reactor's delivery is at-least-once and Stripe retries by design, so this
+// runs again for warnings already sent. The guard is the RECORDED DEADLINE: a
+// second warning for the same trial end appends nothing, while a warning for a
+// LATER deadline — a trial that was extended, which Stripe permits — is a new
+// fact and is recorded.
+//
+// Refused outright once the organization has left Trialing. A `trial_will_end`
+// that arrives after the customer already added a card and converted would warn
+// a paying customer that they are about to lose access, which is worse than
+// silence.
+func (o *Organization) WarnTrialEnding(endsAt, at time.Time) error {
+	if o.status != StatusTrialing {
+		// Not an error. The webhook is stale — the customer converted, or the
+		// trial already lapsed — and asking for redelivery of an event that can
+		// never apply is a retry loop, not a safeguard.
+		return nil
+	}
+	if endsAt.IsZero() {
+		return fmt.Errorf("organization: a trial-ending warning needs the deadline it is " +
+			"warning about; the mail states a date")
+	}
+	if !o.trialWarnedFor.IsZero() && !endsAt.After(o.trialWarnedFor) {
+		return nil // already warned for this deadline
+	}
+	eventsourcing.Record(o, &contract.OrganizationTrialEndingSoon{
+		OrgID: o.orgID, TrialEndsAt: endsAt, WarnedAt: at,
 	})
 	return nil
 }

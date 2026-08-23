@@ -49,10 +49,28 @@ type Sync interface {
 	Apply(ctx context.Context, state orgapp.SubscriptionState, eventID string) error
 }
 
+// Trials records the warning that a trial is about to end.
+//
+// Separate from Sync because the two answer different questions about the same
+// webhook. `trial_will_end` names a subscription whose status is still
+// `trialing`, so the sync correctly does nothing; the warning is about a
+// DEADLINE, not a status.
+type Trials interface {
+	Warn(ctx context.Context, orgID string, trialEndsAt time.Time, eventID string) error
+}
+
+// TrialWillEndEvent is Stripe's warning, three days before a trial ends.
+//
+// For a CARDLESS trial it is the only warning anybody gets: the subscription
+// then pauses, the organization is Suspended, and the first signal a customer
+// would otherwise have is being locked out of their own tenant.
+const TrialWillEndEvent = "customer.subscription.trial_will_end"
+
 // Webhook is the endpoint Stripe posts to.
 type Webhook struct {
 	verifier Verifier
 	sync     Sync
+	trials   Trials
 	events   EventLog
 	log      *slog.Logger
 }
@@ -61,6 +79,7 @@ type Webhook struct {
 type WebhookDeps struct {
 	Verifier Verifier
 	Sync     Sync
+	Trials   Trials
 	Events   EventLog
 	Log      *slog.Logger
 }
@@ -72,13 +91,20 @@ func NewWebhook(d WebhookDeps) (*Webhook, error) {
 			"unverified events would be an unauthenticated way to suspend a tenant")
 	case d.Sync == nil:
 		return nil, fmt.Errorf("billing: a subscription sync is required")
+	case d.Trials == nil:
+		return nil, fmt.Errorf("billing: a trial warning use case is required; without one " +
+			"trial_will_end is consumed and dropped, and a cardless trial's only warning " +
+			"is never sent — the customer's first signal is being locked out")
 	case d.Events == nil:
 		return nil, fmt.Errorf("billing: an event log is required; without the idempotency " +
 			"boundary Stripe's redeliveries would each apply the change again")
 	case d.Log == nil:
 		return nil, fmt.Errorf("billing: a logger is required")
 	}
-	return &Webhook{verifier: d.Verifier, sync: d.Sync, events: d.Events, log: d.Log}, nil
+	return &Webhook{
+		verifier: d.Verifier, sync: d.Sync, trials: d.Trials,
+		events: d.Events, log: d.Log,
+	}, nil
 }
 
 // Path is where Stripe posts. Referenced by the wiring and by `stripe listen`.
@@ -195,7 +221,20 @@ func (w *Webhook) apply(ctx context.Context, event stripeadapter.Event, payload 
 			"event_id", event.ID, "type", event.Type, "reason", err)
 		return nil
 	}
-	return w.sync.Apply(ctx, state, event.ID)
+	// The sync runs for EVERY event that names a subscription, including this
+	// one, and it runs FIRST. `trial_will_end` reports `trialing`, which is
+	// almost always the state the organization is already in — so the sync is a
+	// no-op and the ordering looks arbitrary. It is not: if the provisioning
+	// event has not been applied yet, the sync is what puts the organization
+	// into Trialing, and the warning below refuses to fire for an organization
+	// that is not.
+	if err := w.sync.Apply(ctx, state, event.ID); err != nil {
+		return err
+	}
+	if event.Type == TrialWillEndEvent {
+		return w.trials.Warn(ctx, state.OrgID, state.TrialEndsAt, event.ID)
+	}
+	return nil
 }
 
 // note records why an event failed, without marking it processed.

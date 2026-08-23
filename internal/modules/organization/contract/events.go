@@ -52,6 +52,37 @@ type OrganizationTrialStarted struct {
 
 func (*OrganizationTrialStarted) EventType() string { return "organization.TrialStarted.v1" }
 
+// OrganizationTrialEndingSoon is the warning before the lights go out.
+//
+// Stripe emits `customer.subscription.trial_will_end` three days before a trial
+// ends, and for a CARDLESS trial that is the only warning anybody gets: the
+// subscription then pauses, the organization is Suspended, and the first signal
+// a customer would otherwise have is being locked out of their own tenant.
+//
+// # Why it is an event and not a mail sent from the webhook
+//
+// "We warned them" is a fact worth keeping. Support answers "did we tell you?"
+// from it, reconciliation can find a trial that ended with no warning recorded,
+// and the aggregate refusing a second one is what makes a redelivered webhook
+// stop at one mail instead of three.
+//
+// It carries no personal data — no address, no name. The recipient is resolved
+// from the pseudonym in the envelope's metadata at send time (ADR-002).
+type OrganizationTrialEndingSoon struct {
+	OrgID string
+
+	// TrialEndsAt is Stripe's deadline as re-fetched, not a local computation.
+	// The mail states a date, and a date computed here could differ from the one
+	// the subscription actually enforces.
+	TrialEndsAt time.Time
+
+	WarnedAt time.Time
+}
+
+func (*OrganizationTrialEndingSoon) EventType() string {
+	return "organization.TrialEndingSoon.v1"
+}
+
 // OrganizationActivated is a paying organization.
 //
 // Reached from Trialing when a card is added and the subscription converts, and

@@ -49,6 +49,13 @@ func TestEveryTemplateRenders(t *testing.T) {
 					"ExpiresIn": "1 hour",
 					"Component": "projector", "Severity": "critical",
 					"Summary": "identity_users stopped", "Detail": "column does not exist",
+
+					// A time.Time, not a string. The `date` and `datetime`
+					// helpers take one, so a template that formats a deadline
+					// fails here on any other type — which is the point: this
+					// fixture is the only place a template's data contract is
+					// checked before a customer sees the result.
+					"TrialEndsAt": time.Date(2026, 3, 28, 9, 26, 53, 0, time.UTC),
 				},
 			})
 			if err != nil {

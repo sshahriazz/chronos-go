@@ -59,6 +59,17 @@ func (d *dependencies) buildStripeWebhook(
 		return nil, fmt.Errorf("subscription sync: %w", err)
 	}
 
+	// The trial warning shares the organization repository with the sync, and
+	// is deliberately a SEPARATE use case rather than a branch inside it: the
+	// two consume the same webhook and answer different questions, and
+	// `trial_will_end` is the one event that changes no status at all.
+	trials, err := orgapp.NewTrialWarnings(orgapp.TrialWarningsDeps{
+		Repo: repo, Now: d.clock.Now,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("trial warnings: %w", err)
+	}
+
 	log.Info("stripe webhook endpoint constructed",
 		"path", billingapi.Path,
 		// Named at startup because a rotation in flight is exactly when
@@ -74,6 +85,7 @@ func (d *dependencies) buildStripeWebhook(
 	return billingapi.NewWebhook(billingapi.WebhookDeps{
 		Verifier: verifier,
 		Sync:     sync,
+		Trials:   trials,
 		Events:   events,
 		Log:      log,
 	})

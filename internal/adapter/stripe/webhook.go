@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	stripe "github.com/stripe/stripe-go/v86"
 	"github.com/stripe/stripe-go/v86/webhook"
@@ -167,9 +168,19 @@ func (v *Verifier) SubscriptionFor(ctx context.Context, payload []byte) (app.Sub
 	// Stripe's billing-period arithmetic — which billing.md §6 refuses for
 	// discounts and the same reasoning covers. Stripe owns the retry SCHEDULE;
 	// what we hold is only what the customer is shown.
+	// The deadline as STRIPE reports it, not as we might compute it. The warning
+	// mail states a date, and a date computed here could differ from the one the
+	// subscription actually enforces — which is a support ticket that begins
+	// "your email said the 14th".
+	var trialEndsAt time.Time
+	if sub.TrialEnd != 0 {
+		trialEndsAt = time.Unix(sub.TrialEnd, 0).UTC()
+	}
+
 	return app.SubscriptionState{
 		OrgID:          orgID,
 		SubscriptionID: sub.ID,
 		Status:         domain.StripeStatus(sub.Status),
+		TrialEndsAt:    trialEndsAt,
 	}, nil
 }

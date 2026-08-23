@@ -4,6 +4,7 @@ package postgres_test
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"testing"
@@ -80,20 +81,41 @@ func seedSession(
 
 // sessionEntropy is an unlimited byte source. ids.New panics on a short read, so
 // it must never run out.
+// sessionEntropy is the ULID entropy source for seeded sessions.
+//
+// crypto/rand, not the clock. The previous version derived every byte from one
+// `time.Now().UnixNano()`, which gives two ids generated in the same nanosecond
+// the same entropy — and a seeding loop generates several per microsecond. See
+// sessionDigest below, where exactly that cost a real failure.
 type sessionEntropy struct{}
 
-func (sessionEntropy) Read(p []byte) (int, error) {
-	for i := range p {
-		p[i] = byte(time.Now().UnixNano() >> (i % 8))
-	}
-	return len(p), nil
-}
+func (sessionEntropy) Read(p []byte) (int, error) { return rand.Read(p) }
 
+// sessionDigest is a unique 32-byte token digest.
+//
+// # Why crypto/rand and not the clock
+//
+// The digest is `session_token`'s PRIMARY KEY, so two seeds that produce the
+// same bytes fail the insert. The previous version was
+// `seed ^ byte(i) ^ byte(time.Now().UnixNano())` — the LOW BYTE of nanotime,
+// which is constant across any two calls less than 256ns apart. A seeding loop
+// makes several calls per microsecond, so it collided whenever two iterations
+// landed in the same bucket: eight bits of entropy behind a unique constraint.
+//
+// It failed as `duplicate key value violates unique constraint
+// "session_token_pkey"` from inside a helper called `seeding a session token`,
+// which reads as a schema problem rather than as the fixture running out of
+// distinct values.
+//
+// The seed is kept so a caller can still make two digests deliberately
+// DIFFERENT in a readable way, and is XORed into random bytes rather than
+// standing in for them.
 func sessionDigest(seed byte) []byte {
 	out := make([]byte, 32)
-	for i := range out {
-		out[i] = seed ^ byte(i) ^ byte(time.Now().UnixNano())
+	if _, err := rand.Read(out); err != nil {
+		panic("sessionDigest: " + err.Error())
 	}
+	out[0] ^= seed
 	return out
 }
 

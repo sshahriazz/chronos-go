@@ -22,6 +22,11 @@ type SubscriptionState struct {
 	SubscriptionID string
 	Status         domain.StripeStatus
 	GraceEndsAt    time.Time
+
+	// TrialEndsAt is the re-fetched deadline, zero when the subscription is not
+	// trialing. SubscriptionSync ignores it — a trial end is not a status — and
+	// TrialWarnings is what it is here for.
+	TrialEndsAt time.Time
 }
 
 // SubscriptionSync applies a subscription's current state to an organization.

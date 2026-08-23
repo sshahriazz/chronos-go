@@ -1,0 +1,10 @@
+{{define "title"}}Your Chronos trial ends {{date .TrialEndsAt}}{{end}}
+{{define "content"}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 14px;">Your Chronos trial ends on <strong>{{datetime .TrialEndsAt}}</strong>.</p>
+<p style="margin:0 0 14px;">There is no card on the account, so when the trial ends your
+  organisation will be <strong>suspended</strong>: nobody will be able to sign in to it.
+  Nothing is deleted, and nothing is charged.</p>
+<p style="margin:0 0 20px;">Adding a card restores access immediately, whether you do it before
+  the trial ends or afterwards. You can do that from Billing in your organisation settings.</p>
+{{end}}

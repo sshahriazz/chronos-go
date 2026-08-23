@@ -481,6 +481,28 @@ func identityNotifications(cat *notify.Catalogue) {
 			"there is an owner address to resolve. It is silent today because the audience " +
 			"is the owner and notify addresses a SUBJECT — which is the same thing here, " +
 			"and will stop being so as soon as admins exist")
+	// THE ONE ORGANIZATION EVENT THAT MAILS, and the reason it can when its
+	// neighbours cannot is that its use case puts the OWNER in the envelope's
+	// SubjectIDs. AudienceSubject reads exactly that field, so the audience
+	// problem the silent entries describe is solved here by naming the audience
+	// at the append rather than by resolving a role at send time.
+	//
+	// Transactional, not Product: it is about the service the recipient signed
+	// up for, and a class that could be switched off would make silent
+	// suspension a preference. For a cardless trial this is the ONLY warning
+	// anybody gets before the subscription pauses.
+	cat.On[orgevents.OrganizationTrialEndingSoon](notify.Spec{
+		Template: "organization.trial_ending_soon",
+		Class:    notify.Transactional,
+		Audience: notify.AudienceSubject,
+	}, func(e *orgevents.OrganizationTrialEndingSoon) map[string]any {
+		// The DEADLINE only. No organization name, no address, no owner id — the
+		// recipient is resolved from the vault at send time, and anything
+		// identifying passed through here would travel to the template by way of
+		// the event log (ADR-002).
+		return map[string]any{"TrialEndsAt": e.TrialEndsAt}
+	})
+
 	cat.Silent[orgevents.OrganizationActivated](
 		"Stripe already emails a receipt for the payment that caused it. A second message " +
 			"saying the same thing is the duplicate-dunning mistake billing.md §5 case 5 " +

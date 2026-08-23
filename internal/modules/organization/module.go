@@ -23,6 +23,7 @@ import (
 func RegisterEvents(codec *eventcodec.JSON) {
 	eventcodec.Register[contract.OrganizationCreated](codec)
 	eventcodec.Register[contract.OrganizationTrialStarted](codec)
+	eventcodec.Register[contract.OrganizationTrialEndingSoon](codec)
 	eventcodec.Register[contract.OrganizationActivated](codec)
 	eventcodec.Register[contract.OrganizationPastDue](codec)
 	eventcodec.Register[contract.OrganizationSuspended](codec)
