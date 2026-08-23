@@ -519,9 +519,34 @@ already has a name for.
       billing.md §5 case 25's requirement — one subscription for the
       organization's whole life, so billing history stays continuous and the
       mirror needs no re-keying.
-- [ ] **The two deactivation flakes.** Nine clean runs. A targeted reproduction
-      attempt is cheap; if it does not reproduce again, the honest outcome is to
-      leave it open with the count updated rather than to close it.
+- [x] **`identityit TestADeactivatedAccountCanGetBackIn` — a real race, found by
+      READING it rather than by running it again.** Ten more clean runs produced
+      nothing, which is what a narrow timing window does; the cause was visible
+      in the test.
+
+      It asserted the caller's bearer was dead IMMEDIATELY after
+      `DeactivateAccount` returned. Revocation is an APPEND and
+      `GetSessionByToken` reads `revoked_at` from `session_view`, a PROJECTION —
+      so there is a window in which the call has returned and the token still
+      authenticates. Under load the projector is far enough behind to land
+      inside it, and the failure reads as "deactivation does not revoke
+      sessions" when the revocation is recorded and merely not applied yet.
+
+      The same shape as the password-reset flake fixed earlier this session, and
+      the harness already had `awaitLiveSessions` for exactly this. The test now
+      waits for the revocation to project.
+
+- [ ] **`protocolit .../DeactivateAccount` — still open, and now better
+      isolated.** Checked for the same shape and it does not have it:
+      `bootstrapBearer` already calls `awaitSessionProjected` before returning a
+      token, so the step-up assertions are not racing the session projection.
+
+      Nineteen clean runs this session. Its standing explanation remains the
+      exhausted per-IP rate-limit buckets, and that fix has landed — as has
+      `-p 1`, which removed a second confound of the same family
+      (cross-package contention producing failures in unrelated assertions).
+      Two removed confounds is not proof, so it stays open; but a sighting now
+      would be genuinely informative rather than ambiguous.
 
 ### P3 — real features, unblocked
 

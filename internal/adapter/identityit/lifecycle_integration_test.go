@@ -286,6 +286,24 @@ func TestADeactivatedAccountCanGetBackIn(t *testing.T) {
 	t.Logf("deactivated: changed=%v revoked=%d scanned=%d", deact.Msg.GetChanged(),
 		deact.Msg.GetSessionsRevoked(), deact.Msg.GetSessionsScanned())
 
+	// WAIT FOR THE REVOCATION TO PROJECT before asserting the token is dead.
+	//
+	// The revocation is an APPEND; `GetSessionByToken` reads `revoked_at` from
+	// `session_view`, which is a PROJECTION. So there is a window in which
+	// DeactivateAccount has returned and the bearer still authenticates — and
+	// asserting immediately races it. Under load the projector is far enough
+	// behind to land inside that window, and the failure reads as "deactivation
+	// does not revoke sessions" when the revocation is recorded and simply not
+	// applied yet.
+	//
+	// This is the same shape as the password-reset flake fixed earlier in this
+	// suite: a projection-derived auth decision asserted immediately after the
+	// append that changes it. It is a strong candidate for the intermittent
+	// failure this test has been parked on — parked because it did not reproduce,
+	// which is exactly what a narrow timing window does.
+	h.awaitLiveSessions(t, acct.subjectID, func(n int) bool { return n == 0 },
+		"none, because the deactivation revoked them")
+
 	// The bearer that made the call is dead. This is the assertion that would
 	// still pass if the revocation had been skipped ONLY IF the authenticator
 	// checked account state — it does not (GetSessionByToken joins user_view for
