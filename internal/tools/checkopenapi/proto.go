@@ -103,7 +103,8 @@ func mutatingClass(c optionsv1.OperationClass) bool {
 	switch c {
 	case optionsv1.OperationClass_OPERATION_CLASS_WRITE,
 		optionsv1.OperationClass_OPERATION_CLASS_GROW,
-		optionsv1.OperationClass_OPERATION_CLASS_BILLING_MANAGE:
+		optionsv1.OperationClass_OPERATION_CLASS_BILLING_MANAGE,
+		optionsv1.OperationClass_OPERATION_CLASS_EXPORT:
 		return true
 	default:
 		return false

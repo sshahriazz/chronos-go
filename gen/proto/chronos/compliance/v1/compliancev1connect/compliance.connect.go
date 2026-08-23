@@ -52,6 +52,12 @@ const (
 	// ComplianceServiceExportMyDataProcedure is the fully-qualified name of the ComplianceService's
 	// ExportMyData RPC.
 	ComplianceServiceExportMyDataProcedure = "/chronos.compliance.v1.ComplianceService/ExportMyData"
+	// ComplianceServiceGetDataExportProcedure is the fully-qualified name of the ComplianceService's
+	// GetDataExport RPC.
+	ComplianceServiceGetDataExportProcedure = "/chronos.compliance.v1.ComplianceService/GetDataExport"
+	// ComplianceServiceListDataExportsProcedure is the fully-qualified name of the ComplianceService's
+	// ListDataExports RPC.
+	ComplianceServiceListDataExportsProcedure = "/chronos.compliance.v1.ComplianceService/ListDataExports"
 	// ComplianceServiceGetProcessingRestrictionProcedure is the fully-qualified name of the
 	// ComplianceService's GetProcessingRestriction RPC.
 	ComplianceServiceGetProcessingRestrictionProcedure = "/chronos.compliance.v1.ComplianceService/GetProcessingRestriction"
@@ -126,6 +132,33 @@ type ComplianceServiceClient interface {
 	// bundles to be purged on erasure; putting them there makes that a property of
 	// where they live rather than a step somebody has to remember.
 	ExportMyData(context.Context, *connect.Request[v1.ExportMyDataRequest]) (*connect.Response[v1.ExportMyDataResponse], error)
+	// GetDataExport reports where one of the caller's own requests has got to,
+	// and mints the download links once it is ready.
+	//
+	// # A READ, and AAL1
+	//
+	// Somebody must be able to check on their own request from an ordinary
+	// session. Requiring step-up to POLL would mean a person who asked for their
+	// data at AAL2 could not find out whether it was ready without stepping up
+	// again — on the endpoint they are already waiting on.
+	//
+	// The links it mints are a different matter, and they are bounded rather than
+	// gated: every URL expires within the hour, and the request that produced them
+	// required AAL2.
+	//
+	// # The id is not the authorization
+	//
+	// It is unguessable, and unguessable is not an authorization rule. The server
+	// matches it against the authenticated caller, so an id belonging to somebody
+	// else answers exactly as an unknown one — which is the only thing a holder of
+	// a leaked id learns for free.
+	GetDataExport(context.Context, *connect.Request[v1.GetDataExportRequest]) (*connect.Response[v1.GetDataExportResponse], error)
+	// ListDataExports returns the caller's own request history, newest first.
+	//
+	// It carries NO links. Minting one per file of every past export would turn a
+	// list screen into a bulk issuance of bearer capabilities for everything the
+	// person has ever exported; the caller opens the one they want.
+	ListDataExports(context.Context, *connect.Request[v1.ListDataExportsRequest]) (*connect.Response[v1.ListDataExportsResponse], error)
 	// GetProcessingRestriction reports whether the caller's data is restricted.
 	//
 	// A READ, and AAL1: somebody must be able to see the state of their own
@@ -163,6 +196,18 @@ func NewComplianceServiceClient(httpClient connect.HTTPClient, baseURL string, o
 			connect.WithSchema(complianceServiceMethods.ByName("ExportMyData")),
 			connect.WithClientOptions(opts...),
 		),
+		getDataExport: connect.NewClient[v1.GetDataExportRequest, v1.GetDataExportResponse](
+			httpClient,
+			baseURL+ComplianceServiceGetDataExportProcedure,
+			connect.WithSchema(complianceServiceMethods.ByName("GetDataExport")),
+			connect.WithClientOptions(opts...),
+		),
+		listDataExports: connect.NewClient[v1.ListDataExportsRequest, v1.ListDataExportsResponse](
+			httpClient,
+			baseURL+ComplianceServiceListDataExportsProcedure,
+			connect.WithSchema(complianceServiceMethods.ByName("ListDataExports")),
+			connect.WithClientOptions(opts...),
+		),
 		getProcessingRestriction: connect.NewClient[v1.GetProcessingRestrictionRequest, v1.GetProcessingRestrictionResponse](
 			httpClient,
 			baseURL+ComplianceServiceGetProcessingRestrictionProcedure,
@@ -177,6 +222,8 @@ type complianceServiceClient struct {
 	restrictProcessing        *connect.Client[v1.RestrictProcessingRequest, v1.RestrictProcessingResponse]
 	liftProcessingRestriction *connect.Client[v1.LiftProcessingRestrictionRequest, v1.LiftProcessingRestrictionResponse]
 	exportMyData              *connect.Client[v1.ExportMyDataRequest, v1.ExportMyDataResponse]
+	getDataExport             *connect.Client[v1.GetDataExportRequest, v1.GetDataExportResponse]
+	listDataExports           *connect.Client[v1.ListDataExportsRequest, v1.ListDataExportsResponse]
 	getProcessingRestriction  *connect.Client[v1.GetProcessingRestrictionRequest, v1.GetProcessingRestrictionResponse]
 }
 
@@ -194,6 +241,16 @@ func (c *complianceServiceClient) LiftProcessingRestriction(ctx context.Context,
 // ExportMyData calls chronos.compliance.v1.ComplianceService.ExportMyData.
 func (c *complianceServiceClient) ExportMyData(ctx context.Context, req *connect.Request[v1.ExportMyDataRequest]) (*connect.Response[v1.ExportMyDataResponse], error) {
 	return c.exportMyData.CallUnary(ctx, req)
+}
+
+// GetDataExport calls chronos.compliance.v1.ComplianceService.GetDataExport.
+func (c *complianceServiceClient) GetDataExport(ctx context.Context, req *connect.Request[v1.GetDataExportRequest]) (*connect.Response[v1.GetDataExportResponse], error) {
+	return c.getDataExport.CallUnary(ctx, req)
+}
+
+// ListDataExports calls chronos.compliance.v1.ComplianceService.ListDataExports.
+func (c *complianceServiceClient) ListDataExports(ctx context.Context, req *connect.Request[v1.ListDataExportsRequest]) (*connect.Response[v1.ListDataExportsResponse], error) {
+	return c.listDataExports.CallUnary(ctx, req)
 }
 
 // GetProcessingRestriction calls chronos.compliance.v1.ComplianceService.GetProcessingRestriction.
@@ -271,6 +328,33 @@ type ComplianceServiceHandler interface {
 	// bundles to be purged on erasure; putting them there makes that a property of
 	// where they live rather than a step somebody has to remember.
 	ExportMyData(context.Context, *connect.Request[v1.ExportMyDataRequest]) (*connect.Response[v1.ExportMyDataResponse], error)
+	// GetDataExport reports where one of the caller's own requests has got to,
+	// and mints the download links once it is ready.
+	//
+	// # A READ, and AAL1
+	//
+	// Somebody must be able to check on their own request from an ordinary
+	// session. Requiring step-up to POLL would mean a person who asked for their
+	// data at AAL2 could not find out whether it was ready without stepping up
+	// again — on the endpoint they are already waiting on.
+	//
+	// The links it mints are a different matter, and they are bounded rather than
+	// gated: every URL expires within the hour, and the request that produced them
+	// required AAL2.
+	//
+	// # The id is not the authorization
+	//
+	// It is unguessable, and unguessable is not an authorization rule. The server
+	// matches it against the authenticated caller, so an id belonging to somebody
+	// else answers exactly as an unknown one — which is the only thing a holder of
+	// a leaked id learns for free.
+	GetDataExport(context.Context, *connect.Request[v1.GetDataExportRequest]) (*connect.Response[v1.GetDataExportResponse], error)
+	// ListDataExports returns the caller's own request history, newest first.
+	//
+	// It carries NO links. Minting one per file of every past export would turn a
+	// list screen into a bulk issuance of bearer capabilities for everything the
+	// person has ever exported; the caller opens the one they want.
+	ListDataExports(context.Context, *connect.Request[v1.ListDataExportsRequest]) (*connect.Response[v1.ListDataExportsResponse], error)
 	// GetProcessingRestriction reports whether the caller's data is restricted.
 	//
 	// A READ, and AAL1: somebody must be able to see the state of their own
@@ -304,6 +388,18 @@ func NewComplianceServiceHandler(svc ComplianceServiceHandler, opts ...connect.H
 		connect.WithSchema(complianceServiceMethods.ByName("ExportMyData")),
 		connect.WithHandlerOptions(opts...),
 	)
+	complianceServiceGetDataExportHandler := connect.NewUnaryHandler(
+		ComplianceServiceGetDataExportProcedure,
+		svc.GetDataExport,
+		connect.WithSchema(complianceServiceMethods.ByName("GetDataExport")),
+		connect.WithHandlerOptions(opts...),
+	)
+	complianceServiceListDataExportsHandler := connect.NewUnaryHandler(
+		ComplianceServiceListDataExportsProcedure,
+		svc.ListDataExports,
+		connect.WithSchema(complianceServiceMethods.ByName("ListDataExports")),
+		connect.WithHandlerOptions(opts...),
+	)
 	complianceServiceGetProcessingRestrictionHandler := connect.NewUnaryHandler(
 		ComplianceServiceGetProcessingRestrictionProcedure,
 		svc.GetProcessingRestriction,
@@ -318,6 +414,10 @@ func NewComplianceServiceHandler(svc ComplianceServiceHandler, opts ...connect.H
 			complianceServiceLiftProcessingRestrictionHandler.ServeHTTP(w, r)
 		case ComplianceServiceExportMyDataProcedure:
 			complianceServiceExportMyDataHandler.ServeHTTP(w, r)
+		case ComplianceServiceGetDataExportProcedure:
+			complianceServiceGetDataExportHandler.ServeHTTP(w, r)
+		case ComplianceServiceListDataExportsProcedure:
+			complianceServiceListDataExportsHandler.ServeHTTP(w, r)
 		case ComplianceServiceGetProcessingRestrictionProcedure:
 			complianceServiceGetProcessingRestrictionHandler.ServeHTTP(w, r)
 		default:
@@ -339,6 +439,14 @@ func (UnimplementedComplianceServiceHandler) LiftProcessingRestriction(context.C
 
 func (UnimplementedComplianceServiceHandler) ExportMyData(context.Context, *connect.Request[v1.ExportMyDataRequest]) (*connect.Response[v1.ExportMyDataResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.compliance.v1.ComplianceService.ExportMyData is not implemented"))
+}
+
+func (UnimplementedComplianceServiceHandler) GetDataExport(context.Context, *connect.Request[v1.GetDataExportRequest]) (*connect.Response[v1.GetDataExportResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.compliance.v1.ComplianceService.GetDataExport is not implemented"))
+}
+
+func (UnimplementedComplianceServiceHandler) ListDataExports(context.Context, *connect.Request[v1.ListDataExportsRequest]) (*connect.Response[v1.ListDataExportsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.compliance.v1.ComplianceService.ListDataExports is not implemented"))
 }
 
 func (UnimplementedComplianceServiceHandler) GetProcessingRestriction(context.Context, *connect.Request[v1.GetProcessingRestrictionRequest]) (*connect.Response[v1.GetProcessingRestrictionResponse], error) {

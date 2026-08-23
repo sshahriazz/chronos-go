@@ -476,6 +476,22 @@ func reactors(ctx context.Context, codec *eventcodec.JSON, d *dependencies) []re
 		rs = append(rs, r)
 	}
 
+	// The DATA EXPORT reactor: it turns an accepted request into a running
+	// workflow. Its own group, so a Temporal outage parks export requests on
+	// their own queue rather than sharing retries with erasure.
+	//
+	// Its absence is completely silent at runtime: the request is recorded, the
+	// person is told it was accepted, and no workflow ever builds a bundle — so
+	// it sits at `pending` forever with no error, no parked event and no metric,
+	// while Article 15's one-month clock runs out.
+	if r, err := newExportReactor(d); err != nil {
+		slog.Default().Error("the data-export reactor is NOT registered; every accepted "+
+			"Article 15 request is consumed by nothing, stays pending forever, and the "+
+			"person who asked receives no bundle and no failure", "error", err)
+	} else {
+		rs = append(rs, r)
+	}
+
 	// Provisioning: the reactor that turns a created organization into a usable
 	// one. Its own group, so a Stripe outage parks on its own queue rather than
 	// sharing retries with every notification in the system.

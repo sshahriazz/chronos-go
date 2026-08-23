@@ -19,6 +19,7 @@ import (
 	"github.com/chronos/chronos-go/internal/modules/compliance/app"
 	"github.com/chronos/chronos-go/internal/platform/authz"
 	"github.com/chronos/chronos-go/internal/platform/cqrs"
+	"github.com/chronos/chronos-go/internal/platform/errs"
 	"github.com/chronos/chronos-go/internal/server/interceptor"
 	"github.com/chronos/chronos-go/internal/server/policy"
 )
@@ -66,16 +67,45 @@ func (f *fakeRestrictions) State(
 // would prove nothing about where handlers get theirs.
 // fakeExports stands in where a test is about restrictions.
 type fakeExports struct {
-	result app.ExportResult
-	err    error
-	asked  []string
+	exportID string
+	err      error
+	asked    []app.RequestExportCommand
 }
 
-func (f *fakeExports) Produce(
-	_ context.Context, subjectID string,
-) (app.ExportResult, error) {
-	f.asked = append(f.asked, subjectID)
-	return f.result, f.err
+func (f *fakeExports) Request(
+	_ context.Context, cmd app.RequestExportCommand,
+) (string, error) {
+	f.asked = append(f.asked, cmd)
+	if f.err != nil {
+		return "", f.err
+	}
+	id := f.exportID
+	if id == "" {
+		id = "export_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	}
+	return id, nil
+}
+
+// fakeExportViews stands in for the READ half.
+type fakeExportViews struct {
+	view  app.ExportView
+	list  []app.ExportView
+	err   error
+	asked []string
+}
+
+func (f *fakeExportViews) Get(
+	_ context.Context, exportID, subjectID string,
+) (app.ExportView, error) {
+	f.asked = append(f.asked, exportID+"|"+subjectID)
+	return f.view, f.err
+}
+
+func (f *fakeExportViews) List(
+	_ context.Context, subjectID string, _ int,
+) ([]app.ExportView, error) {
+	f.asked = append(f.asked, "list|"+subjectID)
+	return f.list, f.err
 }
 
 func service(
@@ -84,7 +114,7 @@ func service(
 	t.Helper()
 
 	svc, err := complianceapi.New(complianceapi.Deps{
-		Restrictions: r, Exports: &fakeExports{},
+		Restrictions: r, Exports: &fakeExports{}, ExportViews: &fakeExportViews{},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -352,12 +382,10 @@ func TestTheComplianceServiceRefusesAnIncompleteWiring(t *testing.T) {
 // description warns about — so the schema has no field for one and the handler
 // reads the principal.
 func TestTheExportActsOnTheAuthenticatedCaller(t *testing.T) {
-	exports := &fakeExports{result: app.ExportResult{
-		DownloadURL: "https://s3.example.test/bundle?sig=x",
-		ExpiresAt:   since.Add(time.Hour),
-	}}
+	exports := &fakeExports{exportID: "export_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
 	svc, err := complianceapi.New(complianceapi.Deps{
 		Restrictions: &fakeRestrictions{}, Exports: exports,
+		ExportViews: &fakeExportViews{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -365,15 +393,24 @@ func TestTheExportActsOnTheAuthenticatedCaller(t *testing.T) {
 	client := pipeline(t, svc, user(caller))
 
 	res, err := client.ExportMyData(context.Background(),
-		connect.NewRequest(&compliancev1.ExportMyDataRequest{}))
+		withKey(&compliancev1.ExportMyDataRequest{}, "k-export"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(exports.asked) != 1 || exports.asked[0] != caller {
+	if len(exports.asked) != 1 || exports.asked[0].SubjectID != caller {
 		t.Fatalf("exported for %v, want the authenticated caller %q", exports.asked, caller)
 	}
-	if res.Msg.GetDownloadUrl() != exports.result.DownloadURL {
-		t.Errorf("returned %q", res.Msg.GetDownloadUrl())
+	if exports.asked[0].IdempotencyKey != "k-export" {
+		t.Errorf("the idempotency key reached the app layer as %q; the export ID is "+
+			"DERIVED from it, so losing it starts a second workflow on every retry",
+			exports.asked[0].IdempotencyKey)
+	}
+	if res.Msg.GetExportId() != "export_01ARZ3NDEKTSV4RRFFQ69G5FAV" {
+		t.Errorf("returned export id %q", res.Msg.GetExportId())
+	}
+	// PENDING, always, and never a link: the bundle does not exist yet.
+	if res.Msg.GetStatus() != compliancev1.DataExportStatus_DATA_EXPORT_STATUS_PENDING {
+		t.Errorf("a freshly accepted request reports status %v", res.Msg.GetStatus())
 	}
 }
 
@@ -383,9 +420,10 @@ func TestTheExportActsOnTheAuthenticatedCaller(t *testing.T) {
 // belongs in a response to a browser.
 func TestAFailingExportDoesNotLeakTheStoreError(t *testing.T) {
 	const leak = "NoSuchBucket: chronos-prod-eu at s3.internal:8333"
-	exports := &fakeExports{err: errors.New(leak)}
+	exports := &fakeExports{err: errs.Internalf("producing the export").Wrap(errors.New(leak))}
 	svc, err := complianceapi.New(complianceapi.Deps{
 		Restrictions: &fakeRestrictions{}, Exports: exports,
+		ExportViews: &fakeExportViews{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -393,7 +431,7 @@ func TestAFailingExportDoesNotLeakTheStoreError(t *testing.T) {
 	client := pipeline(t, svc, user(caller))
 
 	_, err = client.ExportMyData(context.Background(),
-		connect.NewRequest(&compliancev1.ExportMyDataRequest{}))
+		withKey(&compliancev1.ExportMyDataRequest{}, "k-fail"))
 	if err == nil {
 		t.Fatal("a failing export reported success")
 	}

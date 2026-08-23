@@ -109,7 +109,16 @@ func TestMutatingFollowsTheOperationClass(t *testing.T) {
 		optionsv1.OperationClass_OPERATION_CLASS_GROW:           true,
 		optionsv1.OperationClass_OPERATION_CLASS_BILLING_VIEW:   false,
 		optionsv1.OperationClass_OPERATION_CLASS_BILLING_MANAGE: true,
-		optionsv1.OperationClass_OPERATION_CLASS_EXPORT:         false,
+		// EXPORT is mutating, and it was not until the export became asynchronous.
+		// It used to build a bundle inside the request and change nothing; it now
+		// appends a data-subject request and derives that request's id from the
+		// caller's key, so a retry without one starts a second workflow and
+		// produces a second bundle.
+		//
+		// Being mutating is INDEPENDENT of the subscription gate's exemption —
+		// BILLING_MANAGE is the precedent, requiring a key and never being blocked
+		// by gate 4.
+		optionsv1.OperationClass_OPERATION_CLASS_EXPORT: true,
 	} {
 		if got := (policy.Policy{Operation: class}).Mutating(); got != want {
 			t.Errorf("%s: Mutating() = %v, want %v — a write not classed as mutating is a "+

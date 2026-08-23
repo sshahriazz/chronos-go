@@ -272,6 +272,13 @@ func projections(codec *eventcodec.JSON) []projection.Projection {
 		// processing resumes for exactly the people who asked it to stop.
 		complianceprojection.NewRestrictions(codec),
 
+		// Data-subject export requests. Its absence is silent in a different
+		// direction from the one above: the workflow still builds the bundle and
+		// still records the outcome in the log, but the subject's poll finds no
+		// row — so a completed export reads as a request that was never made, and
+		// the person is told to ask again for something they already have.
+		complianceprojection.NewExports(codec),
+
 		// Both membership projections belong to WORKSPACE, including the one
 		// that builds `org_member_index`: belonging to an organization comes
 		// from organization events AND from workspace joins, one table has one

@@ -505,6 +505,61 @@ components:
       title: ListInvoicesResponse
       additionalProperties: false
       description: ListInvoicesResponse is one page, newest first.
+    chronos.compliance.v1.DataExportStatus:
+      type: string
+      title: DataExportStatus
+      enum:
+        - DATA_EXPORT_STATUS_UNSPECIFIED
+        - DATA_EXPORT_STATUS_PENDING
+        - DATA_EXPORT_STATUS_READY
+        - DATA_EXPORT_STATUS_FAILED
+      description: DataExportStatus is where one request has got to.
+    chronos.compliance.v1.DataExportSummary:
+      type: object
+      properties:
+        exportId:
+          type: string
+          examples:
+            - export_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: export_id
+          maxLength: 33
+          pattern: ^export_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: The request's id. Poll it with GetDataExport to obtain the links.
+        status:
+          title: status
+          description: Where the request got to.
+          allOf:
+            - $ref: '#/components/schemas/chronos.compliance.v1.DataExportStatus'
+        fileCount:
+          type: integer
+          examples:
+            - "3"
+          title: file_count
+          maximum: 1000
+          minimum: 0
+          format: int32
+          description: How many stored files the export referenced.
+        failureReason:
+          type: string
+          examples:
+            - source_unreadable
+          title: failure_reason
+          maxLength: 64
+          pattern: ^[a-z_]*$
+          description: Set only when the status is FAILED. See GetDataExportResponse.
+        requestedAt:
+          title: requested_at
+          description: When the request was made.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+        settledAt:
+          title: settled_at
+          description: When it settled, either way. Unset while the status is PENDING.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: DataExportSummary
+      additionalProperties: false
+      description: DataExportSummary is one past request, without its links.
     chronos.compliance.v1.ExportMyDataRequest:
       type: object
       title: ExportMyDataRequest
@@ -513,29 +568,182 @@ components:
     chronos.compliance.v1.ExportMyDataResponse:
       type: object
       properties:
+        exportId:
+          type: string
+          examples:
+            - export_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: export_id
+          maxLength: 33
+          pattern: ^export_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            The request's own id, which GetDataExport is polled with.
+
+             DERIVED from the caller's Idempotency-Key rather than minted at random, so
+             one person pressing a button twice polls one export instead of starting two
+             workflows — and so a client that retried a request it never saw the answer
+             to can recover the id by retrying with the same key.
+        status:
+          title: status
+          description: |-
+            Where the request has got to, at the moment it was accepted. Always
+             DATA_EXPORT_STATUS_PENDING today; returned rather than assumed so a client
+             that polls immediately reads one shape of answer everywhere.
+          allOf:
+            - $ref: '#/components/schemas/chronos.compliance.v1.DataExportStatus'
+      title: ExportMyDataResponse
+      required:
+        - exportId
+      additionalProperties: false
+      description: |-
+        ExportMyDataResponse names the request, and carries no link.
+
+         # The link is GONE from this message, deliberately
+
+         It used to carry a signed URL, produced inside the request. Building the
+         bundle is now a workflow (compliance.md §5), so at the moment this responds
+         there is nothing to link to — and a field that was sometimes a URL and
+         sometimes empty would be a client branching on emptiness to decide whether a
+         legal obligation had been met.
+
+         The break is deliberate and one-time. No release has been cut, and the
+         alternative was a permanently empty field on the most sensitive endpoint in
+         the product.
+    chronos.compliance.v1.ExportedFile:
+      type: object
+      properties:
+        key:
+          type: string
+          examples:
+            - subj9f2.../k4m2n
+          title: key
+          maxLength: 1024
+          pattern: ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$
+          description: |-
+            The opaque object key. It carries no business meaning by construction, and
+             is included so a person can quote it to support.
+        sizeBytes:
+          examples:
+            - "18422"
+          title: size_bytes
+          description: The file's length in bytes, as the store reported it when the export ran.
+          oneOf:
+            - type: integer
+              format: int64
+              minimum: 0
+              maximum: 9007199254740991
+            - type: string
+              pattern: ^-?[0-9]+$
+              maxLength: 20
         downloadUrl:
           type: string
           examples:
-            - https://s3.example.com/chronos/avatar9f2.../k4m2n?X-Amz-Signature=...
+            - https://s3.example.com/chronos/subj9f2.../a1b2?X-Amz-Signature=...
           title: download_url
+          maxLength: 4096
+          pattern: ^(https://.*)?$
+          description: |-
+            A signed, EXPIRING URL, or EMPTY when the file no longer exists.
+
+             The manifest is a snapshot of what the account held when the export ran, so
+             a file deleted since has nothing to fetch. It is reported as an entry with
+             no link rather than omitted, because "you had a file here and it is gone
+             now" is a true answer and silence is not.
+      title: ExportedFile
+      additionalProperties: false
+      description: |-
+        ExportedFile is one stored file the export references.
+
+         REFERENCED, not copied into the bundle. Copying would put a second copy of the
+         most concentrated personal data in the system beside the first, and erasure
+         would then have to find both.
+    chronos.compliance.v1.GetDataExportRequest:
+      type: object
+      properties:
+        exportId:
+          type: string
+          examples:
+            - export_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: export_id
+          maxLength: 33
+          pattern: ^export_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            The id ExportMyData returned.
+
+             It is unguessable, and "unguessable" is not the authorization rule: the
+             server matches it against the AUTHENTICATED caller, so an id belonging to
+             somebody else answers exactly as an unknown one.
+      title: GetDataExportRequest
+      required:
+        - exportId
+      additionalProperties: false
+      description: GetDataExportRequest polls one request the caller made.
+    chronos.compliance.v1.GetDataExportResponse:
+      type: object
+      properties:
+        status:
+          title: status
+          description: Where the request has got to.
+          allOf:
+            - $ref: '#/components/schemas/chronos.compliance.v1.DataExportStatus'
+        manifestUrl:
+          type: string
+          examples:
+            - https://s3.example.com/chronos/subj9f2.../k4m2n?X-Amz-Signature=...
+          title: manifest_url
           maxLength: 4096
           pattern: ^https://
           description: |-
-            A signed, EXPIRING URL. Not stored anywhere by this system: it is a bearer
-             capability, and persisting one would turn an expiring link into a durable
-             credential for the most concentrated personal data we hold.
+            A signed, EXPIRING URL for the manifest — the JSON describing everything
+             included. Empty unless the status is READY.
 
-             Delivered here rather than as an email attachment, which compliance.md §5
-             requires: an attachment sits in a mailbox forever, is forwarded, and is
-             backed up by a provider nobody here controls.
+             Minted per poll and stored nowhere: it is a bearer capability, and
+             persisting one would turn an expiring link into a durable credential for the
+             most concentrated personal data we hold. Delivered here rather than by
+             email, which compliance.md §5 requires — a link in a mailbox is forwarded,
+             archived, and outlives its hour.
+        files:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.compliance.v1.ExportedFile'
+          title: files
+          maxItems: 1000
+          description: The stored files the manifest references, each with its own link.
         expiresAt:
           title: expires_at
-          description: When the link stops working.
+          description: |-
+            When every link above stops working. They are minted together, so there is
+             one deadline rather than one each.
           allOf:
             - $ref: '#/components/schemas/google.protobuf.Timestamp'
-      title: ExportMyDataResponse
+        failureReason:
+          type: string
+          examples:
+            - processing_restricted
+          title: failure_reason
+          maxLength: 64
+          pattern: ^[a-z_]*$
+          description: |-
+            Why the request produced nothing. Set only when the status is FAILED.
+
+             A SHORT MACHINE STRING, not a sentence and not a diagnosis: an object
+             store's error names a bucket, a key and an endpoint, none of which means
+             anything to the person reading it. Render one sentence per known value and a
+             generic one for anything else.
+        requestedAt:
+          title: requested_at
+          description: |-
+            When the request was made, and when it settled. settled_at is unset while
+             the status is PENDING.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+        settledAt:
+          title: settled_at
+          description: When it settled, either way. Unset while the status is PENDING.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: GetDataExportResponse
       additionalProperties: false
-      description: ExportMyDataResponse carries a short-lived link to the bundle.
+      description: GetDataExportResponse is the request's state, and its links when ready.
     chronos.compliance.v1.GetProcessingRestrictionRequest:
       type: object
       title: GetProcessingRestrictionRequest
@@ -574,6 +782,39 @@ components:
       title: LiftProcessingRestrictionResponse
       additionalProperties: false
       description: LiftProcessingRestrictionResponse reports the state after the call.
+    chronos.compliance.v1.ListDataExportsRequest:
+      type: object
+      properties:
+        limit:
+          type: integer
+          examples:
+            - "20"
+          title: limit
+          maximum: 50
+          minimum: 1
+          format: int32
+          description: How many to return, newest first. Clamped server-side.
+      title: ListDataExportsRequest
+      additionalProperties: false
+      description: ListDataExportsRequest asks what the caller has requested before.
+    chronos.compliance.v1.ListDataExportsResponse:
+      type: object
+      properties:
+        exports:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.compliance.v1.DataExportSummary'
+          title: exports
+          maxItems: 50
+          description: The caller's own requests, newest first.
+      title: ListDataExportsResponse
+      additionalProperties: false
+      description: |-
+        ListDataExportsResponse is the caller's own request history.
+
+         It carries NO links. Minting one per file of every past export would turn a
+         list screen into a bulk issuance of bearer capabilities for everything the
+         person has ever exported; the caller opens the one they want.
     chronos.compliance.v1.RestrictProcessingRequest:
       type: object
       title: RestrictProcessingRequest
@@ -5304,6 +5545,12 @@ paths:
           schema:
             $ref: '#/components/schemas/connect-timeout-header'
           example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
       requestBody:
         content:
           application/json:
@@ -5324,6 +5571,65 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.compliance.v1.ExportMyDataResponse'
+  /chronos.compliance.v1.ComplianceService/GetDataExport:
+    post:
+      tags:
+        - ComplianceService
+      summary: |-
+        GetDataExport reports where one of the caller's own requests has got to,
+         and mints the download links once it is ready.
+      description: |-
+        # A READ, and AAL1
+
+         Somebody must be able to check on their own request from an ordinary
+         session. Requiring step-up to POLL would mean a person who asked for their
+         data at AAL2 could not find out whether it was ready without stepping up
+         again — on the endpoint they are already waiting on.
+
+         The links it mints are a different matter, and they are bounded rather than
+         gated: every URL expires within the hour, and the request that produced them
+         required AAL2.
+
+         # The id is not the authorization
+
+         It is unguessable, and unguessable is not an authorization rule. The server
+         matches it against the authenticated caller, so an id belonging to somebody
+         else answers exactly as an unknown one — which is the only thing a holder of
+         a leaked id learns for free.
+      operationId: ComplianceService_GetDataExport
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.compliance.v1.GetDataExportRequest'
+            example:
+              exportId: export_01ARZ3NDEKTSV4RRFFQ69G5FAV
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.compliance.v1.GetDataExportResponse'
   /chronos.compliance.v1.ComplianceService/GetProcessingRestriction:
     post:
       tags:
@@ -5416,6 +5722,49 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.compliance.v1.LiftProcessingRestrictionResponse'
+  /chronos.compliance.v1.ComplianceService/ListDataExports:
+    post:
+      tags:
+        - ComplianceService
+      summary: ListDataExports returns the caller's own request history, newest first.
+      description: |-
+        It carries NO links. Minting one per file of every past export would turn a
+         list screen into a bulk issuance of bearer capabilities for everything the
+         person has ever exported; the caller opens the one they want.
+      operationId: ComplianceService_ListDataExports
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.compliance.v1.ListDataExportsRequest'
+            example:
+              limit: "20"
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.compliance.v1.ListDataExportsResponse'
   /chronos.compliance.v1.ComplianceService/RestrictProcessing:
     post:
       tags:

@@ -137,11 +137,24 @@ func (e Enrolment) String() string {
 // Derived from the declared operation class rather than from the method name.
 // Naming conventions are a suggestion; the class is a declaration the
 // subscription gate already depends on being right.
+//
+// EXPORT is mutating too, which it was not until the export became asynchronous.
+// It used to produce a bundle inside the request and change nothing; it now
+// APPENDS a data-subject request to the log and derives that request's id from
+// the caller's key, so a retry without one would start a second workflow and
+// produce a second bundle.
+//
+// Being mutating is INDEPENDENT of gate 4's exemption, and BILLING_MANAGE is the
+// precedent: it requires a key and is never blocked by the subscription gate.
+// Withholding a person's own data from a suspended tenant is a portability
+// violation rather than leverage, and that stays true whether or not the request
+// records anything.
 func (p Policy) Mutating() bool {
 	switch p.Operation {
 	case optionsv1.OperationClass_OPERATION_CLASS_WRITE,
 		optionsv1.OperationClass_OPERATION_CLASS_GROW,
-		optionsv1.OperationClass_OPERATION_CLASS_BILLING_MANAGE:
+		optionsv1.OperationClass_OPERATION_CLASS_BILLING_MANAGE,
+		optionsv1.OperationClass_OPERATION_CLASS_EXPORT:
 		return true
 	default:
 		return false

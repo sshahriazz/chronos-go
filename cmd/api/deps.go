@@ -18,6 +18,7 @@ import (
 	"github.com/chronos/chronos-go/internal/modules/billing"
 	billingapi "github.com/chronos/chronos-go/internal/modules/billing/api"
 	"github.com/chronos/chronos-go/internal/modules/compliance"
+	compliancepg "github.com/chronos/chronos-go/internal/modules/compliance/adapter/postgres"
 	complianceapi "github.com/chronos/chronos-go/internal/modules/compliance/api"
 	complianceapp "github.com/chronos/chronos-go/internal/modules/compliance/app"
 	compliancedomain "github.com/chronos/chronos-go/internal/modules/compliance/domain"
@@ -720,17 +721,64 @@ func (d *dependencies) buildCompliance() (*complianceapi.Service, error) {
 		return nil, errors.New("no object store: the bundle is written as an object and " +
 			"delivered by a signed link, never as a response body")
 	}
-	exports, err := complianceapp.NewExports(complianceapp.ExportsDeps{
+	if d.pool == nil {
+		return nil, errors.New("no postgres pool: a data-subject request is polled from a " +
+			"projection, and without one a person can ask for their data and never find " +
+			"out whether it is ready")
+	}
+
+	// Article 18's own reader, shared by the export runner below. The SAME
+	// component the notification dispatcher consults, so "is this subject
+	// restricted" has one answer everywhere rather than one per caller.
+	restrictionReader, err := compliancepg.NewRestrictions(pgadapter.New(d.pool))
+	if err != nil {
+		return nil, fmt.Errorf("restriction reader: %w", err)
+	}
+
+	// The REQUEST half. It records that somebody asked and returns the id they
+	// poll with; the workflow builds the bundle. Note what it does NOT hold: no
+	// vault, no object store, no way to mint a URL. The endpoint that accepts a
+	// request has no business being able to read anybody's data.
+	exports, err := complianceapp.NewExportRuns(complianceapp.ExportRunsDeps{
+		Exports: eventsourcing.NewRepository[*compliancedomain.Export](
+			d.store, d.codec, d.upcasters,
+			compliancedomain.ExportCategory, compliancedomain.NewExport),
 		Profile: vaultProfile{vault: d.piiVault},
-		Store:   d.blobs,
+		Objects: d.blobs,
+		// Every namespace the subject's objects live under. It MUST be the same
+		// list the erasure walks (cmd/worker's subjectObjectPrefixes) — an export
+		// that covered less than an erasure deletes would hand somebody an
+		// incomplete answer to Article 15 and then destroy the part it omitted.
+		// A test asserts the two agree.
+		Prefixes: complianceapp.SubjectPrefixes(subjectObjectPrefixes),
+		Store:    d.blobs,
 		// The subject's OWN prefix, which is the namespace an erasure empties —
 		// so a bundle is purged by erasure structurally rather than by a step
 		// somebody has to remember (compliance.md §4 step 9).
 		Prefix: profiledomain.AvatarPrefix,
-		Now:    d.clock.Now,
+		// Article 18 stands in front of Article 15: building an export is
+		// processing, and a restricted subject is not processed (compliance.md §6).
+		Restrictions: restrictionReader,
+		Now:          d.clock.Now,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("exports: %w", err)
+	}
+
+	// The READ half, and a SEPARATE component because it holds what the request
+	// half must not: the ability to mint download URLs for the most concentrated
+	// personal data in the system, and to read a manifest back out of the store.
+	exportReader, err := compliancepg.NewExports(pgadapter.New(d.pool))
+	if err != nil {
+		return nil, fmt.Errorf("export reader: %w", err)
+	}
+	exportViews, err := complianceapp.NewExportDownloads(complianceapp.ExportDownloadsDeps{
+		Reader:   exportReader,
+		Store:    d.blobs,
+		Manifest: d.blobs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("export downloads: %w", err)
 	}
 
 	restrictions, err := complianceapp.NewRestrictions(complianceapp.RestrictionsDeps{
@@ -743,7 +791,7 @@ func (d *dependencies) buildCompliance() (*complianceapi.Service, error) {
 		return nil, fmt.Errorf("restrictions: %w", err)
 	}
 	return complianceapi.New(complianceapi.Deps{
-		Restrictions: restrictions, Exports: exports,
+		Restrictions: restrictions, Exports: exports, ExportViews: exportViews,
 	})
 }
 
@@ -766,4 +814,24 @@ func (v vaultProfile) Profile(
 		out[string(field)] = value
 	}
 	return out, nil
+}
+
+// subjectObjectPrefixes is compliance.md §4 step 4's subject graph, for objects.
+//
+// # It is duplicated from cmd/worker, and a test holds the two together
+//
+// Both binaries need it and neither may own it for the other: the worker walks
+// it to ERASE and this binary walks it to EXPORT, and the two must agree
+// exactly. An export that covered less than an erasure deletes would hand
+// somebody an incomplete answer to Article 15 and then destroy the part it
+// omitted — which is the worst combination available here, because the person
+// receives a plausible-looking file and no way to know it was short.
+//
+// It lives in each composition root rather than in compliance because compliance
+// may not import another module's internals (CONVENTIONS §2), and
+// `profile.AvatarPrefix` is exactly that kind of detail. Assembling the list is
+// what a composition root is for; keeping two of them equal is what the test is
+// for.
+func subjectObjectPrefixes(subjectID string) []string {
+	return []string{profiledomain.AvatarPrefix(subjectID)}
 }

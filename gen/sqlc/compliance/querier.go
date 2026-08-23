@@ -9,15 +9,59 @@ import (
 )
 
 type Querier interface {
+	// Applied from DataExportCompleted.
+	//
+	// NOT guarded on the current status, deliberately. A rebuild replays
+	// requested → failed → completed for an export that failed once and was retried
+	// into success, and a guard on `status = 'pending'` would leave that row failed
+	// forever — reporting an error for a bundle that is sitting there. The
+	// aggregate is what refuses an illegal transition; this records what the log
+	// says happened.
+	CompleteDataExport(ctx context.Context, arg CompleteDataExportParams) error
 	// Lifting deletes the row: presence IS the restriction.
 	DeleteRestriction(ctx context.Context, subjectID string) error
+	// Applied from DataExportFailed.
+	//
+	// Guarded on `status <> 'ready'`, and that guard is the table's half of the rule
+	// the aggregate holds: a late failure from an earlier attempt must never
+	// overwrite a fetchable bundle. Without it a redelivered failure would tell
+	// somebody their export failed while the manifest waited for them.
+	FailDataExport(ctx context.Context, arg FailDataExportParams) error
+	// The subject's poll.
+	//
+	// Scoped by subject_id as well as by id, and the export id alone would be enough
+	// to find the row — which is exactly why it is not enough to return it. The id
+	// is unguessable, but "unguessable" is not an authorization rule: one leaked id
+	// would otherwise hand a stranger the manifest key for the most concentrated
+	// copy of somebody's data in the system.
+	GetDataExport(ctx context.Context, arg GetDataExportParams) (DataExportView, error)
 	// May this subject be contacted?
 	//
 	// Read once per tenant-facing notification, so it is a primary-key lookup and
 	// nothing more. The common answer is false — almost nobody is restricted — and
 	// a table of exceptions makes that a miss on a small index.
 	IsProcessingRestricted(ctx context.Context, subjectID string) (bool, error)
+	// What has this person asked for, newest first.
+	ListDataExports(ctx context.Context, arg ListDataExportsParams) ([]ListDataExportsRow, error)
+	TruncateDataExports(ctx context.Context) error
 	TruncateRestrictions(ctx context.Context) error
+	// Queries for data_export_view.
+	//
+	// The subject's own poll, and the controller's evidence that a request was
+	// answered. Every DECISION about an export is taken against the aggregate; this
+	// table answers "where has my request got to", which tolerates lag.
+	// Applied from DataExportRequested.
+	//
+	// Upsert, because a projector replays: the same event WILL arrive twice, and an
+	// insert would fail the second time and stall the projection permanently.
+	//
+	// The conflict clause touches NOTHING. Every column a later event owns — the
+	// status, the manifest, the reason, the settlement time — must survive a
+	// redelivered request, or a replay resurrects a finished export as pending and
+	// the subject is told to wait for a bundle they already have. On a genuine
+	// rebuild the INSERT path runs, because the table was truncated, and the later
+	// events move it again in order.
+	UpsertDataExportRequest(ctx context.Context, arg UpsertDataExportRequestParams) error
 	// Queries for Article 18 processing restrictions.
 	// Record that processing is halted for a subject.
 	//

@@ -672,6 +672,22 @@ func (d *dependencies) newTemporalWorker(
 	}
 	names = append(names, resealed...)
 
+	// The DATA EXPORT, checked the same way and for the same typed-nil reason.
+	//
+	// Its absence is worse than a sweep's: a sweep that does not run leaves work
+	// undone and visible in a backlog, while an unregistered export workflow
+	// leaves every accepted request at `pending` forever — a person who exercised
+	// Article 15, was told their request was accepted, and receives nothing.
+	exports, err := newExportActivities(d)
+	if err != nil {
+		return nil, nil, fmt.Errorf("data export activities: %w", err)
+	}
+	exported, err := w.RegisterDataExport(exports)
+	if err != nil {
+		return nil, nil, fmt.Errorf("registering the data export: %w", err)
+	}
+	names = append(names, exported...)
+
 	// The invitation sweep, checked the same way and for the same typed-nil
 	// reason: an invitationSweepAdapter wrapping a nil use case is a NON-nil
 	// interface, so NewInvitationActivities' own nil check would pass and the

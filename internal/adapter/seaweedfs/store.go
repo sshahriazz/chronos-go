@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -259,6 +260,59 @@ func (s *Store) Put(
 	return nil
 }
 
+// MaxReadBytes bounds what Get will read into memory.
+//
+// The only caller reads an export MANIFEST, which is JSON describing a person's
+// profile fields and a bounded list of object keys. A megabyte is far above any
+// manifest this system produces and far below anything that could exhaust a
+// worker — and the bound is a REFUSAL rather than a truncation, because half a
+// manifest decodes into a shorter file list and would silently hand somebody an
+// incomplete answer to Article 15.
+const MaxReadBytes = 1 << 20
+
+// Get reads an object's bytes.
+//
+// # It is deliberately NOT on blob.Store
+//
+// Every other method on that interface hands out a CAPABILITY — a presigned
+// upload, a presigned download — or reads metadata. This reads the bytes, which
+// for this bucket means reading somebody's personal data directly into a
+// process. Putting it on the shared port would give every holder of a blob.Store
+// that ability by default; leaving it here means a caller has to declare a
+// narrow port of its own and the composition root has to hand this in
+// explicitly, which is one place to notice.
+//
+// Its one caller is the export poll, reading back the manifest it is about to
+// hand to the person the manifest is about.
+func (s *Store) Get(ctx context.Context, key blob.Key) ([]byte, error) {
+	if key == "" {
+		return nil, fmt.Errorf("seaweedfs: a key is required")
+	}
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.cfg.Bucket),
+		Key:    aws.String(key.String()),
+	})
+	if err != nil {
+		if isNotFound(err) {
+			return nil, fmt.Errorf("%w: %s", blob.ErrNotFound, key)
+		}
+		return nil, fmt.Errorf("seaweedfs: reading %s: %w", key, err)
+	}
+	defer func() { _ = out.Body.Close() }()
+
+	// LIMITED, and one byte over the bound is read on purpose: reading exactly
+	// MaxReadBytes cannot tell "exactly at the limit" from "truncated here", and
+	// the two need different answers.
+	body, err := io.ReadAll(io.LimitReader(out.Body, MaxReadBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("seaweedfs: reading the body of %s: %w", key, err)
+	}
+	if len(body) > MaxReadBytes {
+		return nil, fmt.Errorf("seaweedfs: %s is larger than %d bytes", key, MaxReadBytes)
+	}
+	return body, nil
+}
+
 // ListPrefix returns every key under one prefix.
 //
 // # Why this pages rather than trusting one call
@@ -345,9 +399,13 @@ func (s *Store) ListPage(
 	}
 
 	in := &s3.ListObjectsV2Input{
-		Bucket:  aws.String(s.cfg.Bucket),
-		Prefix:  aws.String(prefix),
-		MaxKeys: aws.Int32(int32(limit)),
+		Bucket: aws.String(s.cfg.Bucket),
+		Prefix: aws.String(prefix),
+		// CLAMPED rather than converted. S3 caps a page at 1000 anyway, so a
+		// caller asking for more gets 1000 either way — and clamping is what stops
+		// an oversized int from wrapping negative on the way into int32, which
+		// would ask the store for a nonsensical page size.
+		MaxKeys: aws.Int32(clampPageSize(limit)),
 	}
 	if after != "" {
 		in.ContinuationToken = aws.String(after)
@@ -441,4 +499,23 @@ func isNotFound(err error) bool {
 	// SeaweedFS answers a HEAD on a missing object with a bare 404 that the SDK
 	// does not always map to a typed error.
 	return strings.Contains(err.Error(), "StatusCode: 404")
+}
+
+// clampPageSize bounds a requested page into what S3 accepts.
+//
+// BOTH ends, and the lower one is not defensive noise: without it the conversion
+// below is a plain int→int32 narrowing that can wrap, and a wrapped page size
+// asks the store for a nonsensical listing. The caller already refuses a
+// non-positive limit; this makes the property local to the conversion rather
+// than an argument about a caller three lines away.
+func clampPageSize(limit int) int32 {
+	const maxKeys = 1000
+	switch {
+	case limit < 1:
+		return 1
+	case limit > maxKeys:
+		return maxKeys
+	default:
+		return int32(limit)
+	}
 }

@@ -12,6 +12,7 @@ syntax = "proto3";
 // for a right the system cannot actually deliver is worse than not having it.
 package chronos.compliance.v1;
 
+import "buf/validate/validate.proto";
 import "chronos/options/v1/options.proto";
 import "gnostic/openapi/v3/annotations.proto";
 import "google/protobuf/timestamp.proto";
@@ -56,23 +57,252 @@ message GetProcessingRestrictionResponse {
 // ExportMyDataRequest asks for a copy of everything held about the caller.
 message ExportMyDataRequest {}
 
-// ExportMyDataResponse carries a short-lived link to the bundle.
+// ExportMyDataResponse names the request, and carries no link.
+//
+// # The link is GONE from this message, deliberately
+//
+// It used to carry a signed URL, produced inside the request. Building the
+// bundle is now a workflow (compliance.md §5), so at the moment this responds
+// there is nothing to link to — and a field that was sometimes a URL and
+// sometimes empty would be a client branching on emptiness to decide whether a
+// legal obligation had been met.
+//
+// The break is deliberate and one-time. No release has been cut, and the
+// alternative was a permanently empty field on the most sensitive endpoint in
+// the product.
 message ExportMyDataResponse {
-  // A signed, EXPIRING URL. Not stored anywhere by this system: it is a bearer
-  // capability, and persisting one would turn an expiring link into a durable
-  // credential for the most concentrated personal data we hold.
+  // 1 and 2 held `download_url` and `expires_at`. They are RESERVED rather than
+  // reused, and that matters even in a deliberate break: a client built against
+  // the old schema would otherwise decode an export id into the field it calls
+  // `downloadUrl` and hand a person an identifier where a link belonged.
+  // Reserved, it decodes nothing at all — which is the honest answer.
+  reserved 1, 2;
+  reserved "download_url", "expires_at";
+
+  // The request's own id, which GetDataExport is polled with.
   //
-  // Delivered here rather than as an email attachment, which compliance.md §5
-  // requires: an attachment sits in a mailbox forever, is forwarded, and is
-  // backed up by a provider nobody here controls.
-  string download_url = 1 [(gnostic.openapi.v3.property) = {
-    example: {yaml: "https://s3.example.com/chronos/avatar9f2.../k4m2n?X-Amz-Signature=..."}
+  // DERIVED from the caller's Idempotency-Key rather than minted at random, so
+  // one person pressing a button twice polls one export instead of starting two
+  // workflows — and so a client that retried a request it never saw the answer
+  // to can recover the id by retrying with the same key.
+  string export_id = 3 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "export_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 33
+      pattern: "^export_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    (buf.validate.field) = {required: true}
+  ];
+
+  // Where the request has got to, at the moment it was accepted. Always
+  // DATA_EXPORT_STATUS_PENDING today; returned rather than assumed so a client
+  // that polls immediately reads one shape of answer everywhere.
+  DataExportStatus status = 4;
+}
+
+// DataExportStatus is where one request has got to.
+enum DataExportStatus {
+  DATA_EXPORT_STATUS_UNSPECIFIED = 0;
+
+  DATA_EXPORT_STATUS_PENDING = 1;
+
+  DATA_EXPORT_STATUS_READY = 2;
+
+  DATA_EXPORT_STATUS_FAILED = 3;
+}
+
+// GetDataExportRequest polls one request the caller made.
+message GetDataExportRequest {
+  // The id ExportMyData returned.
+  //
+  // It is unguessable, and "unguessable" is not the authorization rule: the
+  // server matches it against the AUTHENTICATED caller, so an id belonging to
+  // somebody else answers exactly as an unknown one.
+  string export_id = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "export_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 33
+      pattern: "^export_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    (buf.validate.field) = {
+      required: true
+      string: {max_len: 33}
+    }
+  ];
+}
+
+// GetDataExportResponse is the request's state, and its links when ready.
+message GetDataExportResponse {
+  // Where the request has got to.
+  DataExportStatus status = 1;
+
+  // A signed, EXPIRING URL for the manifest — the JSON describing everything
+  // included. Empty unless the status is READY.
+  //
+  // Minted per poll and stored nowhere: it is a bearer capability, and
+  // persisting one would turn an expiring link into a durable credential for the
+  // most concentrated personal data we hold. Delivered here rather than by
+  // email, which compliance.md §5 requires — a link in a mailbox is forwarded,
+  // archived, and outlives its hour.
+  string manifest_url = 2 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "https://s3.example.com/chronos/subj9f2.../k4m2n?X-Amz-Signature=..."}
     max_length: 4096
     pattern: "^https://"
   }];
 
-  // When the link stops working.
-  google.protobuf.Timestamp expires_at = 2;
+  // The stored files the manifest references, each with its own link.
+  repeated ExportedFile files = 3 [(buf.validate.field).repeated.max_items = 1000];
+
+  // When every link above stops working. They are minted together, so there is
+  // one deadline rather than one each.
+  google.protobuf.Timestamp expires_at = 4;
+
+  // Why the request produced nothing. Set only when the status is FAILED.
+  //
+  // A SHORT MACHINE STRING, not a sentence and not a diagnosis: an object
+  // store's error names a bucket, a key and an endpoint, none of which means
+  // anything to the person reading it. Render one sentence per known value and a
+  // generic one for anything else.
+  string failure_reason = 5 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "processing_restricted"}
+    max_length: 64
+    // A lower-case machine token, or empty when the export did not fail. NOT an
+    // enum: a client must render an unrecognised reason as its generic sentence
+    // rather than failing to decode, so that adding one is not a breaking
+    // change to every client.
+    pattern: "^[a-z_]*$"
+  }];
+
+  // When the request was made, and when it settled. settled_at is unset while
+  // the status is PENDING.
+  google.protobuf.Timestamp requested_at = 6;
+
+  // When it settled, either way. Unset while the status is PENDING.
+  google.protobuf.Timestamp settled_at = 7;
+}
+
+// ExportedFile is one stored file the export references.
+//
+// REFERENCED, not copied into the bundle. Copying would put a second copy of the
+// most concentrated personal data in the system beside the first, and erasure
+// would then have to find both.
+message ExportedFile {
+  // The opaque object key. It carries no business meaning by construction, and
+  // is included so a person can quote it to support.
+  string key = 1 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "subj9f2.../k4m2n"}
+    max_length: 1024
+    // A prefix and an unguessable name, separated by one slash. Published as
+    // documentation rather than enforced, because this is a RESPONSE field: the
+    // server produces it from a key it minted, so a rule here would be an oracle
+    // about the store's layout rather than a bound on anything a caller sends.
+    pattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+  }];
+
+  // The file's length in bytes, as the store reported it when the export ran.
+  int64 size_bytes = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "18422"}
+      // The wire type's own ceiling, expressed as the largest int64 a JSON
+      // number carries EXACTLY. 2^63-1 does not survive the document's float64
+      // round trip — it comes back as 9223372036854776000, which is not the
+      // number anybody meant — and a bound a client cannot read back is worse
+      // than the honest one below.
+      maximum: 9007199254740991
+    },
+    // The floor is a RULE rather than an annotation, and it has to be:
+    // `minimum: 0` on the annotation is proto3's zero value for that field,
+    // indistinguishable from unset, so the generator never sees it and the
+    // document silently loses the bound. `gte` survives, and on a response
+    // message it adds no refusal to anything — the interceptor validates
+    // requests. The same construction RevokeAllSessionsResponse uses.
+    (buf.validate.field).int64.gte = 0
+  ];
+
+  // A signed, EXPIRING URL, or EMPTY when the file no longer exists.
+  //
+  // The manifest is a snapshot of what the account held when the export ran, so
+  // a file deleted since has nothing to fetch. It is reported as an entry with
+  // no link rather than omitted, because "you had a file here and it is gone
+  // now" is a true answer and silence is not.
+  string download_url = 3 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "https://s3.example.com/chronos/subj9f2.../a1b2?X-Amz-Signature=..."}
+    max_length: 4096
+    // HTTPS or EMPTY, and the empty alternative is the point: a file deleted
+    // since the export ran is reported as an entry with no link rather than
+    // omitted. A pattern demanding a URL would make the honest answer invalid.
+    pattern: "^(https://.*)?$"
+  }];
+}
+
+// ListDataExportsRequest asks what the caller has requested before.
+message ListDataExportsRequest {
+  // How many to return, newest first. Clamped server-side.
+  int32 limit = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "20"}
+      minimum: 1
+      maximum: 50
+    },
+    (buf.validate.field).int32 = {
+      gte: 0
+      lte: 50
+    }
+  ];
+}
+
+// ListDataExportsResponse is the caller's own request history.
+//
+// It carries NO links. Minting one per file of every past export would turn a
+// list screen into a bulk issuance of bearer capabilities for everything the
+// person has ever exported; the caller opens the one they want.
+message ListDataExportsResponse {
+  // The caller's own requests, newest first.
+  repeated DataExportSummary exports = 1 [(buf.validate.field).repeated.max_items = 50];
+}
+
+// DataExportSummary is one past request, without its links.
+message DataExportSummary {
+  // The request's id. Poll it with GetDataExport to obtain the links.
+  string export_id = 1 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "export_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+    max_length: 33
+    pattern: "^export_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+  }];
+
+  // Where the request got to.
+  DataExportStatus status = 2;
+
+  // How many stored files the export referenced.
+  int32 file_count = 3 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "3"}
+      // The server's own ceiling on one export's listing, restated. An export
+      // that would exceed it FAILS rather than truncating, so this is a real
+      // bound on what can appear here and not a wire-type maximum.
+      maximum: 1000
+    },
+    // The floor is a RULE rather than an annotation, and it has to be:
+    // `minimum: 0` on the annotation is proto3's zero value for that field,
+    // indistinguishable from unset, so the generator never sees it and the
+    // document silently loses the bound. `gte` survives, and on a response
+    // message it adds no refusal to anything — the interceptor validates
+    // requests. The same construction RevokeAllSessionsResponse uses.
+    (buf.validate.field).int32.gte = 0
+  ];
+
+  // Set only when the status is FAILED. See GetDataExportResponse.
+  string failure_reason = 4 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "source_unreadable"}
+    max_length: 64
+    pattern: "^[a-z_]*$"
+  }];
+
+  // When the request was made.
+  google.protobuf.Timestamp requested_at = 5;
+
+  // When it settled, either way. Unset while the status is PENDING.
+  google.protobuf.Timestamp settled_at = 6;
 }
 
 // ComplianceService is the data subject's own rights, exercised on their own
@@ -193,8 +423,72 @@ service ComplianceService {
     };
     // EXPORT, not READ. Gate 4 never blocks this class: withholding a person's
     // own data from a suspended tenant is a portability violation, not leverage.
+    //
+    // EXPORT is a MUTATING class, which it was not until this call became
+    // asynchronous: it now appends a data-subject request to the log rather than
+    // building a bundle inside the request. The two properties are independent,
+    // and BILLING_MANAGE is the precedent for holding both.
     option (chronos.options.v1.operation) = OPERATION_CLASS_EXPORT;
     option (chronos.options.v1.min_aal) = ASSURANCE_LEVEL_2;
+
+    option (gnostic.openapi.v3.operation) = {
+      // The key is REQUIRED and it is load-bearing beyond deduplication: the
+      // export id is derived from it, so a client that retried a request whose
+      // answer it never saw recovers the same id by retrying with the same key.
+      // Without one, one person pressing a button twice starts two workflows and
+      // receives two bundles.
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // GetDataExport reports where one of the caller's own requests has got to,
+  // and mints the download links once it is ready.
+  //
+  // # A READ, and AAL1
+  //
+  // Somebody must be able to check on their own request from an ordinary
+  // session. Requiring step-up to POLL would mean a person who asked for their
+  // data at AAL2 could not find out whether it was ready without stepping up
+  // again — on the endpoint they are already waiting on.
+  //
+  // The links it mints are a different matter, and they are bounded rather than
+  // gated: every URL expires within the hour, and the request that produced them
+  // required AAL2.
+  //
+  // # The id is not the authorization
+  //
+  // It is unguessable, and unguessable is not an authorization rule. The server
+  // matches it against the authenticated caller, so an id belonging to somebody
+  // else answers exactly as an unknown one — which is the only thing a holder of
+  // a leaked id learns for free.
+  rpc GetDataExport(GetDataExportRequest) returns (GetDataExportResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_READ;
+  }
+
+  // ListDataExports returns the caller's own request history, newest first.
+  //
+  // It carries NO links. Minting one per file of every past export would turn a
+  // list screen into a bulk issuance of bearer capabilities for everything the
+  // person has ever exported; the caller opens the one they want.
+  rpc ListDataExports(ListDataExportsRequest) returns (ListDataExportsResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_READ;
   }
 
   // GetProcessingRestriction reports whether the caller's data is restricted.

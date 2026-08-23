@@ -368,7 +368,10 @@ func (a *ExportActivities) Begin(ctx context.Context, in ExportInput) (exportPla
 	if err != nil {
 		return exportPlan{}, a.wrap(ctx, "beginning", in.ExportID, err)
 	}
-	return exportPlan{SubjectID: plan.SubjectID, Prefixes: plan.Prefixes}, nil
+	// A CONVERSION rather than a field-by-field copy: the two types are the
+	// same shape by design — the port's and the wire's — and a literal here
+	// would silently drop a field the day one of them grows.
+	return exportPlan(plan), nil
 }
 
 // ListObjects returns one page.
@@ -381,9 +384,7 @@ func (a *ExportActivities) ListObjects(
 	}
 	out := exportPage{Cursor: page.Cursor, Objects: make([]exportedObject, 0, len(page.Objects))}
 	for _, o := range page.Objects {
-		out.Objects = append(out.Objects, exportedObject{
-			Key: o.Key, Size: o.Size, ModifiedAt: o.ModifiedAt,
-		})
+		out.Objects = append(out.Objects, exportedObject(o))
 	}
 	return out, nil
 }
@@ -394,7 +395,7 @@ func (a *ExportActivities) WriteManifest(
 ) (string, error) {
 	refs := make([]ExportObjectRef, 0, len(in.Objects))
 	for _, o := range in.Objects {
-		refs = append(refs, ExportObjectRef{Key: o.Key, Size: o.Size, ModifiedAt: o.ModifiedAt})
+		refs = append(refs, ExportObjectRef(o))
 	}
 	key, err := a.runner.WriteManifest(ctx, in.ExportID, refs)
 	if err != nil {
@@ -429,4 +430,36 @@ func (a *ExportActivities) wrap(
 			err.Error(), errTypePermanent, err)
 	}
 	return err
+}
+
+// RegisterDataExport binds the export workflow and its activities to a worker.
+func (w *Worker) RegisterDataExport(a *ExportActivities) ([]string, error) {
+	if w == nil || w.w == nil {
+		return nil, errors.New("temporal: cannot register the data export on a nil worker")
+	}
+	if a == nil {
+		return nil, errors.New("temporal: refusing to register the data export with no " +
+			"activity set; every accepted request would start a run that fails on its " +
+			"first task, and the person who asked would wait for a bundle nothing builds")
+	}
+	registerDataExport(w.w, a)
+	return []string{ExportWorkflow}, nil
+}
+
+// registerDataExport binds the workflow and its activities by NAME.
+//
+// By name rather than by function value, because the name is what history
+// records — registering under a Go identifier would make a rename silently
+// strand every in-flight execution.
+func registerDataExport(r registry, a *ExportActivities) {
+	r.RegisterWorkflowWithOptions(ExportData,
+		workflow.RegisterOptions{Name: ExportWorkflow})
+	r.RegisterActivityWithOptions(a.Begin,
+		activity.RegisterOptions{Name: beginExportActivity})
+	r.RegisterActivityWithOptions(a.ListObjects,
+		activity.RegisterOptions{Name: listExportObjectsActivity})
+	r.RegisterActivityWithOptions(a.WriteManifest,
+		activity.RegisterOptions{Name: writeExportManifestActivity})
+	r.RegisterActivityWithOptions(a.Fail,
+		activity.RegisterOptions{Name: failExportActivity})
 }

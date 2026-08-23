@@ -23,6 +23,18 @@ type Credential struct {
 	Failures      int32
 }
 
+// One row per data-subject export request. Polled by the subject; evidence that Article 15 was answered.
+type DataExportView struct {
+	ExportID      string
+	SubjectID     string
+	Status        string
+	ManifestKey   pgtype.Text
+	ObjectCount   int32
+	FailureReason pgtype.Text
+	RequestedAt   pgtype.Timestamptz
+	SettledAt     pgtype.Timestamptz
+}
+
 // PROJECTION. The lapse sweep's work list; enforces nothing — the stream does that.
 type EmailReservationView struct {
 	EmailIndex string
