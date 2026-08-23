@@ -108,8 +108,9 @@ infrastructure and every later piece depends on its shape.
       - [x] **The loop closes:** `OrganizationCreated` -> reactor -> Stripe ->
             `trialing`, asserted against the event log. A redelivery changes
             nothing — same subscription, same revision.
-- [ ] **Then 1b**: access projector consuming `OrganizationCreated`, tombstones,
-      `OrgResolver`
+- [x] **Then 1b**: access projector consuming `OrganizationCreated`, tombstones,
+      `OrgResolver` — all three landed with slice 2 and after. This parent line
+      outlived its own sub-items, the same way the three above it did.
 
 Deliberately excluded: domain verification, ownership transfer. Neither blocks
 workspace.
