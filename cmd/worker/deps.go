@@ -15,6 +15,7 @@ import (
 	"github.com/chronos/chronos-go/internal/adapter/openbao"
 	"github.com/chronos/chronos-go/internal/adapter/piivault"
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
+	"github.com/chronos/chronos-go/internal/adapter/seaweedfs"
 	smtpadapter "github.com/chronos/chronos-go/internal/adapter/smtp"
 	temporaladapter "github.com/chronos/chronos-go/internal/adapter/temporal"
 	valkeyadapter "github.com/chronos/chronos-go/internal/adapter/valkey"
@@ -23,6 +24,7 @@ import (
 	"github.com/chronos/chronos-go/internal/modules/identity/app"
 	notificationpg "github.com/chronos/chronos-go/internal/modules/notification/adapter/postgres"
 	workspaceapp "github.com/chronos/chronos-go/internal/modules/workspace/app"
+	"github.com/chronos/chronos-go/internal/platform/blob"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/config"
 	"github.com/chronos/chronos-go/internal/platform/db"
@@ -74,6 +76,11 @@ type dependencies struct {
 	// because erasure destroys a subject key and the notify view cannot express
 	// that — deliberately.
 	piiVault *piivault.Vault
+
+	// blobs is the object store, and this binary needs it for ONE reason:
+	// erasure. Destroying the subject key makes every vault field unreadable at
+	// once and does nothing whatever to an avatar, which lives here.
+	blobs    *seaweedfs.Store
 	renderer *mailrender.Renderer
 	operator string
 
@@ -403,6 +410,36 @@ func newDependencies(cfg *config.Config, log *slog.Logger, codec *eventcodec.JSO
 			"system reports it", "error", err)
 	} else {
 		d.invitationSweep = sweep
+	}
+
+	// The object store. cmd/api uses it to grant uploads; this binary uses it to
+	// DELETE — an erased subject's avatars are outside the vault, so no key
+	// destruction reaches them.
+	// The same limits cmd/api builds. They govern GRANTS, which this binary never
+	// issues — it only lists and deletes — but the store validates them at
+	// construction, so a divergent set here would be a second definition of the
+	// upload rules that nothing compares.
+	if limits, err := (blob.Limits{
+		MaxBytes:            cfg.Storage.MaxUploadBytes,
+		MaxBatchCount:       cfg.Storage.MaxBatchCount,
+		AllowedContentTypes: cfg.Storage.AllowedContentTypes,
+		ResumableThreshold:  cfg.Storage.ResumableThresholdBytes,
+		PartSize:            cfg.Storage.PartSizeBytes,
+		MaxExpiry:           cfg.Storage.GrantExpiry,
+	}).Defaults(); err != nil {
+		log.Error("object store limits are inconsistent; an erasure cannot delete a "+
+			"subject's avatars and will report success while they stay servable",
+			"error", err)
+	} else {
+		d.blobs = seaweedfs.New(seaweedfs.Config{
+			Endpoint:       cfg.Storage.Endpoint,
+			Region:         cfg.Storage.Region,
+			Bucket:         cfg.Storage.Bucket,
+			AccessKey:      cfg.Storage.AccessKey,
+			SecretKey:      cfg.Storage.SecretKey.Expose(),
+			PublicEndpoint: cfg.Storage.PublicEndpoint,
+			Limits:         limits,
+		}, clock.System{})
 	}
 
 	// Identity retention. Constructed before the worker for the same reason the

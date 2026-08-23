@@ -63,10 +63,21 @@ var Retained = []string{
 		"than rewritten",
 }
 
+// ObjectErasure deletes the subject's stored objects.
+//
+// A separate port from the vault because the two destroy different things and
+// only one of them is a key. Destroying the subject key makes every VAULT field
+// unreadable at once; an object in SeaweedFS is outside the vault entirely, so
+// no key destruction touches it.
+type ObjectErasure interface {
+	ErasePrefixes(ctx context.Context, subjectID string) (int, error)
+}
+
 // Erasure executes a due erasure request.
 type Erasure struct {
 	vault    Vault
 	accounts AccountErasure
+	objects  ObjectErasure
 	confirm  Confirmation
 	now      func() time.Time
 }
@@ -75,6 +86,7 @@ type Erasure struct {
 type ErasureDeps struct {
 	Vault    Vault
 	Accounts AccountErasure
+	Objects  ObjectErasure
 	Confirm  Confirmation
 	Now      func() time.Time
 }
@@ -88,6 +100,10 @@ func NewErasure(d ErasureDeps) (*Erasure, error) {
 	case d.Accounts == nil:
 		return nil, fmt.Errorf("compliance: an account eraser is required; without it the " +
 			"key is destroyed while the account's sessions keep authenticating")
+	case d.Objects == nil:
+		return nil, fmt.Errorf("compliance: an object eraser is required; destroying the " +
+			"subject key makes every VAULT field unreadable and does nothing at all to an " +
+			"avatar, which is a photograph of the person sitting in an object store")
 	case d.Confirm == nil:
 		return nil, fmt.Errorf("compliance: a confirmation sender is required; it is the " +
 			"one notification that cannot be sent afterwards, because afterwards there is " +
@@ -95,7 +111,10 @@ func NewErasure(d ErasureDeps) (*Erasure, error) {
 	case d.Now == nil:
 		return nil, fmt.Errorf("compliance: a clock is required")
 	}
-	return &Erasure{vault: d.Vault, accounts: d.Accounts, confirm: d.Confirm, now: d.Now}, nil
+	return &Erasure{
+		vault: d.Vault, accounts: d.Accounts, objects: d.Objects,
+		confirm: d.Confirm, now: d.Now,
+	}, nil
 }
 
 // Execute erases one subject.
@@ -139,6 +158,20 @@ func (e *Erasure) Execute(ctx context.Context, subjectID string) error {
 
 	if err := e.vault.Erase(ctx, subjectID); err != nil {
 		return fmt.Errorf("compliance: destroying the subject key for %s: %w", subjectID, err)
+	}
+
+	// OBJECTS, and they are the reason a key destruction is not the whole story.
+	// compliance.md §4 step 4 traverses "streams, rows, objects": the first two
+	// are covered by the key that just went, and the third is not — an avatar
+	// lives in SeaweedFS, outside the vault, and stays servable by a signed URL
+	// until something deletes it.
+	//
+	// AFTER the destroy rather than before, so the irreversible step is not
+	// gated on a bucket being reachable. A failure here leaves objects behind
+	// under a key-destroyed subject, which the workflow retries — and retrying
+	// is safe because deleting an object already gone is not an error.
+	if _, err := e.objects.ErasePrefixes(ctx, subjectID); err != nil {
+		return fmt.Errorf("compliance: erasing the objects of %s: %w", subjectID, err)
 	}
 
 	if err := e.accounts.Erase(ctx, subjectID); err != nil {

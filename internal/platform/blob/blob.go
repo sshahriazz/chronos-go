@@ -141,12 +141,40 @@ type Store interface {
 	// is a new key and a new event (CLAUDE.md) — so this exists for erasure and
 	// for cleaning up uploads that were granted and never completed.
 	Delete(ctx context.Context, key Key) error
+
+	// ListPrefix returns every key under one prefix.
+	//
+	// # It exists for erasure, and the shape follows from that
+	//
+	// Deleting a subject's objects cannot work from the read model alone. A
+	// projection names the CURRENT avatar; an upload that was granted, completed
+	// and then superseded leaves an object no row has mentioned since, and an
+	// upload that was granted and never confirmed leaves one no row EVER
+	// mentioned. Both are personal data, and both survive an erasure that only
+	// deletes what a projection can see.
+	//
+	// A prefix works because the prefix is derived from the subject
+	// (profile.AvatarPrefix), so this enumerates one person's objects rather
+	// than scanning a bucket.
+	//
+	// BOUNDED, and the bound is a refusal rather than a page. A caller that
+	// silently processed the first N would report a complete erasure having left
+	// the rest, which is the failure this whole path exists to prevent —
+	// implementations return ErrTooManyObjects instead.
+	ListPrefix(ctx context.Context, prefix string, limit int) ([]Key, error)
 }
 
 var (
 	// ErrNotFound means no object exists at that key. For an upload that was
 	// granted but never completed this is the expected answer, not a failure.
 	ErrNotFound = errors.New("blob: object not found")
+
+	// ErrTooManyObjects means a prefix holds more than the caller allowed.
+	//
+	// Its own error because the caller's response is specific: an erasure that
+	// hit this must FAIL rather than delete what it found, since a partial
+	// deletion reported as success is indistinguishable from a complete one.
+	ErrTooManyObjects = errors.New("blob: more objects under that prefix than the limit allows")
 
 	// ErrInvalidKey means a key or prefix is malformed.
 	ErrInvalidKey = errors.New("blob: invalid key")

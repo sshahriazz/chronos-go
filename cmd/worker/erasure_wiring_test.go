@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 
 	temporaladapter "github.com/chronos/chronos-go/internal/adapter/temporal"
 	compliancereactor "github.com/chronos/chronos-go/internal/modules/compliance/reactor"
 	identitycontract "github.com/chronos/chronos-go/internal/modules/identity/contract"
+	profiledomain "github.com/chronos/chronos-go/internal/modules/profile/domain"
 	"github.com/chronos/chronos-go/internal/platform/workflow"
 	"github.com/chronos/chronos-go/internal/server/health"
 )
@@ -174,6 +176,50 @@ func TestTemporalIsProbedEvenWhenDisabled(t *testing.T) {
 			t.Errorf("the probe's impact does not contain %q: %q. Every other durable job "+
 				"degrades into a delay; erasure simply does not happen, and whoever reads "+
 				"this needs to know which kind of failure they have", want, probe.Impact())
+		}
+	}
+}
+
+// PROFILE'S AVATAR PREFIX MUST BE IN THE SUBJECT GRAPH.
+//
+// The registry is hand-maintained, and a module that stores objects and is not
+// in it erases incompletely with NO symptom: the erasure reports success, the
+// person is told their data is gone, and their photograph is still served by a
+// signed URL to anybody holding one.
+//
+// Asserted against `profile.AvatarPrefix` itself rather than a copied string, so
+// the two cannot drift — if profile changes how it derives the prefix, this
+// fails rather than silently pointing the erasure at a namespace nothing lives
+// under any more.
+func TestTheSubjectGraphCoversProfileAvatars(t *testing.T) {
+	const subject = "subj_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+
+	prefixes := subjectObjectPrefixes(subject)
+	if len(prefixes) == 0 {
+		t.Fatal("no object prefixes are registered; an erasure traverses nothing and " +
+			"reports success")
+	}
+
+	want := profiledomain.AvatarPrefix(subject)
+	if !slices.Contains(prefixes, want) {
+		t.Fatalf("the subject graph is %v and does not include profile's avatar prefix %q; "+
+			"an erased person's photographs stay in the bucket", prefixes, want)
+	}
+}
+
+// THE PREFIXES ARE PER-SUBJECT.
+//
+// A prefix that did not vary by subject would make one erasure delete somebody
+// else's objects — the failure with no undo, aimed at a person who did not ask
+// for anything.
+func TestSubjectPrefixesDifferPerSubject(t *testing.T) {
+	a := subjectObjectPrefixes("subj_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	b := subjectObjectPrefixes("subj_01ARZ3NDEKTSV4RRFFQ69G5FBB")
+
+	for i := range a {
+		if a[i] == b[i] {
+			t.Fatalf("prefix %d is %q for two different subjects; one person's erasure "+
+				"deletes another person's objects", i, a[i])
 		}
 	}
 }

@@ -215,6 +215,68 @@ func (s *Store) Delete(ctx context.Context, key blob.Key) error {
 	return nil
 }
 
+// ListPrefix returns every key under one prefix.
+//
+// # Why this pages rather than trusting one call
+//
+// S3 truncates a listing at 1000 keys and hands back a continuation token,
+// whether or not the caller asked it to. A single ListObjectsV2 that ignored
+// `IsTruncated` would return the first page and look complete — and the caller
+// is an erasure, so "looked complete" means a person's objects survive their own
+// deletion with nothing anywhere reporting it.
+//
+// # And why the limit is a refusal
+//
+// Hitting it returns ErrTooManyObjects and NO KEYS. Returning what was found so
+// far would let the caller delete a prefix partially and report success, which
+// is the one outcome worse than failing: a partial erasure is indistinguishable
+// from a complete one afterwards.
+func (s *Store) ListPrefix(ctx context.Context, prefix string, limit int) ([]blob.Key, error) {
+	switch {
+	case prefix == "":
+		// An empty prefix lists the WHOLE BUCKET, which for an erasure would mean
+		// every tenant's objects. Refused rather than passed through.
+		return nil, fmt.Errorf("seaweedfs: a prefix is required; an empty one lists every " +
+			"object in the bucket")
+	case limit <= 0:
+		return nil, fmt.Errorf("seaweedfs: a positive limit is required, got %d", limit)
+	}
+
+	var keys []blob.Key
+	var token *string
+	for {
+		out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(s.cfg.Bucket),
+			Prefix:            aws.String(prefix),
+			ContinuationToken: token,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("seaweedfs: listing %s: %w", prefix, err)
+		}
+		for _, obj := range out.Contents {
+			if obj.Key == nil {
+				continue
+			}
+			keys = append(keys, blob.Key(*obj.Key))
+			if len(keys) > limit {
+				return nil, fmt.Errorf("%w: %s holds more than %d",
+					blob.ErrTooManyObjects, prefix, limit)
+			}
+		}
+		if out.IsTruncated == nil || !*out.IsTruncated {
+			return keys, nil
+		}
+		token = out.NextContinuationToken
+		if token == nil {
+			// Truncated with no token is a server that cannot be paged. Reported
+			// rather than treated as the end, because treating it as the end is
+			// exactly the silent-partial-listing failure above.
+			return nil, fmt.Errorf("seaweedfs: listing %s was truncated with no "+
+				"continuation token", prefix)
+		}
+	}
+}
+
 // EnsureBucket creates the bucket if it does not exist. Startup convenience for
 // development; production provisions storage separately.
 func (s *Store) EnsureBucket(ctx context.Context) error {

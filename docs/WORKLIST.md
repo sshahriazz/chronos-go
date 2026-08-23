@@ -476,7 +476,7 @@ already has a name for.
 
 ### P1 — erasure is incomplete, and these are why
 
-- [ ] **An erased subject's AVATARS survive.** The crypto-shred destroys the
+- [x] **An erased subject's AVATARS survive.** The crypto-shred destroys the
       vault key, which makes every vault field unreadable at once — and an
       avatar is not in the vault. It is an OBJECT in SeaweedFS, and a photograph
       of a person is personal data by any reading.
