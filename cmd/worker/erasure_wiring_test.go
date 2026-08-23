@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"testing"
 
 	temporaladapter "github.com/chronos/chronos-go/internal/adapter/temporal"
 	compliancereactor "github.com/chronos/chronos-go/internal/modules/compliance/reactor"
 	identitycontract "github.com/chronos/chronos-go/internal/modules/identity/contract"
 	"github.com/chronos/chronos-go/internal/platform/workflow"
+	"github.com/chronos/chronos-go/internal/server/health"
 )
 
 // THE ERASURE REACTOR MUST BE REGISTERED.
@@ -117,5 +119,61 @@ func TestTheErasureExecutorIsConstructed(t *testing.T) {
 	// not import an adapter — so nothing but this compares them.
 	if temporaladapter.ErasureWorkflow == "" {
 		t.Fatal("the erasure workflow has no name")
+	}
+}
+
+// TEMPORAL IS ON THE STATUS SURFACE EVEN WHEN IT IS SWITCHED OFF.
+//
+// This is the gap that made the constraint invisible. With TEMPORAL_ENABLED
+// false the worker registered the three SCHEDULE probes and not the Temporal
+// probe itself — so a status page showed three schedules missing and said
+// nothing about the dependency they all rest on.
+//
+// Erasure is what makes that indefensible rather than untidy. Every other
+// durable job degrades into a delay; erasure has no inline fallback, so with
+// Temporal off a deletion request is recorded, a date is mailed to the person,
+// and nothing ever runs. A statutory obligation must not be discoverable only
+// by reading a startup log.
+func TestTemporalIsProbedEvenWhenDisabled(t *testing.T) {
+	cfg := testConfig(t)
+	if cfg.Temporal.Enabled {
+		t.Skip("this fixture has Temporal enabled; the disabled path is what is under test")
+	}
+	d, closeAll := newDependencies(cfg, slog.New(slog.DiscardHandler), newCodec())
+	defer closeAll()
+
+	var probe health.Probe
+	for _, p := range d.probes {
+		if p.Name() == "temporal" {
+			probe = p
+		}
+	}
+	if probe == nil {
+		t.Fatal("no probe named \"temporal\" is registered with durable work disabled; the " +
+			"status surface reports nothing about the dependency erasure cannot run " +
+			"without")
+	}
+
+	// It must report UNHEALTHY, not merely exist. A probe that passed with no
+	// client would put the dependency on the surface and then lie about it.
+	if err := probe.Check(context.Background()); err == nil {
+		t.Fatal("the temporal probe reports healthy with no client; durable work is off " +
+			"and the status surface says everything is fine")
+	}
+
+	// And it must say what is lost, in words somebody paged can act on.
+	//
+	// TWO substrings, because one is not enough: an impact that merely mentions
+	// erasure in passing — "sends are delayed, accounts are erased later" — reads
+	// as another delay, and the whole point is that this one is not. "statutory"
+	// is the word that separates a late job from an unmet legal obligation, and
+	// an edit that drops it has dropped the reason this probe matters.
+	impact := strings.ToLower(probe.Impact())
+	for _, want := range []string{"eras", "statutory"} {
+		if !strings.Contains(impact, want) {
+			t.Errorf("the probe's impact does not contain %q: %q. Every other durable job "+
+				"degrades into a delay; erasure simply does not happen, and whoever reads "+
+				"this needs to know which kind of failure they have", want, probe.Impact())
+		}
 	}
 }

@@ -476,7 +476,17 @@ func (d *dependencies) startTemporal(cfg *config.Config, log *slog.Logger) {
 		// workflow with an inline fallback. A probe carrying a nil client reports
 		// exactly that, so the state appears on the status surface instead of
 		// being a line in a startup log nobody reads again.
+		//
+		// The TEMPORAL PROBE ITSELF belongs in this list and was missing from it.
+		// Without it, a deployment with TEMPORAL_ENABLED=false reported nothing
+		// about Temporal at all — the three schedule probes below said their
+		// schedules were absent, and the dependency they all depend on was not
+		// on the surface. Erasure made that indefensible: it is a legal
+		// obligation with a statutory clock and no inline fallback, so "durable
+		// work is off" has to be visible to whoever is looking at status, not
+		// only to whoever read the startup log.
 		d.probes = append(d.probes,
+			temporaladapter.Probe{},
 			temporaladapter.SweepReservationsProbe(nil),
 			temporaladapter.PurgeRetentionProbe(nil),
 			temporaladapter.ResealCredentialKeysProbe(nil))

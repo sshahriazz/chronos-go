@@ -370,8 +370,24 @@ type fakeLifecycle struct {
 	deactivateFn func(app.DeactivateAccountCommand) (app.DeactivateAccountResult, error)
 	deletionFn   func(app.RequestAccountDeletionCommand) (app.RequestAccountDeletionResult, error)
 
+	cancelFn func(app.CancelAccountDeletionCommand) (app.CancelAccountDeletionResult, error)
+
 	deactivateCmds []app.DeactivateAccountCommand
 	deletionCmds   []app.RequestAccountDeletionCommand
+	cancelCmds     []app.CancelAccountDeletionCommand
+}
+
+func (f *fakeLifecycle) CancelDeletion(
+	_ context.Context, cmd app.CancelAccountDeletionCommand,
+) (app.CancelAccountDeletionResult, error) {
+	f.mu.Lock()
+	f.cancelCmds = append(f.cancelCmds, cmd)
+	fn := f.cancelFn
+	f.mu.Unlock()
+	if fn == nil {
+		return app.CancelAccountDeletionResult{}, nil
+	}
+	return fn(cmd)
 }
 
 func (f *fakeLifecycle) Deactivate(

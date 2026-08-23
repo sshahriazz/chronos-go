@@ -146,6 +146,9 @@ const (
 	// IdentityServiceRequestAccountDeletionProcedure is the fully-qualified name of the
 	// IdentityService's RequestAccountDeletion RPC.
 	IdentityServiceRequestAccountDeletionProcedure = "/chronos.identity.v1.IdentityService/RequestAccountDeletion"
+	// IdentityServiceCancelAccountDeletionProcedure is the fully-qualified name of the
+	// IdentityService's CancelAccountDeletion RPC.
+	IdentityServiceCancelAccountDeletionProcedure = "/chronos.identity.v1.IdentityService/CancelAccountDeletion"
 )
 
 // IdentityServiceClient is a client for the chronos.identity.v1.IdentityService service.
@@ -411,24 +414,24 @@ type IdentityServiceClient interface {
 	// RequestAccountDeletion asks for the caller's own account to be erased, and
 	// starts the grace period.
 	//
-	// # Nothing acts on it yet
+	// # The account keeps working until the deadline
 	//
-	// The request is appended to the account's stream and that is the whole
-	// behaviour. Erasure is the compliance domain's work — destroy the key, and the
-	// personal data becomes unreadable everywhere at once — and that module does not
-	// exist. Neither does the workflow that runs the grace period, the mail that
-	// names the date, nor a command to cancel. The account keeps working.
+	// A request is not a deletion. `compliance` runs the grace period as a durable
+	// workflow and erases at the end of it; until then everything works normally,
+	// and `CancelAccountDeletion` withdraws the request.
 	//
 	// This is stated on the RPC rather than only in a design document because a
 	// client that reads "deletion requested" as "account gone" will build a screen
-	// that lies to the person using it.
+	// that lies to the person using it — and the screen that matters most here is
+	// the one offering the way back.
 	//
 	// # AAL2, plus a typed confirmation
 	//
 	// identity.md §2 lists account deletion among the operations that require
 	// step-up. The step-up proves WHO is asking; the `confirmation` field is what
-	// makes it hard to ask by accident, which matters here and nowhere else in this
-	// service, because nothing in this module undoes it.
+	// makes it hard to ask by ACCIDENT — a distinct property, and the one
+	// cancellation cannot cover, because cancelling requires somebody to notice
+	// and the person who never meant to ask is the least likely to.
 	//
 	// # It does not sign anybody out
 	//
@@ -437,6 +440,43 @@ type IdentityServiceClient interface {
 	// them out of an account that still works teaches them the request took effect
 	// immediately, which it did not.
 	RequestAccountDeletion(context.Context, *connect.Request[v1.RequestAccountDeletionRequest]) (*connect.Response[v1.RequestAccountDeletionResponse], error)
+	// CancelAccountDeletion withdraws the caller's own outstanding erasure request.
+	//
+	// # This is what makes the grace period real
+	//
+	// A waiting period nobody can use is a delay, not a safeguard. The window
+	// exists so that somebody who clicked in anger, or whose session was taken,
+	// can stop what was started — and the erasure workflow re-reads on every wake
+	// precisely so that this call stops it.
+	//
+	// Cancelling when nothing is outstanding SUCCEEDS and records nothing. The
+	// cancel link in the "deletion scheduled" mail gets clicked twice, or after an
+	// operator already withdrew the request; neither person did anything wrong and
+	// neither should be told they did.
+	//
+	// # AAL2, and no typed confirmation
+	//
+	// Step-up for the same reason requesting needs it: this decides whether an
+	// account survives, and an attacker holding a low-assurance session must not be
+	// able to keep alive an account its owner is trying to close.
+	//
+	// No confirmation field, and the asymmetry is deliberate. A typed confirmation
+	// guards something that cannot be undone; this IS the undo, and putting a
+	// hurdle in front of somebody who has just realised their mistake protects
+	// nothing.
+	//
+	// # Why it notifies
+	//
+	// The catalogue mails a Security-class message on cancellation, which reads as
+	// reassurance and is not only that. Somebody who deliberately asked for erasure
+	// and whose request was withdrawn by SOMEBODY ELSE needs to know: that is
+	// exactly what an attacker with a stolen session does when the holder tries to
+	// close the account under them.
+	//
+	// Returns `NOT_FOUND` for an account already erased — there is nothing to come
+	// back to, and saying so specifically would confirm that a particular person
+	// once held it.
+	CancelAccountDeletion(context.Context, *connect.Request[v1.CancelAccountDeletionRequest]) (*connect.Response[v1.CancelAccountDeletionResponse], error)
 }
 
 // NewIdentityServiceClient constructs a client for the chronos.identity.v1.IdentityService service.
@@ -568,6 +608,12 @@ func NewIdentityServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(identityServiceMethods.ByName("RequestAccountDeletion")),
 			connect.WithClientOptions(opts...),
 		),
+		cancelAccountDeletion: connect.NewClient[v1.CancelAccountDeletionRequest, v1.CancelAccountDeletionResponse](
+			httpClient,
+			baseURL+IdentityServiceCancelAccountDeletionProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("CancelAccountDeletion")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -592,6 +638,7 @@ type identityServiceClient struct {
 	revokeAllSessions         *connect.Client[v1.RevokeAllSessionsRequest, v1.RevokeAllSessionsResponse]
 	deactivateAccount         *connect.Client[v1.DeactivateAccountRequest, v1.DeactivateAccountResponse]
 	requestAccountDeletion    *connect.Client[v1.RequestAccountDeletionRequest, v1.RequestAccountDeletionResponse]
+	cancelAccountDeletion     *connect.Client[v1.CancelAccountDeletionRequest, v1.CancelAccountDeletionResponse]
 }
 
 // Register calls chronos.identity.v1.IdentityService.Register.
@@ -687,6 +734,11 @@ func (c *identityServiceClient) DeactivateAccount(ctx context.Context, req *conn
 // RequestAccountDeletion calls chronos.identity.v1.IdentityService.RequestAccountDeletion.
 func (c *identityServiceClient) RequestAccountDeletion(ctx context.Context, req *connect.Request[v1.RequestAccountDeletionRequest]) (*connect.Response[v1.RequestAccountDeletionResponse], error) {
 	return c.requestAccountDeletion.CallUnary(ctx, req)
+}
+
+// CancelAccountDeletion calls chronos.identity.v1.IdentityService.CancelAccountDeletion.
+func (c *identityServiceClient) CancelAccountDeletion(ctx context.Context, req *connect.Request[v1.CancelAccountDeletionRequest]) (*connect.Response[v1.CancelAccountDeletionResponse], error) {
+	return c.cancelAccountDeletion.CallUnary(ctx, req)
 }
 
 // IdentityServiceHandler is an implementation of the chronos.identity.v1.IdentityService service.
@@ -952,24 +1004,24 @@ type IdentityServiceHandler interface {
 	// RequestAccountDeletion asks for the caller's own account to be erased, and
 	// starts the grace period.
 	//
-	// # Nothing acts on it yet
+	// # The account keeps working until the deadline
 	//
-	// The request is appended to the account's stream and that is the whole
-	// behaviour. Erasure is the compliance domain's work — destroy the key, and the
-	// personal data becomes unreadable everywhere at once — and that module does not
-	// exist. Neither does the workflow that runs the grace period, the mail that
-	// names the date, nor a command to cancel. The account keeps working.
+	// A request is not a deletion. `compliance` runs the grace period as a durable
+	// workflow and erases at the end of it; until then everything works normally,
+	// and `CancelAccountDeletion` withdraws the request.
 	//
 	// This is stated on the RPC rather than only in a design document because a
 	// client that reads "deletion requested" as "account gone" will build a screen
-	// that lies to the person using it.
+	// that lies to the person using it — and the screen that matters most here is
+	// the one offering the way back.
 	//
 	// # AAL2, plus a typed confirmation
 	//
 	// identity.md §2 lists account deletion among the operations that require
 	// step-up. The step-up proves WHO is asking; the `confirmation` field is what
-	// makes it hard to ask by accident, which matters here and nowhere else in this
-	// service, because nothing in this module undoes it.
+	// makes it hard to ask by ACCIDENT — a distinct property, and the one
+	// cancellation cannot cover, because cancelling requires somebody to notice
+	// and the person who never meant to ask is the least likely to.
 	//
 	// # It does not sign anybody out
 	//
@@ -978,6 +1030,43 @@ type IdentityServiceHandler interface {
 	// them out of an account that still works teaches them the request took effect
 	// immediately, which it did not.
 	RequestAccountDeletion(context.Context, *connect.Request[v1.RequestAccountDeletionRequest]) (*connect.Response[v1.RequestAccountDeletionResponse], error)
+	// CancelAccountDeletion withdraws the caller's own outstanding erasure request.
+	//
+	// # This is what makes the grace period real
+	//
+	// A waiting period nobody can use is a delay, not a safeguard. The window
+	// exists so that somebody who clicked in anger, or whose session was taken,
+	// can stop what was started — and the erasure workflow re-reads on every wake
+	// precisely so that this call stops it.
+	//
+	// Cancelling when nothing is outstanding SUCCEEDS and records nothing. The
+	// cancel link in the "deletion scheduled" mail gets clicked twice, or after an
+	// operator already withdrew the request; neither person did anything wrong and
+	// neither should be told they did.
+	//
+	// # AAL2, and no typed confirmation
+	//
+	// Step-up for the same reason requesting needs it: this decides whether an
+	// account survives, and an attacker holding a low-assurance session must not be
+	// able to keep alive an account its owner is trying to close.
+	//
+	// No confirmation field, and the asymmetry is deliberate. A typed confirmation
+	// guards something that cannot be undone; this IS the undo, and putting a
+	// hurdle in front of somebody who has just realised their mistake protects
+	// nothing.
+	//
+	// # Why it notifies
+	//
+	// The catalogue mails a Security-class message on cancellation, which reads as
+	// reassurance and is not only that. Somebody who deliberately asked for erasure
+	// and whose request was withdrawn by SOMEBODY ELSE needs to know: that is
+	// exactly what an attacker with a stolen session does when the holder tries to
+	// close the account under them.
+	//
+	// Returns `NOT_FOUND` for an account already erased — there is nothing to come
+	// back to, and saying so specifically would confirm that a particular person
+	// once held it.
+	CancelAccountDeletion(context.Context, *connect.Request[v1.CancelAccountDeletionRequest]) (*connect.Response[v1.CancelAccountDeletionResponse], error)
 }
 
 // NewIdentityServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -1105,6 +1194,12 @@ func NewIdentityServiceHandler(svc IdentityServiceHandler, opts ...connect.Handl
 		connect.WithSchema(identityServiceMethods.ByName("RequestAccountDeletion")),
 		connect.WithHandlerOptions(opts...),
 	)
+	identityServiceCancelAccountDeletionHandler := connect.NewUnaryHandler(
+		IdentityServiceCancelAccountDeletionProcedure,
+		svc.CancelAccountDeletion,
+		connect.WithSchema(identityServiceMethods.ByName("CancelAccountDeletion")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/chronos.identity.v1.IdentityService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case IdentityServiceRegisterProcedure:
@@ -1145,6 +1240,8 @@ func NewIdentityServiceHandler(svc IdentityServiceHandler, opts ...connect.Handl
 			identityServiceDeactivateAccountHandler.ServeHTTP(w, r)
 		case IdentityServiceRequestAccountDeletionProcedure:
 			identityServiceRequestAccountDeletionHandler.ServeHTTP(w, r)
+		case IdentityServiceCancelAccountDeletionProcedure:
+			identityServiceCancelAccountDeletionHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1228,4 +1325,8 @@ func (UnimplementedIdentityServiceHandler) DeactivateAccount(context.Context, *c
 
 func (UnimplementedIdentityServiceHandler) RequestAccountDeletion(context.Context, *connect.Request[v1.RequestAccountDeletionRequest]) (*connect.Response[v1.RequestAccountDeletionResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.RequestAccountDeletion is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) CancelAccountDeletion(context.Context, *connect.Request[v1.CancelAccountDeletionRequest]) (*connect.Response[v1.CancelAccountDeletionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.CancelAccountDeletion is not implemented"))
 }

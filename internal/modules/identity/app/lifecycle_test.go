@@ -462,3 +462,135 @@ func (stubPlanner) PlanRevokeAllSessions(
 func (stubPlanner) InvalidateAuthorization(context.Context, string) error { return nil }
 
 var _ SessionRevocationPlanner = stubPlanner{}
+
+// CANCELLING WITHDRAWS AN OUTSTANDING REQUEST.
+//
+// This is what makes the grace period a safeguard rather than a delay. Until
+// this command existed the aggregate could cancel and nothing called it, so the
+// window was usable only by an operator with database access — and the cancel
+// link the "deletion scheduled" mail carries had nothing behind it.
+func TestCancellingWithdrawsAnOutstandingRequest(t *testing.T) {
+	h := newLifeHarness(t)
+	if _, err := h.life.RequestDeletion(context.Background(), RequestAccountDeletionCommand{
+		SubjectID: h.subjectID, IdempotencyKey: "idem-delete",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := h.life.CancelDeletion(context.Background(), CancelAccountDeletionCommand{
+		SubjectID: h.subjectID, IdempotencyKey: "idem-cancel",
+	})
+	if err != nil {
+		t.Fatalf("cancelling: %v", err)
+	}
+	if !res.Changed {
+		t.Fatal("the cancellation reported no change; the request is still outstanding and " +
+			"the erasure workflow will act on it")
+	}
+
+	calls := appendedTypes(h.appender)
+	if len(calls) != 2 || len(calls[1]) != 1 ||
+		calls[1][0] != (&contract.UserDeletionCancelled{}).EventType() {
+		t.Fatalf("the cancellation wrote %v, want exactly one UserDeletionCancelled", calls)
+	}
+}
+
+// AND THE ACCOUNT CAN THEN ASK AGAIN, WITH A FRESH DEADLINE.
+//
+// A residual flag would make the second request a no-op — RequestDeletion is
+// idempotent while one is outstanding — so somebody who cancelled and changed
+// their mind would click delete, be told nothing, and keep an account they
+// believe is scheduled for erasure.
+func TestAfterCancellingTheHolderCanRequestAgain(t *testing.T) {
+	h := newLifeHarness(t)
+	ctx := context.Background()
+
+	first, err := h.life.RequestDeletion(ctx, RequestAccountDeletionCommand{
+		SubjectID: h.subjectID, IdempotencyKey: "idem-delete-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.life.CancelDeletion(ctx, CancelAccountDeletionCommand{
+		SubjectID: h.subjectID, IdempotencyKey: "idem-cancel",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := h.life.RequestDeletion(ctx, RequestAccountDeletionCommand{
+		SubjectID: h.subjectID, IdempotencyKey: "idem-delete-2",
+	})
+	if err != nil {
+		t.Fatalf("requesting again: %v", err)
+	}
+	if !second.Changed {
+		t.Fatal("a request after a cancellation recorded nothing; the holder keeps an " +
+			"account they believe is scheduled for erasure")
+	}
+	if second.ScheduledFor.Before(first.ScheduledFor) {
+		t.Errorf("the second deadline %s is before the first %s",
+			second.ScheduledFor, first.ScheduledFor)
+	}
+}
+
+// CANCELLING NOTHING SUCCEEDS AND WRITES NOTHING.
+//
+// The cancel link is clicked twice, or after an operator already withdrew the
+// request. Neither person did anything wrong.
+func TestCancellingWithNothingOutstandingIsASuccess(t *testing.T) {
+	h := newLifeHarness(t)
+
+	res, err := h.life.CancelDeletion(context.Background(), CancelAccountDeletionCommand{
+		SubjectID: h.subjectID, IdempotencyKey: "idem-cancel",
+	})
+	if err != nil {
+		t.Fatalf("cancelling nothing failed: %v; the cancel link errors for anybody who "+
+			"clicks it twice", err)
+	}
+	if res.Changed {
+		t.Error("cancelling nothing reported a change")
+	}
+	if calls := appendedTypes(h.appender); len(calls) != 0 {
+		t.Errorf("cancelling nothing wrote %v", calls)
+	}
+}
+
+// CANCELLING SIGNS NOBODY OUT.
+//
+// For the same reason requesting does not: the account works throughout, and a
+// cancellation is the person keeping it. Voiding their session would sign them
+// out at the moment they chose to stay.
+func TestCancellingRevokesNoSessions(t *testing.T) {
+	h := newLifeHarness(t)
+	h.live.sessions = []ids.SessionID{h.liveSession(t, h.subjectID)}
+	ctx := context.Background()
+
+	if _, err := h.life.RequestDeletion(ctx, RequestAccountDeletionCommand{
+		SubjectID: h.subjectID, IdempotencyKey: "idem-delete",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.life.CancelDeletion(ctx, CancelAccountDeletionCommand{
+		SubjectID: h.subjectID, IdempotencyKey: "idem-cancel",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, e := range h.appender.events() {
+		if _, ok := e.(*contract.SessionRevoked); ok {
+			t.Error("a cancellation revoked a session; it signed somebody out at the " +
+				"moment they chose to keep their account")
+		}
+	}
+}
+
+// A CANCELLATION NEEDS AN IDEMPOTENCY KEY.
+func TestCancellingNeedsAnIdempotencyKey(t *testing.T) {
+	h := newLifeHarness(t)
+
+	if _, err := h.life.CancelDeletion(context.Background(), CancelAccountDeletionCommand{
+		SubjectID: h.subjectID,
+	}); err == nil {
+		t.Error("a cancellation with no Idempotency-Key was accepted")
+	}
+}

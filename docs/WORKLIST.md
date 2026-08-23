@@ -431,15 +431,27 @@ nothing ever ran.
 
 ### What is NOT done, and is the next step
 
-- [ ] **No cancel endpoint.** The aggregate has `CancelDeletion` and nothing
-      calls it. The cancel link NOTIFICATIONS §4 specifies has no RPC behind it,
-      so the grace period is currently only usable by an operator with database
-      access. This is the largest remaining hole in the path.
-- [ ] **Erasure requires Temporal.** With `TEMPORAL_ENABLED=false` the reactor
-      refuses to build and logs it at startup. Unlike mail there is no inline
-      fallback — "wait thirty days, then act" has no synchronous equivalent — so
-      this is a deployment constraint rather than a defect, recorded because it
-      is invisible from the code that requests deletion.
+- [x] **The cancel endpoint.** `CancelAccountDeletion`, AAL2, no typed
+      confirmation — the asymmetry with requesting is deliberate: a confirmation
+      guards what cannot be undone, and this IS the undo. Cancelling nothing
+      succeeds, because the link is clicked twice or after an operator already
+      withdrew it.
+
+      Three stale doc blocks on the request RPC were corrected with it. They
+      each said erasure was unconsumed and uncancellable, which stopped being
+      true one commit earlier.
+- [x] **Temporal is on the status surface even when switched off.** It was not:
+      the disabled branch registered the three SCHEDULE probes and NOT the
+      Temporal probe itself, so a deployment with durable work off reported
+      three missing schedules and said nothing about the dependency they all
+      rest on.
+
+      Criticality stays **Degradable** rather than becoming Critical — a worker
+      that cannot reach Temporal still runs every reactor and fills every read
+      model, and taking the binary out of the load balancer would be a larger
+      outage than the one being reported. What changed is `Impact()`, which now
+      names ERASURE FIRST: every other durable job degrades into a delay, and
+      this is the one that simply does not happen.
 - [ ] **Legal holds and retention exemptions** (compliance.md §4 steps 2–3) are
       not consulted. Nothing can place a hold yet, so there is nothing to check;
       it becomes real with the `LegalHold` aggregate.

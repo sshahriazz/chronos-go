@@ -1693,13 +1693,13 @@ message DeactivateAccountResponse {
 message RequestAccountDeletionRequest {
   // The literal string `DELETE`, typed by the account holder.
   //
-  // Every other destructive call in this service is undone by doing it again the
-  // other way: a revoked session is replaced by signing in, a deactivated account
-  // is reactivated by signing in, a changed password is changed back. This one is
-  // not — nothing in this module cancels a deletion request, and the module that
-  // will act on it destroys a key. A step-up to AAL2 proves WHO is asking; it
-  // does not prove they meant to ask, and a mis-wired client retrying a failed
-  // request would satisfy it perfectly.
+  // The grace period is now cancellable — `CancelAccountDeletion` withdraws it —
+  // so this is no longer the only thing standing between a stray click and an
+  // erasure. It stays anyway, and the reason is what the two controls each cover:
+  // cancelling requires somebody to NOTICE, and the person most likely not to
+  // notice is the one who never meant to ask. A step-up to AAL2 proves WHO is
+  // asking; it does not prove they meant to, and a mis-wired client retrying a
+  // failed request satisfies it perfectly.
   //
   // Constrained by protovalidate rather than checked in a handler, so the
   // requirement is part of the schema every client generates from and is rejected
@@ -1715,15 +1715,41 @@ message RequestAccountDeletionRequest {
   ];
 }
 
+// CancelAccountDeletionRequest withdraws the caller's own outstanding request.
+//
+// It names no account, for the same reason RequestAccountDeletionRequest does
+// not: the subject is the authenticated caller and nothing else. A request that
+// could name an account is a request to cancel somebody else's decision.
+//
+// It carries NO confirmation field, and the asymmetry with requesting is the
+// point. A typed confirmation guards an action that cannot be undone; this is
+// the undo. Making it equally hard to reach would protect nothing and would put
+// a hurdle in front of somebody who has just realised they made a mistake.
+message CancelAccountDeletionRequest {}
+
+// CancelAccountDeletionResponse reports whether anything was outstanding.
+message CancelAccountDeletionResponse {
+  // Whether this call withdrew a request. False means there was nothing to
+  // withdraw, which is a SUCCESS: the cancel link is clicked twice, or after an
+  // operator already withdrew it on the holder's behalf, and neither person did
+  // anything wrong.
+  bool changed = 1;
+}
+
 // RequestAccountDeletionResponse reports the deadline the request now carries.
 //
-// # Read this before building anything on it
+// # What happens after this call
 //
-// The request is APPENDED and nothing consumes it. Erasure belongs to the
-// compliance domain (ADR-002: destroy the key), that module does not exist, and
-// neither does the workflow that would run the grace period, the mail that would
-// name the date, or a command to cancel. The account keeps working — indefinitely
-// — and this response says only that the intent is now in the log.
+// The request is appended and `compliance` acts on it: a durable workflow waits
+// out the grace period, re-reading as it goes so a cancellation stops it, and at
+// the deadline it confirms to the holder, destroys the subject key and erases the
+// account. Until the deadline the account KEEPS WORKING — that is what the grace
+// period is — and `CancelAccountDeletion` withdraws the request.
+//
+// One deployment caveat, because it is invisible from here: the grace period is
+// a Temporal workflow and has no inline fallback. With `TEMPORAL_ENABLED=false`
+// the request is recorded and nothing runs, which the worker reports through its
+// `temporal` health probe rather than leaving to be discovered.
 message RequestAccountDeletionResponse {
   // Whether this call recorded the request. False means one was already
   // outstanding, and `scheduled_for` is then the ORIGINAL deadline: a second
@@ -3156,24 +3182,24 @@ service IdentityService {
   // RequestAccountDeletion asks for the caller's own account to be erased, and
   // starts the grace period.
   //
-  // # Nothing acts on it yet
+  // # The account keeps working until the deadline
   //
-  // The request is appended to the account's stream and that is the whole
-  // behaviour. Erasure is the compliance domain's work — destroy the key, and the
-  // personal data becomes unreadable everywhere at once — and that module does not
-  // exist. Neither does the workflow that runs the grace period, the mail that
-  // names the date, nor a command to cancel. The account keeps working.
+  // A request is not a deletion. `compliance` runs the grace period as a durable
+  // workflow and erases at the end of it; until then everything works normally,
+  // and `CancelAccountDeletion` withdraws the request.
   //
   // This is stated on the RPC rather than only in a design document because a
   // client that reads "deletion requested" as "account gone" will build a screen
-  // that lies to the person using it.
+  // that lies to the person using it — and the screen that matters most here is
+  // the one offering the way back.
   //
   // # AAL2, plus a typed confirmation
   //
   // identity.md §2 lists account deletion among the operations that require
   // step-up. The step-up proves WHO is asking; the `confirmation` field is what
-  // makes it hard to ask by accident, which matters here and nowhere else in this
-  // service, because nothing in this module undoes it.
+  // makes it hard to ask by ACCIDENT — a distinct property, and the one
+  // cancellation cannot cover, because cancelling requires somebody to notice
+  // and the person who never meant to ask is the least likely to.
   //
   // # It does not sign anybody out
   //
@@ -3240,6 +3266,64 @@ service IdentityService {
           }
         ]
       }
+    };
+  }
+
+  // CancelAccountDeletion withdraws the caller's own outstanding erasure request.
+  //
+  // # This is what makes the grace period real
+  //
+  // A waiting period nobody can use is a delay, not a safeguard. The window
+  // exists so that somebody who clicked in anger, or whose session was taken,
+  // can stop what was started — and the erasure workflow re-reads on every wake
+  // precisely so that this call stops it.
+  //
+  // Cancelling when nothing is outstanding SUCCEEDS and records nothing. The
+  // cancel link in the "deletion scheduled" mail gets clicked twice, or after an
+  // operator already withdrew the request; neither person did anything wrong and
+  // neither should be told they did.
+  //
+  // # AAL2, and no typed confirmation
+  //
+  // Step-up for the same reason requesting needs it: this decides whether an
+  // account survives, and an attacker holding a low-assurance session must not be
+  // able to keep alive an account its owner is trying to close.
+  //
+  // No confirmation field, and the asymmetry is deliberate. A typed confirmation
+  // guards something that cannot be undone; this IS the undo, and putting a
+  // hurdle in front of somebody who has just realised their mistake protects
+  // nothing.
+  //
+  // # Why it notifies
+  //
+  // The catalogue mails a Security-class message on cancellation, which reads as
+  // reassurance and is not only that. Somebody who deliberately asked for erasure
+  // and whose request was withdrawn by SOMEBODY ELSE needs to know: that is
+  // exactly what an attacker with a stolen session does when the holder tries to
+  // close the account under them.
+  //
+  // Returns `NOT_FOUND` for an account already erased — there is nothing to come
+  // back to, and saying so specifically would confirm that a particular person
+  // once held it.
+  rpc CancelAccountDeletion(CancelAccountDeletionRequest) returns (CancelAccountDeletionResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+    option (chronos.options.v1.min_aal) = ASSURANCE_LEVEL_2;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
     };
   }
 }

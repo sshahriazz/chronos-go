@@ -3230,13 +3230,13 @@ type RequestAccountDeletionRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The literal string `DELETE`, typed by the account holder.
 	//
-	// Every other destructive call in this service is undone by doing it again the
-	// other way: a revoked session is replaced by signing in, a deactivated account
-	// is reactivated by signing in, a changed password is changed back. This one is
-	// not — nothing in this module cancels a deletion request, and the module that
-	// will act on it destroys a key. A step-up to AAL2 proves WHO is asking; it
-	// does not prove they meant to ask, and a mis-wired client retrying a failed
-	// request would satisfy it perfectly.
+	// The grace period is now cancellable — `CancelAccountDeletion` withdraws it —
+	// so this is no longer the only thing standing between a stray click and an
+	// erasure. It stays anyway, and the reason is what the two controls each cover:
+	// cancelling requires somebody to NOTICE, and the person most likely not to
+	// notice is the one who never meant to ask. A step-up to AAL2 proves WHO is
+	// asking; it does not prove they meant to, and a mis-wired client retrying a
+	// failed request satisfies it perfectly.
 	//
 	// Constrained by protovalidate rather than checked in a handler, so the
 	// requirement is part of the schema every client generates from and is rejected
@@ -3288,15 +3288,115 @@ func (x *RequestAccountDeletionRequest) GetConfirmation() string {
 	return ""
 }
 
+// CancelAccountDeletionRequest withdraws the caller's own outstanding request.
+//
+// It names no account, for the same reason RequestAccountDeletionRequest does
+// not: the subject is the authenticated caller and nothing else. A request that
+// could name an account is a request to cancel somebody else's decision.
+//
+// It carries NO confirmation field, and the asymmetry with requesting is the
+// point. A typed confirmation guards an action that cannot be undone; this is
+// the undo. Making it equally hard to reach would protect nothing and would put
+// a hurdle in front of somebody who has just realised they made a mistake.
+type CancelAccountDeletionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CancelAccountDeletionRequest) Reset() {
+	*x = CancelAccountDeletionRequest{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[40]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CancelAccountDeletionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CancelAccountDeletionRequest) ProtoMessage() {}
+
+func (x *CancelAccountDeletionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[40]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CancelAccountDeletionRequest.ProtoReflect.Descriptor instead.
+func (*CancelAccountDeletionRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{40}
+}
+
+// CancelAccountDeletionResponse reports whether anything was outstanding.
+type CancelAccountDeletionResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Whether this call withdrew a request. False means there was nothing to
+	// withdraw, which is a SUCCESS: the cancel link is clicked twice, or after an
+	// operator already withdrew it on the holder's behalf, and neither person did
+	// anything wrong.
+	Changed       bool `protobuf:"varint,1,opt,name=changed,proto3" json:"changed,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CancelAccountDeletionResponse) Reset() {
+	*x = CancelAccountDeletionResponse{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[41]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CancelAccountDeletionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CancelAccountDeletionResponse) ProtoMessage() {}
+
+func (x *CancelAccountDeletionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[41]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CancelAccountDeletionResponse.ProtoReflect.Descriptor instead.
+func (*CancelAccountDeletionResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{41}
+}
+
+func (x *CancelAccountDeletionResponse) GetChanged() bool {
+	if x != nil {
+		return x.Changed
+	}
+	return false
+}
+
 // RequestAccountDeletionResponse reports the deadline the request now carries.
 //
-// # Read this before building anything on it
+// # What happens after this call
 //
-// The request is APPENDED and nothing consumes it. Erasure belongs to the
-// compliance domain (ADR-002: destroy the key), that module does not exist, and
-// neither does the workflow that would run the grace period, the mail that would
-// name the date, or a command to cancel. The account keeps working — indefinitely
-// — and this response says only that the intent is now in the log.
+// The request is appended and `compliance` acts on it: a durable workflow waits
+// out the grace period, re-reading as it goes so a cancellation stops it, and at
+// the deadline it confirms to the holder, destroys the subject key and erases the
+// account. Until the deadline the account KEEPS WORKING — that is what the grace
+// period is — and `CancelAccountDeletion` withdraws the request.
+//
+// One deployment caveat, because it is invisible from here: the grace period is
+// a Temporal workflow and has no inline fallback. With `TEMPORAL_ENABLED=false`
+// the request is recorded and nothing runs, which the worker reports through its
+// `temporal` health probe rather than leaving to be discovered.
 type RequestAccountDeletionResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Whether this call recorded the request. False means one was already
@@ -3312,7 +3412,7 @@ type RequestAccountDeletionResponse struct {
 
 func (x *RequestAccountDeletionResponse) Reset() {
 	*x = RequestAccountDeletionResponse{}
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[40]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3324,7 +3424,7 @@ func (x *RequestAccountDeletionResponse) String() string {
 func (*RequestAccountDeletionResponse) ProtoMessage() {}
 
 func (x *RequestAccountDeletionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_identity_v1_identity_proto_msgTypes[40]
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3337,7 +3437,7 @@ func (x *RequestAccountDeletionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestAccountDeletionResponse.ProtoReflect.Descriptor instead.
 func (*RequestAccountDeletionResponse) Descriptor() ([]byte, []int) {
-	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{40}
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *RequestAccountDeletionResponse) GetChanged() bool {
@@ -3531,7 +3631,10 @@ const file_chronos_identity_v1_identity_proto_rawDesc = "" +
 	"\fconfirmation\x18\x01 \x01(\tB\x1a\xbaG\n" +
 	":\b\x12\x06DELETE\xbaH\n" +
 	"r\b\n" +
-	"\x06DELETER\fconfirmation\"{\n" +
+	"\x06DELETER\fconfirmation\"\x1e\n" +
+	"\x1cCancelAccountDeletionRequest\"9\n" +
+	"\x1dCancelAccountDeletionResponse\x12\x18\n" +
+	"\achanged\x18\x01 \x01(\bR\achanged\"{\n" +
 	"\x1eRequestAccountDeletionResponse\x12\x18\n" +
 	"\achanged\x18\x01 \x01(\bR\achanged\x12?\n" +
 	"\rscheduled_for\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\fscheduledFor*\xac\x01\n" +
@@ -3559,7 +3662,7 @@ const file_chronos_identity_v1_identity_proto_rawDesc = "" +
 	"$FAILURE_REASON_INCOMPLETE_ENROLLMENT\x10\x06\x12\x1e\n" +
 	"\x1aFAILURE_REASON_DEACTIVATED\x10\a\x12\x1c\n" +
 	"\x18FAILURE_REASON_SUSPENDED\x10\b\x12\x1f\n" +
-	"\x1bFAILURE_REASON_RATE_LIMITED\x10\t2\xad\x90\x01\n" +
+	"\x1bFAILURE_REASON_RATE_LIMITED\x10\t2\x94\x92\x01\n" +
 	"\x0fIdentityService\x12\xee\x04\n" +
 	"\bRegister\x12$.chronos.identity.v1.RegisterRequest\x1a%.chronos.identity.v1.RegisterResponse\"\x94\x04\xbaG\x88\x042G\n" +
 	"E\n" +
@@ -4037,6 +4140,11 @@ const file_chronos_identity_v1_identity_proto_rawDesc = "" +
 	"G#/components/schemas/chronos.identity.v1.RequestAccountDeletionResponse\x125\x123changed: true\n" +
 	"scheduledFor: '2026-09-19T08:15:00Z'\n" +
 	"\xca\xf3\x18\f\n" +
+	"\x04self\x12\x04user\xd0\xf3\x18\x02\xe0\xf3\x18\x02\x12\xe4\x01\n" +
+	"\x15CancelAccountDeletion\x121.chronos.identity.v1.CancelAccountDeletionRequest\x1a2.chronos.identity.v1.CancelAccountDeletionResponse\"d\xbaGI2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-key\xca\xf3\x18\f\n" +
 	"\x04self\x12\x04user\xd0\xf3\x18\x02\xe0\xf3\x18\x02B\xde\x01\n" +
 	"\x17com.chronos.identity.v1B\rIdentityProtoP\x01ZFgithub.com/chronos/chronos-go/gen/proto/chronos/identity/v1;identityv1\xa2\x02\x03CIX\xaa\x02\x13Chronos.Identity.V1\xca\x02\x13Chronos\\Identity\\V1\xe2\x02\x1fChronos\\Identity\\V1\\GPBMetadata\xea\x02\x15Chronos::Identity::V1b\x06proto3"
 
@@ -4053,7 +4161,7 @@ func file_chronos_identity_v1_identity_proto_rawDescGZIP() []byte {
 }
 
 var file_chronos_identity_v1_identity_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_chronos_identity_v1_identity_proto_msgTypes = make([]protoimpl.MessageInfo, 41)
+var file_chronos_identity_v1_identity_proto_msgTypes = make([]protoimpl.MessageInfo, 43)
 var file_chronos_identity_v1_identity_proto_goTypes = []any{
 	(MethodKind)(0),                           // 0: chronos.identity.v1.MethodKind
 	(AccountState)(0),                         // 1: chronos.identity.v1.AccountState
@@ -4098,40 +4206,42 @@ var file_chronos_identity_v1_identity_proto_goTypes = []any{
 	(*DeactivateAccountRequest)(nil),          // 40: chronos.identity.v1.DeactivateAccountRequest
 	(*DeactivateAccountResponse)(nil),         // 41: chronos.identity.v1.DeactivateAccountResponse
 	(*RequestAccountDeletionRequest)(nil),     // 42: chronos.identity.v1.RequestAccountDeletionRequest
-	(*RequestAccountDeletionResponse)(nil),    // 43: chronos.identity.v1.RequestAccountDeletionResponse
-	(v1.AssuranceLevel)(0),                    // 44: chronos.options.v1.AssuranceLevel
-	(*timestamppb.Timestamp)(nil),             // 45: google.protobuf.Timestamp
+	(*CancelAccountDeletionRequest)(nil),      // 43: chronos.identity.v1.CancelAccountDeletionRequest
+	(*CancelAccountDeletionResponse)(nil),     // 44: chronos.identity.v1.CancelAccountDeletionResponse
+	(*RequestAccountDeletionResponse)(nil),    // 45: chronos.identity.v1.RequestAccountDeletionResponse
+	(v1.AssuranceLevel)(0),                    // 46: chronos.options.v1.AssuranceLevel
+	(*timestamppb.Timestamp)(nil),             // 47: google.protobuf.Timestamp
 }
 var file_chronos_identity_v1_identity_proto_depIdxs = []int32{
 	0,  // 0: chronos.identity.v1.AuthenticateResponse.offered:type_name -> chronos.identity.v1.MethodKind
-	44, // 1: chronos.identity.v1.CreateSessionResponse.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
-	45, // 2: chronos.identity.v1.CreateSessionResponse.idle_expires_at:type_name -> google.protobuf.Timestamp
-	45, // 3: chronos.identity.v1.CreateSessionResponse.absolute_expires_at:type_name -> google.protobuf.Timestamp
+	46, // 1: chronos.identity.v1.CreateSessionResponse.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
+	47, // 2: chronos.identity.v1.CreateSessionResponse.idle_expires_at:type_name -> google.protobuf.Timestamp
+	47, // 3: chronos.identity.v1.CreateSessionResponse.absolute_expires_at:type_name -> google.protobuf.Timestamp
 	1,  // 4: chronos.identity.v1.GetUserResponse.state:type_name -> chronos.identity.v1.AccountState
-	45, // 5: chronos.identity.v1.GetUserResponse.registered_at:type_name -> google.protobuf.Timestamp
-	45, // 6: chronos.identity.v1.GetUserResponse.activated_at:type_name -> google.protobuf.Timestamp
-	45, // 7: chronos.identity.v1.GetUserResponse.deactivated_at:type_name -> google.protobuf.Timestamp
-	45, // 8: chronos.identity.v1.GetUserResponse.suspended_at:type_name -> google.protobuf.Timestamp
-	45, // 9: chronos.identity.v1.GetUserResponse.deletion_requested_at:type_name -> google.protobuf.Timestamp
-	45, // 10: chronos.identity.v1.GetUserResponse.deletion_scheduled_for:type_name -> google.protobuf.Timestamp
-	44, // 11: chronos.identity.v1.Session.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
-	45, // 12: chronos.identity.v1.Session.idle_expires_at:type_name -> google.protobuf.Timestamp
-	45, // 13: chronos.identity.v1.Session.absolute_expires_at:type_name -> google.protobuf.Timestamp
-	45, // 14: chronos.identity.v1.Session.created_at:type_name -> google.protobuf.Timestamp
-	45, // 15: chronos.identity.v1.Session.last_seen_at:type_name -> google.protobuf.Timestamp
+	47, // 5: chronos.identity.v1.GetUserResponse.registered_at:type_name -> google.protobuf.Timestamp
+	47, // 6: chronos.identity.v1.GetUserResponse.activated_at:type_name -> google.protobuf.Timestamp
+	47, // 7: chronos.identity.v1.GetUserResponse.deactivated_at:type_name -> google.protobuf.Timestamp
+	47, // 8: chronos.identity.v1.GetUserResponse.suspended_at:type_name -> google.protobuf.Timestamp
+	47, // 9: chronos.identity.v1.GetUserResponse.deletion_requested_at:type_name -> google.protobuf.Timestamp
+	47, // 10: chronos.identity.v1.GetUserResponse.deletion_scheduled_for:type_name -> google.protobuf.Timestamp
+	46, // 11: chronos.identity.v1.Session.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
+	47, // 12: chronos.identity.v1.Session.idle_expires_at:type_name -> google.protobuf.Timestamp
+	47, // 13: chronos.identity.v1.Session.absolute_expires_at:type_name -> google.protobuf.Timestamp
+	47, // 14: chronos.identity.v1.Session.created_at:type_name -> google.protobuf.Timestamp
+	47, // 15: chronos.identity.v1.Session.last_seen_at:type_name -> google.protobuf.Timestamp
 	22, // 16: chronos.identity.v1.ListSessionsResponse.sessions:type_name -> chronos.identity.v1.Session
 	0,  // 17: chronos.identity.v1.AuthMethod.kind:type_name -> chronos.identity.v1.MethodKind
-	45, // 18: chronos.identity.v1.AuthMethod.added_at:type_name -> google.protobuf.Timestamp
-	45, // 19: chronos.identity.v1.AuthMethod.enabled_at:type_name -> google.protobuf.Timestamp
-	45, // 20: chronos.identity.v1.AuthMethod.last_used_at:type_name -> google.protobuf.Timestamp
+	47, // 18: chronos.identity.v1.AuthMethod.added_at:type_name -> google.protobuf.Timestamp
+	47, // 19: chronos.identity.v1.AuthMethod.enabled_at:type_name -> google.protobuf.Timestamp
+	47, // 20: chronos.identity.v1.AuthMethod.last_used_at:type_name -> google.protobuf.Timestamp
 	25, // 21: chronos.identity.v1.ListMethodsResponse.methods:type_name -> chronos.identity.v1.AuthMethod
 	2,  // 22: chronos.identity.v1.LoginAttempt.reason:type_name -> chronos.identity.v1.FailureReason
 	0,  // 23: chronos.identity.v1.LoginAttempt.methods:type_name -> chronos.identity.v1.MethodKind
-	44, // 24: chronos.identity.v1.LoginAttempt.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
-	45, // 25: chronos.identity.v1.LoginAttempt.occurred_at:type_name -> google.protobuf.Timestamp
+	46, // 24: chronos.identity.v1.LoginAttempt.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
+	47, // 25: chronos.identity.v1.LoginAttempt.occurred_at:type_name -> google.protobuf.Timestamp
 	28, // 26: chronos.identity.v1.ListLoginHistoryResponse.attempts:type_name -> chronos.identity.v1.LoginAttempt
-	45, // 27: chronos.identity.v1.EnrollTotpResponse.expires_at:type_name -> google.protobuf.Timestamp
-	45, // 28: chronos.identity.v1.RequestAccountDeletionResponse.scheduled_for:type_name -> google.protobuf.Timestamp
+	47, // 27: chronos.identity.v1.EnrollTotpResponse.expires_at:type_name -> google.protobuf.Timestamp
+	47, // 28: chronos.identity.v1.RequestAccountDeletionResponse.scheduled_for:type_name -> google.protobuf.Timestamp
 	3,  // 29: chronos.identity.v1.IdentityService.Register:input_type -> chronos.identity.v1.RegisterRequest
 	5,  // 30: chronos.identity.v1.IdentityService.VerifyEmail:input_type -> chronos.identity.v1.VerifyEmailRequest
 	7,  // 31: chronos.identity.v1.IdentityService.ResendEmailVerification:input_type -> chronos.identity.v1.ResendEmailVerificationRequest
@@ -4151,27 +4261,29 @@ var file_chronos_identity_v1_identity_proto_depIdxs = []int32{
 	38, // 45: chronos.identity.v1.IdentityService.RevokeAllSessions:input_type -> chronos.identity.v1.RevokeAllSessionsRequest
 	40, // 46: chronos.identity.v1.IdentityService.DeactivateAccount:input_type -> chronos.identity.v1.DeactivateAccountRequest
 	42, // 47: chronos.identity.v1.IdentityService.RequestAccountDeletion:input_type -> chronos.identity.v1.RequestAccountDeletionRequest
-	4,  // 48: chronos.identity.v1.IdentityService.Register:output_type -> chronos.identity.v1.RegisterResponse
-	6,  // 49: chronos.identity.v1.IdentityService.VerifyEmail:output_type -> chronos.identity.v1.VerifyEmailResponse
-	8,  // 50: chronos.identity.v1.IdentityService.ResendEmailVerification:output_type -> chronos.identity.v1.ResendEmailVerificationResponse
-	20, // 51: chronos.identity.v1.IdentityService.CheckUsernameAvailability:output_type -> chronos.identity.v1.CheckUsernameAvailabilityResponse
-	10, // 52: chronos.identity.v1.IdentityService.RequestPasswordReset:output_type -> chronos.identity.v1.RequestPasswordResetResponse
-	12, // 53: chronos.identity.v1.IdentityService.ResetPassword:output_type -> chronos.identity.v1.ResetPasswordResponse
-	14, // 54: chronos.identity.v1.IdentityService.Authenticate:output_type -> chronos.identity.v1.AuthenticateResponse
-	16, // 55: chronos.identity.v1.IdentityService.CreateSession:output_type -> chronos.identity.v1.CreateSessionResponse
-	18, // 56: chronos.identity.v1.IdentityService.GetUser:output_type -> chronos.identity.v1.GetUserResponse
-	23, // 57: chronos.identity.v1.IdentityService.ListSessions:output_type -> chronos.identity.v1.ListSessionsResponse
-	26, // 58: chronos.identity.v1.IdentityService.ListMethods:output_type -> chronos.identity.v1.ListMethodsResponse
-	29, // 59: chronos.identity.v1.IdentityService.ListLoginHistory:output_type -> chronos.identity.v1.ListLoginHistoryResponse
-	31, // 60: chronos.identity.v1.IdentityService.EnrollTotp:output_type -> chronos.identity.v1.EnrollTotpResponse
-	33, // 61: chronos.identity.v1.IdentityService.ConfirmTotp:output_type -> chronos.identity.v1.ConfirmTotpResponse
-	35, // 62: chronos.identity.v1.IdentityService.GenerateRecoveryCodes:output_type -> chronos.identity.v1.GenerateRecoveryCodesResponse
-	37, // 63: chronos.identity.v1.IdentityService.RevokeSession:output_type -> chronos.identity.v1.RevokeSessionResponse
-	39, // 64: chronos.identity.v1.IdentityService.RevokeAllSessions:output_type -> chronos.identity.v1.RevokeAllSessionsResponse
-	41, // 65: chronos.identity.v1.IdentityService.DeactivateAccount:output_type -> chronos.identity.v1.DeactivateAccountResponse
-	43, // 66: chronos.identity.v1.IdentityService.RequestAccountDeletion:output_type -> chronos.identity.v1.RequestAccountDeletionResponse
-	48, // [48:67] is the sub-list for method output_type
-	29, // [29:48] is the sub-list for method input_type
+	43, // 48: chronos.identity.v1.IdentityService.CancelAccountDeletion:input_type -> chronos.identity.v1.CancelAccountDeletionRequest
+	4,  // 49: chronos.identity.v1.IdentityService.Register:output_type -> chronos.identity.v1.RegisterResponse
+	6,  // 50: chronos.identity.v1.IdentityService.VerifyEmail:output_type -> chronos.identity.v1.VerifyEmailResponse
+	8,  // 51: chronos.identity.v1.IdentityService.ResendEmailVerification:output_type -> chronos.identity.v1.ResendEmailVerificationResponse
+	20, // 52: chronos.identity.v1.IdentityService.CheckUsernameAvailability:output_type -> chronos.identity.v1.CheckUsernameAvailabilityResponse
+	10, // 53: chronos.identity.v1.IdentityService.RequestPasswordReset:output_type -> chronos.identity.v1.RequestPasswordResetResponse
+	12, // 54: chronos.identity.v1.IdentityService.ResetPassword:output_type -> chronos.identity.v1.ResetPasswordResponse
+	14, // 55: chronos.identity.v1.IdentityService.Authenticate:output_type -> chronos.identity.v1.AuthenticateResponse
+	16, // 56: chronos.identity.v1.IdentityService.CreateSession:output_type -> chronos.identity.v1.CreateSessionResponse
+	18, // 57: chronos.identity.v1.IdentityService.GetUser:output_type -> chronos.identity.v1.GetUserResponse
+	23, // 58: chronos.identity.v1.IdentityService.ListSessions:output_type -> chronos.identity.v1.ListSessionsResponse
+	26, // 59: chronos.identity.v1.IdentityService.ListMethods:output_type -> chronos.identity.v1.ListMethodsResponse
+	29, // 60: chronos.identity.v1.IdentityService.ListLoginHistory:output_type -> chronos.identity.v1.ListLoginHistoryResponse
+	31, // 61: chronos.identity.v1.IdentityService.EnrollTotp:output_type -> chronos.identity.v1.EnrollTotpResponse
+	33, // 62: chronos.identity.v1.IdentityService.ConfirmTotp:output_type -> chronos.identity.v1.ConfirmTotpResponse
+	35, // 63: chronos.identity.v1.IdentityService.GenerateRecoveryCodes:output_type -> chronos.identity.v1.GenerateRecoveryCodesResponse
+	37, // 64: chronos.identity.v1.IdentityService.RevokeSession:output_type -> chronos.identity.v1.RevokeSessionResponse
+	39, // 65: chronos.identity.v1.IdentityService.RevokeAllSessions:output_type -> chronos.identity.v1.RevokeAllSessionsResponse
+	41, // 66: chronos.identity.v1.IdentityService.DeactivateAccount:output_type -> chronos.identity.v1.DeactivateAccountResponse
+	45, // 67: chronos.identity.v1.IdentityService.RequestAccountDeletion:output_type -> chronos.identity.v1.RequestAccountDeletionResponse
+	44, // 68: chronos.identity.v1.IdentityService.CancelAccountDeletion:output_type -> chronos.identity.v1.CancelAccountDeletionResponse
+	49, // [49:69] is the sub-list for method output_type
+	29, // [29:49] is the sub-list for method input_type
 	29, // [29:29] is the sub-list for extension type_name
 	29, // [29:29] is the sub-list for extension extendee
 	0,  // [0:29] is the sub-list for field type_name
@@ -4188,7 +4300,7 @@ func file_chronos_identity_v1_identity_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chronos_identity_v1_identity_proto_rawDesc), len(file_chronos_identity_v1_identity_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   41,
+			NumMessages:   43,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

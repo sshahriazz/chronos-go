@@ -453,7 +453,7 @@ func (l *Lifecycle) RequestDeletion(
 	}
 	user.ClearUncommitted()
 
-	l.log.InfoContext(ctx, "an account deletion was requested and nothing consumes it yet",
+	l.log.InfoContext(ctx, "an account deletion was requested",
 		"module", "identity", "subject_id", cmd.SubjectID,
 		"scheduled_for", scheduled.Format(time.RFC3339))
 
@@ -547,3 +547,86 @@ func (l *Lifecycle) pending(
 // consumer-declared interface no producer implements is a mock the tests pass
 // against and the composition root cannot wire.
 var _ SessionRevocationPlanner = (*Authentication)(nil)
+
+// CancelAccountDeletionCommand withdraws an outstanding erasure request.
+type CancelAccountDeletionCommand struct {
+	SubjectID      string
+	IdempotencyKey string
+}
+
+// CancelAccountDeletionResult reports what happened inside the process.
+type CancelAccountDeletionResult struct {
+	// Changed is false when nothing was outstanding. A SUCCESS, not a refusal —
+	// see CancelDeletion.
+	Changed bool
+
+	Position eventsourcing.Position
+}
+
+// CancelDeletion withdraws the caller's outstanding erasure request.
+//
+// # This is what makes the grace period a safeguard rather than a delay
+//
+// The window exists so somebody who clicked in anger, or whose session was
+// taken, can stop what was started. The erasure workflow re-reads the request on
+// every wake precisely so that this call stops it: cancel, and the run ends
+// without erasing.
+//
+// # Cancelling nothing succeeds
+//
+// The cancel link in the "deletion scheduled" mail is clicked twice, or after an
+// operator already withdrew the request on the holder's behalf. Neither person
+// did anything wrong, and an error would tell both of them they had.
+//
+// An ERASED account is refused by the aggregate, and that is the direction that
+// matters: once the key is destroyed there is nothing to come back to, and a
+// cancel that appeared to succeed would tell somebody their account was saved
+// when it is unreadable.
+func (l *Lifecycle) CancelDeletion(
+	ctx context.Context, cmd CancelAccountDeletionCommand,
+) (CancelAccountDeletionResult, error) {
+	user, userID, err := l.load(ctx, cmd.SubjectID, cmd.IdempotencyKey, "a deletion cancellation")
+	if err != nil {
+		return CancelAccountDeletionResult{}, err
+	}
+
+	now := l.clock.Now().UTC()
+	if err := user.CancelDeletion(cmd.SubjectID, now); err != nil {
+		return CancelAccountDeletionResult{}, err
+	}
+
+	pending := user.Uncommitted()
+	if len(pending) == 0 {
+		// Nothing was outstanding. Reported as an unchanged success.
+		return CancelAccountDeletionResult{}, nil
+	}
+
+	stream, err := eventsourcing.NewStreamID(UserCategory, userID.String())
+	if err != nil {
+		return CancelAccountDeletionResult{}, err
+	}
+	results, err := l.appender.AppendToMany(ctx, []eventsourcing.StreamAppend{{
+		Stream: stream,
+		// The exact loaded revision. A cancellation racing the erasure workflow's
+		// own append is the one race that matters here, and losing it means
+		// re-reading rather than overwriting a decision taken in between.
+		Expected: eventsourcing.ExpectedFor(user),
+		Events:   l.pending(ctx, cmd.IdempotencyKey, cmd.SubjectID, pending),
+	}})
+	if err != nil {
+		if errors.Is(err, eventsourcing.ErrWrongExpectedRevision) {
+			return CancelAccountDeletionResult{}, errs.Conflictf(
+				"this account is being changed by another request; try again").Wrap(err)
+		}
+		return CancelAccountDeletionResult{}, err
+	}
+	if len(results) == 0 {
+		return CancelAccountDeletionResult{}, errs.Internalf("the append reported no result")
+	}
+	user.ClearUncommitted()
+
+	l.log.InfoContext(ctx, "an account deletion request was withdrawn",
+		"module", "identity", "subject_id", cmd.SubjectID)
+
+	return CancelAccountDeletionResult{Changed: true, Position: results[0].Position}, nil
+}

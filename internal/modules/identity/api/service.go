@@ -163,6 +163,9 @@ type Lifecycle interface {
 	RequestDeletion(
 		ctx context.Context, cmd app.RequestAccountDeletionCommand,
 	) (app.RequestAccountDeletionResult, error)
+	CancelDeletion(
+		ctx context.Context, cmd app.CancelAccountDeletionCommand,
+	) (app.CancelAccountDeletionResult, error)
 }
 
 // Queries is identity's read side.

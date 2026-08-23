@@ -153,13 +153,28 @@ func (Probe) Name() string { return "temporal" }
 // ErrUnavailable so the event is redelivered rather than acked. Marking it
 // Critical would take a whole binary out of the load balancer over a subsystem
 // whose failures are already retried by the transport that called it.
+//
+// Degradable is not "unimportant". It is the level that says SOME CAPABILITY IS
+// LOST while the rest of the product continues, which is exactly true here —
+// and Impact below is where which capability is spelled out, because that is
+// what somebody reading a status page needs.
 func (Probe) Criticality() health.Criticality { return health.Degradable }
 
 // Impact is written in product terms, because it is read by whoever is paged.
+//
+// It names ERASURE FIRST, and the ordering is deliberate. Every other durable
+// job here degrades into a delay: mail sends inline, sweeps catch up when they
+// resume, and the events that trigger them are redelivered. Erasure does not
+// degrade at all — a thirty-day grace period has no inline equivalent, so with
+// Temporal down a deletion request is recorded, a date is mailed to the person,
+// and nothing runs. That is a legal obligation with a statutory clock, and it
+// must not be discovered by reading a list of workflow names.
 func (Probe) Impact() string {
-	return "Durable work stops: notification workflows do not run, so scheduled and " +
-		"retried sends are delayed. Nothing is lost — the events that trigger them are " +
-		"redelivered — and reactors, projections and the API are unaffected."
+	return "Durable work stops. ERASURE DOES NOT RUN: deletion requests are recorded and " +
+		"their grace period never elapses, so accounts that should have been erased are " +
+		"not — a statutory obligation, and the one durable job with no inline fallback. " +
+		"Scheduled and retried notification sends are delayed but not lost, sweeps resume " +
+		"when Temporal does, and reactors, projections and the API are unaffected."
 }
 
 // Check asks the service to describe the namespace. It is a real round trip:

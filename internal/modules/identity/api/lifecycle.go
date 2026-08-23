@@ -82,3 +82,36 @@ func (s *Service) RequestAccountDeletion(
 		ScheduledFor: timestamppb.New(result.ScheduledFor.UTC()),
 	}), nil
 }
+
+// CancelAccountDeletion withdraws the caller's own outstanding erasure request.
+//
+// The subject comes from the CONTEXT and never from the request — there is no
+// field for one, and there must not be: a request that could name an account is
+// a request to cancel somebody else's decision.
+//
+// Cancelling nothing returns `changed: false` and no error. That is the shape
+// the cancel link in the "deletion scheduled" mail needs: clicked twice, or
+// after an operator already withdrew the request, and neither person is told
+// they did something wrong.
+func (s *Service) CancelAccountDeletion(
+	ctx context.Context, req *connect.Request[identityv1.CancelAccountDeletionRequest],
+) (*connect.Response[identityv1.CancelAccountDeletionResponse], error) {
+	subjectID, err := callerSubject(ctx)
+	if err != nil {
+		return nil, fail(err)
+	}
+	key, err := idempotencyKey(req.Header())
+	if err != nil {
+		return nil, fail(err)
+	}
+	result, err := s.lifecycle.CancelDeletion(ctx, app.CancelAccountDeletionCommand{
+		SubjectID:      subjectID,
+		IdempotencyKey: key,
+	})
+	if err != nil {
+		return nil, fail(err)
+	}
+	return connect.NewResponse(&identityv1.CancelAccountDeletionResponse{
+		Changed: result.Changed,
+	}), nil
+}
