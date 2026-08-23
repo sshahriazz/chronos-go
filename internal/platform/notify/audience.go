@@ -78,6 +78,13 @@ func cardinalityOf(a Audience) Cardinality {
 	case AudienceOperator:
 		// An operator alert nobody receives is an outage nobody hears about.
 		return AtLeastOne
+	case AudienceOrgMembers:
+		// An organization always contains at least its owner (organization.md
+		// §1), so zero members means the read model is wrong — and the messages
+		// this audience carries are the ones nobody can afford to miss. A
+		// suspension delivered to nobody is a tenant that simply stops working,
+		// with no mail anywhere to explain it.
+		return AtLeastOne
 	default:
 		return AnyNumber
 	}

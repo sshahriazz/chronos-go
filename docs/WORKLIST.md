@@ -367,21 +367,24 @@ what landed since is the part that turns a trial into revenue.
       switch is a subscription UPDATE that Stripe prorates — never a second
       subscription (billing.md §5 case 19: one active subscription per org).
 
-### Suspension: tell EVERY member — decided
+### Suspension: tells EVERY member — done
 
-`OrganizationSuspended` becomes an `On` with a new organization-member audience
-resolved over `org_member_index`. The reason the event was Silent still stands
-and is exactly why the answer is "everyone": suspension ends access for every
-member, so telling the owner alone tells the one person who can fix it and
-nobody who is affected.
+`OrganizationSuspended` is an `On` over `AudienceOrgMembers`, resolved from
+`org_member_index` — the first audience in the system that needs a READ MODEL
+rather than the envelope's own metadata, which is what `notify.SubjectAudiences`
+had been refusing to guess at.
 
-Two templates by role — the owner is told how to restore access, everyone else
-is told to contact their owner — because a member who cannot pay does not need
-instructions for paying.
+ONE wording for everyone, which is a constraint rather than a preference and is
+worth recording as such. The catalogue is one event to one Spec — a second entry
+panics with "would send twice" — and `Data` is computed once from the EVENT, not
+per recipient, so a template cannot branch on whether the reader is the owner.
+Two templates by role would therefore mean either sending twice or reshaping a
+well-designed piece for a wording nicety. The copy addresses both without
+conditionals, which is the ordinary shape for broadcast mail anyway.
 
-This is the first audience in the system that needs a READ MODEL rather than the
-envelope's own metadata, which is what `notify.SubjectAudiences` refuses to guess
-at today.
+An oversized organization is REFUSED rather than truncated: a notification that
+reaches the first N members and omits the rest is invisible from every side —
+the sender saw a success, and the people left out have nothing to notice.
 
 ### The original note, kept because it records why this was open
 

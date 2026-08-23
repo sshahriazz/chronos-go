@@ -1,0 +1,11 @@
+{{define "title"}}Your Chronos organisation is suspended{{end}}
+{{define "content"}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 14px;">Your Chronos organisation has been <strong>suspended</strong>.
+  Nobody can sign in to it until billing is brought up to date.</p>
+<p style="margin:0 0 14px;">Nothing has been deleted, and nothing is being charged while it
+  is suspended. Access is restored as soon as a payment method is added — there is no need to
+  create anything again, and no data is lost in the meantime.</p>
+<p style="margin:0 0 20px;">If you manage billing for this organisation, add a card from
+  Billing in your organisation settings. Otherwise, please contact whoever owns the account.</p>
+{{end}}

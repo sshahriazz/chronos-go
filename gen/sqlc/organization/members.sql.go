@@ -9,6 +9,54 @@ import (
 	"context"
 )
 
+const OrgMemberSubjects = `-- name: OrgMemberSubjects :many
+SELECT subject_id, role FROM org_member_index
+WHERE org_id = $1
+ORDER BY joined_at, subject_id
+LIMIT $2
+`
+
+type OrgMemberSubjectsParams struct {
+	OrgID string
+	Limit int32
+}
+
+type OrgMemberSubjectsRow struct {
+	SubjectID string
+	Role      string
+}
+
+// Everyone in this organization, for notifications that concern all of them.
+//
+// Ordered and bounded, and both matter. The order makes a partially delivered
+// fan-out resumable in a stable place; the LIMIT is what stops one very large
+// organization from turning a single event into an unbounded read and an
+// unbounded number of mails in one transaction.
+//
+// The cap is a REFUSAL rather than a page: a notification that reaches the first
+// N members and silently omits the rest is worse than one that fails loudly,
+// because the omission is invisible from every side. The caller compares the
+// count against the limit and parks if it hit it.
+func (q *Queries) OrgMemberSubjects(ctx context.Context, arg OrgMemberSubjectsParams) ([]OrgMemberSubjectsRow, error) {
+	rows, err := q.db.Query(ctx, OrgMemberSubjects, arg.OrgID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []OrgMemberSubjectsRow{}
+	for rows.Next() {
+		var i OrgMemberSubjectsRow
+		if err := rows.Scan(&i.SubjectID, &i.Role); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const OrgMembership = `-- name: OrgMembership :one
 
 SELECT role FROM org_member_index WHERE org_id = $1 AND subject_id = $2

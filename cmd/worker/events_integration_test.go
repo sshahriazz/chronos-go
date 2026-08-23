@@ -124,7 +124,10 @@ func TestIdentitySecurityAlertsReachMailpit(t *testing.T) {
 			}
 			r := notify.NewEventReactor(
 				notificationReactorName, notifications(), newCodec(),
-				audiences(""), transport.dispatcher)
+				// nil members: these cases are identity events, which resolve
+				// AudienceSubject from the envelope. Passing a resolver would
+				// suggest this test exercises one.
+				audiences("", nil), transport.dispatcher)
 
 			env, _ := identityEnvelope(t, tt.event, subjectID, "evt-"+to)
 			if err := r.React(ctx, env); err != nil {
@@ -186,7 +189,7 @@ func TestARedeliveredIdentityEventIsNotMailedTwice(t *testing.T) {
 	codecJSON := newCodec()
 	r := notify.NewEventReactor(
 		notificationReactorName, notifications(), codecJSON,
-		audiences(""), transport.dispatcher)
+		audiences("", nil), transport.dispatcher)
 
 	_, recorded := identityEnvelope(t, &identityevents.TotpDisabled{
 		CredentialID: "cred_redelivery", DisabledAt: time.Now().UTC(),

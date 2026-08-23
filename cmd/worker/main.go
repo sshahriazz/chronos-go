@@ -369,7 +369,7 @@ func reactors(codec *eventcodec.JSON, d *dependencies) []reactor.Reactor {
 			notificationReactorName,
 			notifications(),
 			codec,
-			audiences(d.operator),
+			audiences(d.operator, orgMembers(d, slog.Default())),
 			d.Notify(),
 			opts...,
 		),

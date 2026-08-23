@@ -567,7 +567,12 @@ func decidedEnvelope(t *testing.T) eventsourcing.Envelope {
 // were never told.
 func TestEveryAudienceInUseHasAResolver(t *testing.T) {
 	cat := notifications()
-	reg := audiences("ops@chronos.local")
+	// A STAND-IN for the organization-member resolver, because the real one
+	// reads a table and this test must not need one. What it proves is the
+	// catalogue/registry contract: every audience some entry names is
+	// registered. That the BINARY wires the real one is a different property,
+	// asserted at the composition root by TestTheOrgMemberAudienceIsWired.
+	reg := audiences("ops@chronos.local", standInAudience{})
 
 	for _, event := range cat.Events() {
 		spec, _ := cat.For(event)
@@ -579,5 +584,31 @@ func TestEveryAudienceInUseHasAResolver(t *testing.T) {
 				"every one of those notifications will park. Either wire a resolver "+
 				"in audiences(), or change the audience", event, spec.Audience)
 		}
+	}
+}
+
+// standInAudience answers any audience with one recipient.
+type standInAudience struct{}
+
+func (standInAudience) Resolve(
+	_ context.Context, _ notify.Audience, env eventsourcing.Envelope,
+) ([]notify.Recipient, error) {
+	return []notify.Recipient{{SubjectID: "sub_probe", OrgID: env.Meta.OrgID}}, nil
+}
+
+// AN UNWIRED MEMBER AUDIENCE PARKS, AND DOES NOT QUIETLY SUCCEED.
+//
+// The nil path is the one worth asserting, because the alternative implementation
+// — a stub resolving to nobody — would report success having told nobody, which
+// is indistinguishable from an organization that genuinely has no members. That
+// is the exact silence OrganizationSuspended sat in while it was Silent.
+func TestAnUnwiredMemberAudienceParks(t *testing.T) {
+	reg := audiences("ops@chronos.local", nil)
+
+	_, err := reg.Resolve(context.Background(), notify.AudienceOrgMembers,
+		eventsourcing.Envelope{Meta: eventsourcing.Metadata{OrgID: "org_probe"}})
+	if !errors.Is(err, notify.ErrAudienceUnsupported) {
+		t.Fatalf("an unwired member audience returned %v; a suspension would report "+
+			"success having told nobody", err)
 	}
 }

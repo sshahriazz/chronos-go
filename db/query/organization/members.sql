@@ -23,3 +23,20 @@ SELECT role FROM org_member_index WHERE org_id = $1 AND subject_id = $2;
 SELECT org_id, role FROM org_member_index
 WHERE subject_id = $1
 ORDER BY joined_at, org_id;
+
+-- name: OrgMemberSubjects :many
+-- Everyone in this organization, for notifications that concern all of them.
+--
+-- Ordered and bounded, and both matter. The order makes a partially delivered
+-- fan-out resumable in a stable place; the LIMIT is what stops one very large
+-- organization from turning a single event into an unbounded read and an
+-- unbounded number of mails in one transaction.
+--
+-- The cap is a REFUSAL rather than a page: a notification that reaches the first
+-- N members and silently omits the rest is worse than one that fails loudly,
+-- because the omission is invisible from every side. The caller compares the
+-- count against the limit and parks if it hit it.
+SELECT subject_id, role FROM org_member_index
+WHERE org_id = $1
+ORDER BY joined_at, subject_id
+LIMIT $2;

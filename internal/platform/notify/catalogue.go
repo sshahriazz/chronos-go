@@ -31,6 +31,18 @@ const (
 	// AudienceOrgAdmins is every administrator of the org.
 	AudienceOrgAdmins
 
+	// AudienceOrgMembers is EVERYONE in the organization, administrators and
+	// owner included.
+	//
+	// It exists for facts that change what everybody can do rather than what one
+	// person is responsible for. Suspension is the case it was added for:
+	// billing is the owner's to fix, but access ends for every member, and
+	// telling only the person who can fix it tells nobody who is affected.
+	//
+	// It is the first audience that needs a READ MODEL rather than the
+	// envelope's own metadata, which is why SubjectAudiences refuses it.
+	AudienceOrgMembers
+
 	// AudienceOperator is the people running the system. Never a tenant, and
 	// never carrying tenant personal data.
 	AudienceOperator
@@ -46,6 +58,8 @@ func (a Audience) String() string {
 		return "org_owner"
 	case AudienceOrgAdmins:
 		return "org_admins"
+	case AudienceOrgMembers:
+		return "org_members"
 	case AudienceOperator:
 		return "operator"
 	default:

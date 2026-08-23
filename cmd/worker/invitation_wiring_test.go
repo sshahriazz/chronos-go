@@ -11,6 +11,7 @@ import (
 	workspacereactor "github.com/chronos/chronos-go/internal/modules/workspace/reactor"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/platform/ids"
+	"github.com/chronos/chronos-go/internal/platform/notify"
 )
 
 // A reactor no binary registers delivers nothing, silently.
@@ -160,5 +161,35 @@ func TestTeamDepartureIsRegistered(t *testing.T) {
 	prefixes := found.Filter().EventTypePrefixes
 	if len(prefixes) != 1 || prefixes[0] != want {
 		t.Errorf("the registered reactor subscribes to %v, want exactly [%s]", prefixes, want)
+	}
+}
+
+// THE ORGANIZATION-MEMBER AUDIENCE MUST BE WIRED IN THE BINARY.
+//
+// Suspension is the only thing that sends to it, and its failure is quiet in a
+// way the others are not: with no resolver the notification PARKS — which is at
+// least visible — but with the wiring absent nobody notices until a tenant is
+// suspended and asks why nothing was said. Every member loses access; telling
+// only the owner tells the one person who can fix it and nobody affected.
+//
+// Only a test of the COMPOSITION ROOT can see it. The resolver, the catalogue
+// entry and the templates all pass their own tests while reaching nobody.
+func TestTheOrgMemberAudienceIsWired(t *testing.T) {
+	cfg := testConfig(t)
+	d, closeAll := newDependencies(cfg, slog.New(slog.DiscardHandler), newCodec())
+	defer closeAll()
+
+	members := orgMembers(d, slog.New(slog.DiscardHandler))
+	if members == nil {
+		t.Fatal("the worker builds no organization-member audience; every suspension parks " +
+			"instead of telling the members their access has ended")
+	}
+
+	reg := audiences(d.operator, members)
+	if _, err := reg.Resolve(context.Background(), notify.AudienceOrgMembers,
+		eventsourcing.Envelope{Meta: eventsourcing.Metadata{OrgID: "org_probe"}},
+	); errors.Is(err, notify.ErrAudienceUnsupported) {
+		t.Fatalf("the registry cannot resolve %s even with a resolver built: %v",
+			notify.AudienceOrgMembers, err)
 	}
 }

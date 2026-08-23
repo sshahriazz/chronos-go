@@ -20,6 +20,18 @@ type Querier interface {
 	GetOrgStatus(ctx context.Context, orgID string) (string, error)
 	// The fuller row, for the billing screen and for reconciliation.
 	GetOrgStatusRow(ctx context.Context, orgID string) (GetOrgStatusRowRow, error)
+	// Everyone in this organization, for notifications that concern all of them.
+	//
+	// Ordered and bounded, and both matter. The order makes a partially delivered
+	// fan-out resumable in a stable place; the LIMIT is what stops one very large
+	// organization from turning a single event into an unbounded read and an
+	// unbounded number of mails in one transaction.
+	//
+	// The cap is a REFUSAL rather than a page: a notification that reaches the first
+	// N members and silently omits the rest is worse than one that fails loudly,
+	// because the omission is invisible from every side. The caller compares the
+	// count against the limit and parks if it hit it.
+	OrgMemberSubjects(ctx context.Context, arg OrgMemberSubjectsParams) ([]OrgMemberSubjectsRow, error)
 	// Read queries for the organization membership index.
 	//
 	// The WRITES live in db/query/workspace/members.sql, with the projection that

@@ -529,10 +529,24 @@ func identityNotifications(cat *notify.Catalogue) {
 		"Stripe Smart Retries owns the dunning schedule and sends the mail. Adding ours " +
 			"double-messages a customer who is already anxious about a failed card " +
 			"(billing.md §5 case 5)")
-	cat.Silent[orgevents.OrganizationSuspended](
-		"the one most likely to become an On, and it needs an audience first: suspension " +
-			"ends access for every member, not just the owner. Sending it to the owner " +
-			"alone would tell the one person who can fix it and nobody who is affected")
+	// The audience the Silent note above was waiting for now exists.
+	//
+	// EVERY MEMBER, not the owner: suspension ends access for all of them, and
+	// telling only the person who can fix it tells nobody who is affected. That
+	// is also why it is Transactional rather than a class anybody can switch
+	// off — being locked out of your employer's account is not a preference.
+	//
+	// ONE wording for everyone, and that is a constraint rather than a
+	// preference: the catalogue is one event to one Spec — a second entry panics
+	// with "would send twice" — and Data is computed once from the EVENT, not
+	// per recipient, so a template cannot branch on whether the reader is the
+	// owner. The copy therefore addresses both without conditionals, which is
+	// the ordinary shape for broadcast mail anyway.
+	cat.On[orgevents.OrganizationSuspended](notify.Spec{
+		Template: "organization.suspended",
+		Class:    notify.Transactional,
+		Audience: notify.AudienceOrgMembers,
+	}, nil)
 	cat.Silent[orgevents.OrganizationClosed](
 		"closure is the owner's own deliberate act, and the export window it opens is what " +
 			"needs communicating. That message has a deadline in it, so it belongs to the " +
@@ -759,15 +773,24 @@ func actedOnBehalf(actorID, subjectID string) bool {
 // person is worse than notifying nobody, and a parked event is visible where a
 // wrong recipient is not.
 //
-// AudienceOrgOwner and AudienceOrgAdmins are absent until the organization
-// module lands with a read model that can answer them. Any catalogue entry using
-// them parks until then — loudly, and by design.
-func audiences(operator string) *notify.Registry {
+// AudienceOrgOwner and AudienceOrgAdmins remain absent: nothing sends to them
+// yet, and a resolver with no caller is a resolver nobody notices is wrong. Any
+// catalogue entry using them parks until one exists — loudly, and by design.
+//
+// AudienceOrgMembers IS wired, from `org_member_index`, because suspension
+// sends to it. A nil members resolver leaves it unanswerable rather than
+// approximated: the notification parks, which is visible, instead of reaching a
+// smaller set nobody would notice was smaller.
+func audiences(operator string, members notify.Audiences) *notify.Registry {
 	subject := notify.SubjectAudiences{Operator: operatorRecipients(operator)}
-	return notify.NewRegistry().
+	r := notify.NewRegistry().
 		Register(notify.AudienceSubject, subject).
 		Register(notify.AudienceActor, subject).
 		Register(notify.AudienceOperator, subject)
+	if members != nil {
+		r = r.Register(notify.AudienceOrgMembers, members)
+	}
+	return r
 }
 
 // operatorRecipients is who receives Operator-class alerts — a stopped

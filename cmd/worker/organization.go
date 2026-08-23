@@ -6,13 +6,16 @@ import (
 	"log/slog"
 
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
+	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
 	stripeadapter "github.com/chronos/chronos-go/internal/adapter/stripe"
 	"github.com/chronos/chronos-go/internal/modules/organization"
+	orgpg "github.com/chronos/chronos-go/internal/modules/organization/adapter/postgres"
 	orgapp "github.com/chronos/chronos-go/internal/modules/organization/app"
 	orgdomain "github.com/chronos/chronos-go/internal/modules/organization/domain"
 	orgreactor "github.com/chronos/chronos-go/internal/modules/organization/reactor"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
+	"github.com/chronos/chronos-go/internal/platform/notify"
 	"github.com/chronos/chronos-go/internal/platform/reactor"
 )
 
@@ -85,4 +88,26 @@ func newOrganizationCodec() (*eventcodec.JSON, *eventsourcing.UpcasterRegistry) 
 	codec := eventcodec.NewJSON(upcasters)
 	organization.RegisterEvents(codec)
 	return codec, upcasters
+}
+
+// orgMembers builds the resolver for AudienceOrgMembers, or nil.
+//
+// NIL rather than a stub, and the difference is the design. An unwired audience
+// stays UNANSWERABLE, so a notification that needs it PARKS — visibly, on a
+// queue somebody looks at. A stub returning no recipients would instead report
+// success having told nobody, which is indistinguishable from an organization
+// that genuinely has no members and is precisely the silence this event was
+// Silent about for so long.
+func orgMembers(d *dependencies, log *slog.Logger) notify.Audiences {
+	if d.pool == nil {
+		log.Error("no organization-member audience: postgres is unreachable, so a " +
+			"suspension parks instead of telling every member their access has ended")
+		return nil
+	}
+	members, err := orgpg.NewMemberAudience(pgadapter.New(d.pool))
+	if err != nil {
+		log.Error("no organization-member audience; a suspension will park", "error", err)
+		return nil
+	}
+	return members
 }
