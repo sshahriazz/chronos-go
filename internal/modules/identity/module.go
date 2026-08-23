@@ -41,6 +41,8 @@ func RegisterEvents(codec *eventcodec.JSON) {
 	eventcodec.Register[contract.UserReactivated](codec)
 	eventcodec.Register[contract.UserSuspended](codec)
 	eventcodec.Register[contract.UserDeletionRequested](codec)
+	eventcodec.Register[contract.UserDeletionCancelled](codec)
+	eventcodec.Register[contract.UserErased](codec)
 
 	// Password.
 	eventcodec.Register[contract.PasswordResetRequested](codec)
@@ -106,6 +108,7 @@ func eventTypes() []string {
 		&contract.EmailVerified{}, &contract.UserActivated{},
 		&contract.UserDeactivated{}, &contract.UserReactivated{},
 		&contract.UserSuspended{}, &contract.UserDeletionRequested{},
+		&contract.UserDeletionCancelled{}, &contract.UserErased{},
 
 		&contract.PasswordResetRequested{},
 		&contract.PasswordSet{}, &contract.PasswordChanged{},

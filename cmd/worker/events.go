@@ -260,6 +260,44 @@ func identityNotifications(cat *notify.Catalogue) {
 		return map[string]any{"ByAnotherParty": actedOnBehalf(e.ActorID, e.SubjectID)}
 	})
 
+	// Cancelling a deletion is a SECURITY event, not a courtesy.
+	//
+	// The obvious reading is reassurance — "nothing was erased" — and that is
+	// the smaller half. The larger half is the other direction: somebody who
+	// deliberately asked for erasure and whose request was withdrawn by
+	// SOMEBODY ELSE needs to know, because the account they wanted destroyed is
+	// still there and still holds their data. That is exactly what an attacker
+	// with a stolen session does when the holder tries to close the account
+	// under them.
+	cat.On[identityevents.UserDeletionCancelled](notify.Spec{
+		Template: "identity.deletion_cancelled",
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, func(e *identityevents.UserDeletionCancelled) map[string]any {
+		return map[string]any{"ByAnotherParty": actedOnBehalf(e.ActorID, e.SubjectID)}
+	})
+
+	// UserErased is SILENT, and it is the one entry in this catalogue whose
+	// silence is a physical fact rather than a product decision.
+	//
+	// NOTIFICATIONS §9 does require a confirmation — "erasure complete, and
+	// here is what was retained and why" — and requires it BEFORE the address is
+	// purged. This event is appended AFTER the key is destroyed, because it
+	// records the destruction. By the time a catalogue entry here could run,
+	// there is no address left to resolve: the vault answers a tombstone, and
+	// §4's own rule is that a send to an erased subject is SKIPPED, not failed.
+	//
+	// So the confirmation cannot live here. It is the erasure workflow's, sent
+	// as a step BEFORE the destroy, which is also the only place that knows what
+	// was retained — invoices under Article 17(3)(b), operator audit as a
+	// pseudonym — and a confirmation implying total deletion when tax records
+	// survive is a misleading statement about processing.
+	cat.Silent[identityevents.UserErased](
+		"the confirmation NOTIFICATIONS §9 requires must be sent BEFORE the key is destroyed, " +
+			"and this event records the destruction. There is no address left to resolve by " +
+			"then — the vault answers a tombstone. The erasure workflow sends it, one step " +
+			"earlier, and it is the only place that knows what was retained")
+
 	cat.On[identityevents.UserDeactivated](notify.Spec{
 		Template: "identity.account_deactivated",
 		Class:    notify.Security,

@@ -1480,3 +1480,174 @@ func TestAssignUsername(t *testing.T) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// Erasure — the one operation with no undo
+// ---------------------------------------------------------------------------
+
+// requestedDeletion returns an active account with an outstanding request.
+func requestedDeletion(t *testing.T) *domain.User {
+	t.Helper()
+	u := active(t)
+	mustNil(t, u.RequestDeletion("subj_1", at.Add(30*24*time.Hour), at))
+	return u
+}
+
+// ERASURE REQUIRES A REQUEST, AND THAT GUARD HAS NO SECOND CHANCE.
+//
+// Every other refusal in this aggregate protects a state somebody can recover
+// from. This one protects the only action that cannot be undone: a workflow
+// started for the wrong subject, or an activity replayed carrying a stale id,
+// destroys an account nobody asked to erase and there is nothing to restore it
+// from — the key is gone.
+func TestErasureWithoutARequestIsRefused(t *testing.T) {
+	u := active(t)
+
+	err := u.Erase(at)
+	if err == nil {
+		t.Fatal("an account with no outstanding request was erased; a stale workflow id " +
+			"now destroys accounts nobody asked to delete, and there is no undo")
+	}
+	if got := errs.ReasonOf(err); got != errs.Conflict {
+		t.Errorf("reason is %q, want CONFLICT", got)
+	}
+	if u.State() == domain.StateErased {
+		t.Error("refused and erased anyway")
+	}
+}
+
+// A CANCELLED REQUEST NO LONGER PERMITS ERASURE.
+//
+// The grace period is only real if using it actually stops what was started.
+// A workflow that woke up after a cancellation and erased anyway would make the
+// cancel button a lie — and the person would have no way to discover it until
+// their account was gone.
+func TestErasureAfterACancellationIsRefused(t *testing.T) {
+	u := requestedDeletion(t)
+	mustNil(t, u.CancelDeletion("subj_1", at))
+
+	if err := u.Erase(at.Add(time.Hour)); err == nil {
+		t.Fatal("an account was erased after its request was cancelled; the grace period " +
+			"is decoration and the cancel button is a lie")
+	}
+	if u.State() == domain.StateErased {
+		t.Fatal("erased after cancellation")
+	}
+}
+
+// ERASURE IS RECORDED, AND IS TERMINAL.
+func TestErasureIsTerminal(t *testing.T) {
+	u := requestedDeletion(t)
+
+	mustNil(t, u.Erase(at.Add(30*24*time.Hour)))
+	if u.State() != domain.StateErased {
+		t.Fatalf("state is %s, want erased", u.State())
+	}
+
+	// Every ordinary command is refused through mutable(), so this asserts a
+	// representative few rather than each in turn: what is under test is that
+	// they inherit the guard, not that each remembered it.
+	for name, call := range map[string]func() error{
+		"deactivate":       func() error { return u.Deactivate("subj_1", at) },
+		"reactivate":       func() error { return u.Reactivate("subj_1", at) },
+		"request deletion": func() error { return u.RequestDeletion("subj_1", at.Add(time.Hour), at) },
+		"cancel deletion":  func() error { return u.CancelDeletion("subj_1", at) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := call()
+			if err == nil {
+				t.Fatalf("%s succeeded on an erased account, recording a change to somebody "+
+					"nobody can resolve again", name)
+			}
+			// NOT_FOUND, and the wording is a privacy decision rather than a
+			// convention: "this account was erased" confirms to anybody who can
+			// guess an identifier that a particular person once held it.
+			if got := errs.ReasonOf(err); got != errs.NotFound {
+				t.Errorf("reason is %q, want NOT_FOUND — a specific refusal confirms the "+
+					"account existed", got)
+			}
+		})
+	}
+}
+
+// A SECOND ERASURE RECORDS NOTHING AND SUCCEEDS.
+//
+// The workflow that calls this retries. A second call that failed would park a
+// step that is genuinely done, and the retry would never drain.
+func TestErasingTwiceIsErasingOnce(t *testing.T) {
+	u := requestedDeletion(t)
+	mustNil(t, u.Erase(at))
+	before := len(u.Uncommitted())
+
+	if err := u.Erase(at.Add(time.Hour)); err != nil {
+		t.Fatalf("a retried erasure failed: %v; the workflow parks on a step that is done", err)
+	}
+	if got := len(u.Uncommitted()); got != before {
+		t.Errorf("a second erasure appended %d events", got-before)
+	}
+}
+
+// CANCELLING RESTORES AN ORDINARY ACCOUNT, INCLUDING THE RIGHT TO ASK AGAIN.
+//
+// A residual flag would make the second request a no-op — RequestDeletion is
+// idempotent while one is outstanding — so somebody who cancelled and changed
+// their mind would click delete, be told nothing, and keep an account they
+// believe is scheduled for erasure.
+func TestCancellingLetsTheHolderAskAgain(t *testing.T) {
+	u := requestedDeletion(t)
+	mustNil(t, u.CancelDeletion("subj_1", at))
+
+	if _, outstanding := u.DeletionRequested(); outstanding {
+		t.Fatal("a request is still outstanding after cancellation")
+	}
+
+	later := at.Add(24 * time.Hour)
+	mustNil(t, u.RequestDeletion("subj_1", later.Add(30*24*time.Hour), later))
+
+	when, outstanding := u.DeletionRequested()
+	if !outstanding {
+		t.Fatal("a second request recorded nothing; the holder keeps an account they " +
+			"believe is scheduled for erasure")
+	}
+	if !when.Equal(later.Add(30 * 24 * time.Hour)) {
+		t.Errorf("the new deadline is %v; a stale one is a date nobody was ever told", when)
+	}
+}
+
+// CANCELLING NOTHING SUCCEEDS.
+//
+// The cancel link in the "deletion scheduled" mail is clicked twice, or after an
+// operator already withdrew the request. Neither person did anything wrong.
+func TestCancellingWithNoRequestOutstandingIsHarmless(t *testing.T) {
+	u := active(t)
+	// The DELTA, not the total: building an active account records events of its
+	// own, and asserting on the total would have this pass or fail for reasons
+	// that have nothing to do with cancelling.
+	before := len(u.Uncommitted())
+
+	if err := u.CancelDeletion("subj_1", at); err != nil {
+		t.Fatalf("cancelling nothing failed: %v; the cancel link errors for anybody who "+
+			"clicks it twice", err)
+	}
+	if got := len(u.Uncommitted()); got != before {
+		t.Errorf("cancelling nothing recorded %d events", got-before)
+	}
+}
+
+// A SUSPENDED ACCOUNT CANNOT START OR FINISH AN ERASURE.
+//
+// RequestDeletion already refuses through mutable(); this pins the other half.
+// Letting a suspended subject destroy their own account would let them destroy
+// the evidence the suspension exists to preserve.
+func TestASuspendedAccountCannotBeErasedByItsHolder(t *testing.T) {
+	u := active(t)
+	mustNil(t, u.Suspend("op_1", "abuse", at))
+
+	if err := u.RequestDeletion("subj_1", at.Add(30*24*time.Hour), at); err == nil {
+		t.Fatal("a suspended account started an erasure clock; the subject can destroy " +
+			"the evidence the suspension preserves")
+	}
+	if err := u.Erase(at); err == nil {
+		t.Fatal("a suspended account with no request was erased")
+	}
+}

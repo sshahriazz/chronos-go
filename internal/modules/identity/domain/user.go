@@ -41,6 +41,16 @@ const (
 	// outside and must never be confused inside — a suspended account that could
 	// reactivate itself would make suspension decorative.
 	StateSuspended
+
+	// StateErased is TERMINAL. The subject key is destroyed, so nothing can read
+	// the person's address or name again — not this system, and not anybody who
+	// takes a copy of the database.
+	//
+	// It is a state rather than a deleted row because the events remain and must
+	// keep replaying (compliance.md §4): a projector that met a missing account
+	// and panicked would make the log unreplayable and take the rebuild
+	// capability down with it. So the account exists, and is inert.
+	StateErased
 )
 
 func (s State) String() string {
@@ -53,6 +63,8 @@ func (s State) String() string {
 		return "deactivated"
 	case StateSuspended:
 		return "suspended"
+	case StateErased:
+		return "erased"
 	default:
 		return "none"
 	}
@@ -262,6 +274,11 @@ func (u *User) Apply(e eventsourcing.Event) {
 	case *contract.UserSuspended:
 		u.state = StateSuspended
 
+	case *contract.UserDeletionCancelled:
+		u.deletionRequested = false
+		u.deletionScheduledAt = time.Time{}
+	case *contract.UserErased:
+		u.state = StateErased
 	case *contract.UserDeletionRequested:
 		// No state change, deliberately — see the field's comment. A rebuild that
 		// replays this reaches the same answer as the live aggregate because
@@ -747,6 +764,12 @@ func (u *User) Deactivate(actorID string, at time.Time) error {
 	case StateActive, StatePending:
 	case StateDeactivated:
 		return nil
+	case StateErased:
+		// Explicit, because the fallback below would answer CONFLICT and NAME
+		// THE STATE — "a erased account cannot be deactivated" both confirms to
+		// anybody who can guess an identifier that a particular person once held
+		// this account, and reads as a typo while doing it.
+		return errs.NotFoundf("no such account")
 	default:
 		return errs.Conflictf("a %s account cannot be deactivated", u.state)
 	}
@@ -764,6 +787,12 @@ func (u *User) Deactivate(actorID string, at time.Time) error {
 // the two states, and it is enforced here rather than at the API, because an
 // administrative suspension a user can undo is not a suspension.
 func (u *User) Reactivate(actorID string, at time.Time) error {
+	if u.state == StateErased {
+		// Before the suspended branch, and NOT_FOUND for the same reason
+		// Deactivate gives: an erased account must not be distinguishable from
+		// one that never existed.
+		return errs.NotFoundf("no such account")
+	}
 	if u.state == StateSuspended {
 		return errs.AccessDeniedf("this account is suspended and cannot be reactivated by its holder")
 	}
@@ -841,6 +870,76 @@ func (u *User) RequestDeletion(actorID string, scheduledFor, at time.Time) error
 		ActorID:      actorID,
 		ScheduledFor: scheduledFor.UTC(),
 		RequestedAt:  at.UTC(),
+	})
+	return nil
+}
+
+// CancelDeletion withdraws an outstanding erasure request.
+//
+// # Idempotent in the direction that matters
+//
+// Cancelling when nothing is outstanding records nothing and succeeds. The
+// alternative — an error — makes the cancel link in the "deletion scheduled"
+// mail fail for anybody who clicks it twice, or who clicks it after an operator
+// already withdrew the request on their behalf. Neither person did anything
+// wrong, and both would be told they had.
+//
+// It is refused for an ERASED account by mutable(), which is the important
+// direction: once the key is destroyed there is nothing to come back to, and a
+// cancel that appeared to succeed would tell somebody their account was saved
+// when it is unreadable.
+func (u *User) CancelDeletion(actorID string, at time.Time) error {
+	if err := u.mutable(); err != nil {
+		return err
+	}
+	if !u.deletionRequested {
+		return nil
+	}
+	if actorID == "" {
+		return errs.ValidationFailedf("an actor id is required")
+	}
+	eventsourcing.Record(u, &contract.UserDeletionCancelled{
+		SubjectID:   u.subjectID,
+		ActorID:     actorID,
+		CancelledAt: at.UTC(),
+	})
+	return nil
+}
+
+// Erase records that the subject key has been destroyed.
+//
+// # Called AFTER the destruction, never before
+//
+// This is the fact, not the instruction. compliance.md §4 makes step 5 — the
+// destroy — the point of no return, and everything before it reversible; an
+// event appended first would assert an irreversible thing that had not happened
+// yet, and a failure between the two would leave a log saying the account is
+// unreadable while every address in the vault still resolves.
+//
+// # Only with a request outstanding
+//
+// Erasure follows a request and a grace period. Refusing without one is what
+// stops a bug in the orchestration — a workflow started for the wrong subject,
+// a replayed activity carrying a stale id — from destroying an account nobody
+// asked to erase. That mistake has no undo.
+//
+// Idempotent, because the workflow that calls it retries: a second call on an
+// already-erased account records nothing and succeeds, so a redelivery does not
+// park forever on a step that is genuinely done.
+func (u *User) Erase(at time.Time) error {
+	if u.state == StateErased {
+		return nil
+	}
+	if u.state == StateNone {
+		return errs.NotFoundf("no such account")
+	}
+	if !u.deletionRequested {
+		return errs.Conflictf("this account has no outstanding erasure request; erasure " +
+			"follows a request and a grace period, and there is no undo for it")
+	}
+	eventsourcing.Record(u, &contract.UserErased{
+		SubjectID: u.subjectID,
+		ErasedAt:  at.UTC(),
 	})
 	return nil
 }
@@ -1219,6 +1318,18 @@ func (u *User) mutable() error {
 		return errs.NotFoundf("no such account")
 	case StateSuspended:
 		return errs.AccessDeniedf("this account is suspended")
+	case StateErased:
+		// TERMINAL, and refused here so every command inherits it rather than
+		// each one remembering. There is nothing left to act on: the key that
+		// made the personal data readable is destroyed, so a command that
+		// "succeeded" here would record a change to an account nobody can ever
+		// resolve again.
+		//
+		// NOT_FOUND rather than a specific refusal, and it is the one place in
+		// this switch where the wording is a privacy decision: telling a caller
+		// "this account was erased" confirms that a particular person once held
+		// it, to anybody who can guess an identifier.
+		return errs.NotFoundf("no such account")
 	default:
 		return nil
 	}

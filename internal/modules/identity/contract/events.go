@@ -305,6 +305,66 @@ type UserDeletionRequested struct {
 
 func (*UserDeletionRequested) EventType() string { return "identity.UserDeletionRequested.v1" }
 
+// UserDeletionCancelled records that an outstanding erasure request was
+// withdrawn before its deadline.
+//
+// # The grace period only means something if it can be used
+//
+// A request that could not be withdrawn would make the waiting period
+// decoration: the point of it is that somebody who clicked in anger, or whose
+// session was taken, can stop what they started. The window is also exactly when
+// a stolen session is most dangerous, which is why the "deletion scheduled"
+// mail carries a way to cancel and why cancelling is a mutation like any other.
+//
+// After this the account is ordinary again. There is no residue: the next
+// request computes a fresh deadline, because a stale one would be a date nobody
+// was ever told.
+type UserDeletionCancelled struct {
+	SubjectID string
+
+	// ActorID is who withdrew it. Normally the holder; an operator when the
+	// original request arrived out of band and was retracted the same way.
+	ActorID string
+
+	CancelledAt time.Time
+}
+
+func (*UserDeletionCancelled) EventType() string { return "identity.UserDeletionCancelled.v1" }
+
+// UserErased records that the account's key has been destroyed.
+//
+// # This is the completed fact UserDeletionRequested deliberately is not
+//
+// The request is a clock; this is the point of no return, appended AFTER
+// OpenBao has destroyed the subject key (compliance.md §4 step 5). Every event
+// referencing this subject still exists and still replays — that is what makes
+// erasure a key destruction rather than a rewrite — and from here the vault
+// answers a tombstone for them, so projections render "Deleted user" instead of
+// a name nobody can read.
+//
+// # What it does NOT mean
+//
+// Not "every trace is gone". Invoices and tax records are retained under Article
+// 17(3)(b) with the personal data minimised to what the obligation requires, and
+// operator audit keeps the pseudonym while the key that resolves it is destroyed
+// (compliance.md §7). The mail that precedes this event says so explicitly: a
+// confirmation implying total deletion when tax records survive is a misleading
+// statement about processing.
+//
+// # No personal data, and less than usual
+//
+// A pseudonym and a timestamp. There is no actor: by the time this is appended
+// the request that caused it is minutes-to-days old and already recorded, and an
+// actor here would be a second copy of a fact whose subject can no longer be
+// resolved anyway.
+type UserErased struct {
+	SubjectID string
+
+	ErasedAt time.Time
+}
+
+func (*UserErased) EventType() string { return "identity.UserErased.v1" }
+
 // ---------------------------------------------------------------------------
 // Password
 // ---------------------------------------------------------------------------
