@@ -32,6 +32,10 @@ func blockedOnAGloballyReachableChannel() { <-globallyReachable }
 
 var globallyReachable = make(chan struct{})
 
+// leaked records that this process has already started the unkillable
+// goroutine, so a repeated run can tell its own leak from a broken detector.
+var leaked bool
+
 // The detector must report a real leak.
 //
 // This is the assertion the old `make leaks` target could never have made. It
@@ -50,12 +54,29 @@ func TestTheGoroutineLeakProfileReportsALeakedGoroutine(t *testing.T) {
 		t.Fatalf("collecting the baseline profile: %v", err)
 	}
 	if strings.Contains(before.Profile, "leakOnAnUnreachableChannel") {
+		// SKIPPED on a repeat run, FAILED on the first — and the difference is
+		// the whole value of the guard.
+		//
+		// The goroutine this test starts is unkillable by construction; that is
+		// what makes it a leak. So a second run of the test in the same process,
+		// which is what `go test -count=2` does, finds the FIRST run's leak in
+		// its baseline. That is the test working, not the detector lying.
+		//
+		// It matters because `-count=N` is how this repository hunts flakes, and
+		// a package that cannot be re-run makes every such hunt report a failure
+		// that has nothing to do with what was being hunted.
+		if leaked {
+			t.Skip("the leak from an earlier run of this test in this process is still " +
+				"leaked, which is what makes it a leak; the assertion below can only " +
+				"run once per process")
+		}
 		t.Fatalf("the baseline profile already names the leak this test has not started "+
 			"yet; the detector reports leaks unconditionally and proves nothing:\n%s",
 			before.Profile)
 	}
 
 	go leakOnAnUnreachableChannel()
+	leaked = true
 
 	// Poll rather than sleep-then-assert. Detection needs the goroutine to be
 	// parked and needs one leak-detecting GC, and both happen on the runtime's

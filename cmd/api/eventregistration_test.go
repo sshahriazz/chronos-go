@@ -3,11 +3,11 @@ package main
 import (
 	"log/slog"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/chronos/chronos-go/internal/modules/billing"
 	"github.com/chronos/chronos-go/internal/modules/compliance"
+	"github.com/chronos/chronos-go/internal/modules/identity"
 	"github.com/chronos/chronos-go/internal/modules/notification"
 	"github.com/chronos/chronos-go/internal/modules/organization"
 	"github.com/chronos/chronos-go/internal/modules/profile"
@@ -54,18 +54,11 @@ func TestTheCodecRegistersEveryModuleThisBinaryWrites(t *testing.T) {
 	}
 	registered := d.codec.Types()
 
-	// Identity keeps its list unexported, so it is represented by the type every
-	// registration path must produce. The other two are checked in full.
-	for _, want := range []string{"identity.UserRegistered.v1"} {
-		if !slices.Contains(registered, want) {
-			t.Errorf("the codec cannot decode %q; identity's events are not registered", want)
-		}
-	}
-
 	for _, module := range []struct {
 		name  string
 		types []string
 	}{
+		{"identity", identity.EventTypes()},
 		{"billing", billing.EventTypes()},
 		{"compliance", compliance.EventTypes()},
 		{"notification", notification.EventTypes()},
@@ -115,6 +108,10 @@ func assertNothingIsRegisteredButUndeclared(t *testing.T, registered []string) {
 		billing.EventTypes(), compliance.EventTypes(),
 		notification.EventTypes(), profile.EventTypes(),
 		organization.EventTypes(), workspace.EventTypes(),
+		// Identity was SKIPPED by name prefix until it exported this, which left
+		// the module with the most events entirely uncovered by the check this
+		// function exists to perform.
+		identity.EventTypes(),
 	} {
 		for _, e := range types {
 			declared[e] = true
@@ -122,11 +119,6 @@ func assertNothingIsRegisteredButUndeclared(t *testing.T, registered []string) {
 	}
 
 	for _, got := range registered {
-		// Identity keeps its list unexported, so it cannot be compared this way
-		// and is skipped by prefix rather than silently passing.
-		if strings.HasPrefix(got, "identity.") {
-			continue
-		}
 		if !declared[got] {
 			t.Errorf("the codec registers %q but no module DECLARES it in EventTypes(). "+
 				"eventTypes() drives RegisterSchemas, so this event is written with no "+

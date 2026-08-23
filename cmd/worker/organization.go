@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
@@ -123,6 +124,9 @@ func orgMembers(d *dependencies, log *slog.Logger) notify.Audiences {
 	return members
 }
 
+// mirrorTimeout bounds the startup mirror.
+const mirrorTimeout = time.Minute
+
 // mirrorCatalogue makes the published plans exist in Stripe and returns the
 // trial version with its price id.
 //
@@ -139,6 +143,18 @@ func orgMembers(d *dependencies, log *slog.Logger) notify.Audiences {
 func mirrorCatalogue(
 	ctx context.Context, secretKey string, log *slog.Logger,
 ) (billingdomain.PlanVersion, string, error) {
+	// BOUNDED, and the bound is the point. The caller's context carries SIGINT
+	// and nothing else, so an unresponsive Stripe would leave the worker hanging
+	// in construction — no reactors running, no health endpoint served, and
+	// nothing in the log after "configuration loaded". A worker that has not
+	// started is indistinguishable from one that is merely slow to start, which
+	// is the failure this deadline turns into a message.
+	//
+	// Two API calls per published version, and the catalogue is small. A minute
+	// is generous against a slow account and far short of a hang.
+	ctx, cancel := context.WithTimeout(ctx, mirrorTimeout)
+	defer cancel()
+
 	catalogue, err := billingdomain.Published()
 	if err != nil {
 		return billingdomain.PlanVersion{}, "", fmt.Errorf("billing catalogue: %w", err)
@@ -155,6 +171,12 @@ func mirrorCatalogue(
 	}
 	prices, err := mirror.EnsureAll(ctx, catalogue)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return billingdomain.PlanVersion{}, "", fmt.Errorf("mirroring the plan catalogue "+
+				"into Stripe did not finish within %s; the worker refuses to start rather "+
+				"than hang, because a process stuck in construction runs no reactors and "+
+				"serves no health endpoint: %w", mirrorTimeout, err)
+		}
 		return billingdomain.PlanVersion{}, "", fmt.Errorf("mirroring the plan catalogue "+
 			"into Stripe: %w", err)
 	}

@@ -1,6 +1,8 @@
 package policy_test
 
 import (
+	"fmt"
+	"sync/atomic"
 	"testing"
 
 	optionsv1 "github.com/chronos/chronos-go/gen/proto/chronos/options/v1"
@@ -22,14 +24,24 @@ import (
 // The alternative — deleting an annotation from a checked-in schema to watch the
 // test fail — is a test that only runs once, because putting the annotation back
 // is what the next commit does.
+// syntheticSeq makes every registered descriptor unique within the process.
+var syntheticSeq atomic.Uint64
+
 func registerSynthetic(
 	t *testing.T, pkg, method string, opts *descriptorpb.MethodOptions,
 ) protoreflect.FullName {
 	t.Helper()
 
-	// Each call gets its own file name. Registration is global and permanent for
-	// the process, so a shared name makes the second call fail with a duplicate
-	// rather than testing what it meant to.
+	// Each call gets its own file name AND its own package. Registration is
+	// global and permanent for the process, so a shared name makes the second
+	// call fail with a duplicate rather than testing what it meant to.
+	//
+	// The counter is what makes the whole package survive `go test -count=2`.
+	// Without it a second run of the same test re-registers the same file and
+	// the protobuf registry PANICS — which matters because `-count=N` is how
+	// this repository hunts flakes, and a panic there reads as a new failure in
+	// whatever test happened to run first.
+	pkg = fmt.Sprintf("%s.r%d", pkg, syntheticSeq.Add(1))
 	file := pkg + "/" + method + ".proto"
 
 	empty := "google.protobuf.Empty"

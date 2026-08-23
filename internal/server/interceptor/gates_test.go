@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,6 +46,13 @@ func mutatingService(t *testing.T, pkg string) (protoreflect.FullName, string) {
 	})
 	proto.SetExtension(opts, optionsv1.E_Operation,
 		optionsv1.OperationClass_OPERATION_CLASS_WRITE)
+
+	// UNIQUE per call within the process. protoregistry registration is global
+	// and permanent, so re-running this package with `-count=2` would otherwise
+	// re-register the same file and PANIC — and `-count=N` is how this
+	// repository hunts flakes, so the panic reads as a new failure in whatever
+	// test happened to run first.
+	pkg = fmt.Sprintf("%s.r%d", pkg, syntheticSeq.Add(1))
 
 	fd := &descriptorpb.FileDescriptorProto{
 		Name:       new(pkg + "/svc.proto"),
@@ -87,6 +95,13 @@ func publicMutatingService(t *testing.T, pkg string) (protoreflect.FullName, str
 	proto.SetExtension(opts, optionsv1.E_Operation,
 		optionsv1.OperationClass_OPERATION_CLASS_WRITE)
 
+	// UNIQUE per call within the process. protoregistry registration is global
+	// and permanent, so re-running this package with `-count=2` would otherwise
+	// re-register the same file and PANIC — and `-count=N` is how this
+	// repository hunts flakes, so the panic reads as a new failure in whatever
+	// test happened to run first.
+	pkg = fmt.Sprintf("%s.r%d", pkg, syntheticSeq.Add(1))
+
 	fd := &descriptorpb.FileDescriptorProto{
 		Name:       new(pkg + "/svc.proto"),
 		Package:    new(pkg),
@@ -112,6 +127,9 @@ func publicMutatingService(t *testing.T, pkg string) (protoreflect.FullName, str
 	return protoreflect.FullName(pkg + ".SyntheticPublicService"),
 		"/" + pkg + ".SyntheticPublicService/Open"
 }
+
+// syntheticSeq makes every registered descriptor unique within the process.
+var syntheticSeq atomic.Uint64
 
 func policies(t *testing.T, names ...protoreflect.FullName) *policy.Set {
 	t.Helper()
@@ -1059,6 +1077,13 @@ func selfScopedService(
 		proto.SetExtension(opts, optionsv1.E_MinAal, aal)
 	}
 
+	// UNIQUE per call within the process. protoregistry registration is global
+	// and permanent, so re-running this package with `-count=2` would otherwise
+	// re-register the same file and PANIC — and `-count=N` is how this
+	// repository hunts flakes, so the panic reads as a new failure in whatever
+	// test happened to run first.
+	pkg = fmt.Sprintf("%s.r%d", pkg, syntheticSeq.Add(1))
+
 	fd := &descriptorpb.FileDescriptorProto{
 		Name:       new(pkg + "/svc.proto"),
 		Package:    new(pkg),
@@ -1098,6 +1123,13 @@ func bootstrapSelfService(t *testing.T, pkg string) (protoreflect.FullName, stri
 		optionsv1.AssuranceLevel_ASSURANCE_LEVEL_2)
 	proto.SetExtension(opts, optionsv1.E_BootstrapMinAal,
 		optionsv1.AssuranceLevel_ASSURANCE_LEVEL_1)
+
+	// UNIQUE per call within the process. protoregistry registration is global
+	// and permanent, so re-running this package with `-count=2` would otherwise
+	// re-register the same file and PANIC — and `-count=N` is how this
+	// repository hunts flakes, so the panic reads as a new failure in whatever
+	// test happened to run first.
+	pkg = fmt.Sprintf("%s.r%d", pkg, syntheticSeq.Add(1))
 
 	fd := &descriptorpb.FileDescriptorProto{
 		Name:       new(pkg + "/svc.proto"),

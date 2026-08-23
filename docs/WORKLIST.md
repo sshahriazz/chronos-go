@@ -536,8 +536,24 @@ already has a name for.
       the harness already had `awaitLiveSessions` for exactly this. The test now
       waits for the revocation to project.
 
-- [ ] **`protocolit .../DeactivateAccount` — still open, and now better
-      isolated.** Checked for the same shape and it does not have it:
+- [ ] **`protocolit .../DeactivateAccount` — still open, and a sighting is now
+      DIAGNOSTIC.** Ten more clean runs, in-process, on top of the nineteen —
+      twenty-nine with no reproduction. Read for the sibling's race shape and it
+      does not have it: `disposableAccount` leaves TWO live sessions and waits
+      for both with `awaitSessionProjected`, so the work list is not racing the
+      projection at the moment of creation.
+
+      What changed is the assertion. It checked `revoked < 1` and threw
+      `sessions_scanned` away, so a sighting could not say which half broke —
+      and the two halves are unrelated. `scanned` is the work list, read from
+      `session_view`, so a zero there is the projection or the movable clock
+      passing the sessions' idle deadline; `revoked` is what the session
+      aggregates accepted, so a zero there with a NON-empty list is the domain
+      refusing. The proto says exactly this about why `sessions_scanned` exists.
+      Both are now asserted separately and both are logged; the observed value is
+      `scanned 2 and revoked 2`.
+
+      Previously recorded, still true: Checked for the same shape and it does not have it:
       `bootstrapBearer` already calls `awaitSessionProjected` before returning a
       token, so the step-up assertions are not racing the session projection.
 
@@ -715,8 +731,14 @@ already has a name for.
 
 ## Parked
 
-- [ ] **The two deactivation flakes — NOT reproduced, and one plausible cause
-      removed.** `protocolit .../DeactivateAccount` and
+- [ ] **The two deactivation flakes — NOT reproduced, and `-count=N` now works.**
+      Repeated-run hunting was itself broken until this session: three packages
+      panicked under `go test -count=2` — `internal/server/policy` and
+      `internal/server/interceptor` re-registered the same synthetic protobuf
+      descriptors into the global registry, and `internal/platform/obs` found its
+      own previous run's deliberately-unkillable goroutine in the baseline. All
+      three are fixed, and `go test ./... -race -count=2` is clean, so the tool
+      the remaining flake needs is available. `protocolit .../DeactivateAccount` and
       `identityit TestADeactivatedAccountCanGetBackIn`.
       Nine clean runs after the rate-limit fix: five of identityit's lifecycle
       tests, four full package runs across both suites. Neither reproduced.

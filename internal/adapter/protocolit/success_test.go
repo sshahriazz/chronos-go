@@ -281,10 +281,39 @@ func TestEveryRPCAnswersItsHappyPath(t *testing.T) {
 			t.Errorf("deactivating a live account reported changed=false; the account is either " +
 				"still live or the response is lying about which")
 		}
-		if res.Msg.GetSessionsRevoked() < 1 {
-			t.Errorf("deactivation revoked %d sessions. A deactivated account whose bearer still "+
-				"works is deactivated in the projection only", res.Msg.GetSessionsRevoked())
+		// SCANNED and REVOKED are asserted separately, and the split is what makes
+		// a failure here worth having.
+		//
+		// This subtest has an open flake against it with no reproduction in
+		// twenty-nine runs. A single `revoked < 1` says nothing about which half
+		// broke, and the two halves have nothing to do with each other: `scanned`
+		// is the work list, read from `session_view`, so a zero there is the
+		// projection or the movable clock; `revoked` is what the session
+		// aggregates accepted, so a zero there with a non-empty list is the
+		// domain refusing a revocation. The proto says exactly this about why
+		// `sessions_scanned` is on the response at all — "so a client can tell
+		// nothing to do apart from the list came back empty because it is broken"
+		// — and the test was throwing that away.
+		//
+		// disposableAccount leaves TWO live sessions: the AAL1 bootstrap and the
+		// AAL2 re-sign-in, both waited for with awaitSessionProjected. So a zero
+		// scan is not lag at the moment of creation; it would mean the sessions
+		// stopped being live between then and here, which on this harness means
+		// the movable clock moved past their idle deadline.
+		if res.Msg.GetSessionsScanned() < 1 {
+			t.Errorf("the deactivation's work list was EMPTY (scanned=%d, revoked=%d) for an "+
+				"account whose two sessions were both waited for. Either session_view lost "+
+				"them or the movable clock advanced past their idle deadline — this is NOT "+
+				"the aggregate refusing to revoke",
+				res.Msg.GetSessionsScanned(), res.Msg.GetSessionsRevoked())
+		} else if res.Msg.GetSessionsRevoked() < 1 {
+			t.Errorf("the deactivation scanned %d live session(s) and revoked NONE of them. "+
+				"The work list was fine, so this is the session aggregate refusing every "+
+				"revocation — a deactivated account whose bearer still works is "+
+				"deactivated in the projection only", res.Msg.GetSessionsScanned())
 		}
+		t.Logf("deactivation scanned %d and revoked %d",
+			res.Msg.GetSessionsScanned(), res.Msg.GetSessionsRevoked())
 	})
 
 	t.Run("RequestAccountDeletion", func(t *testing.T) {

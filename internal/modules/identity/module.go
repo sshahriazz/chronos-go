@@ -91,6 +91,23 @@ func RegisterSchemas(r *eventsourcing.UpcasterRegistry) {
 	}
 }
 
+// EventTypes is what this module declares, so a composition-root test can assert
+// what a binary registers.
+//
+// Exported for the same reason every other module exports it, and the reason is
+// a bug that already happened here once: cmd/api's registration gate compares
+// what the codec REGISTERS against what the modules DECLARE, and identity was
+// skipped by name prefix because it had no exported list. An identity event
+// added to RegisterEvents and forgotten in eventTypes() gets no schema version,
+// and `UpcasterRegistry.Apply` — which runs on EVERY read — refuses a type it
+// has no version for. The write succeeds, the projector is fine, every unit test
+// passes because they build repositories over a nil registry, and the first
+// account to record that event becomes permanently unloadable in cmd/api.
+//
+// Identity is the module with the most events, so it was the largest surface the
+// gate did not cover.
+func EventTypes() []string { return eventTypes() }
+
 // eventTypes lists every identity event type as a string.
 //
 // Derived from the same zero values the codec registers, so the two lists cannot

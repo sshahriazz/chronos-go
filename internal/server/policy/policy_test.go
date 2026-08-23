@@ -242,7 +242,10 @@ func TestAWellFormedPolicyLoads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a well-formed policy was refused: %v", err)
 	}
-	p, ok := set.Lookup("/chronos.test.wellformed.v1.SyntheticService/Method")
+	// Built from the RETURNED name rather than restated: registerSynthetic makes
+	// each descriptor unique within the process so the package survives
+	// `-count=N`, and a hand-written path would not follow it.
+	p, ok := set.Lookup("/" + string(svc) + "/Method")
 	if !ok {
 		t.Fatalf("the method is not in the set; loaded: %v", set.Methods())
 	}
@@ -511,7 +514,7 @@ func TestACoherentBootstrapFloorLoads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a coherent bootstrap floor was refused: %v", err)
 	}
-	const method = "/chronos.test.bootstrapok.v1.SyntheticService/Method"
+	method := "/" + string(svc) + "/Method"
 	p, ok := set.Lookup(method)
 	if !ok {
 		t.Fatalf("the method is not in the set; loaded: %v", set.Methods())
