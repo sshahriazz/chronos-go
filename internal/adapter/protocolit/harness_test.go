@@ -125,6 +125,7 @@ import (
 	"time"
 
 	connectrpc "connectrpc.com/connect"
+	compliancev1connect "github.com/chronos/chronos-go/gen/proto/chronos/compliance/v1/compliancev1connect"
 	identityv1 "github.com/chronos/chronos-go/gen/proto/chronos/identity/v1"
 	"github.com/chronos/chronos-go/gen/proto/chronos/identity/v1/identityv1connect"
 	optionsv1 "github.com/chronos/chronos-go/gen/proto/chronos/options/v1"
@@ -132,7 +133,12 @@ import (
 	"github.com/chronos/chronos-go/gen/proto/chronos/workspace/v1/workspacev1connect"
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
 	kurrentadapter "github.com/chronos/chronos-go/internal/adapter/kurrentdb"
+	"github.com/chronos/chronos-go/internal/adapter/openbao"
+	"github.com/chronos/chronos-go/internal/adapter/piivault"
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
+	"github.com/chronos/chronos-go/internal/adapter/seaweedfs"
+	"github.com/chronos/chronos-go/internal/modules/compliance"
+	complianceprojection "github.com/chronos/chronos-go/internal/modules/compliance/projection"
 	"github.com/chronos/chronos-go/internal/modules/identity"
 	"github.com/chronos/chronos-go/internal/modules/identity/adapter/blindindex"
 	identitypg "github.com/chronos/chronos-go/internal/modules/identity/adapter/postgres"
@@ -150,6 +156,7 @@ import (
 	profileprojection "github.com/chronos/chronos-go/internal/modules/profile/projection"
 	"github.com/chronos/chronos-go/internal/modules/workspace"
 	workspaceprojection "github.com/chronos/chronos-go/internal/modules/workspace/projection"
+	"github.com/chronos/chronos-go/internal/platform/blob"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/db"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
@@ -192,8 +199,17 @@ type harness struct {
 	// workspace is the first client whose RPC traverses every gate.
 	workspace workspacev1connect.WorkspaceServiceClient
 
-	pool      *pgxpool.Pool
-	pg        *pgadapter.DB
+	// compliance is the data subject's own rights, exercised on their own data.
+	compliance compliancev1connect.ComplianceServiceClient
+
+	pool *pgxpool.Pool
+	pg   *pgadapter.DB
+
+	// vault and blobs exist for ONE test: the export's bundle half, which is
+	// work cmd/worker does and which nothing else in this package touches.
+	vault *piivault.Vault
+	blobs *seaweedfs.Store
+
 	store     *kurrentadapter.Store
 	codec     *eventcodec.JSON
 	upcasters *eventsourcing.UpcasterRegistry
@@ -337,6 +353,7 @@ func newHarness() (*harness, error) {
 	hh.identity = identityv1connect.NewIdentityServiceClient(hh.http, hh.baseURL)
 	hh.organization = organizationv1connect.NewOrganizationServiceClient(hh.http, hh.baseURL)
 	hh.workspace = workspacev1connect.NewWorkspaceServiceClient(hh.http, hh.baseURL)
+	hh.compliance = compliancev1connect.NewComplianceServiceClient(hh.http, hh.baseURL)
 
 	if err := hh.dialInfra(env); err != nil {
 		return nil, err
@@ -407,12 +424,19 @@ func (hh *harness) dialInfra(env map[string]string) error {
 	profile.RegisterSchemas(upcasters)
 	organization.RegisterSchemas(upcasters)
 	workspace.RegisterSchemas(upcasters)
+	// Compliance was MISSING, alongside its two projections. The symptom was not
+	// a build error and not a failing assertion: the export projection consumed
+	// its first event, could not decode it, returned ErrPoison and STOPPED — so
+	// it sat at an old position while every other projection advanced, and the
+	// suite's polls answered "not found" forever.
+	compliance.RegisterSchemas(upcasters)
 	codec := eventcodec.NewJSON(upcasters)
 	identity.RegisterEvents(codec)
 	notification.RegisterEvents(codec)
 	profile.RegisterEvents(codec)
 	organization.RegisterEvents(codec)
 	workspace.RegisterEvents(codec)
+	compliance.RegisterEvents(codec)
 	hh.codec = codec
 
 	client, err := kurrentadapter.Dial(
@@ -421,6 +445,39 @@ func (hh *harness) dialInfra(env map[string]string) error {
 		return fmt.Errorf("kurrentdb: %w", err)
 	}
 	hh.store = kurrentadapter.NewStore(client, codec)
+
+	// The PII vault and the object store. Neither is needed by the API this
+	// suite drives — cmd/api builds its own — and both are here so ONE test can
+	// drive the export's workflow activities against the real infrastructure.
+	//
+	// That test is the only thing in this package that runs work cmd/worker
+	// normally runs, and it exists because the alternative was leaving the half
+	// of the export that touches the vault and the object store verified by
+	// nothing but unit tests with fakes.
+	bao, err := openbao.Dial(
+		envOr(env, "OPENBAO_ADDR", "http://localhost:8200"), env["OPENBAO_DEV_TOKEN"])
+	if err != nil {
+		return fmt.Errorf("openbao: %w", err)
+	}
+	hh.vault = piivault.New(hh.pg,
+		openbao.NewKeyRing(bao, envOr(env, "OPENBAO_KEK_NAME", "chronos-kek")))
+
+	// The zero value, defaulted. This suite never uploads through the store —
+	// it writes a manifest and lists — so the upload limits are irrelevant here
+	// and stating fake ones would suggest otherwise.
+	limits, err := blob.Limits{}.Defaults()
+	if err != nil {
+		return fmt.Errorf("object store limits: %w", err)
+	}
+	hh.blobs = seaweedfs.New(seaweedfs.Config{
+		Endpoint:       envOr(env, "S3_ENDPOINT", "http://localhost:8333"),
+		Region:         envOr(env, "S3_REGION", "us-east-1"),
+		Bucket:         envOr(env, "S3_BUCKET", "chronos"),
+		AccessKey:      env["S3_ACCESS_KEY"],
+		SecretKey:      env["S3_SECRET_KEY"],
+		PublicEndpoint: envOr(env, "S3_PUBLIC_ENDPOINT", ""),
+		Limits:         limits,
+	}, clock.System{})
 
 	key, err := hex.DecodeString(env["IDENTITY_EMAIL_INDEX_KEY"])
 	if err != nil {
@@ -523,6 +580,11 @@ func (hh *harness) close() {
 // ---------------------------------------------------------------------------
 
 // startProjectors runs every projection cmd/projector runs.
+//
+// "Every" is asserted rather than claimed — see
+// TestTheHarnessRunsEveryProjectionTheProjectorDoes. It was not true when this
+// comment was written: compliance's two were absent, so anything they feed read
+// as permanently empty in this suite.
 //
 // It does NOT wait for the leases, and that is the difference from identityit's
 // harness. A projection is global: whichever process holds the lease applies
@@ -1443,6 +1505,15 @@ func projectionRegistry(codec *eventcodec.JSON) []projection.Projection {
 		identityprojection.NewUser(codec),
 		identityprojection.NewSession(codec),
 		identityprojection.NewReservation(codec),
+		// Compliance's two. They were MISSING while this function's doc claimed to
+		// run every projection cmd/projector runs — so a data-subject request
+		// could be accepted here and its poll would never find a row, and a
+		// restriction could be placed and the dispatcher would never see it.
+		//
+		// The drift is the reason a test asserts this list against
+		// cmd/projector's rather than trusting the comment.
+		complianceprojection.NewRestrictions(codec),
+		complianceprojection.NewExports(codec),
 	}
 }
 

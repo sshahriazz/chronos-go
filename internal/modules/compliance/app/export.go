@@ -144,11 +144,25 @@ type ExportsDeps struct {
 
 // DefaultExportExpiry is how long a download link lives.
 //
-// An hour. The bundle is the most concentrated personal data this system can
-// produce, and the link is a bearer capability — anybody holding the URL can
-// fetch it. Long enough to click from an email, short enough that a URL in a
-// proxy log or a screenshot is stale before it is useful.
-const DefaultExportExpiry = time.Hour
+// # Fifteen minutes, and the number is not ours to choose freely
+//
+// It was an hour, on the argument that the bundle is the most concentrated
+// personal data this system can produce and an hour is long enough to click from
+// an email while short enough that a URL in a proxy log is stale before it is
+// useful. That argument still holds and the number was still wrong: the object
+// store REFUSES a grant longer than `blob.Limits.MaxExpiry`, which defaults to
+// fifteen minutes — so every ready export answered its poll with `internal`.
+//
+// Nothing caught it. The use case had unit tests against a fake store that
+// granted whatever it was asked for, the handler had tests against a fake use
+// case, and the two limits live in packages that do not import each other. It
+// took a request driven through the real store to see it, and
+// TestTheExportExpiryFitsTheStoresCeiling now holds the two together.
+//
+// Shorter is also the right direction on its own terms: the link is minted when
+// the person asks for it, not mailed to them, so it only has to survive the
+// click that follows.
+const DefaultExportExpiry = 15 * time.Minute
 
 func NewExports(d ExportsDeps) (*Exports, error) {
 	switch {

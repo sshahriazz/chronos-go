@@ -807,12 +807,32 @@ already has a name for.
          exactly, because a bound a client cannot read back is worse than an
          honest smaller one.
 
-      **Still open: no integration test against the running stack.** Every layer
-      is unit-tested and the workflow is exercised through the Temporal test
-      suite, but nothing has driven a request through KurrentDB, the projector,
-      SeaweedFS and a real poll. That is the test that would catch a schema or a
-      wiring fault the way the email-change slice's did — where it found a CHECK
-      constraint that would have parked every change in production.
+      **The integration test is written, and it found three things.** Six tests
+      in `protocolit`: the request half through the real API and projector, and
+      the bundle half by driving the workflow's ACTIVITIES against the real
+      KurrentDB, vault and object store — then fetching the manifest through the
+      signed URL a browser would use and decoding it.
+
+      1. **The export asked for a one-hour download link and the object store
+         refuses anything over fifteen minutes.** Every ready export answered its
+         poll with `internal`: the person was told their data was ready and could
+         not fetch it. It was PRE-EXISTING — the synchronous version had the same
+         constant — and nothing caught it because the use case's tests used a
+         fake store that granted whatever it was asked for, the handler's tests
+         used a fake use case, and the two numbers live in packages that do not
+         import each other. `TestTheExportExpiryFitsTheStoresCeiling` now holds
+         them together.
+
+      2. **`protocolit`'s harness never registered compliance's events**, so the
+         export projection consumed its first event, could not decode it,
+         returned ErrPoison and STOPPED — sitting at an old position while every
+         other projection advanced.
+
+      3. **Neither compliance projection was in that harness's registry**, whose
+         own comment claimed it ran every projection `cmd/projector` runs.
+         `TestTheHarnessRunsEveryProjectionTheProjectorDoes` compares the two by
+         name now, and `cmd/projector` gained a test that its own registry names
+         compliance.
 
 ## Parked
 
