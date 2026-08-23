@@ -25,25 +25,66 @@ type Restrictions interface {
 	State(ctx context.Context, subjectID string) (app.RestrictionResult, error)
 }
 
+// Exports produces a data subject's portability bundle.
+type Exports interface {
+	Produce(ctx context.Context, subjectID string) (app.ExportResult, error)
+}
+
 // Service serves ComplianceService.
 type Service struct {
 	compliancev1connect.UnimplementedComplianceServiceHandler
 
 	restrictions Restrictions
+	exports      Exports
 }
 
 // Deps is what Service needs.
 type Deps struct {
 	Restrictions Restrictions
+	Exports      Exports
 }
 
 func New(d Deps) (*Service, error) {
-	if d.Restrictions == nil {
+	switch {
+	case d.Restrictions == nil:
 		return nil, fmt.Errorf("compliance: a restriction use case is required; without one " +
 			"every Article 18 method answers 'unimplemented' and a person can only halt " +
 			"processing by asking an operator to edit a table")
+	case d.Exports == nil:
+		return nil, fmt.Errorf("compliance: an export use case is required; without one a " +
+			"person cannot obtain a copy of their own data, which is Article 15 and 20")
 	}
-	return &Service{restrictions: d.Restrictions}, nil
+	return &Service{restrictions: d.Restrictions, exports: d.Exports}, nil
+}
+
+// ExportMyData produces a machine-readable copy of the caller's personal data.
+//
+// The subject is the authenticated caller and nothing else. compliance.md §3
+// calls this the most dangerous endpoint in the product — it exports everything
+// known about a person, on demand, in a convenient bundle — and a request that
+// could name a subject would be exactly the exfiltration API that description
+// warns about.
+//
+// The response carries a LINK rather than the data. The bundle is the most
+// concentrated personal data this system produces, and a response body is
+// logged, cached and retried in ways a short-lived signed URL is not.
+func (s *Service) ExportMyData(
+	ctx context.Context, _ *connect.Request[compliancev1.ExportMyDataRequest],
+) (*connect.Response[compliancev1.ExportMyDataResponse], error) {
+	subject, err := callerSubject(ctx)
+	if err != nil {
+		return nil, fail(err)
+	}
+	result, err := s.exports.Produce(ctx, subject)
+	if err != nil {
+		// The detail is not returned. An object-store error can name a bucket, a
+		// key and an endpoint, none of which belongs in a response to a browser.
+		return nil, fail(errs.Internalf("producing the export").Wrap(err))
+	}
+	return connect.NewResponse(&compliancev1.ExportMyDataResponse{
+		DownloadUrl: result.DownloadURL,
+		ExpiresAt:   timestamppb.New(result.ExpiresAt.UTC()),
+	}), nil
 }
 
 // RestrictProcessing halts processing of the caller's own data.

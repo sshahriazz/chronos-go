@@ -306,6 +306,104 @@ func (x *GetProcessingRestrictionResponse) GetRestrictedSince() *timestamppb.Tim
 	return nil
 }
 
+// ExportMyDataRequest asks for a copy of everything held about the caller.
+type ExportMyDataRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExportMyDataRequest) Reset() {
+	*x = ExportMyDataRequest{}
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExportMyDataRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExportMyDataRequest) ProtoMessage() {}
+
+func (x *ExportMyDataRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExportMyDataRequest.ProtoReflect.Descriptor instead.
+func (*ExportMyDataRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{6}
+}
+
+// ExportMyDataResponse carries a short-lived link to the bundle.
+type ExportMyDataResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// A signed, EXPIRING URL. Not stored anywhere by this system: it is a bearer
+	// capability, and persisting one would turn an expiring link into a durable
+	// credential for the most concentrated personal data we hold.
+	//
+	// Delivered here rather than as an email attachment, which compliance.md §5
+	// requires: an attachment sits in a mailbox forever, is forwarded, and is
+	// backed up by a provider nobody here controls.
+	DownloadUrl string `protobuf:"bytes,1,opt,name=download_url,json=downloadUrl,proto3" json:"download_url,omitempty"`
+	// When the link stops working.
+	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExportMyDataResponse) Reset() {
+	*x = ExportMyDataResponse{}
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExportMyDataResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExportMyDataResponse) ProtoMessage() {}
+
+func (x *ExportMyDataResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExportMyDataResponse.ProtoReflect.Descriptor instead.
+func (*ExportMyDataResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *ExportMyDataResponse) GetDownloadUrl() string {
+	if x != nil {
+		return x.DownloadUrl
+	}
+	return ""
+}
+
+func (x *ExportMyDataResponse) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
 var File_chronos_compliance_v1_compliance_proto protoreflect.FileDescriptor
 
 const file_chronos_compliance_v1_compliance_proto_rawDesc = "" +
@@ -323,7 +421,12 @@ const file_chronos_compliance_v1_compliance_proto_rawDesc = "" +
 	"\n" +
 	"restricted\x18\x01 \x01(\bR\n" +
 	"restricted\x12E\n" +
-	"\x10restricted_since\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x0frestrictedSince2\x90\x05\n" +
+	"\x10restricted_since\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x0frestrictedSince\"\x15\n" +
+	"\x13ExportMyDataRequest\"\xd1\x01\n" +
+	"\x14ExportMyDataResponse\x12~\n" +
+	"\fdownload_url\x18\x01 \x01(\tB[\xbaGX:G\x12Ehttps://s3.example.com/chronos/avatar9f2.../k4m2n?X-Amz-Signature=...x\x80 \x8a\x01\t^https://R\vdownloadUrl\x129\n" +
+	"\n" +
+	"expires_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt2\x94\x06\n" +
 	"\x11ComplianceService\x12\xdf\x01\n" +
 	"\x12RestrictProcessing\x120.chronos.compliance.v1.RestrictProcessingRequest\x1a1.chronos.compliance.v1.RestrictProcessingResponse\"d\xbaGI2G\n" +
 	"E\n" +
@@ -334,7 +437,9 @@ const file_chronos_compliance_v1_compliance_proto_rawDesc = "" +
 	"E\n" +
 	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
 	"$#/components/schemas/idempotency-key\xca\xf3\x18\f\n" +
-	"\x04self\x12\x04user\xd0\xf3\x18\x02\xe0\xf3\x18\x02\x12\xa1\x01\n" +
+	"\x04self\x12\x04user\xd0\xf3\x18\x02\xe0\xf3\x18\x02\x12\x81\x01\n" +
+	"\fExportMyData\x12*.chronos.compliance.v1.ExportMyDataRequest\x1a+.chronos.compliance.v1.ExportMyDataResponse\"\x18\xca\xf3\x18\f\n" +
+	"\x04self\x12\x04user\xd0\xf3\x18\x06\xe0\xf3\x18\x02\x12\xa1\x01\n" +
 	"\x18GetProcessingRestriction\x126.chronos.compliance.v1.GetProcessingRestrictionRequest\x1a7.chronos.compliance.v1.GetProcessingRestrictionResponse\"\x14\xca\xf3\x18\f\n" +
 	"\x04self\x12\x04user\xd0\xf3\x18\x01B\xee\x01\n" +
 	"\x19com.chronos.compliance.v1B\x0fComplianceProtoP\x01ZJgithub.com/chronos/chronos-go/gen/proto/chronos/compliance/v1;compliancev1\xa2\x02\x03CCX\xaa\x02\x15Chronos.Compliance.V1\xca\x02\x15Chronos\\Compliance\\V1\xe2\x02!Chronos\\Compliance\\V1\\GPBMetadata\xea\x02\x17Chronos::Compliance::V1b\x06proto3"
@@ -351,7 +456,7 @@ func file_chronos_compliance_v1_compliance_proto_rawDescGZIP() []byte {
 	return file_chronos_compliance_v1_compliance_proto_rawDescData
 }
 
-var file_chronos_compliance_v1_compliance_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_chronos_compliance_v1_compliance_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_chronos_compliance_v1_compliance_proto_goTypes = []any{
 	(*RestrictProcessingRequest)(nil),         // 0: chronos.compliance.v1.RestrictProcessingRequest
 	(*RestrictProcessingResponse)(nil),        // 1: chronos.compliance.v1.RestrictProcessingResponse
@@ -359,22 +464,27 @@ var file_chronos_compliance_v1_compliance_proto_goTypes = []any{
 	(*LiftProcessingRestrictionResponse)(nil), // 3: chronos.compliance.v1.LiftProcessingRestrictionResponse
 	(*GetProcessingRestrictionRequest)(nil),   // 4: chronos.compliance.v1.GetProcessingRestrictionRequest
 	(*GetProcessingRestrictionResponse)(nil),  // 5: chronos.compliance.v1.GetProcessingRestrictionResponse
-	(*timestamppb.Timestamp)(nil),             // 6: google.protobuf.Timestamp
+	(*ExportMyDataRequest)(nil),               // 6: chronos.compliance.v1.ExportMyDataRequest
+	(*ExportMyDataResponse)(nil),              // 7: chronos.compliance.v1.ExportMyDataResponse
+	(*timestamppb.Timestamp)(nil),             // 8: google.protobuf.Timestamp
 }
 var file_chronos_compliance_v1_compliance_proto_depIdxs = []int32{
-	6, // 0: chronos.compliance.v1.RestrictProcessingResponse.restricted_since:type_name -> google.protobuf.Timestamp
-	6, // 1: chronos.compliance.v1.GetProcessingRestrictionResponse.restricted_since:type_name -> google.protobuf.Timestamp
-	0, // 2: chronos.compliance.v1.ComplianceService.RestrictProcessing:input_type -> chronos.compliance.v1.RestrictProcessingRequest
-	2, // 3: chronos.compliance.v1.ComplianceService.LiftProcessingRestriction:input_type -> chronos.compliance.v1.LiftProcessingRestrictionRequest
-	4, // 4: chronos.compliance.v1.ComplianceService.GetProcessingRestriction:input_type -> chronos.compliance.v1.GetProcessingRestrictionRequest
-	1, // 5: chronos.compliance.v1.ComplianceService.RestrictProcessing:output_type -> chronos.compliance.v1.RestrictProcessingResponse
-	3, // 6: chronos.compliance.v1.ComplianceService.LiftProcessingRestriction:output_type -> chronos.compliance.v1.LiftProcessingRestrictionResponse
-	5, // 7: chronos.compliance.v1.ComplianceService.GetProcessingRestriction:output_type -> chronos.compliance.v1.GetProcessingRestrictionResponse
-	5, // [5:8] is the sub-list for method output_type
-	2, // [2:5] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	2, // [2:2] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	8, // 0: chronos.compliance.v1.RestrictProcessingResponse.restricted_since:type_name -> google.protobuf.Timestamp
+	8, // 1: chronos.compliance.v1.GetProcessingRestrictionResponse.restricted_since:type_name -> google.protobuf.Timestamp
+	8, // 2: chronos.compliance.v1.ExportMyDataResponse.expires_at:type_name -> google.protobuf.Timestamp
+	0, // 3: chronos.compliance.v1.ComplianceService.RestrictProcessing:input_type -> chronos.compliance.v1.RestrictProcessingRequest
+	2, // 4: chronos.compliance.v1.ComplianceService.LiftProcessingRestriction:input_type -> chronos.compliance.v1.LiftProcessingRestrictionRequest
+	6, // 5: chronos.compliance.v1.ComplianceService.ExportMyData:input_type -> chronos.compliance.v1.ExportMyDataRequest
+	4, // 6: chronos.compliance.v1.ComplianceService.GetProcessingRestriction:input_type -> chronos.compliance.v1.GetProcessingRestrictionRequest
+	1, // 7: chronos.compliance.v1.ComplianceService.RestrictProcessing:output_type -> chronos.compliance.v1.RestrictProcessingResponse
+	3, // 8: chronos.compliance.v1.ComplianceService.LiftProcessingRestriction:output_type -> chronos.compliance.v1.LiftProcessingRestrictionResponse
+	7, // 9: chronos.compliance.v1.ComplianceService.ExportMyData:output_type -> chronos.compliance.v1.ExportMyDataResponse
+	5, // 10: chronos.compliance.v1.ComplianceService.GetProcessingRestriction:output_type -> chronos.compliance.v1.GetProcessingRestrictionResponse
+	7, // [7:11] is the sub-list for method output_type
+	3, // [3:7] is the sub-list for method input_type
+	3, // [3:3] is the sub-list for extension type_name
+	3, // [3:3] is the sub-list for extension extendee
+	0, // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_chronos_compliance_v1_compliance_proto_init() }
@@ -388,7 +498,7 @@ func file_chronos_compliance_v1_compliance_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chronos_compliance_v1_compliance_proto_rawDesc), len(file_chronos_compliance_v1_compliance_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

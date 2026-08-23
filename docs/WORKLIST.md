@@ -629,10 +629,34 @@ already has a name for.
       consumption, the email reservation aggregate, the blind index, and a
       `VerifyEmail` that already voids sessions. It is a slice of its own rather
       than a step in a compliance one.
-- [ ] **Export and portability (Art. 15/20)** — the same traversal as erasure,
-      which is why compliance.md §5 says they are built together: a traversal
-      that misses data exports incompletely AND erases incompletely, and only
-      one of those is noticed. Needs the P1 traversal first.
+- [x] **Export and portability (Art. 15/20).** `ExportMyData` produces a JSON
+      bundle of every vault field, writes it to SeaweedFS and returns an
+      expiring signed link.
+
+      The bundle is written under the SUBJECT'S OWN object prefix — the same
+      namespace the erasure empties — so compliance.md §4 step 9's "purge
+      exported bundles on erasure" is a property of where the bundle lives
+      rather than a step somebody has to remember. That is the payoff of P1's
+      traversal, and it is asserted by a test.
+
+      It carries a statement of what is RETAINED, because Article 15(1) asks
+      about the processing rather than only the values: a file listing a name and
+      an address while saying nothing about invoices held under a statutory
+      obligation is accurate and misleading.
+
+      It carries NO event log, no password hash, no TOTP secret and no session
+      digests. The first names pseudonyms and positions meaningless outside this
+      deployment; the rest are derived from credentials rather than data about
+      the person, and exporting them turns a privacy right into an offline attack
+      surface.
+
+      `OPERATION_CLASS_EXPORT`, which gate 4 never blocks: withholding a person's
+      own data from a suspended tenant is a portability violation, not leverage.
+
+      **Not yet resumable.** compliance.md §5 asks for long-running and resumable
+      with progress visible in the workflow. It is synchronous today because the
+      bundle is one vault read and one small object; it needs the workflow
+      treatment when a subject's data spans modules that do not exist yet.
 - [ ] **The plan catalogue.** Billing's webhooks, portal and invoices are done;
       the catalogue is one hardcoded lookup and `STRIPE_TRIAL_PRICE_ID` is still
       an env var whose own comment says it disappears when the catalogue lands.

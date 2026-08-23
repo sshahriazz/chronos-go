@@ -32,6 +32,7 @@ import (
 	orgapi "github.com/chronos/chronos-go/internal/modules/organization/api"
 	"github.com/chronos/chronos-go/internal/modules/profile"
 	profileapi "github.com/chronos/chronos-go/internal/modules/profile/api"
+	profiledomain "github.com/chronos/chronos-go/internal/modules/profile/domain"
 	"github.com/chronos/chronos-go/internal/modules/workspace"
 	workspaceapi "github.com/chronos/chronos-go/internal/modules/workspace/api"
 	workspaceapp "github.com/chronos/chronos-go/internal/modules/workspace/app"
@@ -43,6 +44,7 @@ import (
 	"github.com/chronos/chronos-go/internal/platform/cqrs"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/platform/obs"
+	"github.com/chronos/chronos-go/internal/platform/pii"
 	"github.com/chronos/chronos-go/internal/platform/ratelimit"
 	"github.com/chronos/chronos-go/internal/server/health"
 	"github.com/chronos/chronos-go/internal/server/interceptor"
@@ -710,6 +712,27 @@ func (d *dependencies) buildCompliance() (*complianceapi.Service, error) {
 	if d.store == nil {
 		return nil, errors.New("no event store: a restriction is recorded as events")
 	}
+	if d.piiVault == nil {
+		return nil, errors.New("no PII vault: an export IS the personal data the vault " +
+			"holds, so there is nothing to export")
+	}
+	if d.blobs == nil {
+		return nil, errors.New("no object store: the bundle is written as an object and " +
+			"delivered by a signed link, never as a response body")
+	}
+	exports, err := complianceapp.NewExports(complianceapp.ExportsDeps{
+		Profile: vaultProfile{vault: d.piiVault},
+		Store:   d.blobs,
+		// The subject's OWN prefix, which is the namespace an erasure empties —
+		// so a bundle is purged by erasure structurally rather than by a step
+		// somebody has to remember (compliance.md §4 step 9).
+		Prefix: profiledomain.AvatarPrefix,
+		Now:    d.clock.Now,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("exports: %w", err)
+	}
+
 	restrictions, err := complianceapp.NewRestrictions(complianceapp.RestrictionsDeps{
 		Repo: eventsourcing.NewRepository[*compliancedomain.Restriction](
 			d.store, d.codec, d.upcasters,
@@ -719,5 +742,28 @@ func (d *dependencies) buildCompliance() (*complianceapi.Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("restrictions: %w", err)
 	}
-	return complianceapi.New(complianceapi.Deps{Restrictions: restrictions})
+	return complianceapi.New(complianceapi.Deps{
+		Restrictions: restrictions, Exports: exports,
+	})
+}
+
+// vaultProfile narrows the vault to the one method an export may call.
+//
+// It reads EVERY field of a person in one call, which is the most sensitive
+// capability in this system. The code holding it should hold nothing else — it
+// cannot write, and it cannot erase.
+type vaultProfile struct{ vault *piivault.Vault }
+
+func (v vaultProfile) Profile(
+	ctx context.Context, subjectID string,
+) (map[string]string, error) {
+	profile, err := v.vault.Profile(ctx, pii.SubjectID(subjectID))
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(profile.Fields))
+	for field, value := range profile.Fields {
+		out[string(field)] = value
+	}
+	return out, nil
 }

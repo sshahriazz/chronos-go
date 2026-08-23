@@ -49,6 +49,9 @@ const (
 	// ComplianceServiceLiftProcessingRestrictionProcedure is the fully-qualified name of the
 	// ComplianceService's LiftProcessingRestriction RPC.
 	ComplianceServiceLiftProcessingRestrictionProcedure = "/chronos.compliance.v1.ComplianceService/LiftProcessingRestriction"
+	// ComplianceServiceExportMyDataProcedure is the fully-qualified name of the ComplianceService's
+	// ExportMyData RPC.
+	ComplianceServiceExportMyDataProcedure = "/chronos.compliance.v1.ComplianceService/ExportMyData"
 	// ComplianceServiceGetProcessingRestrictionProcedure is the fully-qualified name of the
 	// ComplianceService's GetProcessingRestriction RPC.
 	ComplianceServiceGetProcessingRestrictionProcedure = "/chronos.compliance.v1.ComplianceService/GetProcessingRestriction"
@@ -92,6 +95,37 @@ type ComplianceServiceClient interface {
 	//
 	// Lifting nothing succeeds and reports `changed: false`.
 	LiftProcessingRestriction(context.Context, *connect.Request[v1.LiftProcessingRestrictionRequest]) (*connect.Response[v1.LiftProcessingRestrictionResponse], error)
+	// ExportMyData produces a machine-readable copy of the caller's personal data
+	// (Articles 15 and 20).
+	//
+	// # This is the most dangerous endpoint in the product
+	//
+	// It exports everything known about a person, on demand, in a convenient
+	// bundle — which is compliance.md §3's own description of it. That is why the
+	// subject is the authenticated caller and nothing else, why it takes AAL2, and
+	// why the result is a link that expires rather than a payload in the response.
+	//
+	// # What the bundle contains, and what it does not
+	//
+	// Every personal-data field the vault holds, plus a statement of what is
+	// RETAINED and why — Article 15(1) asks about the processing, not only the
+	// values, so a file listing a name and an address while saying nothing about
+	// invoices retained under a statutory obligation would be accurate and
+	// misleading.
+	//
+	// It carries no event log, no password hash, no TOTP secret and no session
+	// digests. The first names pseudonyms and positions meaningless outside this
+	// deployment; the rest are derived from credentials rather than data about the
+	// person, and exporting them would turn a privacy right into an offline attack
+	// surface.
+	//
+	// # The bundle is purged by erasure, structurally
+	//
+	// It is written under the subject's OWN object prefix, which is the namespace
+	// an erasure already empties. compliance.md §4 step 9 requires exported
+	// bundles to be purged on erasure; putting them there makes that a property of
+	// where they live rather than a step somebody has to remember.
+	ExportMyData(context.Context, *connect.Request[v1.ExportMyDataRequest]) (*connect.Response[v1.ExportMyDataResponse], error)
 	// GetProcessingRestriction reports whether the caller's data is restricted.
 	//
 	// A READ, and AAL1: somebody must be able to see the state of their own
@@ -123,6 +157,12 @@ func NewComplianceServiceClient(httpClient connect.HTTPClient, baseURL string, o
 			connect.WithSchema(complianceServiceMethods.ByName("LiftProcessingRestriction")),
 			connect.WithClientOptions(opts...),
 		),
+		exportMyData: connect.NewClient[v1.ExportMyDataRequest, v1.ExportMyDataResponse](
+			httpClient,
+			baseURL+ComplianceServiceExportMyDataProcedure,
+			connect.WithSchema(complianceServiceMethods.ByName("ExportMyData")),
+			connect.WithClientOptions(opts...),
+		),
 		getProcessingRestriction: connect.NewClient[v1.GetProcessingRestrictionRequest, v1.GetProcessingRestrictionResponse](
 			httpClient,
 			baseURL+ComplianceServiceGetProcessingRestrictionProcedure,
@@ -136,6 +176,7 @@ func NewComplianceServiceClient(httpClient connect.HTTPClient, baseURL string, o
 type complianceServiceClient struct {
 	restrictProcessing        *connect.Client[v1.RestrictProcessingRequest, v1.RestrictProcessingResponse]
 	liftProcessingRestriction *connect.Client[v1.LiftProcessingRestrictionRequest, v1.LiftProcessingRestrictionResponse]
+	exportMyData              *connect.Client[v1.ExportMyDataRequest, v1.ExportMyDataResponse]
 	getProcessingRestriction  *connect.Client[v1.GetProcessingRestrictionRequest, v1.GetProcessingRestrictionResponse]
 }
 
@@ -148,6 +189,11 @@ func (c *complianceServiceClient) RestrictProcessing(ctx context.Context, req *c
 // chronos.compliance.v1.ComplianceService.LiftProcessingRestriction.
 func (c *complianceServiceClient) LiftProcessingRestriction(ctx context.Context, req *connect.Request[v1.LiftProcessingRestrictionRequest]) (*connect.Response[v1.LiftProcessingRestrictionResponse], error) {
 	return c.liftProcessingRestriction.CallUnary(ctx, req)
+}
+
+// ExportMyData calls chronos.compliance.v1.ComplianceService.ExportMyData.
+func (c *complianceServiceClient) ExportMyData(ctx context.Context, req *connect.Request[v1.ExportMyDataRequest]) (*connect.Response[v1.ExportMyDataResponse], error) {
+	return c.exportMyData.CallUnary(ctx, req)
 }
 
 // GetProcessingRestriction calls chronos.compliance.v1.ComplianceService.GetProcessingRestriction.
@@ -194,6 +240,37 @@ type ComplianceServiceHandler interface {
 	//
 	// Lifting nothing succeeds and reports `changed: false`.
 	LiftProcessingRestriction(context.Context, *connect.Request[v1.LiftProcessingRestrictionRequest]) (*connect.Response[v1.LiftProcessingRestrictionResponse], error)
+	// ExportMyData produces a machine-readable copy of the caller's personal data
+	// (Articles 15 and 20).
+	//
+	// # This is the most dangerous endpoint in the product
+	//
+	// It exports everything known about a person, on demand, in a convenient
+	// bundle — which is compliance.md §3's own description of it. That is why the
+	// subject is the authenticated caller and nothing else, why it takes AAL2, and
+	// why the result is a link that expires rather than a payload in the response.
+	//
+	// # What the bundle contains, and what it does not
+	//
+	// Every personal-data field the vault holds, plus a statement of what is
+	// RETAINED and why — Article 15(1) asks about the processing, not only the
+	// values, so a file listing a name and an address while saying nothing about
+	// invoices retained under a statutory obligation would be accurate and
+	// misleading.
+	//
+	// It carries no event log, no password hash, no TOTP secret and no session
+	// digests. The first names pseudonyms and positions meaningless outside this
+	// deployment; the rest are derived from credentials rather than data about the
+	// person, and exporting them would turn a privacy right into an offline attack
+	// surface.
+	//
+	// # The bundle is purged by erasure, structurally
+	//
+	// It is written under the subject's OWN object prefix, which is the namespace
+	// an erasure already empties. compliance.md §4 step 9 requires exported
+	// bundles to be purged on erasure; putting them there makes that a property of
+	// where they live rather than a step somebody has to remember.
+	ExportMyData(context.Context, *connect.Request[v1.ExportMyDataRequest]) (*connect.Response[v1.ExportMyDataResponse], error)
 	// GetProcessingRestriction reports whether the caller's data is restricted.
 	//
 	// A READ, and AAL1: somebody must be able to see the state of their own
@@ -221,6 +298,12 @@ func NewComplianceServiceHandler(svc ComplianceServiceHandler, opts ...connect.H
 		connect.WithSchema(complianceServiceMethods.ByName("LiftProcessingRestriction")),
 		connect.WithHandlerOptions(opts...),
 	)
+	complianceServiceExportMyDataHandler := connect.NewUnaryHandler(
+		ComplianceServiceExportMyDataProcedure,
+		svc.ExportMyData,
+		connect.WithSchema(complianceServiceMethods.ByName("ExportMyData")),
+		connect.WithHandlerOptions(opts...),
+	)
 	complianceServiceGetProcessingRestrictionHandler := connect.NewUnaryHandler(
 		ComplianceServiceGetProcessingRestrictionProcedure,
 		svc.GetProcessingRestriction,
@@ -233,6 +316,8 @@ func NewComplianceServiceHandler(svc ComplianceServiceHandler, opts ...connect.H
 			complianceServiceRestrictProcessingHandler.ServeHTTP(w, r)
 		case ComplianceServiceLiftProcessingRestrictionProcedure:
 			complianceServiceLiftProcessingRestrictionHandler.ServeHTTP(w, r)
+		case ComplianceServiceExportMyDataProcedure:
+			complianceServiceExportMyDataHandler.ServeHTTP(w, r)
 		case ComplianceServiceGetProcessingRestrictionProcedure:
 			complianceServiceGetProcessingRestrictionHandler.ServeHTTP(w, r)
 		default:
@@ -250,6 +335,10 @@ func (UnimplementedComplianceServiceHandler) RestrictProcessing(context.Context,
 
 func (UnimplementedComplianceServiceHandler) LiftProcessingRestriction(context.Context, *connect.Request[v1.LiftProcessingRestrictionRequest]) (*connect.Response[v1.LiftProcessingRestrictionResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.compliance.v1.ComplianceService.LiftProcessingRestriction is not implemented"))
+}
+
+func (UnimplementedComplianceServiceHandler) ExportMyData(context.Context, *connect.Request[v1.ExportMyDataRequest]) (*connect.Response[v1.ExportMyDataResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.compliance.v1.ComplianceService.ExportMyData is not implemented"))
 }
 
 func (UnimplementedComplianceServiceHandler) GetProcessingRestriction(context.Context, *connect.Request[v1.GetProcessingRestrictionRequest]) (*connect.Response[v1.GetProcessingRestrictionResponse], error) {

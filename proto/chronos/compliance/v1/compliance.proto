@@ -53,6 +53,28 @@ message GetProcessingRestrictionResponse {
   google.protobuf.Timestamp restricted_since = 2;
 }
 
+// ExportMyDataRequest asks for a copy of everything held about the caller.
+message ExportMyDataRequest {}
+
+// ExportMyDataResponse carries a short-lived link to the bundle.
+message ExportMyDataResponse {
+  // A signed, EXPIRING URL. Not stored anywhere by this system: it is a bearer
+  // capability, and persisting one would turn an expiring link into a durable
+  // credential for the most concentrated personal data we hold.
+  //
+  // Delivered here rather than as an email attachment, which compliance.md §5
+  // requires: an attachment sits in a mailbox forever, is forwarded, and is
+  // backed up by a provider nobody here controls.
+  string download_url = 1 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "https://s3.example.com/chronos/avatar9f2.../k4m2n?X-Amz-Signature=..."}
+    max_length: 4096
+    pattern: "^https://"
+  }];
+
+  // When the link stops working.
+  google.protobuf.Timestamp expires_at = 2;
+}
+
 // ComplianceService is the data subject's own rights, exercised on their own
 // data.
 service ComplianceService {
@@ -132,6 +154,47 @@ service ComplianceService {
         }
       ]
     };
+  }
+
+  // ExportMyData produces a machine-readable copy of the caller's personal data
+  // (Articles 15 and 20).
+  //
+  // # This is the most dangerous endpoint in the product
+  //
+  // It exports everything known about a person, on demand, in a convenient
+  // bundle — which is compliance.md §3's own description of it. That is why the
+  // subject is the authenticated caller and nothing else, why it takes AAL2, and
+  // why the result is a link that expires rather than a payload in the response.
+  //
+  // # What the bundle contains, and what it does not
+  //
+  // Every personal-data field the vault holds, plus a statement of what is
+  // RETAINED and why — Article 15(1) asks about the processing, not only the
+  // values, so a file listing a name and an address while saying nothing about
+  // invoices retained under a statutory obligation would be accurate and
+  // misleading.
+  //
+  // It carries no event log, no password hash, no TOTP secret and no session
+  // digests. The first names pseudonyms and positions meaningless outside this
+  // deployment; the rest are derived from credentials rather than data about the
+  // person, and exporting them would turn a privacy right into an offline attack
+  // surface.
+  //
+  // # The bundle is purged by erasure, structurally
+  //
+  // It is written under the subject's OWN object prefix, which is the namespace
+  // an erasure already empties. compliance.md §4 step 9 requires exported
+  // bundles to be purged on erasure; putting them there makes that a property of
+  // where they live rather than a step somebody has to remember.
+  rpc ExportMyData(ExportMyDataRequest) returns (ExportMyDataResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    // EXPORT, not READ. Gate 4 never blocks this class: withholding a person's
+    // own data from a suspended tenant is a portability violation, not leverage.
+    option (chronos.options.v1.operation) = OPERATION_CLASS_EXPORT;
+    option (chronos.options.v1.min_aal) = ASSURANCE_LEVEL_2;
   }
 
   // GetProcessingRestriction reports whether the caller's data is restricted.

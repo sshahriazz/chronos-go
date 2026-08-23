@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,15 +64,40 @@ func (f *fakeRestrictions) State(
 // can forge a caller. The only honest way to give a handler a principal is to run
 // the pipeline that puts one there, and a test that could inject one directly
 // would prove nothing about where handlers get theirs.
+// fakeExports stands in where a test is about restrictions.
+type fakeExports struct {
+	result app.ExportResult
+	err    error
+	asked  []string
+}
+
+func (f *fakeExports) Produce(
+	_ context.Context, subjectID string,
+) (app.ExportResult, error) {
+	f.asked = append(f.asked, subjectID)
+	return f.result, f.err
+}
+
 func service(
 	t *testing.T, r *fakeRestrictions, principal authz.Principal,
 ) compliancev1connect.ComplianceServiceClient {
 	t.Helper()
 
-	svc, err := complianceapi.New(complianceapi.Deps{Restrictions: r})
+	svc, err := complianceapi.New(complianceapi.Deps{
+		Restrictions: r, Exports: &fakeExports{},
+	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	return pipeline(t, svc, principal)
+}
+
+// pipeline puts one service behind the real gates and returns a client.
+func pipeline(
+	t *testing.T, svc *complianceapi.Service, principal authz.Principal,
+) compliancev1connect.ComplianceServiceClient {
+	t.Helper()
+
 	policies, err := policy.Load("chronos.compliance.v1.ComplianceService")
 	if err != nil {
 		t.Fatalf("loading compliance's policies: %v", err)
@@ -305,7 +331,74 @@ func TestAFailingRestrictionIsReported(t *testing.T) {
 
 // AN INCOMPLETE WIRING IS REFUSED.
 func TestTheComplianceServiceRefusesAnIncompleteWiring(t *testing.T) {
-	if _, err := complianceapi.New(complianceapi.Deps{}); err == nil {
+	if _, err := complianceapi.New(complianceapi.Deps{
+		Exports: &fakeExports{},
+	}); err == nil {
 		t.Error("a service with no restriction use case was accepted")
+	}
+	if _, err := complianceapi.New(complianceapi.Deps{
+		Restrictions: &fakeRestrictions{},
+	}); err == nil {
+		t.Error("a service with no export use case was accepted; a person cannot obtain a " +
+			"copy of their own data")
+	}
+}
+
+// THE EXPORT ACTS ON THE AUTHENTICATED CALLER.
+//
+// compliance.md §3 calls this the most dangerous endpoint in the product: it
+// exports everything known about a person, on demand, in a convenient bundle. A
+// request that could name a subject would be exactly the exfiltration API that
+// description warns about — so the schema has no field for one and the handler
+// reads the principal.
+func TestTheExportActsOnTheAuthenticatedCaller(t *testing.T) {
+	exports := &fakeExports{result: app.ExportResult{
+		DownloadURL: "https://s3.example.test/bundle?sig=x",
+		ExpiresAt:   since.Add(time.Hour),
+	}}
+	svc, err := complianceapi.New(complianceapi.Deps{
+		Restrictions: &fakeRestrictions{}, Exports: exports,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := pipeline(t, svc, user(caller))
+
+	res, err := client.ExportMyData(context.Background(),
+		connect.NewRequest(&compliancev1.ExportMyDataRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exports.asked) != 1 || exports.asked[0] != caller {
+		t.Fatalf("exported for %v, want the authenticated caller %q", exports.asked, caller)
+	}
+	if res.Msg.GetDownloadUrl() != exports.result.DownloadURL {
+		t.Errorf("returned %q", res.Msg.GetDownloadUrl())
+	}
+}
+
+// A FAILING EXPORT DOES NOT LEAK THE STORE'S OWN ERROR.
+//
+// An object-store failure names a bucket, a key and an endpoint. None of that
+// belongs in a response to a browser.
+func TestAFailingExportDoesNotLeakTheStoreError(t *testing.T) {
+	const leak = "NoSuchBucket: chronos-prod-eu at s3.internal:8333"
+	exports := &fakeExports{err: errors.New(leak)}
+	svc, err := complianceapi.New(complianceapi.Deps{
+		Restrictions: &fakeRestrictions{}, Exports: exports,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := pipeline(t, svc, user(caller))
+
+	_, err = client.ExportMyData(context.Background(),
+		connect.NewRequest(&compliancev1.ExportMyDataRequest{}))
+	if err == nil {
+		t.Fatal("a failing export reported success")
+	}
+	if strings.Contains(err.Error(), "chronos-prod-eu") ||
+		strings.Contains(err.Error(), "s3.internal") {
+		t.Errorf("the response carries the store's own text: %q", err)
 	}
 }

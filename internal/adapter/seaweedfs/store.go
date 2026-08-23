@@ -7,6 +7,7 @@
 package seaweedfs
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -211,6 +212,49 @@ func (s *Store) Delete(ctx context.Context, key blob.Key) error {
 	})
 	if err != nil && !isNotFound(err) {
 		return fmt.Errorf("seaweedfs: deleting %s: %w", key, err)
+	}
+	return nil
+}
+
+// Put writes an object the SERVER produced.
+//
+// # Why this exists when every other upload is a grant
+//
+// The two-call grant flow exists because the bytes come from a BROWSER: the
+// server must never receive them, so it signs a policy and the client POSTs
+// direct. A portability bundle has no browser in it — the server built the bytes
+// from the vault — so a grant would mean signing a policy for ourselves and then
+// making an HTTP request to satisfy it.
+//
+// It is deliberately NOT part of the grant path and takes no UploadRequest: this
+// cannot be reached by a caller-chosen key or a caller-supplied content type,
+// because there is no caller. Both arguments come from the code that produced
+// the bytes.
+func (s *Store) Put(
+	ctx context.Context, key blob.Key, body []byte, contentType string,
+) error {
+	switch {
+	case key == "":
+		return fmt.Errorf("seaweedfs: a key is required")
+	case len(body) == 0:
+		// An empty object is almost always a serialization that failed quietly,
+		// and for an export it would be a bundle a person is told is their data.
+		return fmt.Errorf("seaweedfs: refusing to store an empty object at %s", key)
+	case contentType == "":
+		return fmt.Errorf("seaweedfs: a content type is required")
+	}
+
+	if _, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(s.cfg.Bucket),
+		Key:         aws.String(key.String()),
+		Body:        bytes.NewReader(body),
+		ContentType: aws.String(contentType),
+		// The LENGTH is passed explicitly. Without it the SDK streams with a
+		// chunked encoding some S3 implementations reject, and SeaweedFS is one
+		// of the implementations worth not finding that out from.
+		ContentLength: aws.Int64(int64(len(body))),
+	}); err != nil {
+		return fmt.Errorf("seaweedfs: storing %s: %w", key, err)
 	}
 	return nil
 }
