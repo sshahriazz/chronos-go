@@ -1,0 +1,16 @@
+{{define "title"}}Your email address was changed{{end}}
+{{define "content"}}
+{{$link := url (printf "/revert-email-change?token=%s" .Token)}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 20px;">The Chronos account that used this address has been moved to a different one. Everyone signed in to it has been signed out.</p>
+<p style="margin:0 0 20px;"><strong>If this was not you</strong>, undo it now.</p>
+<p style="margin:0 0 20px;">
+  <a href="{{$link}}" style="display:inline-block;background:#a4262c;color:#ffffff;text-decoration:none;padding:11px 20px;border-radius:6px;font-size:14px;font-weight:500;">Change it back</a>
+</p>
+<p style="margin:0 0 14px;color:#6b7280;font-size:13px;">If the button does not work, paste this into your browser:<br>
+  <a href="{{$link}}" style="color:#3b5bdb;word-break:break-all;">{{$link}}</a>
+</p>
+<p style="margin:0 0 6px;color:#6b7280;font-size:13px;">This link expires in {{.ExpiresIn}} and can be used once. Using it moves the account back to this address, signs everyone out again, and releases the address it was moved to. Afterwards, set a new password.</p>
+<p style="margin:0 0 6px;color:#6b7280;font-size:13px;">We are holding this address for the account until the link expires, so nobody else can take it in the meantime.</p>
+<p style="margin:0;color:#6b7280;font-size:13px;">If you made this change yourself, nothing more is needed.</p>
+{{end}}

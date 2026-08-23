@@ -128,6 +128,27 @@ type Verification struct {
 func (v *VerificationIssuer) IssueVerification(
 	ctx context.Context, subjectID string,
 ) (Verification, error) {
+	return v.IssueFor(ctx, PurposeEmailVerification, subjectID)
+}
+
+// IssueFor does the same for any purpose.
+//
+// The revoke-first invariant above is what is being reused, and it is the reason
+// the email-change flow does not get its own issuer: "after this returns, the
+// token it returned is the ONLY redeemable one of this purpose" is a property
+// that has to hold identically for a change link and a revert link, and two
+// implementations of it are two chances for one of them to lose it.
+//
+// The purpose is NOT a label: it is mixed into the digest, so a token issued to
+// verify an address hashes to a value no change lookup can match. Without that
+// binding, anyone who can cause a verification mail — by registering an address
+// they own — would hold a token that completes a change on another account.
+func (v *VerificationIssuer) IssueFor(
+	ctx context.Context, purpose TokenPurpose, subjectID string,
+) (Verification, error) {
+	if purpose == "" {
+		return Verification{}, errs.ValidationFailedf("a token purpose is required")
+	}
 	if subjectID == "" {
 		// Refused rather than defaulted. RevokeAll with an empty subject is a
 		// query that matches nothing in one store and everything in another, and
@@ -136,20 +157,20 @@ func (v *VerificationIssuer) IssueVerification(
 	}
 
 	now := v.clock.Now().UTC()
-	token, err := v.minter(PurposeEmailVerification, now)
+	token, err := v.minter(purpose, now)
 	if err != nil {
-		return Verification{}, fmt.Errorf("minting a verification token: %w", err)
+		return Verification{}, fmt.Errorf("minting a %s token: %w", purpose, err)
 	}
-	if err := v.tokens.RevokeAll(ctx, PurposeEmailVerification, subjectID); err != nil {
+	if err := v.tokens.RevokeAll(ctx, purpose, subjectID); err != nil {
 		// Before Issue, so a failure here leaves the PREVIOUS token live and this
 		// one unissued — one live token, and the link already in the mailbox still
 		// works. The redelivery that follows tries the whole sequence again.
 		return Verification{}, fmt.Errorf("voiding outstanding verification tokens: %w", err)
 	}
 	if err := v.tokens.Issue(
-		ctx, PurposeEmailVerification, subjectID, token.Digest, token.ExpiresAt,
+		ctx, purpose, subjectID, token.Digest, token.ExpiresAt,
 	); err != nil {
-		return Verification{}, fmt.Errorf("storing the verification token: %w", err)
+		return Verification{}, fmt.Errorf("storing the %s token: %w", purpose, err)
 	}
 
 	return Verification{

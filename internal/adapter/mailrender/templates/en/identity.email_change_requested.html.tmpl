@@ -1,0 +1,15 @@
+{{define "title"}}Someone asked to change your email address{{end}}
+{{define "content"}}
+{{/*
+  NO LINK AND NO TOKEN. This message goes to the address a change is moving
+  AWAY from, which is exactly the mailbox an attacker may already be reading; a
+  credential in it would make the warning itself the attack. It also omits the
+  new address, which would tell that attacker nothing they do not know and would
+  tell everyone else where a stranger tried to send an account.
+*/}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 20px;">Someone asked to move your Chronos account to a different email address. We are telling you here, at the address the account uses today, so that you hear about it even if the request was not yours.</p>
+<p style="margin:0 0 20px;">Nothing has changed. The move only happens if someone confirms a link we sent to the new address, and that link expires in {{.ExpiresIn}}.</p>
+<p style="margin:0 0 20px;"><strong>If this was not you</strong>, sign in and cancel the request, then change your password. Someone with access to your account may have started this.</p>
+<p style="margin:0;color:#6b7280;font-size:13px;">We have not included the new address or a link in this message. If your account has been reached by someone else, this message must not help them.</p>
+{{end}}

@@ -235,6 +235,50 @@ func identityNotifications(cat *notify.Catalogue) {
 		Audience: notify.AudienceSubject,
 	}, nil)
 
+	// ---- Email change (identity.md §12) --------------------------------------
+	//
+	// Every message this flow sends is sent by identity's own reactor
+	// (internal/modules/identity/reactor/emailchange.go), for two reasons the
+	// catalogue cannot work around: two of the three carry a freshly minted
+	// token, which no catalogue entry can produce; and the REQUEST sends two
+	// messages to two different addresses, while an entry here maps one event to
+	// one notification.
+	cat.Silent[identityevents.EmailChangeRequested](
+		"delivered by the email-change reactor, which sends TWO messages off this one " +
+			"event: the proof link to the new address, and a security warning to the " +
+			"address still in force. The catalogue can express neither — the first is a " +
+			"credential it cannot mint, and the second is a second recipient for one " +
+			"event. Splitting them across two entries is not possible either, because " +
+			"the addresses differ and only the reactor can select one")
+	cat.Silent[identityevents.EmailChanged](
+		"delivered by the email-change reactor, which mails the REVERT link to the " +
+			"address the account moved away from. That address is the entire remedy " +
+			"identity.md §12 offers, and it is not the recipient a catalogue entry would " +
+			"resolve: the dispatcher reads the vault at send time, which by then holds " +
+			"the NEW address — the attacker's, in the case the revert window exists for")
+	cat.Silent[identityevents.EmailChangeCancelled](
+		"a pending change ending without completing. Three causes and none of them is " +
+			"news to the holder: they superseded it themselves, they cancelled it " +
+			"themselves, or a password reset voided it — and a reset already sends its " +
+			"own security mail saying every pending change was killed. The address that " +
+			"was being claimed is not notified either: nobody there ever proved they " +
+			"wanted anything, so mail to it would be unsolicited (NOTIFICATIONS §5)")
+	cat.On[identityevents.EmailChangeReverted](notify.Spec{
+		Template: "identity.email_change_reverted",
+		// SECURITY. It confirms that an account takeover was undone, and no
+		// preference may suppress the message that says so.
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, nil)
+
+	cat.Silent[identityevents.EmailReservationDemoted](
+		"the bookkeeping half of a completed change: the old address stops being " +
+			"verified and starts counting down its revert window. The person is told " +
+			"about the change itself by the revert mail, which rides the same append " +
+			"and is the message with the link. A second copy about a reservation state " +
+			"would be noise, and noise in a security stream trains people to ignore the " +
+			"message that matters")
+
 	cat.Silent[identityevents.UserActivated](
 		"activation is the conjunction of two facts that each notify on their own — the " +
 			"address was proven (EmailVerified) and a second factor was enrolled " +

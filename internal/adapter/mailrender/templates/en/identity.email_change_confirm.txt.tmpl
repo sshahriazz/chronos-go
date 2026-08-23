@@ -1,0 +1,12 @@
+Hello{{if .Name}} {{.Name}}{{end}},
+
+Someone asked to move a Chronos account to this address. Confirm that you can
+read mail here to complete the move:
+
+  {{url (printf "/confirm-email-change?token=%s" .Token)}}
+
+This link expires in {{.ExpiresIn}} and can be used once. Nothing changes until
+you use it — the account still signs in with its current address.
+
+If you were not expecting this, ignore the message. The request expires on its
+own and no account of yours is affected.

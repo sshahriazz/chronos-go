@@ -1,0 +1,19 @@
+{{define "title"}}Confirm your new email address{{end}}
+{{define "content"}}
+{{/*
+  Built here, like every other link in this directory: the renderer holds the
+  base URL, so the token never has to be concatenated into a string in Go where
+  a log line, an error message or a span attribute could pick it up.
+*/}}
+{{$link := url (printf "/confirm-email-change?token=%s" .Token)}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 20px;">Someone asked to move a Chronos account to this address. Confirm that you can read mail here to complete the move.</p>
+<p style="margin:0 0 20px;">
+  <a href="{{$link}}" style="display:inline-block;background:#1a1d21;color:#ffffff;text-decoration:none;padding:11px 20px;border-radius:6px;font-size:14px;font-weight:500;">Confirm this address</a>
+</p>
+<p style="margin:0 0 14px;color:#6b7280;font-size:13px;">If the button does not work, paste this into your browser:<br>
+  <a href="{{$link}}" style="color:#3b5bdb;word-break:break-all;">{{$link}}</a>
+</p>
+<p style="margin:0 0 6px;color:#6b7280;font-size:13px;">This link expires in {{.ExpiresIn}} and can be used once. Nothing changes until you use it — the account still signs in with its current address.</p>
+<p style="margin:0;color:#6b7280;font-size:13px;">If you were not expecting this, ignore the message. The request expires on its own and no account of yours is affected.</p>
+{{end}}

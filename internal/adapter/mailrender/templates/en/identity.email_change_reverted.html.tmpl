@@ -1,0 +1,6 @@
+{{define "title"}}Your email address was changed back{{end}}
+{{define "content"}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 20px;">The change to your Chronos account's email address has been undone. The account uses this address again, and everyone signed in to it has been signed out.</p>
+<p style="margin:0;color:#6b7280;font-size:13px;">If you did not undo this yourself, someone else can read mail at this address. Treat the account as compromised: sign in, change your password, and review the devices and sessions on it.</p>
+{{end}}

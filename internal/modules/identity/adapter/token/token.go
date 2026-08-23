@@ -41,6 +41,25 @@ const (
 	// tighter window. Treating the two the same is the common shortcut, and it
 	// leaves account-takeover credentials sitting in inboxes for a day.
 	ResetTTL = time.Hour
+
+	// ChangeTTL bounds the link that proves an address an account is MOVING TO.
+	//
+	// The same window as a verification, because it is the same act: somebody
+	// proving they can read mail at an address. It also bounds how long the
+	// claimed address is held away from anyone else who might want it, so it is
+	// not a number to lengthen casually.
+	ChangeTTL = 24 * time.Hour
+
+	// RevertTTL bounds the link that UNDOES a completed change.
+	//
+	// Deliberately the longest of the four, and the only one whose length is a
+	// safety property rather than a cost. The person who needs it did not ask for
+	// the change and is reading an unexpected mail — possibly after a weekend —
+	// and every hour shaved off is an hour in which an account taken over stays
+	// taken over. It must match app.DefaultEmailRevertWindow: the token dying
+	// before the aggregate's window closes would leave a window nothing can act
+	// on, and outliving it would leave a link that redeems into a refusal.
+	RevertTTL = 72 * time.Hour
 )
 
 // Token is a freshly minted secret and its stored digest.
@@ -59,6 +78,8 @@ func New() *Minter {
 	inner, err := secret.New(map[secret.Purpose]time.Duration{
 		secret.Purpose(app.PurposeEmailVerification): VerificationTTL,
 		secret.Purpose(app.PurposePasswordReset):     ResetTTL,
+		secret.Purpose(app.PurposeEmailChange):       ChangeTTL,
+		secret.Purpose(app.PurposeEmailChangeRevert): RevertTTL,
 	})
 	if err != nil {
 		// Unreachable: the table above is a constant of this package. Panicking
