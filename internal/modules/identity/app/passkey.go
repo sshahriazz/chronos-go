@@ -9,8 +9,10 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/chronos/chronos-go/internal/modules/identity/contract"
 	"github.com/chronos/chronos-go/internal/modules/identity/domain"
 	"github.com/chronos/chronos-go/internal/platform/clock"
+	"github.com/chronos/chronos-go/internal/platform/codec"
 	"github.com/chronos/chronos-go/internal/platform/errs"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/platform/ids"
@@ -589,4 +591,222 @@ func passkeyCredentialID(webauthnID string) string {
 // allowCredentials or excludeCredentials list carries.
 func decodeCredentialID(id string) ([]byte, error) {
 	return base64.RawURLEncoding.DecodeString(id)
+}
+
+// ---------------------------------------------------------------------------
+// Authentication
+// ---------------------------------------------------------------------------
+
+// BeginLoginCommand starts a passkey sign-in.
+//
+// It carries no identifier, and that absence is the feature: identity.md §5 asks
+// for usernameless login, so the authenticator names the account. A field for an
+// address here would reintroduce the enumeration oracle every other public
+// surface in this module removes — "does this address have a passkey" is the
+// same question as "does this address have an account".
+type BeginLoginCommand struct{}
+
+// BeginLoginResult is what the browser needs.
+type BeginLoginResult struct {
+	ChallengeID string
+	Options     []byte
+	ExpiresAt   time.Time
+}
+
+// BeginLogin issues a discoverable-login ceremony.
+//
+// No account is looked up and none is named. The options list no credentials,
+// so the authenticator offers whatever it holds for this relying party — which
+// is what makes the call answer identically whether or not any account exists.
+func (p *Passkeys) BeginLogin(ctx context.Context, _ BeginLoginCommand) (BeginLoginResult, error) {
+	challenge, err := p.ceremonies.BeginLogin(CeremonyAccount{}, nil)
+	if err != nil {
+		return BeginLoginResult{}, fmt.Errorf("beginning a passkey login: %w", err)
+	}
+
+	id, err := p.ceremonyID()
+	if err != nil {
+		return BeginLoginResult{}, err
+	}
+	now := p.clock.Now().UTC()
+	if err := p.challenges.Issue(ctx, Challenge{
+		ID: id, Purpose: CeremonyLogin, State: challenge.State, ExpiresAt: now.Add(p.ttl),
+	}); err != nil {
+		return BeginLoginResult{}, fmt.Errorf("storing the ceremony: %w", err)
+	}
+	return BeginLoginResult{ChallengeID: id, Options: challenge.Options, ExpiresAt: now.Add(p.ttl)}, nil
+}
+
+// FinishLoginCommand completes a passkey sign-in.
+type FinishLoginCommand struct {
+	ChallengeID string
+
+	// Response is the browser's assertion payload, verbatim. It names the
+	// credential, which names the account.
+	Response []byte
+
+	IdempotencyKey string
+}
+
+// FinishLoginResult is the evidence CreateSession requires.
+type FinishLoginResult struct {
+	Proof Proof
+
+	// CloneWarned reports that the authenticator's counter went BACKWARDS.
+	//
+	// Surfaced so a caller can tell the person why they are being asked to step
+	// up. The assurance reduction is already applied to the Proof — this is not
+	// the enforcement, it is the explanation.
+	CloneWarned bool
+}
+
+// FinishLogin verifies an assertion and produces a Proof.
+//
+// # What the sign count does, and what it must never do
+//
+// identity.md §5: the counter is "not treated as mandatory, because most synced
+// passkeys never increment it. A regression here locks out legitimate users." So
+// a regression is NOT a denial. It caps the session at AAL1 and records a
+// warning event, which means anything requiring step-up asks for it and ordinary
+// reads keep working.
+//
+// The alternative — denying — signs people out for using two devices at once,
+// which identity.md §6 and §9 treat as ordinary rather than theoretical.
+func (p *Passkeys) FinishLogin(
+	ctx context.Context, cmd FinishLoginCommand,
+) (FinishLoginResult, error) {
+	switch {
+	case cmd.IdempotencyKey == "":
+		return FinishLoginResult{}, errs.ValidationFailedf("an idempotency key is required")
+	case cmd.ChallengeID == "":
+		return FinishLoginResult{}, errs.Unauthenticatedf("this sign-in has expired; try again")
+	case len(cmd.Response) == 0:
+		return FinishLoginResult{}, errs.Unauthenticatedf("this sign-in has expired; try again")
+	}
+
+	now := p.clock.Now().UTC()
+	challenge, err := p.challenges.Consume(ctx, cmd.ChallengeID, CeremonyLogin, now)
+	if err != nil {
+		// ONE answer for unknown, spent, expired and wrong-purpose — and the same
+		// answer a bad signature gets below.
+		return FinishLoginResult{}, errs.Unauthenticatedf("this sign-in has expired; try again")
+	}
+
+	presented, err := credentialIDFromAssertion(cmd.Response)
+	if err != nil {
+		return FinishLoginResult{}, errs.Unauthenticatedf("this passkey could not be verified")
+	}
+	stored, err := p.store.Find(ctx, presented)
+	if err != nil {
+		if errors.Is(err, ErrNoSuchPasskey) {
+			// An unknown credential answers exactly as a bad signature does.
+			// Distinguishing them would tell a caller which credential ids are
+			// registered, and a credential id is not secret — it travels in every
+			// allowCredentials list — so the answer must not be an oracle.
+			return FinishLoginResult{}, errs.Unauthenticatedf("this passkey could not be verified")
+		}
+		return FinishLoginResult{}, fmt.Errorf("reading the passkey: %w", err)
+	}
+
+	user, err := p.load(ctx, stored.SubjectID)
+	if err != nil {
+		return FinishLoginResult{}, errs.Unauthenticatedf("this passkey could not be verified")
+	}
+	assertion, err := p.ceremonies.FinishLogin(
+		CeremonyAccount{SubjectID: stored.SubjectID, Username: user.Username()},
+		[]CeremonyStored{{
+			ID: stored.CredentialID, PublicKey: stored.PublicKey, SignCount: stored.SignCount,
+			AAGUID: stored.AAGUID, Transports: stored.Transports,
+			UserVerified: stored.UserVerified, BackupEligible: stored.BackupEligible,
+			BackupState: stored.BackupState,
+		}},
+		challenge.State, cmd.Response)
+	if err != nil {
+		return FinishLoginResult{}, errs.Unauthenticatedf("this passkey could not be verified")
+	}
+
+	// The counter, advanced ATOMICALLY. The comparison is the database's; this
+	// only reads which of the three things happened.
+	outcome, err := p.store.Advance(ctx, stored.CredentialID, assertion.SignCount, now)
+	if err != nil {
+		return FinishLoginResult{}, fmt.Errorf("advancing the passkey's sign count: %w", err)
+	}
+
+	// BOTH signals, and either is enough. The library's CloneWarning and the
+	// store's regression answer the same question from two sides, and reading
+	// only one would make the check depend on a library flag this codebase has
+	// no control over — which is precisely how a check becomes decorative.
+	regressed := assertion.CloneWarning || outcome.Regressed
+
+	result := FinishLoginResult{CloneWarned: regressed}
+	aal := domain.AALForVerified([]contract.MethodKind{contract.MethodPasskey}, assertion.UserVerified)
+
+	if regressed {
+		// CAPPED, not denied. Anything requiring step-up will ask for it; ordinary
+		// reads keep working. See the doc comment.
+		aal = contract.AAL1
+
+		if err := user.NoteCloneWarning(
+			mustPasskeyCredentialID(stored.CredentialID),
+			outcome.Stored, assertion.SignCount, now,
+		); err == nil && len(user.Uncommitted()) > 0 {
+			// Appended, and a failure here does NOT fail the sign-in: the person
+			// authenticated, and refusing them because a warning could not be
+			// recorded would turn an observability gap into a lockout. It is loud
+			// instead.
+			if appendErr := p.append(ctx, cmd.IdempotencyKey+":clone", stored.SubjectID, user); appendErr != nil {
+				p.log.ErrorContext(ctx, "a passkey's signature counter regressed and the "+
+					"warning could not be recorded; clone detection is silent for this login",
+					"module", "identity", "subject_id", stored.SubjectID,
+					"stored", outcome.Stored, "presented", assertion.SignCount,
+					"error", appendErr)
+			}
+		}
+	}
+
+	userID, err := p.subjects.UserBySubject(ctx, stored.SubjectID)
+	if err != nil {
+		return FinishLoginResult{}, errs.Unauthenticatedf("this passkey could not be verified")
+	}
+	result.Proof = Proof{
+		userID:    userID,
+		subjectID: stored.SubjectID,
+		methods:   []contract.MethodKind{contract.MethodPasskey},
+		aal:       aal,
+		at:        now,
+	}
+	return result, nil
+}
+
+// mustPasskeyCredentialID derives the aggregate's id, falling back to zero.
+//
+// A zero id makes NoteCloneWarning refuse, which is the safe direction: the
+// warning is not recorded and the caller logs that it could not be, rather than
+// an event being attributed to a credential that does not exist.
+func mustPasskeyCredentialID(webauthnID string) ids.CredentialID {
+	id, err := ids.Parse[ids.Credential](passkeyCredentialID(webauthnID))
+	if err != nil {
+		return ids.CredentialID{}
+	}
+	return id
+}
+
+// credentialIDFromAssertion reads which credential signed.
+//
+// The assertion names it, and the server must look it up to learn whose it is —
+// that is what makes usernameless login possible. Parsed with the TOLERANT
+// decoder for ADR-047's reason: the payload comes from a browser this system
+// does not control, and a field the current build has never heard of must not
+// make a person's sign-in fail.
+func credentialIDFromAssertion(response []byte) (string, error) {
+	parsed, err := codec.Tolerant[struct {
+		ID string `json:"id"`
+	}](response)
+	if err != nil {
+		return "", err
+	}
+	if parsed.ID == "" {
+		return "", errors.New("identity: the assertion names no credential")
+	}
+	return parsed.ID, nil
 }
