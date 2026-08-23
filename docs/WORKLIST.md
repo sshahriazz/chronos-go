@@ -334,16 +334,56 @@ what landed since is the part that turns a trial into revenue.
 
 ### Still open in the plan
 
-- [ ] **§7 key custody.** `STRIPE_SECRET_KEY` comes from the environment via
-      `config.Secret`. ADR-028 says OpenBao. The webhook secret's
-      rotation-with-overlap is already built; the API key itself is not.
+- [x] **§7 key custody.** A KV v2 engine beside the transit KEK — a different
+      job in the same server: the KEK never leaves OpenBao, while these values
+      must, because a Stripe key is useless unless we can send it to Stripe. So
+      it is CUSTODY, not secrecy-in-use: read once at startup over an
+      authenticated channel instead of sitting in every process's environment,
+      `docker inspect`, a crash dump and the deploying shell's history.
+
+      `OPENBAO_STRIPE_PATH` is the switch and it is deliberately binary. Unset,
+      the environment is used, which is what a dev machine wants. Set, OpenBao
+      is AUTHORITATIVE and a missing `api_key` is a startup failure — there is
+      no third mode where custody is configured and the environment quietly
+      fills a gap, because that fallback makes a rotation that failed to land
+      look exactly like one that worked.
+
+      Resolution is a step after `config.Load` rather than inside it: Load is
+      pure, and folding a network read into it would make configuration fail on
+      a blip and report "bad configuration" when the configuration is fine. The
+      overlay re-runs `validate()`, so ADR-008's live-key-outside-production
+      rule is about the VALUE rather than about where it came from — and custody
+      is the more likely place for a live key to appear.
+
+      Still environment-only: every other secret in the build. The mechanism is
+      general and the remaining move is mechanical.
 - [ ] **§9.3** — does a trial convert automatically at trial end when a card was
       added mid-trial? Stripe's default is yes. Worth confirming rather than
       inheriting.
-- [ ] **§9.4** — annual plans at launch? Structural for the catalogue's shape,
-      and cheaper to decide before the catalogue exists.
+- [x] **§9.4 — annual plans: YES, from the start.** Decided before the catalogue
+      exists, which is the whole reason it was worth asking: the catalogue
+      carries `interval` as a dimension from day one rather than being reshaped
+      once annual arrives. Two Prices per plan per currency, and a monthly→annual
+      switch is a subscription UPDATE that Stripe prorates — never a second
+      subscription (billing.md §5 case 19: one active subscription per org).
 
-### Suspension notifies nobody, and that is now conspicuous
+### Suspension: tell EVERY member — decided
+
+`OrganizationSuspended` becomes an `On` with a new organization-member audience
+resolved over `org_member_index`. The reason the event was Silent still stands
+and is exactly why the answer is "everyone": suspension ends access for every
+member, so telling the owner alone tells the one person who can fix it and
+nobody who is affected.
+
+Two templates by role — the owner is told how to restore access, everyone else
+is told to contact their owner — because a member who cannot pay does not need
+instructions for paying.
+
+This is the first audience in the system that needs a READ MODEL rather than the
+envelope's own metadata, which is what `notify.SubjectAudiences` refuses to guess
+at today.
+
+### The original note, kept because it records why this was open
 
 `OrganizationTrialEndingSoon` mails: "your trial ends in three days". When it
 actually ends, `OrganizationSuspended` is `cat.Silent`, so the customer hears

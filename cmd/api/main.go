@@ -66,6 +66,14 @@ func run(addr string, log *slog.Logger) error {
 	log.Info("configuration loaded",
 		"env", cfg.Env, "timezone", cfg.Timezone, "version", version)
 
+	// Secrets in custody override the environment, before anything reads them.
+	// It runs HERE — before tracing, before any dependency — because a value
+	// resolved after something has already read the environment copy is a value
+	// two things disagree about.
+	if err := resolveSecrets(context.Background(), cfg, log); err != nil {
+		return err
+	}
+
 	// Tracing first, so every span this process creates — including the ones
 	// libraries open during wiring — belongs to a provider that can export them.
 	// It never fails a boot: an observability outage must not become a service

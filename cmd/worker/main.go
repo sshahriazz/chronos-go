@@ -68,6 +68,11 @@ func run(addr string, list bool, replay string, stats bool, log *slog.Logger) er
 		return err
 	}
 
+	// Secrets in custody override the environment, before anything reads them.
+	if err := resolveSecrets(context.Background(), cfg, log); err != nil {
+		return err
+	}
+
 	// Tracing is installed before anything else builds a client, so spans opened
 	// during wiring belong to a provider that can export them. It never fails a
 	// boot: an observability outage must not become a service outage (ADR-010).

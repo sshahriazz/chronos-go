@@ -14,6 +14,7 @@
 package config
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -823,6 +824,24 @@ type OpenBaoConfig struct {
 	Address string `env:"OPENBAO_ADDR" envDefault:"http://localhost:8200"`
 	Token   Secret `env:"OPENBAO_DEV_TOKEN"`
 	KEKName string `env:"OPENBAO_KEK_NAME" envDefault:"chronos-kek"`
+
+	// KVMount is the KV v2 engine holding APPLICATION secrets.
+	//
+	// A different job from KEKName above: that key never leaves OpenBao, while
+	// these values must, because a Stripe key is useless unless we can send it
+	// to Stripe. This is custody — read once at startup over an authenticated
+	// channel — not secrecy in use.
+	KVMount string `env:"OPENBAO_KV_MOUNT" envDefault:"secret"`
+
+	// StripePath is where the Stripe secrets live inside that mount.
+	//
+	// EMPTY MEANS "not in custody", and that is the switch: set, OpenBao is
+	// authoritative and a missing value is a startup failure; unset, the
+	// environment is used. There is deliberately no third mode where custody is
+	// configured and the environment quietly fills a gap — a fallback that
+	// silent means a rotation that failed to land looks like a rotation that
+	// worked.
+	StripePath string `env:"OPENBAO_STRIPE_PATH"`
 }
 
 // Required values use `required,notEmpty`. `required` alone only checks that a
@@ -1325,4 +1344,71 @@ func validVersionNumber(name string, v int) error {
 			"indistinguishable from an unset column and the re-sealing job cannot see it", name, v)
 	}
 	return nil
+}
+
+// SecretSource reads named secrets out of custody.
+//
+// Declared here rather than in the adapter because this is the package that
+// knows WHICH fields are secret — the adapter only knows how to read a path.
+type SecretSource interface {
+	Values(ctx context.Context, path string) (map[string]string, error)
+}
+
+// ResolveSecrets overlays values held in custody onto the parsed config.
+//
+// # Why this is a separate step and not part of Load
+//
+// Load is pure: it parses the environment and validates it, with no I/O and no
+// context. Folding a network read into it would make configuration loading fail
+// on a blip, make every config test need a server, and make the failure arrive
+// as "bad configuration" when the configuration is fine and OpenBao is down.
+//
+// So each binary calls this after Load, and the two failures stay distinct.
+//
+// # It is a no-op when custody is not configured
+//
+// Local development keeps its .env, which is the point of .env. Custody is
+// switched on by naming a path, and from that moment it is AUTHORITATIVE: a key
+// the path does not carry is an error rather than a silent fall back to the
+// environment. A fallback would make a rotation that failed to land look exactly
+// like a rotation that worked, which is the failure BILLING-PLAN.md §7's overlap
+// window exists to avoid in the other direction.
+func (c *Config) ResolveSecrets(ctx context.Context, src SecretSource) error {
+	if c.OpenBao.StripePath == "" {
+		return nil
+	}
+	if src == nil {
+		return fmt.Errorf("config: OPENBAO_STRIPE_PATH names %q but no secret source was "+
+			"wired, so the Stripe secrets would silently come from the environment that "+
+			"setting exists to stop being trusted", c.OpenBao.StripePath)
+	}
+
+	values, err := src.Values(ctx, c.OpenBao.StripePath)
+	if err != nil {
+		return fmt.Errorf("config: reading Stripe secrets from custody: %w", err)
+	}
+
+	// The API key is REQUIRED once custody is on. The two webhook secrets are
+	// not: a deployment that has not yet rotated has only one, and the previous
+	// one is legitimately absent (billing.md §5 case 26).
+	apiKey, ok := values["api_key"]
+	if !ok || apiKey == "" {
+		return fmt.Errorf("config: %q carries no non-empty api_key; custody is configured, "+
+			"so this is a deployment step nobody ran rather than a reason to fall back to "+
+			"the environment", c.OpenBao.StripePath)
+	}
+	c.Stripe.SecretKey = Secret(apiKey)
+
+	if v, ok := values["webhook_secret"]; ok {
+		c.Stripe.WebhookSecret = Secret(v)
+	}
+	if v, ok := values["webhook_secret_previous"]; ok {
+		c.Stripe.WebhookSecretPrevious = Secret(v)
+	}
+
+	// Re-validated, because a value from custody has had none of the checks
+	// Load applied to the environment — and the one that matters most is
+	// ADR-008's: a LIVE key outside production is a startup failure however it
+	// arrived, and custody is the more likely place for one to appear.
+	return c.validate()
 }

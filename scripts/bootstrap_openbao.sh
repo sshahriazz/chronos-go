@@ -18,6 +18,8 @@ cd "$(dirname "$0")/.."
 ADDR="${OPENBAO_ADDR:-http://localhost:8200}"
 TOKEN="${OPENBAO_DEV_TOKEN:-}"
 KEK="${OPENBAO_KEK_NAME:-chronos-kek}"
+KV="${OPENBAO_KV_MOUNT:-secret}"
+STRIPE_PATH="${OPENBAO_STRIPE_PATH:-chronos/stripe}"
 G="\033[32m"; Y="\033[33m"; R="\033[31m"; X="\033[0m"
 
 if [ -z "$TOKEN" ]; then
@@ -77,3 +79,55 @@ case "$detail" in
   *) echo -e "  ${R}FAIL${X}  '$KEK' is not aes256-gcm96"; exit 1 ;;
 esac
 echo -e "  ${G}OK${X}    verified: aes256-gcm96, exportable=false"
+
+# ---------------------------------------------------------------------------
+# The KV engine, for APPLICATION SECRETS — a different job from the KEK above.
+# ---------------------------------------------------------------------------
+# The transit engine holds a key that never leaves OpenBao. This holds values
+# that must leave it: a Stripe API key is useless unless the process can send it
+# to Stripe. So this is custody, not secrecy-in-use — the secret is read once at
+# startup over an authenticated channel instead of sitting in every process's
+# environment, in `docker inspect`, in a crash dump and in the shell history of
+# whoever last deployed.
+#
+# BILLING-PLAN.md §7 requires it for the Stripe key and the webhook signing
+# secrets. KV v2 rather than v1 because v2 versions writes, which is what makes
+# the overlap window in billing.md §5 case 26 auditable: after a rotation you can
+# see which secret was current when.
+code=$(api -X POST -d '{"type":"kv","options":{"version":"2"}}' "$ADDR/v1/sys/mounts/$KV")
+case "$code" in
+  204|200) echo -e "  ${G}OK${X}    kv v2 engine mounted at '$KV'" ;;
+  400)     echo -e "  ${G}OK${X}    kv v2 engine already mounted at '$KV'" ;;
+  *)       echo -e "  ${R}FAIL${X}  mounting kv: HTTP $code"; exit 1 ;;
+esac
+
+# Seed the Stripe secrets from .env, FOR DEVELOPMENT ONLY.
+#
+# This is the one place the two worlds meet, and it runs only because a dev
+# machine's .env is already the source of truth there. In production nothing
+# seeds anything: the secrets are written by whoever holds them, and this script
+# would find them already present.
+#
+# Absent values are skipped rather than written empty. An empty Stripe key in
+# custody is worse than none: the process starts, reads it, and fails on the
+# first call to Stripe with an authentication error that looks like a revoked
+# key rather than a missing one.
+seed=""
+add_seed() {
+  [ -n "${2:-}" ] || return 0
+  [ -n "$seed" ] && seed="$seed,"
+  seed="$seed\"$1\":\"$2\""
+}
+add_seed api_key "${STRIPE_SECRET_KEY:-}"
+add_seed webhook_secret "${STRIPE_WEBHOOK_SECRET:-}"
+add_seed webhook_secret_previous "${STRIPE_WEBHOOK_SECRET_PREVIOUS:-}"
+
+if [ -z "$seed" ]; then
+  echo -e "  ${Y}skip${X}  no STRIPE_* values in .env to seed into '$KV/$STRIPE_PATH'"
+else
+  code=$(api -X POST -d "{\"data\":{$seed}}" "$ADDR/v1/$KV/data/$STRIPE_PATH")
+  case "$code" in
+    200|204) echo -e "  ${G}OK${X}    stripe secrets seeded at '$KV/$STRIPE_PATH'" ;;
+    *)       echo -e "  ${R}FAIL${X}  seeding stripe secrets: HTTP $code"; exit 1 ;;
+  esac
+fi
