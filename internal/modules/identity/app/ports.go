@@ -735,6 +735,70 @@ type LiveSessions interface {
 	List(ctx context.Context, subjectID string, now time.Time) ([]ids.SessionID, error)
 }
 
+// CeremonyPurpose binds a challenge to the flow that issued it.
+//
+// Mixed into the statement that consumes it, so a challenge issued to ADD a
+// passkey cannot be answered as a sign-in. The same binding TokenPurpose has,
+// and for the same reason: without it, anybody who can cause a registration
+// ceremony holds something redeemable as an authentication.
+type CeremonyPurpose string
+
+const (
+	// CeremonyRegistration adds a credential to an account that is already
+	// authenticated.
+	CeremonyRegistration CeremonyPurpose = "registration"
+
+	// CeremonyLogin proves a credential. It may be DISCOVERABLE, in which case
+	// the challenge carries no subject — the authenticator names the account.
+	CeremonyLogin CeremonyPurpose = "login"
+)
+
+// Challenge is one WebAuthn ceremony in flight.
+type Challenge struct {
+	// ID is unguessable and is handed to the browser. It is NOT a credential:
+	// holding one lets somebody complete a ceremony they must still produce a
+	// valid signature for.
+	ID string
+
+	// SubjectID is empty for a discoverable login, which is the point of
+	// usernameless sign-in: there is no subject until the authenticator names
+	// one.
+	SubjectID string
+
+	Purpose CeremonyPurpose
+
+	// State is the ceremony adapter's own session data, opaque to everything
+	// else. It carries the challenge bytes that make a replay impossible, which
+	// is why it is stored server-side and never handed to the browser.
+	State []byte
+
+	ExpiresAt time.Time
+}
+
+// ChallengeStore holds ceremonies in flight.
+//
+// Consume must be ATOMIC. A read-then-delete races two simultaneous finishes and
+// both win — for a registration that is one ceremony producing two credentials,
+// and for a login two sessions from one signature. `identity_token`'s Consume
+// makes the same demand for the same reason.
+type ChallengeStore interface {
+	Issue(ctx context.Context, c Challenge) error
+
+	// Consume redeems exactly once, returning ErrNoSuchChallenge for anything
+	// unusable. Unknown, spent, expired and wrong-purpose are deliberately one
+	// outcome.
+	Consume(ctx context.Context, id string, purpose CeremonyPurpose, now time.Time) (Challenge, error)
+
+	// Sweep drops what nobody completed. Abandoned ceremonies are the ordinary
+	// case, so a non-zero count is housekeeping rather than a signal.
+	Sweep(ctx context.Context, now time.Time) (int, error)
+}
+
+// ErrNoSuchChallenge means the ceremony is unknown, spent, expired or was issued
+// for a different purpose. One error for all four, so a caller cannot use it to
+// discover which ceremony ids are real.
+var ErrNoSuchChallenge = errors.New("identity: this ceremony is no longer valid")
+
 // PasskeyStore is the system of record for WebAuthn material (ADR-057).
 //
 // # It is not a projection, and that is the whole shape of it

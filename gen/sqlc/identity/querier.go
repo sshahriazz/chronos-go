@@ -124,6 +124,23 @@ type Querier interface {
 	// token was valid but has expired" would confirm that the address it was sent to
 	// has an account.
 	ConsumeToken(ctx context.Context, arg ConsumeTokenParams) (string, error)
+	// Redeem a ceremony exactly ONCE.
+	//
+	// The whole single-use rule, as one statement. A read-then-delete races two
+	// simultaneous finishes and both win, which for a registration is one ceremony
+	// producing two credentials and for a login is two sessions from one signature.
+	// `identity_token`'s ConsumeToken makes the same argument and takes the same
+	// shape.
+	//
+	// The PURPOSE is checked in the same statement, so a challenge issued to add a
+	// passkey cannot be answered as a sign-in — the same binding that stops a
+	// verification token being redeemed as a password reset.
+	//
+	// The EXPIRY is checked here too, so an expired challenge is indistinguishable
+	// from an unknown one. Reporting "valid but expired" would confirm that a
+	// ceremony id was real, which is the only thing a holder of a stale one learns
+	// for free.
+	ConsumeWebauthnChallenge(ctx context.Context, arg ConsumeWebauthnChallengeParams) (ConsumeWebauthnChallengeRow, error)
 	// The rotation job's DONE check, and the one an operator runs before destroying a
 	// key.
 	//
@@ -372,6 +389,16 @@ type Querier interface {
 	// under concurrency, where a check alone cannot.
 	InsertPasskey(ctx context.Context, arg InsertPasskeyParams) error
 	InsertRecoveryCode(ctx context.Context, arg InsertRecoveryCodeParams) error
+	// Queries for webauthn_challenge.
+	//
+	// One ceremony in flight, single-use. Not a projection: a ceremony that does not
+	// complete is not a fact worth keeping.
+	// Record a ceremony.
+	//
+	// A plain INSERT under an unguessable primary key. No upsert: two ceremonies
+	// cannot share an id, and if they somehow did, overwriting one would let a
+	// second Begin invalidate a first that is mid-flight in another tab.
+	InsertWebauthnChallenge(ctx context.Context, arg InsertWebauthnChallengeParams) error
 	// The AUTHORITATIVE half, written by the login handler.
 	//
 	// Separate statement, and separate WRITER: the handler holds the token, the
@@ -729,6 +756,12 @@ type Querier interface {
 	// Retention. A token digest is not personal data, but it is evidence that a
 	// particular account requested a reset, and it has no purpose past its expiry.
 	SweepTokens(ctx context.Context) (int64, error)
+	// Drop ceremonies nobody completed.
+	//
+	// Abandoned challenges are the ordinary case — a person closes the tab, or the
+	// browser prompt times out — so this is routine housekeeping rather than an
+	// alarm. Consuming already deletes; this only reclaims what was never answered.
+	SweepWebauthnChallenges(ctx context.Context, expiresAt pgtype.Timestamptz) (int64, error)
 	// Record a successful use and clear the failure count.
 	//
 	// Clearing on SUCCESS is what makes the ceiling a consecutive-failure counter
@@ -795,6 +828,7 @@ type Querier interface {
 	// a table that may be rebuilt repeatedly.
 	TruncateIdentityProjections(ctx context.Context) error
 	TruncatePasskeys(ctx context.Context) error
+	TruncateWebauthnChallenges(ctx context.Context) error
 	// Credential storage: the one identity table that is NOT rebuildable from the
 	// log, because verifiers and TOTP secrets must never enter an event.
 	//

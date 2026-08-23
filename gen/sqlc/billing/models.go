@@ -366,6 +366,16 @@ type UserView struct {
 	Username pgtype.Text
 }
 
+// One WebAuthn ceremony in flight. Single-use, enforced by DELETE … RETURNING rather than read-then-write. Expires; swept.
+type WebauthnChallenge struct {
+	ChallengeID string
+	SubjectID   pgtype.Text
+	Purpose     string
+	State       []byte
+	CreatedAt   pgtype.Timestamptz
+	ExpiresAt   pgtype.Timestamptz
+}
+
 // Membership per (workspace, subject). Counts here decide when a seat is taken and returned.
 type WorkspaceMemberView struct {
 	WorkspaceID string
