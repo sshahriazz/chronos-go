@@ -536,33 +536,43 @@ already has a name for.
       the harness already had `awaitLiveSessions` for exactly this. The test now
       waits for the revocation to project.
 
-- [ ] **`protocolit .../DeactivateAccount` — still open, and a sighting is now
-      DIAGNOSTIC.** Ten more clean runs, in-process, on top of the nineteen —
-      twenty-nine with no reproduction. Read for the sibling's race shape and it
-      does not have it: `disposableAccount` leaves TWO live sessions and waits
-      for both with `awaitSessionProjected`, so the work list is not racing the
-      projection at the moment of creation.
+- [x] **`protocolit .../DeactivateAccount` — CLOSED as not reproducible, with the
+      evidence and the next diagnosis written down.**
 
-      What changed is the assertion. It checked `revoked < 1` and threw
-      `sessions_scanned` away, so a sighting could not say which half broke —
-      and the two halves are unrelated. `scanned` is the work list, read from
-      `session_view`, so a zero there is the projection or the movable clock
-      passing the sessions' idle deadline; `revoked` is what the session
-      aggregates accepted, so a zero there with a NON-empty list is the domain
-      refusing. The proto says exactly this about why `sessions_scanned` exists.
-      Both are now asserted separately and both are logged; the observed value is
-      `scanned 2 and revoked 2`.
+      Seventy-two clean observations: twenty-nine recorded earlier, then forty
+      runs of the subtest IN ONE PROCESS plus three full-package runs. The
+      in-process axis was impossible until `-count=N` was fixed this session —
+      three packages panicked on a second run — so this is the first time the
+      cheap axis was available at all.
 
-      Previously recorded, still true: Checked for the same shape and it does not have it:
-      `bootstrapBearer` already calls `awaitSessionProjected` before returning a
-      token, so the step-up assertions are not racing the session projection.
+      **Three hypotheses eliminated, by reading and measuring rather than by
+      running it again:**
 
-      Nineteen clean runs this session. Its standing explanation remains the
-      exhausted per-IP rate-limit buckets, and that fix has landed — as has
-      `-p 1`, which removed a second confound of the same family
-      (cross-package contention producing failures in unrelated assertions).
-      Two removed confounds is not proof, so it stays open; but a sighting now
-      would be genuinely informative rather than ambiguous.
+      1. *The sibling's race shape.* `identityit`'s version asserted a
+         revocation immediately after the call returned, racing the session
+         projection. This one does not have it: `disposableAccount` leaves TWO
+         live sessions and waits for both with `awaitSessionProjected`.
+
+      2. *The work list depending on the token row.* `ListLiveSessionIDs` reads
+         `session_view` alone — no join to `session_token` — and its own comment
+         says why. A swept token cannot make a session invisible to revocation.
+
+      3. *The movable clock outrunning the session.* The absolute window is
+         thirty days (`DefaultAbsoluteWindow`); the suite's one large jump is
+         past the IDLE deadline, about fourteen days, and every other advance is
+         a TOTP step of ~30s. Reaching thirty days would need some 46,000 of
+         them.
+
+      **What is left, and why closing beats leaving it open.** No mechanism is
+      identified, and "did not reproduce" is not "fixed". But an open item with
+      no action attached is not a plan — and the one action that WAS available
+      has been taken: the assertion is split, so a sighting now says which half
+      broke. `scanned` is the work list, read from `session_view`, so a zero
+      there is the projection or the clock; `revoked` is what the session
+      aggregates accepted, so a zero there with a non-empty list is the domain
+      refusing. Observed value is `scanned 2 and revoked 2`.
+
+      Reopen on a sighting. It will arrive with a number attached.
 
 ### P3 — real features, unblocked
 
