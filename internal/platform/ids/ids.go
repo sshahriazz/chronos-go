@@ -56,6 +56,11 @@ type (
 	// browser produces a distinct subscription in every organization they
 	// belong to (ADR-043).
 	PushSubscription struct{}
+
+	// DataExport is one Article 15 / Article 20 request and the bundle it
+	// produced. One per REQUEST, because a person may exercise the right more
+	// than once and each answer is its own artefact.
+	DataExport struct{}
 )
 
 func (Org) Prefix() string       { return "org" }
@@ -87,6 +92,14 @@ func (Subject) Prefix() string      { return "subj" } // pseudonym; appears in e
 // does.
 func (PushSubscription) Prefix() string { return "push" }
 
+// DataExport's id is DERIVED from the requester's idempotency key rather than
+// minted at random, so one person pressing a button twice polls one export
+// instead of starting two workflows. Like PushSubscription's it is therefore not
+// time-ordered and leaks no creation time — the one thing ADR-030 warns a ULID
+// does, and the one worth avoiding on an identifier that names a data-subject
+// request.
+func (DataExport) Prefix() string { return "export" }
+
 // Registry reports every registered kind by name. Used by the conformance test
 // that asserts prefixes are unique — a duplicate would make Parse ambiguous.
 func Registry() map[string]string {
@@ -100,6 +113,7 @@ func Registry() map[string]string {
 		"Notification": Notification{}.Prefix(), "Event": Event{}.Prefix(),
 		"Subject":          Subject{}.Prefix(),
 		"PushSubscription": PushSubscription{}.Prefix(),
+		"DataExport":       DataExport{}.Prefix(),
 	}
 }
 

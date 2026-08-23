@@ -770,6 +770,39 @@ already has a name for.
       and the address that was being claimed never proved it wanted anything, so
       mail to it would be unsolicited (NOTIFICATIONS §5).
 
+## In progress — export resumability (compliance.md §5)
+
+- [ ] **Make the export asynchronous and resumable.** It is synchronous today —
+      one vault read and one small object, produced inside the request. §5 asks
+      for long-running and resumable with progress visible in the workflow.
+
+      **Three decisions taken with the user, not inferred:**
+
+      1. **Notify, then poll.** `ExportMyData` starts a workflow and returns an
+         id; `GetDataExport` returns status and mints the short-lived URLs once
+         the bundle is ready. A Security-class notification says "your export is
+         ready" and carries NO link — a URL in a mailbox is forwarded, archived
+         and outlives its hour, which is the same argument compliance.md §5
+         already makes about attachments.
+
+      2. **Break the contract now.** `ExportMyDataResponse.download_url` goes.
+         The `buf breaking` baseline is the `main` branch, so the break fails the
+         gate exactly once, on the commit that makes it, and passes from the next
+         commit onward. Nothing in the ruleset is widened — which is the
+         distinction from the `account_name` case, where the fix WOULD have been
+         to relax the gate and it stayed parked instead.
+
+      3. **The object store is a second source.** Without it the "resumable"
+         machinery would be a state machine wired to one cheap read, which is the
+         shape deliberately not built for the plan catalogue's editing half.
+
+      **Copy or reference?** REFERENCE. The manifest records each object's key,
+      size and content type; `GetDataExport` mints a URL per object at fetch
+      time. Copying would put a second copy of the most concentrated personal
+      data in the system beside the first, and erasure would have to find both.
+      The cost is that the manifest is a snapshot of what existed and an object
+      deleted since simply has no URL — which the manifest says.
+
 ## Parked
 
 - [ ] **The two deactivation flakes — NOT reproduced, and `-count=N` now works.**

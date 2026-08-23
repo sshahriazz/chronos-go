@@ -1,0 +1,15 @@
+Hello{{if .Name}} {{.Name}}{{end}},
+
+We could not prepare the copy of your data you asked for{{if .ExportID}} (request {{.ExportID}}){{end}}.
+
+{{if eq .Reason "processing_restricted"}}Your account is under a processing restriction, which you or we placed on it.
+While it stands, we do not process your data — and preparing an export is
+processing. Lift the restriction and ask again.
+{{else if eq .Reason "too_many_objects"}}Your account holds more files than this automatic export can gather. This needs
+a person: contact support quoting the request above and we will prepare it
+manually.
+{{else}}Something on our side did not respond. This is our problem, not yours. Ask
+again, and if it fails a second time contact support quoting the request above.
+{{end}}
+Your right to a copy of your data is not affected by this. We still owe you an
+answer.

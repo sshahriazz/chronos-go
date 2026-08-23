@@ -588,6 +588,44 @@ func identityNotifications(cat *notify.Catalogue) {
 		"the person who lifted it did so deliberately and is looking at the screen that " +
 			"did it")
 
+	// ---- Data export (Articles 15 and 20, compliance.md §5) ------------------
+	cat.Silent[complianceevents.DataExportRequested](
+		"the person is looking at the screen that asked. What is worth a message is the " +
+			"bundle being READY, which can be minutes or hours later and is the point " +
+			"they have something to fetch")
+	cat.On[complianceevents.DataExportCompleted](notify.Spec{
+		Template: "compliance.export_ready",
+		// SECURITY, and no preference may switch it off. This is the message
+		// telling somebody that a complete copy of everything held about them now
+		// exists and can be downloaded — which is exactly the fact a person needs
+		// to hear even if they have muted everything else, because if they did not
+		// request it, somebody else did.
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, func(e *complianceevents.DataExportCompleted) map[string]any {
+		return map[string]any{
+			// The export id, so the message can say WHICH request finished, and the
+			// object count, so "ready" and "ready and it found none of your files"
+			// are different sentences. NO link and NO manifest key: the download is
+			// minted by GetDataExport against an authenticated caller, and a URL in
+			// a mailbox is a bearer capability that outlives its hour.
+			"ExportID":    e.ExportID,
+			"ObjectCount": e.ObjectCount,
+		}
+	})
+	cat.On[complianceevents.DataExportFailed](notify.Spec{
+		Template: "compliance.export_failed",
+		// SECURITY for its sibling's reason, and for one more: Article 15 gives a
+		// controller a month to answer, and a request that produced nothing must
+		// not be silent to the person who made it.
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, func(e *complianceevents.DataExportFailed) map[string]any {
+		// The machine reason, which the template turns into a sentence. It is
+		// coarse on purpose — see contract.DataExportFailed.
+		return map[string]any{"ExportID": e.ExportID, "Reason": e.Reason}
+	})
+
 	cat.Silent[billingevents.InvoiceRecorded](
 		"Stripe emails the receipt and owns the dunning schedule. A mail of ours saying " +
 			"what Stripe just said is billing.md §5 case 5's duplicate-dunning mistake, " +

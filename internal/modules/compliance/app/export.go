@@ -68,6 +68,23 @@ type Bundle struct {
 	// PersonalData is every field the vault holds, by field name.
 	PersonalData map[string]string `json:"personalData"`
 
+	// Objects lists the stored files this system holds for the subject —
+	// avatars today — by opaque key, size and modification time.
+	//
+	// # Listed, not copied, and that is a decision rather than an economy
+	//
+	// Copying each object into the export would put a second copy of the most
+	// concentrated personal data in the system beside the first, and erasure
+	// would then have to find both. Referencing keeps one copy under one prefix,
+	// which the erasure traversal already deletes.
+	//
+	// The cost is stated where it can be weighed: this is a SNAPSHOT of what
+	// existed when the export ran, so an object deleted since has no download URL
+	// when the subject fetches. GetDataExport says so per object rather than
+	// omitting it, because "you had a file here and it is gone now" is a true
+	// answer and silence is not.
+	Objects []ExportedObject `json:"objects"`
+
 	// Retained explains what this system keeps that is NOT in the bundle and
 	// why — the same list the erasure confirmation carries.
 	//
@@ -76,6 +93,24 @@ type Bundle struct {
 	// said nothing about invoices retained under a statutory obligation would be
 	// an accurate file and a misleading answer.
 	Retained []string `json:"retained"`
+}
+
+// ExportedObject is one stored file, as the manifest records it.
+//
+// No content type: an S3 listing does not return one, and it is left empty
+// rather than guessed from the key. A guessed type in a portability manifest is
+// a claim about somebody's data that nothing verified — and the key deliberately
+// carries no meaning to guess from (CLAUDE.md).
+type ExportedObject struct {
+	// Key is the opaque object key. Included so GetDataExport can mint a URL for
+	// it, and so a person can quote it to support.
+	Key string `json:"key"`
+
+	// Size is the object's length in bytes, as the store reported it.
+	Size int64 `json:"sizeBytes"`
+
+	// ModifiedAt is when the store last saw it change.
+	ModifiedAt time.Time `json:"modifiedAt"`
 }
 
 // Exports produces a data subject's portability bundle.

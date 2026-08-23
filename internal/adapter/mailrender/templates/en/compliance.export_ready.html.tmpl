@@ -1,0 +1,15 @@
+{{define "title"}}Your data export is ready{{end}}
+{{define "content"}}
+{{/*
+  NO LINK, and its absence is the design rather than an omission. The download
+  is minted by GetDataExport against an authenticated caller and expires within
+  the hour; a URL placed here would be forwarded, archived and still live long
+  after — for the single most concentrated copy of a person's data this system
+  can produce.
+*/}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 20px;">The copy of your data you asked for is ready. Sign in and open your privacy settings to download it{{if .ExportID}} — the request is <code>{{.ExportID}}</code>{{end}}.</p>
+{{if .ObjectCount}}<p style="margin:0 0 20px;">It includes {{.ObjectCount}} file(s) you have uploaded, alongside the personal details we hold.</p>{{else}}<p style="margin:0 0 20px;">It contains the personal details we hold. We found no uploaded files on your account.</p>{{end}}
+<p style="margin:0 0 6px;color:#6b7280;font-size:13px;">The download link is created when you ask for it and expires shortly after, so there is no link in this message.</p>
+<p style="margin:0;color:#6b7280;font-size:13px;"><strong>If you did not ask for this</strong>, somebody else may have access to your account. Change your password and review your active sessions.</p>
+{{end}}

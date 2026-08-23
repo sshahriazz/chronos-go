@@ -162,6 +162,43 @@ type Store interface {
 	// the rest, which is the failure this whole path exists to prevent —
 	// implementations return ErrTooManyObjects instead.
 	ListPrefix(ctx context.Context, prefix string, limit int) ([]Key, error)
+
+	// ListPage returns ONE page of objects under a prefix, with a cursor.
+	//
+	// # Why this exists beside ListPrefix rather than replacing it
+	//
+	// The two answer different questions and fail in opposite directions.
+	// ListPrefix is erasure's, and it REFUSES past its bound: an erasure that
+	// silently processed the first N would report success having left personal
+	// data behind, so "more than you allowed" must be an error there.
+	//
+	// This is the export's, and past its bound it hands back a CURSOR. An export
+	// is resumable by design (compliance.md §5), so the caller's correct response
+	// to "there is more" is to come back for it — and a workflow that carries the
+	// cursor across a restart continues where it stopped instead of re-listing
+	// from the beginning.
+	//
+	// It returns Objects rather than Keys because the export's manifest records
+	// what each object IS — its size and its content type — and a second call per
+	// object to Verify would turn one listing into N round trips.
+	//
+	// `after` is opaque and comes from a previous call's cursor. Empty starts at
+	// the beginning. An empty cursor in the result means the listing is complete.
+	ListPage(ctx context.Context, prefix, after string, limit int) (Page, error)
+}
+
+// Page is one result of ListPage.
+type Page struct {
+	// Objects are this page's contents, in the store's own order. That order is
+	// stable for a given prefix, which is what makes the cursor meaningful.
+	Objects []Object
+
+	// Cursor resumes the listing. Empty means there is nothing after this page.
+	//
+	// Opaque on purpose: it is the store's own continuation token, and a caller
+	// that parsed it would be depending on an implementation detail of whichever
+	// S3 the deployment runs.
+	Cursor string
 }
 
 var (

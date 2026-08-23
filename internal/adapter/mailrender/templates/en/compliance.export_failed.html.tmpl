@@ -1,0 +1,19 @@
+{{define "title"}}We could not prepare your data export{{end}}
+{{define "content"}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 20px;">We could not prepare the copy of your data you asked for{{if .ExportID}} (request <code>{{.ExportID}}</code>){{end}}.</p>
+{{/*
+  One branch per reason, and the reasons are the coarse machine strings the
+  event carries. The underlying error is deliberately not here: it names a
+  bucket, a key and an endpoint, none of which means anything to the person
+  reading this and all of which would outlive the incident in their mailbox.
+*/}}
+{{if eq .Reason "processing_restricted"}}
+<p style="margin:0 0 20px;">Your account is under a processing restriction. While it stands we do not process your data — and preparing an export is processing. Lift the restriction and ask again.</p>
+{{else if eq .Reason "too_many_objects"}}
+<p style="margin:0 0 20px;">Your account holds more files than this automatic export can gather. This one needs a person: contact support quoting the request above and we will prepare it manually.</p>
+{{else}}
+<p style="margin:0 0 20px;">Something on our side did not respond. This is our problem, not yours. Ask again, and if it fails a second time contact support quoting the request above.</p>
+{{end}}
+<p style="margin:0;color:#6b7280;font-size:13px;">Your right to a copy of your data is not affected by this. We still owe you an answer.</p>
+{{end}}

@@ -321,6 +321,75 @@ func (s *Store) ListPrefix(ctx context.Context, prefix string, limit int) ([]blo
 	}
 }
 
+// ListPage returns one page of objects under a prefix, with a cursor.
+//
+// The export's listing, and the counterpart to ListPrefix above: where that one
+// REFUSES past its bound because a truncated erasure is a failed erasure, this
+// hands back a continuation token because a truncated export page is simply the
+// next unit of resumable work (compliance.md §5).
+//
+// It returns S3's own continuation token unchanged. The caller treats it as
+// opaque, which is what lets a workflow carry it across a restart without
+// depending on how this store happens to page.
+func (s *Store) ListPage(
+	ctx context.Context, prefix, after string, limit int,
+) (blob.Page, error) {
+	switch {
+	case prefix == "":
+		// As ListPrefix: an empty prefix lists the WHOLE BUCKET, which here would
+		// put another tenant's objects into somebody's data export.
+		return blob.Page{}, fmt.Errorf("seaweedfs: a prefix is required; an empty one " +
+			"lists every object in the bucket")
+	case limit <= 0:
+		return blob.Page{}, fmt.Errorf("seaweedfs: a positive limit is required, got %d", limit)
+	}
+
+	in := &s3.ListObjectsV2Input{
+		Bucket:  aws.String(s.cfg.Bucket),
+		Prefix:  aws.String(prefix),
+		MaxKeys: aws.Int32(int32(limit)),
+	}
+	if after != "" {
+		in.ContinuationToken = aws.String(after)
+	}
+
+	out, err := s.client.ListObjectsV2(ctx, in)
+	if err != nil {
+		return blob.Page{}, fmt.Errorf("seaweedfs: listing %s: %w", prefix, err)
+	}
+
+	page := blob.Page{Objects: make([]blob.Object, 0, len(out.Contents))}
+	for _, obj := range out.Contents {
+		if obj.Key == nil {
+			continue
+		}
+		o := blob.Object{Key: blob.Key(*obj.Key)}
+		if obj.Size != nil {
+			o.Size = *obj.Size
+		}
+		if obj.ETag != nil {
+			o.ETag = *obj.ETag
+		}
+		if obj.LastModified != nil {
+			// UTC, like every other instant this system stores (ADR-008). The SDK
+			// hands back whatever zone the response carried.
+			o.ModifiedAt = obj.LastModified.UTC()
+		}
+		// ContentType is NOT in a listing — S3 does not return it — and it is left
+		// empty rather than guessed from the key. A guessed type in a portability
+		// manifest is a claim about somebody's data that nothing verified, and the
+		// key deliberately carries no meaning to guess from (CLAUDE.md).
+		page.Objects = append(page.Objects, o)
+	}
+	// TRUNCATION is what decides whether there is a cursor, not the token being
+	// present: S3 may return a token on a final page, and treating that as "more
+	// to come" would make the caller loop once more for an empty page every time.
+	if out.IsTruncated != nil && *out.IsTruncated && out.NextContinuationToken != nil {
+		page.Cursor = *out.NextContinuationToken
+	}
+	return page, nil
+}
+
 // EnsureBucket creates the bucket if it does not exist. Startup convenience for
 // development; production provisions storage separately.
 func (s *Store) EnsureBucket(ctx context.Context) error {
