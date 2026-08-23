@@ -20,6 +20,7 @@ import (
 	"connectrpc.com/grpcreflect"
 	"connectrpc.com/validate"
 	"github.com/chronos/chronos-go/gen/proto/chronos/billing/v1/billingv1connect"
+	"github.com/chronos/chronos-go/gen/proto/chronos/compliance/v1/compliancev1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/identity/v1/identityv1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/notification/v1/notificationv1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/organization/v1/organizationv1connect"
@@ -343,6 +344,14 @@ func registerServices(
 	} else {
 		mux.Handle(organizationv1connect.NewOrganizationServiceHandler(d.organization, opts...))
 		served = append(served, organizationv1connect.OrganizationServiceName)
+	}
+
+	if d.compliance == nil {
+		log.Error("ComplianceService is NOT registered; a person cannot halt processing of " +
+			"their own data and every Article 18 method answers 'unimplemented'")
+	} else {
+		mux.Handle(compliancev1connect.NewComplianceServiceHandler(d.compliance, opts...))
+		served = append(served, compliancev1connect.ComplianceServiceName)
 	}
 
 	if d.billing == nil {

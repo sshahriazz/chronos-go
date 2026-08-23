@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -16,6 +18,9 @@ import (
 	"github.com/chronos/chronos-go/internal/modules/billing"
 	billingapi "github.com/chronos/chronos-go/internal/modules/billing/api"
 	"github.com/chronos/chronos-go/internal/modules/compliance"
+	complianceapi "github.com/chronos/chronos-go/internal/modules/compliance/api"
+	complianceapp "github.com/chronos/chronos-go/internal/modules/compliance/app"
+	compliancedomain "github.com/chronos/chronos-go/internal/modules/compliance/domain"
 	entitlementapp "github.com/chronos/chronos-go/internal/modules/entitlement/app"
 	"github.com/chronos/chronos-go/internal/modules/identity"
 	"github.com/chronos/chronos-go/internal/modules/identity/adapter/argon2id"
@@ -183,6 +188,11 @@ type dependencies struct {
 	// webhook, which is why the webhook handler re-fetches rather than trusting
 	// a payload.
 	billing *billingapi.Service
+
+	// compliance is the data subject's own rights. One right so far — Article 18
+	// restriction — and it is the first thing in this binary that can HALT
+	// processing on a person's own instruction.
+	compliance *complianceapi.Service
 
 	// reserver is entitlement's use case, held because TWO things need it: gate
 	// 4 reserves through it, and the workspace handler COMMITS through it. A
@@ -657,6 +667,14 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 		d.organization = svc
 	}
 
+	if svc, err := d.buildCompliance(); err != nil {
+		log.Error("the compliance service is NOT constructed; a person cannot halt "+
+			"processing of their own data, and Article 18 is reachable only by an "+
+			"operator editing a table", "error", err)
+	} else {
+		d.compliance = svc
+	}
+
 	if svc, err := d.buildBilling(cfg); err != nil {
 		log.Error("the billing service is NOT constructed; the Customer Portal is the only "+
 			"way a card is ever added, so every trial has exactly one outcome and no "+
@@ -677,4 +695,29 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 			c()
 		}
 	}
+}
+
+// buildCompliance assembles the data subject's own rights.
+//
+// # What its absence costs
+//
+// Article 18 becomes unreachable. The aggregate, the projection and the
+// dispatcher check all exist and work — and nothing can place a restriction, so
+// the only way to halt processing is an operator editing a table by hand. That
+// is the shape the erasure path had before its cancel endpoint landed, and it is
+// worth failing loudly rather than discovering from a data subject.
+func (d *dependencies) buildCompliance() (*complianceapi.Service, error) {
+	if d.store == nil {
+		return nil, errors.New("no event store: a restriction is recorded as events")
+	}
+	restrictions, err := complianceapp.NewRestrictions(complianceapp.RestrictionsDeps{
+		Repo: eventsourcing.NewRepository[*compliancedomain.Restriction](
+			d.store, d.codec, d.upcasters,
+			compliancedomain.RestrictionCategory, compliancedomain.NewRestriction),
+		Now: d.clock.Now,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("restrictions: %w", err)
+	}
+	return complianceapi.New(complianceapi.Deps{Restrictions: restrictions})
 }

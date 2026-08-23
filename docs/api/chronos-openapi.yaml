@@ -505,6 +505,68 @@ components:
       title: ListInvoicesResponse
       additionalProperties: false
       description: ListInvoicesResponse is one page, newest first.
+    chronos.compliance.v1.GetProcessingRestrictionRequest:
+      type: object
+      title: GetProcessingRestrictionRequest
+      additionalProperties: false
+      description: GetProcessingRestrictionRequest asks whether the caller's data is restricted.
+    chronos.compliance.v1.GetProcessingRestrictionResponse:
+      type: object
+      properties:
+        restricted:
+          type: boolean
+          title: restricted
+          description: Whether processing is currently halted.
+        restrictedSince:
+          title: restricted_since
+          description: When it began. Unset when there is no restriction.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: GetProcessingRestrictionResponse
+      additionalProperties: false
+      description: GetProcessingRestrictionResponse is the current state.
+    chronos.compliance.v1.LiftProcessingRestrictionRequest:
+      type: object
+      title: LiftProcessingRestrictionRequest
+      additionalProperties: false
+      description: LiftProcessingRestrictionRequest resumes processing of the caller's data.
+    chronos.compliance.v1.LiftProcessingRestrictionResponse:
+      type: object
+      properties:
+        changed:
+          type: boolean
+          title: changed
+          description: |-
+            False means nothing was restricted, which is a success for the same reason
+             the cancel path is: the control is clicked twice, and neither click is
+             wrong.
+      title: LiftProcessingRestrictionResponse
+      additionalProperties: false
+      description: LiftProcessingRestrictionResponse reports the state after the call.
+    chronos.compliance.v1.RestrictProcessingRequest:
+      type: object
+      title: RestrictProcessingRequest
+      additionalProperties: false
+      description: RestrictProcessingRequest halts processing of the caller's data (Article 18).
+    chronos.compliance.v1.RestrictProcessingResponse:
+      type: object
+      properties:
+        changed:
+          type: boolean
+          title: changed
+          description: |-
+            Whether this call changed anything. False means processing was ALREADY
+             restricted, which is a success: the caller asked for a state that holds.
+        restrictedSince:
+          title: restricted_since
+          description: |-
+            When the restriction began — the FIRST time it was invoked, not this call.
+             A repeated request must not move a date the person has been given.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: RestrictProcessingResponse
+      additionalProperties: false
+      description: RestrictProcessingResponse reports the state after the call.
     chronos.errors.v1.ErrorDetail:
       type: object
       title: Error detail
@@ -5048,6 +5110,168 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.billing.v1.ListInvoicesResponse'
+  /chronos.compliance.v1.ComplianceService/GetProcessingRestriction:
+    post:
+      tags:
+        - ComplianceService
+      summary: GetProcessingRestriction reports whether the caller's data is restricted.
+      description: |-
+        A READ, and AAL1: somebody must be able to see the state of their own
+         request from an ordinary session. Requiring step-up to read what you already
+         asked for would make the setting hard to verify and easy to forget.
+      operationId: ComplianceService_GetProcessingRestriction
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.compliance.v1.GetProcessingRestrictionRequest'
+            example: {}
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.compliance.v1.GetProcessingRestrictionResponse'
+  /chronos.compliance.v1.ComplianceService/LiftProcessingRestriction:
+    post:
+      tags:
+        - ComplianceService
+      summary: LiftProcessingRestriction resumes processing of the caller's data.
+      description: |-
+        Nothing was lost while the restriction stood, which is Article 18's point as
+         distinct from Article 17: the data was held and not processed, so resuming
+         needs no recovery.
+
+         Lifting nothing succeeds and reports `changed: false`.
+      operationId: ComplianceService_LiftProcessingRestriction
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.compliance.v1.LiftProcessingRestrictionRequest'
+            example: {}
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.compliance.v1.LiftProcessingRestrictionResponse'
+  /chronos.compliance.v1.ComplianceService/RestrictProcessing:
+    post:
+      tags:
+        - ComplianceService
+      summary: RestrictProcessing halts processing of the caller's data (Article 18).
+      description: |-
+        # What it stops, and what it deliberately does not
+
+         Storage CONTINUES and nothing is deleted — that is the whole distinction
+         from erasure. The account keeps working, sign-in keeps working, projections
+         keep building. What stops is being contacted: no transactional mail, no
+         activity nudges, nothing product.
+
+         SECURITY ALERTS STILL ARRIVE, and that exemption is deliberate. A control a
+         session holder can set, which stops a security alert, is a control an
+         attacker sets to silence the message that would reveal them — the same
+         reason a notification preference cannot switch one off. Article 18(2)
+         permits it: restriction does not bar processing needed to protect the
+         rights of a natural person, and a warning to the account's own holder about
+         their own account is exactly that.
+
+         # Why AAL2
+
+         Restricting somebody silences most of what would tell them their account is
+         being used. Requiring step-up does not remove that risk — the security
+         exemption above is what addresses it — but an endpoint that quietens a
+         person's mail must not be reachable from a session that has proven one
+         factor.
+
+         Idempotent: a second call reports `changed: false` and returns the ORIGINAL
+         instant.
+      operationId: ComplianceService_RestrictProcessing
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.compliance.v1.RestrictProcessingRequest'
+            example: {}
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.compliance.v1.RestrictProcessingResponse'
   /chronos.identity.v1.IdentityService/Authenticate:
     post:
       tags:
@@ -8921,6 +9145,10 @@ paths:
 tags:
   - name: BillingService
     description: BillingService is the commercial self-service surface.
+  - name: ComplianceService
+    description: |-
+      ComplianceService is the data subject's own rights, exercised on their own
+       data.
   - name: IdentityService
     description: |-
       IdentityService is the account, its credentials and its sessions.

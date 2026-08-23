@@ -563,16 +563,42 @@ already has a name for.
       would resume processing for exactly the people who asked it to stop, and a
       sent notification looks like success.
 
-      **DECISION TO REVISIT: it suppresses Security too.** compliance.md §6 is
-      explicit — "no email, no push" — and restriction is invoked by the subject
-      about their own data, so the spec was implemented rather than narrowed.
-      The cost is real: somebody under restriction is not told when their
-      password changes. Art. 18(2) would arguably permit that send as protection
-      of their own rights. Recorded here rather than decided in a dispatcher.
+      **SECURITY IS EXEMPT — reversed, one commit after shipping it the other
+      way.** It first suppressed Security too, because compliance.md §6 says "no
+      email, no push" without qualification. Building the RPC surfaced the
+      argument that settles it, already written in this codebase for the
+      identical attack on notification preferences: *"if switching off email
+      could stop a security alert, an attacker who gains access to an account
+      would simply switch it off and silence the very message that reveals them
+      — the account-takeover tripwire disabled by the takeover itself."*
 
-      Still missing: no RPC. The use case and aggregate exist and nothing calls
-      them, so a restriction can only be placed by an operator with database
-      access — the same gap the cancel endpoint had, and the next thing to close.
+      Restriction is such a control. Restrict the victim, then operate on their
+      account with no password-changed, no new-device and no
+      credential-compromised mail arriving. Requiring AAL2 raises the bar and
+      does not close the hole. Art. 18(2) makes the exemption lawful rather than
+      convenient: restriction does not bar processing needed to protect a natural
+      person's rights, and a warning to the account's own holder is exactly that.
+
+      Narrow: only Security. Transactional, Activity and Product are all still
+      stopped.
+
+- [x] **The restriction RPCs.** `chronos.compliance.v1.ComplianceService` —
+      restrict, lift, and read the state. Its own service rather than an addition
+      to identity, because compliance will grow: export, rectification and the
+      rest of the DSAR surface belong beside it.
+
+      Every method names NO subject and acts on the authenticated caller. AAL2
+      to change, AAL1 to read — somebody must be able to see the state of their
+      own request from an ordinary session. An API key is refused: it carries a
+      key's identifier rather than a person's pseudonym, and there is no
+      delegation convention to make exercising a data subject's rights on their
+      behalf mean anything yet.
+
+      Its tests drive the REAL gate pipeline rather than calling the handler,
+      because `interceptor.PrincipalFrom` reads a context key whose type is
+      unexported precisely so no test can forge a caller. Building it that way
+      immediately paid: the first run failed every mutation with step-up, which
+      was the min_aal gate working.
 - [ ] **Rectification (Art. 16)** — `PersonalDataCorrected`, a new event rather
       than a rewrite. The log stays truthful: it recorded what we believed then,
       and when we learned otherwise.

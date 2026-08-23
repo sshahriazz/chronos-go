@@ -154,22 +154,34 @@ func (d *Dispatcher) Dispatch(ctx context.Context, n Notification) error {
 		// ARTICLE 18, checked before the address is even resolved.
 		//
 		// Restriction is not a preference, so it is here rather than in
-		// allowed(): Security and Transactional bypass preferences deliberately,
-		// and a legal obligation that a class could bypass is not an obligation.
+		// allowed(): Transactional, Activity and Product all reach delivery, and
+		// a legal obligation that a class could bypass is not an obligation.
 		//
-		// # It suppresses SECURITY too, and that is the specified behaviour
+		// # SECURITY IS EXEMPT, and this is the account-takeover tripwire
 		//
-		// compliance.md §6 is explicit — "reactors skip the subject: no email, no
-		// push, no export, no profiling" — and restriction is invoked BY the
-		// subject, so it is their choice about their own data.
+		// compliance.md §6 says "no email, no push" without qualification, and
+		// this narrows it. The reason is the one the Preferences port already
+		// documents for the identical attack: if a control a session holder can
+		// set could stop a security alert, an attacker who gains access simply
+		// sets it and silences the message that would reveal them — the tripwire
+		// disabled by the takeover itself.
 		//
-		// The tension is real and worth stating rather than quietly resolving:
-		// somebody under restriction is not told when their password changes. Art.
-		// 18(2) would arguably permit that send as protection of their own rights,
-		// and narrowing the rule here would be inventing an exception the spec
-		// does not have. It is recorded in the worklist as a decision to revisit,
-		// not decided in this function.
-		if d.restrictions != nil {
+		// Restriction is exactly such a control. It reintroduces that hole
+		// through a different door: restrict the victim, then operate on their
+		// account with no password-changed, no new-device and no
+		// credential-compromised mail reaching them. Requiring AAL2 to invoke it
+		// raises the bar and does not remove the hole.
+		//
+		// Article 18(2) is what makes the exemption lawful rather than
+		// convenient: restriction does not bar processing necessary for the
+		// establishment, exercise or defence of legal claims, nor for protecting
+		// the rights of a natural person — and a warning to the data subject
+		// about their own account is squarely the second.
+		//
+		// It is deliberately narrow. Only Security is exempt; a restriction still
+		// stops every Transactional receipt, every Activity nudge and everything
+		// Product.
+		if d.restrictions != nil && n.Class != Security {
 			restricted, err := d.restrictions.Restricted(ctx, n.Recipient.SubjectID)
 			if err != nil {
 				// REFUSES rather than sends. A rebuild that has not yet replayed a

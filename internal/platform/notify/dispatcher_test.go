@@ -469,19 +469,14 @@ func (f *fakeRestrictions) Restricted(_ context.Context, subjectID string) (bool
 	return f.restricted, f.err
 }
 
-// A RESTRICTED SUBJECT IS NOT CONTACTED, WHATEVER THE CLASS.
+// A RESTRICTED SUBJECT IS NOT CONTACTED — except by a security alert.
 //
-// Restriction is a legal obligation, not a preference — and Security and
-// Transactional bypass preferences deliberately, so a check that lived with the
-// preference logic would be bypassed by exactly the classes that send most.
-//
-// Suppressing Security is the specified behaviour (compliance.md §6: "no email,
-// no push") and it is a real trade: somebody under restriction is not told when
-// their password changes. It is recorded as a decision to revisit rather than
-// silently narrowed here.
+// Restriction is a legal obligation rather than a preference, so the check lives
+// beside the erased check rather than with the preference logic, which
+// Transactional bypasses anyway.
 func TestARestrictedSubjectIsNotContacted(t *testing.T) {
 	for _, class := range []notify.Class{
-		notify.Security, notify.Transactional, notify.Activity, notify.Product,
+		notify.Transactional, notify.Activity, notify.Product,
 	} {
 		t.Run(class.String(), func(t *testing.T) {
 			transport := &spyTransport{ch: notify.ChannelEmail}
@@ -506,6 +501,50 @@ func TestARestrictedSubjectIsNotContacted(t *testing.T) {
 					class)
 			}
 		})
+	}
+}
+
+// A SECURITY ALERT REACHES A RESTRICTED SUBJECT.
+//
+// The account-takeover tripwire, and the reason this exemption exists. The
+// Preferences port documents the identical attack for channel toggles: a control
+// a session holder can set, which stops a security alert, is a control an
+// attacker sets to silence the message that reveals them.
+//
+// Restriction is such a control — restrict the victim, then operate on their
+// account with no password-changed and no new-device mail reaching them.
+// Requiring AAL2 to invoke it raises the bar and does not close the hole.
+//
+// Art. 18(2) makes the exemption lawful rather than convenient: restriction does
+// not bar processing needed to protect the rights of a natural person, and a
+// warning to the data subject about their own account is exactly that.
+func TestASecurityAlertReachesARestrictedSubject(t *testing.T) {
+	transport := &spyTransport{ch: notify.ChannelEmail}
+	restrictions := &fakeRestrictions{restricted: true}
+	d := notify.NewDispatcher(notify.Deps{
+		Vault:        vault{addr: "user@example.test"},
+		Transports:   []notify.Transport{transport},
+		Restrictions: restrictions,
+		Log:          quiet(),
+	})
+
+	if err := d.Dispatch(context.Background(), notify.Notification{
+		Template:  "identity.password_changed",
+		Class:     notify.Security,
+		Recipient: notify.Recipient{SubjectID: "subj_1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if transport.calls != 1 {
+		t.Fatal("a security alert was suppressed by an Article 18 restriction. An attacker " +
+			"who can restrict a victim can then take over the account with no " +
+			"password-changed, no new-device and no compromise mail reaching them — the " +
+			"tripwire disabled by the takeover itself, which is the exact attack the " +
+			"Preferences port refuses for channel toggles")
+	}
+	if len(restrictions.asked) != 0 {
+		t.Error("a security alert consulted the restriction table at all; the exemption " +
+			"should short-circuit before the lookup")
 	}
 }
 
@@ -553,9 +592,11 @@ func TestAnUnreadableRestrictionRefusesToSend(t *testing.T) {
 		Log:          quiet(),
 	})
 
+	// TRANSACTIONAL, not Security: Security is exempt from the lookup entirely,
+	// so it would pass this test without exercising the failure path at all.
 	err := d.Dispatch(context.Background(), notify.Notification{
-		Template:  "identity.password_changed",
-		Class:     notify.Security,
+		Template:  "billing.invoice_paid",
+		Class:     notify.Transactional,
 		Recipient: notify.Recipient{SubjectID: "subj_1"},
 	})
 	if err == nil {
