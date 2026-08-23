@@ -4,7 +4,6 @@ package reactor_test
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +13,7 @@ import (
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
 	kurrentadapter "github.com/chronos/chronos-go/internal/adapter/kurrentdb"
 	stripeadapter "github.com/chronos/chronos-go/internal/adapter/stripe"
+	"github.com/chronos/chronos-go/internal/adapter/stripe/stripetest"
 	"github.com/chronos/chronos-go/internal/modules/organization"
 	"github.com/chronos/chronos-go/internal/modules/organization/app"
 	"github.com/chronos/chronos-go/internal/modules/organization/domain"
@@ -42,18 +42,14 @@ import (
 // It is the mirror of TestALapsedTrialSuspendsTheTenant: same provisioner, same
 // clock mechanism, one difference — a card.
 func TestATrialWithACardConvertsToActive(t *testing.T) {
-	key := os.Getenv("STRIPE_SECRET_KEY")
-	price := os.Getenv("STRIPE_TRIAL_PRICE_ID")
-	if key == "" || price == "" {
-		t.Skip("STRIPE_SECRET_KEY and STRIPE_TRIAL_PRICE_ID are not both set")
-	}
-	if strings.Contains(key, "_live_") {
-		t.Fatal("STRIPE_SECRET_KEY is a LIVE key; this test attaches a payment method and " +
-			"lets a subscription bill")
-	}
+	key := stripetest.Key(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
+
+	// The catalogue's Price, mirrored exactly as the worker mirrors it at
+	// startup — not STRIPE_TRIAL_PRICE_ID, which no longer exists.
+	price, trial := stripetest.TrialPrice(ctx, t)
 
 	sc := stripesdk.NewClient(key)
 
@@ -90,7 +86,7 @@ func TestATrialWithACardConvertsToActive(t *testing.T) {
 	// The SAME provisioner production uses, so what converts is the subscription
 	// this system creates rather than one the test built to be convertible.
 	provisioner, err := stripeadapter.NewProvisioner(stripeadapter.Config{
-		SecretKey: key, PriceID: price, TrialDays: 14, TestClockID: testClock.ID,
+		SecretKey: key, PriceID: price, TrialDays: trial.TrialDays, TestClockID: testClock.ID,
 	})
 	if err != nil {
 		t.Fatalf("NewProvisioner: %v", err)

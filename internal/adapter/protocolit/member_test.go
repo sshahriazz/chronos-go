@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"github.com/chronos/chronos-go/internal/adapter/stripe/stripetest"
 	"net/http"
 	"os"
 	"strings"
@@ -47,14 +48,9 @@ import (
 // removal immediate are four separate mechanisms in three modules; this is the
 // only place they run together.
 func TestWorkspaceMembersEndToEnd(t *testing.T) {
-	key := os.Getenv("STRIPE_SECRET_KEY")
-	price := os.Getenv("STRIPE_TRIAL_PRICE_ID")
-	storeID := os.Getenv("OPENFGA_STORE_ID")
-	if key == "" || price == "" || storeID == "" {
-		t.Skip("STRIPE_SECRET_KEY, STRIPE_TRIAL_PRICE_ID and OPENFGA_STORE_ID must all be set")
-	}
-	if strings.Contains(key, "_live_") {
-		t.Fatal("STRIPE_SECRET_KEY is a LIVE key")
+	stripetest.Key(t)
+	if os.Getenv("OPENFGA_STORE_ID") == "" {
+		t.Skip("OPENFGA_STORE_ID is not set")
 	}
 
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
@@ -474,14 +470,9 @@ func (hh *harness) checker(t *testing.T) *fgaadapter.Checker {
 // repository keeps finding, and it would surface as "the invitation service is
 // NOT constructed" in a log line nobody reads.
 func TestInvitingEndToEnd(t *testing.T) {
-	key := os.Getenv("STRIPE_SECRET_KEY")
-	price := os.Getenv("STRIPE_TRIAL_PRICE_ID")
-	storeID := os.Getenv("OPENFGA_STORE_ID")
-	if key == "" || price == "" || storeID == "" {
-		t.Skip("STRIPE_SECRET_KEY, STRIPE_TRIAL_PRICE_ID and OPENFGA_STORE_ID must all be set")
-	}
-	if strings.Contains(key, "_live_") {
-		t.Fatal("STRIPE_SECRET_KEY is a LIVE key")
+	stripetest.Key(t)
+	if os.Getenv("OPENFGA_STORE_ID") == "" {
+		t.Skip("OPENFGA_STORE_ID is not set")
 	}
 
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)

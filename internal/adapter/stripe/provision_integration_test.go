@@ -4,12 +4,12 @@ package stripe_test
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	stripeadapter "github.com/chronos/chronos-go/internal/adapter/stripe"
+	"github.com/chronos/chronos-go/internal/adapter/stripe/stripetest"
 	"github.com/chronos/chronos-go/internal/platform/ids"
 )
 
@@ -21,21 +21,15 @@ import (
 func provisioner(t *testing.T) *stripeadapter.Provisioner {
 	t.Helper()
 
-	key := os.Getenv("STRIPE_SECRET_KEY")
-	price := os.Getenv("STRIPE_TRIAL_PRICE_ID")
-	if key == "" || price == "" {
-		t.Skip("STRIPE_SECRET_KEY and STRIPE_TRIAL_PRICE_ID are not both set")
-	}
-	// A live key must never reach this suite. The tests create customers and
-	// subscriptions; against a live account that is real customer data and, the
-	// moment a price is not zero, real money.
-	if strings.Contains(key, "_live_") {
-		t.Fatal("STRIPE_SECRET_KEY is a LIVE key. This test creates customers and " +
-			"subscriptions; it must only ever run against a test account")
-	}
+	// The catalogue's Price and the catalogue's trial length, mirrored the same
+	// way the worker mirrors them at startup. Reading STRIPE_TRIAL_PRICE_ID here
+	// would exercise a path the binary no longer has.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	price, trial := stripetest.TrialPrice(ctx, t)
 
 	p, err := stripeadapter.NewProvisioner(stripeadapter.Config{
-		SecretKey: key, PriceID: price, TrialDays: 14,
+		SecretKey: stripetest.Key(t), PriceID: price, TrialDays: trial.TrialDays,
 	})
 	if err != nil {
 		t.Fatalf("NewProvisioner: %v", err)

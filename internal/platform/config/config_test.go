@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -702,11 +703,7 @@ func TestALiveStripeKeyOutsideProductionFailsStartup(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			stripe := config.StripeConfig{
-				SecretKey:    config.Secret(tc.key),
-				TrialPriceID: "price_trial",
-				TrialDays:    14,
-			}
+			stripe := config.StripeConfig{SecretKey: config.Secret(tc.key)}
 			if got := stripe.Live(); got != strings.Contains(tc.key, "_live_") {
 				t.Fatalf("Live() reported %t for key %q", got, tc.key)
 			}
@@ -720,33 +717,54 @@ func TestALiveStripeKeyOutsideProductionFailsStartup(t *testing.T) {
 	}
 }
 
-// Provisioning needs BOTH the key and the Price, or neither.
+// Provisioning needs the key, and nothing else from configuration.
 //
-// A key with no Price subscribes to nothing; a Price with no key cannot be
-// reached. Half-configured is not a state worth starting in, because the failure
-// arrives per organization — every creation stalls in `provisioning` — rather
-// than once, at boot, where somebody is looking.
-func TestStripeIsConfiguredOnlyWhenBothHalvesArePresent(t *testing.T) {
+// The Price used to be here too, as STRIPE_TRIAL_PRICE_ID, and its absence is
+// the assertion: the plan catalogue supplies it now, mirrored into Stripe at
+// startup. A price id in configuration is a number that can differ between two
+// deployments of the same binary, and then "what did this customer sign up to"
+// has a different answer in staging than in production with nothing to compare.
+func TestStripeIsConfiguredOnTheKeyAlone(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		name       string
-		key, price string
-		want       bool
+		name string
+		key  string
+		want bool
 	}{
-		{"both", "rk_test_abc", "price_1", true},
-		{"key only", "rk_test_abc", "", false},
-		{"price only", "", "price_1", false},
-		{"neither", "", "", false},
+		{"a key", "rk_test_abc", true},
+		{"no key", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := config.StripeConfig{
-				SecretKey: config.Secret(tc.key), TrialPriceID: tc.price,
-			}.Configured()
+			got := config.StripeConfig{SecretKey: config.Secret(tc.key)}.Configured()
 			if got != tc.want {
 				t.Errorf("Configured()=%t, want %t", got, tc.want)
 			}
 		})
+	}
+}
+
+// No environment variable names a Price or a trial length any more.
+//
+// Asserted against the STRUCT rather than by reading the source, because the
+// failure this prevents is a variable that survives in `.env.example` and in
+// somebody's deployment while nothing reads it — an operator sets it, the value
+// is ignored, and the plan they think they published is not the plan running.
+func TestNoStripeFieldCarriesAPriceOrATrialLength(t *testing.T) {
+	t.Parallel()
+
+	typ := reflect.TypeOf(config.StripeConfig{})
+	for i := range typ.NumField() {
+		f := typ.Field(i)
+		switch f.Name {
+		case "TrialPriceID", "TrialDays":
+			t.Errorf("StripeConfig still carries %s; it belongs to the plan catalogue, and "+
+				"two sources for one number is how a fourteen-day plan runs for thirty",
+				f.Name)
+		}
+		if env := f.Tag.Get("env"); env == "STRIPE_TRIAL_PRICE_ID" || env == "STRIPE_TRIAL_DAYS" {
+			t.Errorf("field %s still reads %s", f.Name, env)
+		}
 	}
 }

@@ -104,16 +104,21 @@ func run(addr string, list bool, replay string, stats bool, log *slog.Logger) er
 	d, closeAll := newDependencies(cfg, log, codec)
 	defer closeAll()
 
-	rs := reactors(codec, d)
+	// The signal context is established BEFORE the reactors are built, because
+	// building them does network I/O now: the provisioning reactor mirrors the
+	// plan catalogue into Stripe at startup. A Stripe call that hangs must still
+	// answer Ctrl-C, and it cannot if the context that carries the signal is
+	// created afterwards.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	rs := reactors(ctx, codec, d)
 	for _, r := range rs {
 		// Same reason as the projector: a reactor with a parked backlog and no
 		// series is indistinguishable from a healthy one.
 		d.metrics.InitReactor(r.Name())
 	}
 	log.Info("configuration loaded", "env", cfg.Env, "version", version, "reactors", len(rs))
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	if stats {
 		return printStats(ctx, rs, d)
@@ -351,7 +356,7 @@ func serveHealth(ctx context.Context, addr string, d *dependencies, log *slog.Lo
 // events.go, rather than one reactor per notification. Per-notification
 // handlers are where a mapping drifts: two disagree about a class, a third
 // forgets an audience, and nothing compares them.
-func reactors(codec *eventcodec.JSON, d *dependencies) []reactor.Reactor {
+func reactors(ctx context.Context, codec *eventcodec.JSON, d *dependencies) []reactor.Reactor {
 	var opts []notify.ReactorOption
 	if d.temporal != nil {
 		// Durable delivery: the reactor starts a workflow per recipient and the
@@ -456,7 +461,7 @@ func reactors(codec *eventcodec.JSON, d *dependencies) []reactor.Reactor {
 	// Provisioning: the reactor that turns a created organization into a usable
 	// one. Its own group, so a Stripe outage parks on its own queue rather than
 	// sharing retries with every notification in the system.
-	if r, err := newProvisionReactor(codec, d, slog.Default()); err != nil {
+	if r, err := newProvisionReactor(ctx, codec, d, slog.Default()); err != nil {
 		slog.Default().Error("the organization provisioning reactor is NOT registered; every "+
 			"organization created will stay in `provisioning` forever, which means no "+
 			"workspace, no invitations, and a signup that never completes", "error", err)

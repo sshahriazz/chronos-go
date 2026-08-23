@@ -57,7 +57,7 @@ func TestWithoutTemporalTheErasureReactorRefusesToBeBuilt(t *testing.T) {
 	}
 
 	// And it is genuinely absent from the registry, rather than present and inert.
-	if found := find(reactors(newCodec(), d), compliancereactor.ErasureReactorName); found != nil {
+	if found := find(reactors(context.Background(), newCodec(), d), compliancereactor.ErasureReactorName); found != nil {
 		t.Error("the reactor is registered even though it could not be built")
 	}
 }

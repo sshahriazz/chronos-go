@@ -13,6 +13,7 @@ import (
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
 	kurrentadapter "github.com/chronos/chronos-go/internal/adapter/kurrentdb"
 	stripeadapter "github.com/chronos/chronos-go/internal/adapter/stripe"
+	"github.com/chronos/chronos-go/internal/adapter/stripe/stripetest"
 	"github.com/chronos/chronos-go/internal/modules/organization"
 	"github.com/chronos/chronos-go/internal/modules/organization/app"
 	"github.com/chronos/chronos-go/internal/modules/organization/contract"
@@ -45,17 +46,14 @@ import (
 // by cmd/projector, which this test does not run, and a test that waited for a
 // row would be asserting that a different process happened to be up.
 func TestProvisioningReachesTrialing(t *testing.T) {
-	key := os.Getenv("STRIPE_SECRET_KEY")
-	price := os.Getenv("STRIPE_TRIAL_PRICE_ID")
-	if key == "" || price == "" {
-		t.Skip("STRIPE_SECRET_KEY and STRIPE_TRIAL_PRICE_ID are not both set")
-	}
-	if strings.Contains(key, "_live_") {
-		t.Fatal("STRIPE_SECRET_KEY is a LIVE key; this test creates real customers")
-	}
+	key := stripetest.Key(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
+
+	// The catalogue's Price, mirrored exactly as the worker mirrors it at
+	// startup — not STRIPE_TRIAL_PRICE_ID, which no longer exists.
+	price, trial := stripetest.TrialPrice(ctx, t)
 
 	upcasters := eventsourcing.NewUpcasterRegistry()
 	organization.RegisterSchemas(upcasters)
@@ -73,7 +71,7 @@ func TestProvisioningReachesTrialing(t *testing.T) {
 		store, codec, upcasters, domain.Category, domain.NewOrganization)
 
 	provisioner, err := stripeadapter.NewProvisioner(stripeadapter.Config{
-		SecretKey: key, PriceID: price, TrialDays: 14,
+		SecretKey: key, PriceID: price, TrialDays: trial.TrialDays,
 	})
 	if err != nil {
 		t.Fatalf("NewProvisioner: %v", err)

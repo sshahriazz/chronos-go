@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"slices"
 	"testing"
@@ -69,6 +70,13 @@ func testConfig(t *testing.T) *config.Config {
 		"POSTGRES_DB": "chronos", "POSTGRES_USER": "chronos",
 		"POSTGRES_PASSWORD": "x", "POSTGRES_APP_PASSWORD": "y",
 		"OPENFGA_PRESHARED_KEY": "k",
+		// CLEARED, not merely unset. `config.Load` reads the ambient
+		// environment, and building the reactors now does network I/O: the
+		// provisioning reactor mirrors the plan catalogue into Stripe. A
+		// developer with a key exported in their shell would turn every test in
+		// this file into a live API call, which is slow, flaky and creates
+		// objects in a real account.
+		"STRIPE_SECRET_KEY": "",
 	} {
 		t.Setenv(k, v)
 	}
@@ -121,7 +129,7 @@ func TestWithoutDurableWorkTheReactorStillDelivers(t *testing.T) {
 	d, closeAll := newDependencies(cfg, log, newCodec())
 	defer closeAll()
 
-	for _, r := range reactors(newCodec(), d) {
+	for _, r := range reactors(context.Background(), newCodec(), d) {
 		er, ok := r.(*notify.EventReactor)
 		if !ok {
 			continue

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"testing"
 
@@ -68,7 +69,7 @@ func TestEnablingDurableWorkRegistersTheWorkflows(t *testing.T) {
 	// every send still goes inline, and the retry policy the workflow owns never
 	// applies.
 	var sawVerification bool
-	for _, r := range reactors(newCodec(), d) {
+	for _, r := range reactors(context.Background(), newCodec(), d) {
 		switch typed := r.(type) {
 		case *notify.EventReactor:
 			if !typed.Durable() {

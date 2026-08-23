@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -8,6 +9,7 @@ import (
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
 	stripeadapter "github.com/chronos/chronos-go/internal/adapter/stripe"
+	billingdomain "github.com/chronos/chronos-go/internal/modules/billing/domain"
 	"github.com/chronos/chronos-go/internal/modules/organization"
 	orgpg "github.com/chronos/chronos-go/internal/modules/organization/adapter/postgres"
 	orgapp "github.com/chronos/chronos-go/internal/modules/organization/app"
@@ -32,20 +34,29 @@ import (
 // So the failure is loud here and the message says the consequence rather than
 // the cause.
 func newProvisionReactor(
-	codec *eventcodec.JSON, d *dependencies, log *slog.Logger,
+	ctx context.Context, codec *eventcodec.JSON, d *dependencies, log *slog.Logger,
 ) (reactor.Reactor, error) {
 	if !d.cfg.Stripe.Configured() {
-		return nil, errors.New("STRIPE_SECRET_KEY and STRIPE_TRIAL_PRICE_ID are not both " +
-			"set, so no Stripe customer or trialing subscription can be created")
+		return nil, errors.New("STRIPE_SECRET_KEY is not set, so no Stripe customer or " +
+			"trialing subscription can be created")
 	}
 	if d.store == nil {
 		return nil, errors.New("no event store: the trial cannot be recorded")
 	}
 
+	trial, priceID, err := mirrorCatalogue(ctx, d.cfg.Stripe.SecretKey.Expose(), log)
+	if err != nil {
+		return nil, err
+	}
+
 	provisioner, err := stripeadapter.NewProvisioner(stripeadapter.Config{
 		SecretKey: d.cfg.Stripe.SecretKey.Expose(),
-		PriceID:   d.cfg.Stripe.TrialPriceID,
-		TrialDays: d.cfg.Stripe.TrialDays,
+		PriceID:   priceID,
+		// The catalogue's number, not configuration's. One plan version declares
+		// both what a trial costs and how long it runs, and splitting them across
+		// a Price and an environment variable is how a deployment ends up with a
+		// fourteen-day plan running for thirty.
+		TrialDays: trial.TrialDays,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("stripe provisioner: %w", err)
@@ -110,4 +121,55 @@ func orgMembers(d *dependencies, log *slog.Logger) notify.Audiences {
 		return nil
 	}
 	return members
+}
+
+// mirrorCatalogue makes the published plans exist in Stripe and returns the
+// trial version with its price id.
+//
+// # Why this runs at startup rather than at signup
+//
+// The alternative is creating the Price the first time somebody subscribes to
+// it, which puts an object-creation round trip inside a customer-facing request
+// and turns a Stripe hiccup into a failed signup. Here the same failure stops a
+// deployment, where somebody is watching — and the reactor refuses to construct
+// rather than provisioning organizations against a plan that does not exist.
+//
+// It is safe to re-run: `Mirror.EnsurePrice` is idempotent on the Price's
+// lookup key, so every deployment after the first finds what the first made.
+func mirrorCatalogue(
+	ctx context.Context, secretKey string, log *slog.Logger,
+) (billingdomain.PlanVersion, string, error) {
+	catalogue, err := billingdomain.Published()
+	if err != nil {
+		return billingdomain.PlanVersion{}, "", fmt.Errorf("billing catalogue: %w", err)
+	}
+	trial, err := catalogue.Latest(billingdomain.TrialPlan, billingdomain.Monthly)
+	if err != nil {
+		return billingdomain.PlanVersion{}, "", fmt.Errorf(
+			"billing catalogue: %w; provisioning subscribes every new organization to it", err)
+	}
+
+	mirror, err := stripeadapter.NewMirror(secretKey)
+	if err != nil {
+		return billingdomain.PlanVersion{}, "", fmt.Errorf("stripe mirror: %w", err)
+	}
+	prices, err := mirror.EnsureAll(ctx, catalogue)
+	if err != nil {
+		return billingdomain.PlanVersion{}, "", fmt.Errorf("mirroring the plan catalogue "+
+			"into Stripe: %w", err)
+	}
+
+	priceID := prices[trial.ID()]
+	if priceID == "" {
+		// Unreachable while EnsureAll returns an entry per published version, and
+		// asserted anyway: an empty price id would reach the provisioner, which
+		// refuses it, and the message there names a configuration variable that
+		// no longer exists.
+		return billingdomain.PlanVersion{}, "", fmt.Errorf("the mirror returned no price "+
+			"for %s", trial.ID())
+	}
+
+	log.Info("plan catalogue mirrored",
+		"versions", len(prices), "trial_price", priceID, "trial_days", trial.TrialDays)
+	return trial, priceID, nil
 }

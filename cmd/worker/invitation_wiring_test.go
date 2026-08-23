@@ -33,7 +33,7 @@ func TestInvitationMailIsRegistered(t *testing.T) {
 			"so every invitation spends a seat and mails nobody")
 	}
 
-	found := find(reactors(newCodec(), d), workspacereactor.InvitationReactorName)
+	found := find(reactors(context.Background(), newCodec(), d), workspacereactor.InvitationReactorName)
 	if found == nil {
 		t.Fatalf("the worker registers no %q reactor: InvitationIssued is consumed by "+
 			"nothing and no invitation link is ever sent",
@@ -140,7 +140,7 @@ func TestTeamDepartureIsRegistered(t *testing.T) {
 	d, closeAll := newDependencies(cfg, slog.New(slog.DiscardHandler), newCodec())
 	defer closeAll()
 
-	found := find(reactors(newCodec(), d), workspacereactor.TeamDepartureReactorName)
+	found := find(reactors(context.Background(), newCodec(), d), workspacereactor.TeamDepartureReactorName)
 	if found == nil {
 		t.Fatalf("the worker registers no %q reactor: everybody removed from a workspace "+
 			"stays in its teams, and the access graph keeps granting through them",

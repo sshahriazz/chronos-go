@@ -747,13 +747,15 @@ type StripeConfig struct {
 	// moving them all is one change rather than six.
 	SecretKey Secret `env:"STRIPE_SECRET_KEY"`
 
-	// TrialPriceID is the Price a cardless trial subscribes to.
+	// There is deliberately NO trial price id here, and no trial length.
 	//
-	// From configuration rather than a plan catalogue, deliberately: the
-	// catalogue is part of billing proper and this slice is provisioning only.
-	// When the catalogue lands, this becomes the id it publishes for the trial
-	// plan and the variable goes away.
-	TrialPriceID string `env:"STRIPE_TRIAL_PRICE_ID"`
+	// Both used to be environment variables, and both are now the plan
+	// catalogue's (`billing/domain.Published`), which the worker mirrors into
+	// Stripe at startup. A price id in configuration is a number that can differ
+	// between two deployments of the same binary, which makes "what did this
+	// customer sign up to" unanswerable across environments — and a trial length
+	// held apart from the Price it applies to is how a fourteen-day plan ends up
+	// running for thirty.
 
 	// WebhookSecret verifies that an event genuinely came from Stripe.
 	//
@@ -771,22 +773,16 @@ type StripeConfig struct {
 	// and restarting the process fails verification — and Stripe retries for
 	// three days, so the damage is bounded but the pager is not.
 	WebhookSecretPrevious Secret `env:"STRIPE_WEBHOOK_SECRET_PREVIOUS"`
-
-	// TrialDays is how long a cardless trial runs.
-	//
-	// Stripe caps a trial at 730 days. Fourteen is the decision recorded in
-	// ORG-WORKSPACE-SCOPE.md §3.
-	TrialDays int `env:"STRIPE_TRIAL_DAYS" envDefault:"14"`
 }
 
 // Configured reports whether provisioning can run at all.
 //
-// Both values are required together: a key with no Price subscribes to nothing,
-// and a Price with no key cannot be reached. Neither is a partial state worth
-// starting in, so the reactor refuses to construct rather than failing per
-// organization.
+// The key alone, now that the plan catalogue supplies the Price: without a key
+// nothing can be reached, and with one the worker mirrors the catalogue and
+// discovers the price id itself. The reactor refuses to construct rather than
+// failing per organization.
 func (s StripeConfig) Configured() bool {
-	return !s.SecretKey.IsZero() && s.TrialPriceID != ""
+	return !s.SecretKey.IsZero()
 }
 
 // WebhookSecrets is every secret an incoming signature may be checked against,
@@ -900,9 +896,6 @@ func (c *Config) validate() error {
 	// A trial length Stripe cannot honour. Its maximum is 730 days, and a
 	// non-positive trial is not a cardless trial at all — it is an immediate
 	// charge against a customer who has given no payment method, which fails.
-	if c.Stripe.Configured() && (c.Stripe.TrialDays < 1 || c.Stripe.TrialDays > 730) {
-		add("STRIPE_TRIAL_DAYS is %d; Stripe allows 1 to 730", c.Stripe.TrialDays)
-	}
 
 	// ADR-014: an unauthenticated event store outside local is a startup
 	// failure, not a warning nobody reads.

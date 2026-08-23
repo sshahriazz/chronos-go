@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
+	billingdomain "github.com/chronos/chronos-go/internal/modules/billing/domain"
 	entitlementpg "github.com/chronos/chronos-go/internal/modules/entitlement/adapter/postgres"
 	entitlementapi "github.com/chronos/chronos-go/internal/modules/entitlement/api"
 	entitlementapp "github.com/chronos/chronos-go/internal/modules/entitlement/app"
@@ -34,12 +35,27 @@ func (d *dependencies) buildEntitlements(log *slog.Logger) (interceptor.Entitlem
 			"because one Valkey FLUSHALL would let two requests take the last seat")
 	}
 
-	catalogue, err := entitlementdomain.NewCatalogue(entitlementdomain.Trial())
+	// BILLING'S catalogue is now the source, which is what the comment here used
+	// to promise. It holds one definition of what a plan grants; entitlement
+	// enforces those numbers and billing prices them, and two copies of the same
+	// limits would disagree the first time somebody changed one.
+	//
+	// The two modules do not import each other (CONVENTIONS §2): billing carries
+	// the limits as strings and this is where they become entitlement's typed
+	// LimitKeys. `NewCatalogue` refuses a key this build does not know, so a
+	// limit billing publishes that nothing reserves against fails startup rather
+	// than becoming a number with no enforcement behind it.
+	allowances, err := allowancesFromBilling()
+	if err != nil {
+		return nil, err
+	}
+	catalogue, err := entitlementdomain.NewCatalogue(allowances...)
 	if err != nil {
 		return nil, fmt.Errorf("entitlement catalogue: %w", err)
 	}
-	// One plan exists. When billing's catalogue lands this reads the
-	// organization's subscription instead, and no caller changes.
+	// Still "trial" for every organization: reading the SUBSCRIPTION's plan is
+	// the next step, and it needs the plan id on org_status_view, which the
+	// catalogue's arrival is the prerequisite for rather than the whole of.
 	plans, err := entitlementapp.NewOrgPlans(catalogue, "trial")
 	if err != nil {
 		return nil, fmt.Errorf("entitlement plans: %w", err)
@@ -261,4 +277,78 @@ func (d *dependencies) buildWorkspace(log *slog.Logger) (*workspaceapi.Service, 
 		Invitations: invitations, InvitationQueries: invitationQueries,
 		Teams: teams, TeamQueries: teamQueries, TeamMembers: teamMembers,
 	})
+}
+
+// allowancesFromBilling turns billing's published catalogue into entitlement's.
+//
+// # Why the composition root and not either module
+//
+// `modules/billing` may not import `modules/entitlement` and the reverse is
+// equally forbidden (CONVENTIONS §2). Billing knows what a plan COSTS and
+// carries its limits as opaque strings; entitlement knows what a limit MEANS and
+// refuses one it cannot enforce. Assembling the two is what a composition root
+// is for.
+//
+// One allowance per PLAN rather than per version: a limit is a property of the
+// plan, and monthly and yearly grant the same thing. Taking the latest monthly
+// version's limits is therefore not a choice about interval — it is the only
+// interval guaranteed to exist for every plan, since a trial has no yearly form.
+func allowancesFromBilling() ([]entitlementdomain.Allowance, error) {
+	published, err := billingdomain.Published()
+	if err != nil {
+		return nil, fmt.Errorf("billing catalogue: %w", err)
+	}
+	return allowancesFrom(published)
+}
+
+// allowancesFrom is the translation itself, over any catalogue.
+//
+// Split from the function above so a test can drive it with a catalogue the
+// build does not publish. That is not a testability nicety: the bridge's rule is
+// "the LATEST monthly version of each plan", and every published plan has
+// exactly one version, so a bridge that took the FIRST version passed every test
+// while being wrong — which is precisely what it did until a mutation of it
+// survived. The rule cannot be exercised against a catalogue that has only one
+// version to choose from.
+func allowancesFrom(published *billingdomain.Catalogue) ([]entitlementdomain.Allowance, error) {
+	// The distinct plans, in the catalogue's deterministic order.
+	var plans []billingdomain.PlanID
+	seen := map[billingdomain.PlanID]bool{}
+	for _, v := range published.All() {
+		if !seen[v.Plan] {
+			seen[v.Plan] = true
+			plans = append(plans, v.Plan)
+		}
+	}
+
+	var out []entitlementdomain.Allowance
+	for _, plan := range plans {
+		// LATEST, asked for by name rather than taken as the first monthly
+		// version the list yields. The distinction is invisible today and stops
+		// being invisible the moment a second version ships: `All` is sorted by
+		// plan-version id, so "pro:v1:month" precedes "pro:v2:month" and a
+		// first-wins loop would enforce v1's limits forever while every new
+		// subscriber was sold v2's.
+		v, err := published.Latest(plan, billingdomain.Monthly)
+		if err != nil {
+			// A plan with no monthly version. Refused rather than skipped: a
+			// plan that reaches entitlement as nothing is one gate 4 cannot
+			// price, and every capped operation on it is denied with no
+			// explanation.
+			return nil, fmt.Errorf("billing publishes plan %q with no monthly version, so "+
+				"entitlement has no allowance for it and every capped operation on that "+
+				"plan would be refused: %w", plan, err)
+		}
+
+		limits := make(map[entitlementdomain.LimitKey]int, len(v.Limits))
+		for key, n := range v.Limits {
+			limits[entitlementdomain.LimitKey(key)] = n
+		}
+		out = append(out, entitlementdomain.Allowance{Name: string(v.Plan), Limits: limits})
+	}
+	if len(out) == 0 {
+		return nil, errors.New("billing publishes no monthly plan version, so entitlement " +
+			"has no allowance to enforce and every capped operation would be refused")
+	}
+	return out, nil
 }

@@ -31,7 +31,7 @@ func TestVerificationMailIsRegistered(t *testing.T) {
 			"link, so every registration claims an address and mails nobody")
 	}
 
-	found := find(reactors(newCodec(), d), identityreactor.VerificationReactorName)
+	found := find(reactors(context.Background(), newCodec(), d), identityreactor.VerificationReactorName)
 	if found == nil {
 		t.Fatalf("the worker registers no %q reactor: EmailVerificationRequested is "+
 			"consumed by nothing and no verification link is ever sent",
