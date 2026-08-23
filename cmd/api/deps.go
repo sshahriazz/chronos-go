@@ -15,6 +15,7 @@ import (
 	valkeyadapter "github.com/chronos/chronos-go/internal/adapter/valkey"
 	"github.com/chronos/chronos-go/internal/modules/billing"
 	billingapi "github.com/chronos/chronos-go/internal/modules/billing/api"
+	"github.com/chronos/chronos-go/internal/modules/compliance"
 	entitlementapp "github.com/chronos/chronos-go/internal/modules/entitlement/app"
 	"github.com/chronos/chronos-go/internal/modules/identity"
 	"github.com/chronos/chronos-go/internal/modules/identity/adapter/argon2id"
@@ -350,6 +351,7 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 	// TestASecondWriteToAnAggregateIsRefused.
 	d.upcasters = eventsourcing.NewUpcasterRegistry()
 	billing.RegisterSchemas(d.upcasters)
+	compliance.RegisterSchemas(d.upcasters)
 	identity.RegisterSchemas(d.upcasters)
 	notification.RegisterSchemas(d.upcasters)
 	profile.RegisterSchemas(d.upcasters)
@@ -357,6 +359,7 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 	workspace.RegisterSchemas(d.upcasters)
 	d.codec = eventcodec.NewJSON(d.upcasters)
 	billing.RegisterEvents(d.codec)
+	compliance.RegisterEvents(d.codec)
 	identity.RegisterEvents(d.codec)
 	notification.RegisterEvents(d.codec)
 	profile.RegisterEvents(d.codec)

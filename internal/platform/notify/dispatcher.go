@@ -31,6 +31,26 @@ type Dispatcher struct {
 	window      time.Duration
 	obs         Observer
 	defaultChan []Channel
+
+	// restrictions answers Article 18. Optional: a deployment without compliance
+	// wired sends normally, which is correct — there is nothing to restrict when
+	// nothing can record a restriction.
+	restrictions Restrictions
+}
+
+// Restrictions answers "has this subject halted processing" (Article 18).
+//
+// A port rather than a table handle, so this package never learns which store
+// holds it. compliance owns the events and the projection; the dispatcher only
+// needs the answer.
+//
+// It is consulted for every TENANT-FACING notification, including Security and
+// Transactional, and that is deliberate: a restriction is a legal obligation
+// rather than a preference, and a class that could bypass it would make it not
+// an obligation. See Dispatch for the tension that creates and where it is
+// recorded.
+type Restrictions interface {
+	Restricted(ctx context.Context, subjectID string) (bool, error)
 }
 
 // Observer records what was delivered, suppressed and skipped. Optional.
@@ -58,6 +78,11 @@ type Deps struct {
 	Transports []Transport
 	Log        *slog.Logger
 	Observer   Observer
+
+	// Restrictions answers Article 18. Optional — a deployment with no
+	// compliance module wired sends normally, which is correct: nothing can
+	// record a restriction, so there is none to honour.
+	Restrictions Restrictions
 
 	// Window overrides the arbitration window. Zero takes the default.
 	Window time.Duration
@@ -89,7 +114,7 @@ func NewDispatcher(d Deps) *Dispatcher {
 	return &Dispatcher{
 		vault: d.Vault, prefs: d.Prefs, readState: d.ReadState,
 		transports: transports, log: d.Log, window: d.Window,
-		obs: d.Observer, defaultChan: order,
+		obs: d.Observer, defaultChan: order, restrictions: d.Restrictions,
 	}
 }
 
@@ -126,6 +151,41 @@ func (d *Dispatcher) Dispatch(ctx context.Context, n Notification) error {
 	}
 
 	if n.Class != Operator {
+		// ARTICLE 18, checked before the address is even resolved.
+		//
+		// Restriction is not a preference, so it is here rather than in
+		// allowed(): Security and Transactional bypass preferences deliberately,
+		// and a legal obligation that a class could bypass is not an obligation.
+		//
+		// # It suppresses SECURITY too, and that is the specified behaviour
+		//
+		// compliance.md §6 is explicit — "reactors skip the subject: no email, no
+		// push, no export, no profiling" — and restriction is invoked BY the
+		// subject, so it is their choice about their own data.
+		//
+		// The tension is real and worth stating rather than quietly resolving:
+		// somebody under restriction is not told when their password changes. Art.
+		// 18(2) would arguably permit that send as protection of their own rights,
+		// and narrowing the rule here would be inventing an exception the spec
+		// does not have. It is recorded in the worklist as a decision to revisit,
+		// not decided in this function.
+		if d.restrictions != nil {
+			restricted, err := d.restrictions.Restricted(ctx, n.Recipient.SubjectID)
+			if err != nil {
+				// REFUSES rather than sends. A rebuild that has not yet replayed a
+				// restriction leaves the table empty, so an unreadable lookup
+				// treated as permission would resume processing for exactly the
+				// people who asked it to stop — the wrong direction to fail in.
+				return fmt.Errorf("notify: reading processing restrictions: %w", err)
+			}
+			if restricted {
+				d.obs.Suppressed(n.Template, n.Class.String(), "", "processing_restricted")
+				d.log.Info("notification skipped: processing restricted (Article 18)",
+					"template", n.Template, "class", n.Class.String())
+				return nil
+			}
+		}
+
 		resolved, err := d.vault.Resolve(ctx, n.Recipient.SubjectID)
 		switch {
 		case errors.Is(err, ErrSubjectErased):

@@ -20,6 +20,7 @@ import (
 	temporaladapter "github.com/chronos/chronos-go/internal/adapter/temporal"
 	valkeyadapter "github.com/chronos/chronos-go/internal/adapter/valkey"
 	"github.com/chronos/chronos-go/internal/adapter/webpush"
+	compliancepg "github.com/chronos/chronos-go/internal/modules/compliance/adapter/postgres"
 	complianceapp "github.com/chronos/chronos-go/internal/modules/compliance/app"
 	"github.com/chronos/chronos-go/internal/modules/identity/app"
 	notificationpg "github.com/chronos/chronos-go/internal/modules/notification/adapter/postgres"
@@ -365,8 +366,15 @@ func newDependencies(cfg *config.Config, log *slog.Logger, codec *eventcodec.JSO
 		// wiring is asserted by a test rather than trusted.
 		Prefs:     prefsOrNil(reader),
 		ReadState: readStateOrNil(reader),
-		Log:       log,
-		Observer:  d.metrics.Notifications(),
+		// Article 18. UNLIKE the two above, nil here is not "permissive by
+		// accident, safe by luck" — it means the restriction table cannot be
+		// read, and an unread restriction is a person who asked not to be
+		// contacted being contacted. So the dispatcher REFUSES to send when the
+		// lookup errors, and this being nil at all is asserted by a test rather
+		// than trusted.
+		Restrictions: restrictionsOrNil(d, log),
+		Log:          log,
+		Observer:     d.metrics.Notifications(),
 	})
 
 	// The lapsed email-reservation sweep. Constructed before the worker, because
@@ -961,4 +969,26 @@ func (d *dependencies) scheduleErasureSweep(log *slog.Logger) {
 		log.Info("erasure backstop already scheduled",
 			"schedule", temporaladapter.SweepErasuresScheduleID)
 	}
+}
+
+// restrictionsOrNil builds the Article 18 lookup, or nil.
+//
+// The typed-nil trap prefsOrNil exists for applies here too and matters more: a
+// *Restrictions that is nil inside a non-nil interface passes the dispatcher's
+// `!= nil` check and then panics on the first tenant-facing notification — which,
+// on a system where almost nobody is restricted, is the first one after this is
+// wired rather than the first one ever.
+func restrictionsOrNil(d *dependencies, log *slog.Logger) notify.Restrictions {
+	if d.pool == nil {
+		log.Error("no Article 18 restriction lookup: postgres is unreachable, so every " +
+			"tenant-facing notification is refused rather than risk contacting somebody " +
+			"who asked not to be")
+		return nil
+	}
+	r, err := compliancepg.NewRestrictions(pgadapter.New(d.pool))
+	if err != nil {
+		log.Error("no Article 18 restriction lookup", "error", err)
+		return nil
+	}
+	return r
 }

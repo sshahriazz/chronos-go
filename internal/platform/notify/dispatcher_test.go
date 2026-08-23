@@ -453,3 +453,169 @@ func TestOperatorAlertsWorkWithoutAVault(t *testing.T) {
 		t.Fatal("the operator alert was not delivered")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Article 18 — processing restriction
+// ---------------------------------------------------------------------------
+
+type fakeRestrictions struct {
+	restricted bool
+	err        error
+	asked      []string
+}
+
+func (f *fakeRestrictions) Restricted(_ context.Context, subjectID string) (bool, error) {
+	f.asked = append(f.asked, subjectID)
+	return f.restricted, f.err
+}
+
+// A RESTRICTED SUBJECT IS NOT CONTACTED, WHATEVER THE CLASS.
+//
+// Restriction is a legal obligation, not a preference — and Security and
+// Transactional bypass preferences deliberately, so a check that lived with the
+// preference logic would be bypassed by exactly the classes that send most.
+//
+// Suppressing Security is the specified behaviour (compliance.md §6: "no email,
+// no push") and it is a real trade: somebody under restriction is not told when
+// their password changes. It is recorded as a decision to revisit rather than
+// silently narrowed here.
+func TestARestrictedSubjectIsNotContacted(t *testing.T) {
+	for _, class := range []notify.Class{
+		notify.Security, notify.Transactional, notify.Activity, notify.Product,
+	} {
+		t.Run(class.String(), func(t *testing.T) {
+			transport := &spyTransport{ch: notify.ChannelEmail}
+			restrictions := &fakeRestrictions{restricted: true}
+			d := notify.NewDispatcher(notify.Deps{
+				Vault:        vault{addr: "user@example.test"},
+				Transports:   []notify.Transport{transport},
+				Restrictions: restrictions,
+				Log:          quiet(),
+			})
+
+			if err := d.Dispatch(context.Background(), notify.Notification{
+				Template:  "identity.password_changed",
+				Class:     class,
+				Recipient: notify.Recipient{SubjectID: "subj_1"},
+			}); err != nil {
+				t.Fatalf("a restricted subject produced an error: %v; suppression is a "+
+					"correct outcome, not a failure to retry", err)
+			}
+			if transport.calls != 0 {
+				t.Errorf("a %s notification reached a subject under Article 18 restriction",
+					class)
+			}
+		})
+	}
+}
+
+// AN UNRESTRICTED SUBJECT IS CONTACTED.
+//
+// The other half. Without it "suppress everything" passes the test above and
+// nobody receives anything.
+func TestAnUnrestrictedSubjectIsContacted(t *testing.T) {
+	transport := &spyTransport{ch: notify.ChannelEmail}
+	d := notify.NewDispatcher(notify.Deps{
+		Vault:        vault{addr: "user@example.test"},
+		Transports:   []notify.Transport{transport},
+		Restrictions: &fakeRestrictions{restricted: false},
+		Log:          quiet(),
+	})
+
+	if err := d.Dispatch(context.Background(), notify.Notification{
+		Template:  "identity.password_changed",
+		Class:     notify.Security,
+		Recipient: notify.Recipient{SubjectID: "subj_1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if transport.calls != 1 {
+		t.Fatalf("an unrestricted subject received %d notifications, want 1", transport.calls)
+	}
+}
+
+// AN UNREADABLE RESTRICTION REFUSES TO SEND.
+//
+// The failure direction is the whole point. A rebuild that has not yet replayed
+// a restriction leaves the table EMPTY, so treating an unreadable lookup as
+// permission would resume processing for exactly the people who asked it to
+// stop — and nobody would notice, because a sent notification looks like
+// success.
+//
+// It returns an ERROR rather than suppressing, so the notification is retried
+// once the lookup works rather than silently dropped.
+func TestAnUnreadableRestrictionRefusesToSend(t *testing.T) {
+	transport := &spyTransport{ch: notify.ChannelEmail}
+	d := notify.NewDispatcher(notify.Deps{
+		Vault:        vault{addr: "user@example.test"},
+		Transports:   []notify.Transport{transport},
+		Restrictions: &fakeRestrictions{err: errors.New("postgres: down")},
+		Log:          quiet(),
+	})
+
+	err := d.Dispatch(context.Background(), notify.Notification{
+		Template:  "identity.password_changed",
+		Class:     notify.Security,
+		Recipient: notify.Recipient{SubjectID: "subj_1"},
+	})
+	if err == nil {
+		t.Fatal("an unreadable restriction sent the notification; a rebuild in progress " +
+			"reads as 'nobody is restricted' and every restricted person is contacted")
+	}
+	if transport.calls != 0 {
+		t.Error("the notification was sent despite the failed lookup")
+	}
+}
+
+// OPERATOR NOTIFICATIONS ARE NOT SUBJECT TO IT.
+//
+// They carry no tenant subject at all — an operator alert is about the system,
+// not about a person — so consulting a restriction for one would look up the
+// empty string.
+func TestAnOperatorNotificationIgnoresRestrictions(t *testing.T) {
+	transport := &spyTransport{ch: notify.ChannelEmail}
+	restrictions := &fakeRestrictions{restricted: true}
+	d := notify.NewDispatcher(notify.Deps{
+		Transports:   []notify.Transport{transport},
+		Restrictions: restrictions,
+		Log:          quiet(),
+	})
+
+	if err := d.Dispatch(context.Background(), notify.Notification{
+		Template:  "operator.projection_stopped",
+		Class:     notify.Operator,
+		Recipient: notify.Recipient{Address: "ops@chronos.test"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(restrictions.asked) != 0 {
+		t.Error("an operator notification consulted the restriction table")
+	}
+	if transport.calls != 1 {
+		t.Errorf("an operator alert was suppressed by a tenant's restriction")
+	}
+}
+
+// NO RESTRICTION PORT MEANS NO RESTRICTIONS.
+//
+// A deployment without compliance wired sends normally, which is correct: there
+// is nothing that can record a restriction, so there is none to honour.
+func TestWithoutARestrictionPortNotificationsSend(t *testing.T) {
+	transport := &spyTransport{ch: notify.ChannelEmail}
+	d := notify.NewDispatcher(notify.Deps{
+		Vault:      vault{addr: "user@example.test"},
+		Transports: []notify.Transport{transport},
+		Log:        quiet(),
+	})
+
+	if err := d.Dispatch(context.Background(), notify.Notification{
+		Template:  "identity.password_changed",
+		Class:     notify.Security,
+		Recipient: notify.Recipient{SubjectID: "subj_1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if transport.calls != 1 {
+		t.Error("a deployment with no compliance module suppressed a notification")
+	}
+}

@@ -550,9 +550,29 @@ already has a name for.
 
 ### P3 — real features, unblocked
 
-- [ ] **Restriction (Art. 18)** — a flag on the subject that reactors skip while
-      projectors continue. Storage continues, which is exactly what the article
-      requires. Small once the flag exists.
+- [x] **Restriction (Art. 18).** Its own aggregate and stream per subject, a
+      projection where a row's PRESENCE is the restriction, and a check in the
+      notification dispatcher.
+
+      It sits beside the erased check in `Dispatch` rather than in `allowed()`,
+      because Security and Transactional bypass preferences deliberately — and a
+      legal obligation a class can bypass is not an obligation.
+
+      An unreadable lookup REFUSES to send. A rebuild that has not yet replayed a
+      restriction leaves the table empty, so treating the failure as permission
+      would resume processing for exactly the people who asked it to stop, and a
+      sent notification looks like success.
+
+      **DECISION TO REVISIT: it suppresses Security too.** compliance.md §6 is
+      explicit — "no email, no push" — and restriction is invoked by the subject
+      about their own data, so the spec was implemented rather than narrowed.
+      The cost is real: somebody under restriction is not told when their
+      password changes. Art. 18(2) would arguably permit that send as protection
+      of their own rights. Recorded here rather than decided in a dispatcher.
+
+      Still missing: no RPC. The use case and aggregate exist and nothing calls
+      them, so a restriction can only be placed by an operator with database
+      access — the same gap the cancel endpoint had, and the next thing to close.
 - [ ] **Rectification (Art. 16)** — `PersonalDataCorrected`, a new event rather
       than a rewrite. The log stays truthful: it recorded what we believed then,
       and when we learned otherwise.

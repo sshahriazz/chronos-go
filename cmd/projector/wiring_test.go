@@ -5,6 +5,7 @@ import (
 
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
 	billingprojection "github.com/chronos/chronos-go/internal/modules/billing/projection"
+	complianceprojection "github.com/chronos/chronos-go/internal/modules/compliance/projection"
 	"github.com/chronos/chronos-go/internal/modules/identity"
 	identityprojection "github.com/chronos/chronos-go/internal/modules/identity/projection"
 	"github.com/chronos/chronos-go/internal/platform/config"
@@ -88,6 +89,11 @@ func TestEveryProjectionIsRegistered(t *testing.T) {
 		// and a tenant who has genuinely never been billed look identical from
 		// every screen.
 		billingprojection.InvoicesName,
+
+		// Article 18. Absent, the table stays empty and an empty table reads as
+		// "nobody is restricted" — so a projection nobody registered resumes
+		// processing for every person who asked it to stop, silently.
+		complianceprojection.RestrictionsName,
 	} {
 		if !registered[name] {
 			t.Errorf("projection %q is not registered on the projector, so it never runs "+

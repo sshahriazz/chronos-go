@@ -6,6 +6,8 @@ import (
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
 	"github.com/chronos/chronos-go/internal/modules/billing"
 	billingevents "github.com/chronos/chronos-go/internal/modules/billing/contract"
+	"github.com/chronos/chronos-go/internal/modules/compliance"
+	complianceevents "github.com/chronos/chronos-go/internal/modules/compliance/contract"
 	"github.com/chronos/chronos-go/internal/modules/identity"
 	identityevents "github.com/chronos/chronos-go/internal/modules/identity/contract"
 	"github.com/chronos/chronos-go/internal/modules/notification/contract"
@@ -57,6 +59,7 @@ func registerEvents(codec *eventcodec.JSON) {
 	organization.RegisterEvents(codec)
 	workspace.RegisterEvents(codec)
 	billing.RegisterEvents(codec)
+	compliance.RegisterEvents(codec)
 }
 
 // notifications declares what each event sends, and to whom.
@@ -523,6 +526,24 @@ func identityNotifications(cat *notify.Catalogue) {
 	//
 	// The event carries no SubjectIDs for the same reason, so even a future
 	// `On` here would need an audience before it could send anything.
+	// ── compliance ─────────────────────────────────────────────────────────
+	//
+	// A restriction notifies NOBODY, and the reason is close to circular in a way
+	// worth stating: telling somebody "we have stopped contacting you" is
+	// contacting them. It is the one message an Article 18 restriction must not
+	// produce, and the dispatcher would suppress it anyway — the subject is
+	// restricted, which is precisely the condition being reported.
+	//
+	// LIFTING is silent for the ordinary reason: the person who lifted it did so
+	// deliberately and is looking at the screen that did it.
+	cat.Silent[complianceevents.ProcessingRestricted](
+		"telling somebody we have stopped contacting them is contacting them. The " +
+			"dispatcher would suppress it anyway, because the subject is restricted — " +
+			"which is the condition being reported")
+	cat.Silent[complianceevents.ProcessingRestrictionLifted](
+		"the person who lifted it did so deliberately and is looking at the screen that " +
+			"did it")
+
 	cat.Silent[billingevents.InvoiceRecorded](
 		"Stripe emails the receipt and owns the dunning schedule. A mail of ours saying " +
 			"what Stripe just said is billing.md §5 case 5's duplicate-dunning mistake, " +

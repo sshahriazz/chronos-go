@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/chronos/chronos-go/internal/modules/billing"
+	"github.com/chronos/chronos-go/internal/modules/compliance"
 	"github.com/chronos/chronos-go/internal/modules/notification"
 	"github.com/chronos/chronos-go/internal/modules/organization"
 	"github.com/chronos/chronos-go/internal/modules/profile"
@@ -66,6 +67,7 @@ func TestTheCodecRegistersEveryModuleThisBinaryWrites(t *testing.T) {
 		types []string
 	}{
 		{"billing", billing.EventTypes()},
+		{"compliance", compliance.EventTypes()},
 		{"notification", notification.EventTypes()},
 		{"profile", profile.EventTypes()},
 		{"organization", organization.EventTypes()},
@@ -110,7 +112,8 @@ func assertNothingIsRegisteredButUndeclared(t *testing.T, registered []string) {
 
 	declared := map[string]bool{}
 	for _, types := range [][]string{
-		billing.EventTypes(), notification.EventTypes(), profile.EventTypes(),
+		billing.EventTypes(), compliance.EventTypes(),
+		notification.EventTypes(), profile.EventTypes(),
 		organization.EventTypes(), workspace.EventTypes(),
 	} {
 		for _, e := range types {

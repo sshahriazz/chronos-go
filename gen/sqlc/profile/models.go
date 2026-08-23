@@ -164,6 +164,13 @@ type PiiValue struct {
 	UpdatedAt  pgtype.Timestamptz
 }
 
+// Article 18 restrictions. A row IS the restriction; lifting deletes it. Read once per tenant-facing notification.
+type ProcessingRestrictionView struct {
+	SubjectID    string
+	RestrictedAt pgtype.Timestamptz
+	ActorID      string
+}
+
 // Profile projection. No personal data: pseudonym, set-flags and an opaque avatar object key only.
 type ProfileView struct {
 	SubjectID         string

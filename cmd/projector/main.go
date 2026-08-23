@@ -27,6 +27,8 @@ import (
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
 	"github.com/chronos/chronos-go/internal/modules/billing"
 	billingprojection "github.com/chronos/chronos-go/internal/modules/billing/projection"
+	"github.com/chronos/chronos-go/internal/modules/compliance"
+	complianceprojection "github.com/chronos/chronos-go/internal/modules/compliance/projection"
 	"github.com/chronos/chronos-go/internal/modules/identity"
 	identityprojection "github.com/chronos/chronos-go/internal/modules/identity/projection"
 	"github.com/chronos/chronos-go/internal/modules/notification"
@@ -265,6 +267,11 @@ func projections(codec *eventcodec.JSON) []projection.Projection {
 		// object rather than part of the organization's lifecycle.
 		billingprojection.NewInvoices(codec),
 
+		// Article 18 restrictions. Its absence is silent in the dangerous
+		// direction: an empty table reads as "nobody is restricted", so
+		// processing resumes for exactly the people who asked it to stop.
+		complianceprojection.NewRestrictions(codec),
+
 		// Both membership projections belong to WORKSPACE, including the one
 		// that builds `org_member_index`: belonging to an organization comes
 		// from organization events AND from workspace joins, one table has one
@@ -297,6 +304,7 @@ func registerEvents(codec *eventcodec.JSON) {
 	// and a type registered in two of them is a projector that stops on an event
 	// the API can happily write.
 	billing.RegisterEvents(codec)
+	compliance.RegisterEvents(codec)
 	notification.RegisterEvents(codec)
 	profile.RegisterEvents(codec)
 	organization.RegisterEvents(codec)
