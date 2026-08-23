@@ -44,12 +44,14 @@ wired to nothing — which this repo has already done once, with `inapp`,
 `webpush` and `seaweedfs` fully built, fully tested and constructed by no
 binary. So 1b now FOLLOWS the organization aggregate.
 
-- [ ] **Access projector** — writes tuples from module events
-      *Blocked on:* `OrganizationCreated`, whose owner grant is its first job.
-- [ ] **Revocation tombstones (ADR-045)** — deny before the projection catches up
-      *Blocked on:* a revocation event to react to.
-- [ ] **Gate 1 (`OrgResolver`)** — "which organization is this request in"
-      *Blocked on:* organizations existing.
+- [x] **Access projector** — `internal/modules/access/projection/tuples.go`.
+      Writes membership, workspace-admin and team-membership edges. Its blocker
+      cleared when organization landed, and the boxes above stayed unticked long
+      after the work was done.
+- [x] **Revocation tombstones (ADR-045)** — `platform/authz`'s `Tombstones`,
+      `Revoker` and `Revocations` ports, cleared by the access projector's
+      confirmation and never by a timer.
+- [x] **Gate 1 (`OrgResolver`)** — `orgapi.NewOrgResolver`, wired in `cmd/api`.
 
 ## Slice 2 — organization core  ✅ complete
 
