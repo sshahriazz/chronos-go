@@ -106,6 +106,32 @@ func (v *Vault) PutAll(ctx context.Context, id pii.SubjectID, values map[pii.Fie
 	})
 }
 
+// Forget removes one field, leaving the rest and the subject's key alone.
+//
+// # No key is touched, and that is the difference from Erase
+//
+// Erase destroys the data key, which makes every field for the subject
+// permanently unreadable — that is what makes erasure a key deletion instead of
+// a migration (ADR-002). This removes one ROW. The subject keeps their key,
+// their other fields stay readable, and nothing is invalidated anywhere.
+//
+// It is idempotent: forgetting a field nothing holds is a DELETE that matches
+// nothing, which is the right outcome for a caller retrying an append.
+func (v *Vault) Forget(ctx context.Context, id pii.SubjectID, field pii.Field) error {
+	if id == "" {
+		return fmt.Errorf("pii: a subject id is required")
+	}
+	if !field.Valid() {
+		return fmt.Errorf("%w: %q", pii.ErrInvalidField, field)
+	}
+	return v.tx.InSystemTx(ctx, func(ctx context.Context, q db.Querier) error {
+		if _, err := q.Exec(ctx, platformdb.DeleteValue, string(id), string(field)); err != nil {
+			return fmt.Errorf("pii: forgetting %s: %w", field, err)
+		}
+		return nil
+	})
+}
+
 // Get decrypts one field.
 func (v *Vault) Get(ctx context.Context, id pii.SubjectID, field pii.Field) (string, error) {
 	if !field.Valid() {

@@ -114,6 +114,23 @@ type Vault interface {
 	// returns.
 	Profile(ctx context.Context, id SubjectID) (Profile, error)
 
+	// Forget removes ONE field, leaving the rest and the subject's key alone.
+	//
+	// Distinct from Erase, which destroys the key and takes every field with it.
+	// This is the narrow operation an identifier change needs: a pending address
+	// is forgotten when the change completes or is cancelled, and a previous
+	// address is forgotten when a revert spends its window.
+	//
+	// It is a METHOD rather than "PutAll with an empty string", because Validate
+	// refuses an empty value on purpose: a field that reads back as "" would be
+	// indistinguishable from one nobody ever set, and the notification path
+	// depends on telling those apart — resolving a previous address that is
+	// absent must FAIL rather than fall back to the primary, or an email-change
+	// notice goes to the address it was changed to.
+	//
+	// Forgetting a field that is not set is not an error.
+	Forget(ctx context.Context, id SubjectID, field Field) error
+
 	// Erase destroys the subject's data key.
 	//
 	// Not a delete of the values: those rows stay, unreadable, because deleting

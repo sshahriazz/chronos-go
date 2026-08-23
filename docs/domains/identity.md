@@ -447,11 +447,17 @@ three at the point they become reachable: it voids every session with no
 exception, every outstanding token of every purpose, and any pending identifier
 change, in the same command as the credential change.
 
-The remaining two flows — email change and federated linking — still do not exist
-in this module: no RPC, no use case, no event. That is not a mitigation, it is an
-absence, and it expires the day either is built. Each carries the requirement in
-its own section (§7, §12) rather than only here, because a rule recorded far from
-the code that must obey it is a rule that gets missed.
+**The email change is now built too, and it obeys the rule in both directions** —
+see §12. Completing a change voids every session with no exception, and a
+password reset voids any pending change on the aggregate as well as by killing
+its token. That was the last of the three variants to become reachable: it could
+not be tested before the flow existed, and it is tested end to end now.
+
+Federated linking is the one flow that still does not exist in this module: no
+RPC, no use case, no event. That is not a mitigation, it is an absence, and it
+expires the day it is built. It carries the requirement in its own section (§7)
+rather than only here, because a rule recorded far from the code that must obey
+it is a rule that gets missed.
 
 ### 4.5 Password reset — BUILT, and what it does
 
@@ -1231,19 +1237,58 @@ if it was not you there is nothing to do. Nothing reaches the caller.
   *old* address, and allows a revert window — otherwise an attacker with a
   hijacked session silently takes ownership.
 
-  **NOT BUILT** — no RPC, no use case, no event — and that absence is the only
-  reason C8's **unexpired email change** variant is unreachable today. On
-  arrival it MUST obey §4.4, in both directions:
+  **BUILT.** Four RPCs: `RequestEmailChange` and `CancelEmailChange` (AAL2, see
+  §4.3), `ConfirmEmailChange` and `RevertEmailChange` (public — both are reached
+  from a mailbox, and after §4.4 runs there is no session to reach them with).
+  The use case is `internal/modules/identity/app/emailchange.go`; the three
+  messages are sent by identity's own reactor, on its own subscription group.
 
-  - Re-verifying the new address runs through `VerifyEmail`, which already voids
-    every session for the subject. That is what defeats the *unexpired session*
-    variant here, and it is already enforced rather than pending.
-  - A password reset or recovery MUST void any PENDING change. Otherwise an
-    attacker queues a change to their own address, the victim recovers the
-    account believing they have secured it, and the queued change completes
-    afterwards and hands it back.
+  Both directions of §4.4 are enforced and both are tested end to end:
+
+  - Completing the change VOIDS every session for the subject, sparing none —
+    including the one that requested it, because the party who requested it may
+    be an attacker. That defeats the *unexpired session* variant at the instant
+    the identifier moves.
+  - A password reset VOIDS any pending change, twice over: the reset already
+    revoked every outstanding token of every purpose, and
+    `domain.User.VoidPendingIdentifierChange` now records the cancellation on the
+    aggregate as well. Building this flow is what made C8's **unexpired email
+    change** variant reachable at all, so it is closed in the same slice.
+
+  Three decisions the paragraph above does not settle:
+
+  - **The old address is DEMOTED, not released.** It becomes an unverified claim
+    expiring at the revert deadline, so it stays unavailable to everybody for the
+    window and is then freed by the ordinary lapsed-reservation sweep. Releasing
+    it at the moment of the change is an attack rather than a simplification:
+    whoever performed the change could re-register the freed address immediately
+    and leave the revert with nowhere to go back to.
+  - **The previous address lives in the vault**, as `previous_email`. The revert
+    has to restore it and the log cannot hold it (ADR-002). `SubjectAddresses` is
+    four MOVES and no reads, so the values never cross back into this module.
+  - **The revert mail resolves a NON-PRIMARY address.** The dispatcher reads the
+    vault at send time, which by then holds the address the account moved TO — so
+    a notice on `EmailChanged` addressed to the primary would mail the undo link,
+    with its live token, to the attacker. `notify.Spec` carries an address choice
+    for this one message, and the vault adapter REFUSES to fall back to the
+    primary when no previous address is recorded.
+
+  The warning sent to the current address at REQUEST time carries no link, no
+  token and not even the new address. It goes to the mailbox an attacker may
+  already be reading, so a credential in it would make the warning itself the
+  attack.
 - Verification tokens: **looked up by `SHA-256(token)`, never stored in the
   clear**; single-use, expiring, invalidated on email change.
+
+  Four purposes exist — `email_verification`, `password_reset`, `email_change`
+  and `email_change_revert` — and the purpose is mixed INTO the digest rather
+  than stored beside it. That binding is a control, not bookkeeping: without it,
+  anybody who can cause a verification mail to be sent (by registering an address
+  they own) would hold a token that completes a change on somebody else's
+  account. A CHECK constraint on `identity_token.purpose` is the second,
+  independent guard, and it earned its keep — it refused the new purposes until
+  migration 00029 widened it, which is a failure at issuance rather than a link
+  that is dead on arrival with nothing to say so.
 
   This previously said "constant-time lookup", which is not implementable and
   hid the rule that matters. You cannot do a constant-time lookup through a
@@ -1348,7 +1393,9 @@ The value is refused above 8 at boot and logged at startup as
 
 `UserRegistered` · `DuplicateRegistrationAttempted` ·
 `EmailVerificationRequested` · `EmailVerified` ·
-`EmailChangeRequested` · `EmailChanged` · `PasswordSet` · `PasswordChanged` ·
+`EmailChangeRequested` · `EmailChangeCancelled` · `EmailChanged` ·
+`EmailChangeReverted` · `EmailReservationDemoted` ·
+`PasswordSet` · `PasswordChanged` ·
 `PasswordResetRequested` · `PasskeyRegistered` · `PasskeyRemoved` ·
 `TotpEnabled` · `TotpDisabled` · `RecoveryCodesGenerated` ·
 `RecoveryCodeConsumed` · `FederatedIdentityLinked` · `FederatedIdentityUnlinked`

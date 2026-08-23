@@ -40,6 +40,19 @@ type Querier interface {
 	// Retention. A response can contain personal data, so this is not optional
 	// housekeeping (ADR-002).
 	DeleteExpiredIdempotencyKeys(ctx context.Context) (int64, error)
+	// Forget ONE field for a subject, leaving the rest and the key alone.
+	//
+	// Distinct from erasure, which destroys the subject's data key and takes every
+	// field with it. This is the narrow operation an email change needs: the
+	// pending address is cleared when a change completes or is cancelled, and the
+	// previous address is cleared when a revert spends the window.
+	//
+	// A DELETE rather than storing an empty value, because pii.Validate refuses an
+	// empty one — deliberately, since a field that reads back as "" is
+	// indistinguishable from one nobody ever set and would make an absent address
+	// and a blanked one the same fact. Removing the row keeps them different: Get
+	// reports ErrNoValue, and Profile simply does not carry the field.
+	DeleteValue(ctx context.Context, arg DeleteValueParams) error
 	// The key goes; the value rows stay, unreadable. Deleting them would leave
 	// nothing to show the erasure happened (ADR-002).
 	// Already-erased subjects match nothing, so erasure is idempotent.

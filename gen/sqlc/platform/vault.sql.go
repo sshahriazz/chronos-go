@@ -28,6 +28,32 @@ func (q *Queries) CreateSubjectKey(ctx context.Context, arg CreateSubjectKeyPara
 	return err
 }
 
+const DeleteValue = `-- name: DeleteValue :exec
+DELETE FROM pii_value WHERE subject_id = $1 AND field = $2
+`
+
+type DeleteValueParams struct {
+	SubjectID string
+	Field     string
+}
+
+// Forget ONE field for a subject, leaving the rest and the key alone.
+//
+// Distinct from erasure, which destroys the subject's data key and takes every
+// field with it. This is the narrow operation an email change needs: the
+// pending address is cleared when a change completes or is cancelled, and the
+// previous address is cleared when a revert spends the window.
+//
+// A DELETE rather than storing an empty value, because pii.Validate refuses an
+// empty one — deliberately, since a field that reads back as "" is
+// indistinguishable from one nobody ever set and would make an absent address
+// and a blanked one the same fact. Removing the row keeps them different: Get
+// reports ErrNoValue, and Profile simply does not carry the field.
+func (q *Queries) DeleteValue(ctx context.Context, arg DeleteValueParams) error {
+	_, err := q.db.Exec(ctx, DeleteValue, arg.SubjectID, arg.Field)
+	return err
+}
+
 const EraseSubjectKey = `-- name: EraseSubjectKey :execrows
 UPDATE pii_key
 SET wrapped_dek = NULL, erased_at = now()

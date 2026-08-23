@@ -63,20 +63,28 @@ func (a *AddressBook) PromotePending(ctx context.Context, id pii.SubjectID) erro
 		// what a retried append looks like from here.
 		return nil
 	}
-	return a.put(ctx, id, map[pii.Field]string{
+	if err := a.put(ctx, id, map[pii.Field]string{
 		pii.FieldEmail: pending,
 		// The address being left, kept so the revert has something to restore.
 		pii.FieldPreviousEmail: profile.Get(pii.FieldEmail),
-		// CLEARED in the same write. A pending address left behind would keep the
-		// change's verification link deliverable after the change completed, and
-		// that link is a live credential.
-		pii.FieldPendingEmail: "",
-	})
+	}); err != nil {
+		return err
+	}
+	// FORGOTTEN, not written empty: an empty value is refused by pii.Validate,
+	// and deliberately — a field reading back as "" would be indistinguishable
+	// from one nobody ever set, and the notification path depends on telling
+	// those apart.
+	//
+	// AFTER the write above, so a failure between the two leaves the account's
+	// mail already going to the new address with a stale pending value beside
+	// it. The reverse order would leave the pending address gone and the primary
+	// unmoved, and the retry would then find nothing to promote.
+	return a.forget(ctx, id, pii.FieldPendingEmail)
 }
 
 // DiscardPending forgets a claimed address that was never proven.
 func (a *AddressBook) DiscardPending(ctx context.Context, id pii.SubjectID) error {
-	return a.put(ctx, id, map[pii.Field]string{pii.FieldPendingEmail: ""})
+	return a.forget(ctx, id, pii.FieldPendingEmail)
 }
 
 // RestorePrevious undoes a completed change.
@@ -89,15 +97,19 @@ func (a *AddressBook) RestorePrevious(ctx context.Context, id pii.SubjectID) err
 	if previous == "" {
 		return nil
 	}
-	return a.put(ctx, id, map[pii.Field]string{
-		pii.FieldEmail: previous,
-		// The window is SPENT once the revert lands, so the address that was
-		// reverted away from is not kept as the new "previous". Keeping it would
-		// offer a revert of the revert, and the two addresses could then be
-		// swapped back and forth from whichever mailbox answered last.
-		pii.FieldPreviousEmail: "",
-		pii.FieldPendingEmail:  "",
-	})
+	if err := a.put(ctx, id, map[pii.Field]string{pii.FieldEmail: previous}); err != nil {
+		return err
+	}
+	// The window is SPENT once the revert lands, so the address that was reverted
+	// away from is not kept as the new "previous". Keeping it would offer a
+	// revert of the revert, and the two addresses could then be swapped back and
+	// forth from whichever mailbox answered last.
+	for _, field := range []pii.Field{pii.FieldPreviousEmail, pii.FieldPendingEmail} {
+		if err := a.forget(ctx, id, field); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (a *AddressBook) profile(ctx context.Context, id pii.SubjectID) (pii.Profile, error) {
@@ -117,6 +129,13 @@ func (a *AddressBook) profile(ctx context.Context, id pii.SubjectID) (pii.Profil
 func (a *AddressBook) put(ctx context.Context, id pii.SubjectID, values map[pii.Field]string) error {
 	if err := a.vault.PutAll(ctx, id, values); err != nil {
 		return fmt.Errorf("piivault: moving addresses for %s: %w", id, err)
+	}
+	return nil
+}
+
+func (a *AddressBook) forget(ctx context.Context, id pii.SubjectID, field pii.Field) error {
+	if err := a.vault.Forget(ctx, id, field); err != nil {
+		return fmt.Errorf("piivault: forgetting %s for %s: %w", field, id, err)
 	}
 	return nil
 }

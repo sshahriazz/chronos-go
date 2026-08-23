@@ -729,58 +729,46 @@ already has a name for.
       order #10, "once there is something to operate". Large, and the gate for
       legal holds above.
 
-## In progress — email change (identity.md §12)
+## Done — email change (identity.md §12)
 
-- [ ] **Email change.** The last of the three flows §4.4 named as absent. The
-      absence is why IDENTITY-REVIEW C8's **unexpired email change** variant is
-      unreachable today, so building it makes that variant reachable and the
-      slice has to close it in the same commit.
+- [x] **Email change.** Four RPCs, an aggregate, a reservation demotion, a mail
+      reactor on its own group, two projection handlers and a migration. Both
+      directions of §4.4 enforced and tested end to end — building this flow is
+      what made IDENTITY-REVIEW C8's **unexpired email change** variant
+      reachable, so it is closed in the same slice.
 
-      **What §12 requires:** verify the NEW address before switching, notify the
-      OLD address, allow a revert window. Plus §4.4 in both directions —
-      confirming re-verifies, which voids every session; and a password reset
-      MUST void any PENDING change, or an attacker queues a change to their own
-      address, the victim recovers the account believing it secured, and the
-      queued change completes afterwards and hands it back.
+      **Four things the build found that the design did not predict:**
 
-      **What is already waiting for it**, written before the flow existed and
-      inherited without changes:
+      1. **`user_view.email_index` never moved on a change.**
+         `AccountByEmailIndex` reads that table, so a completed change would have
+         left the person unable to sign in with their new address while whoever
+         caused the change kept signing in with the old one — the change
+         achieving the exact opposite of its purpose.
 
-      - `domain.User.VoidPendingIdentifierChange` — called by the reset on every
-        run, records nothing today because no event can create a pending change.
-        The recording goes here.
-      - `Registration.VerifyEmail`'s unconditional `RevokeAllSessions`.
-      - `TokenStore.RevokeAllPurposes` on reset, which already voids the token a
-        pending change would need to complete. That is the half of the rule that
-        is real today; the aggregate half is what this adds.
+      2. **The `identity_token.purpose` CHECK constraint refused the two new
+         purposes.** Found by the integration test, not by any unit test: the
+         event appended fine and the MAIL REACTOR failed to issue, so every
+         requested change would have parked and mailed nobody. Migration 00029
+         widens it. The constraint is worth keeping precisely because it caught
+         this.
 
-      **Three design decisions the spec did not settle:**
+      3. **The vault had no way to CLEAR a field.** `pii.Validate` refuses an
+         empty value on purpose — a field reading back as `""` would be
+         indistinguishable from one nobody ever set, and the notification path
+         depends on telling those apart. So `pii.Vault` gained `Forget`, which
+         removes one row and touches no key. It is not erasure: the subject keeps
+         their key and every other field.
 
-      1. **The old address stays claimed for the revert window, and no sweep
-         releases it.** `EmailReservation` already lapses: an UNVERIFIED claim
-         with a deadline becomes available on its own, and `Reserve` self-heals
-         by recording `EmailReleased(expired)` before the new claim. So the old
-         address is DEMOTED from verified to an unverified lease ending at the
-         revert deadline. It stays unavailable to everyone else for the window
-         and frees itself afterwards.
+      4. **A mutation of the revert mail's address survived every test in the
+         repository.** Changing `AddressPrevious` to `AddressPrimary` mails the
+         undo link, with its live token, to the party the undo is aimed at. It is
+         the single most dangerous line in the flow and nothing covered it until
+         the reactor got its own tests.
 
-         Releasing it outright at change time does not work and the reason is an
-         attack: an attacker who changed the address could immediately register
-         the victim's old one and make the revert impossible.
-
-      2. **The revert needs the old address back, and it is not in the log**
-         (ADR-002). It goes in the vault as `FieldPreviousEmail`. It is the
-         person's own data, it belongs in a subject access request, and the next
-         change overwrites it.
-
-      3. **Notifying the old address after the switch needs the dispatcher to
-         resolve a field other than the primary.** The dispatcher resolves from
-         the vault by subject at SEND time and overwrites `Recipient.Address`,
-         so a notice on `EmailChanged` would go to the NEW address — to the
-         attacker — which is the exact opposite of what §12 asks for. So
-         `notify.Spec` gains an address choice, carried to the dispatcher and
-         mapped to a vault field in the adapter. `notify` does not import `pii`
-         and still does not: the choice is a notify-level enum.
+      **Not built: no `CancelEmailChange` mail.** Cancelling is silent, and the
+      catalogue records why: all three causes are already known to the holder,
+      and the address that was being claimed never proved it wanted anything, so
+      mail to it would be unsolicited (NOTIFICATIONS §5).
 
 ## Parked
 
