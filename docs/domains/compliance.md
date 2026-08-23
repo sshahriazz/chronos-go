@@ -140,6 +140,54 @@ incompletely, and only one of those is noticed.
   on erasure** (§4 step 9).
 - Long-running and resumable, with progress visible in the workflow.
 
+### 5.1 How it is built — BUILT
+
+`ExportMyData` records the request and returns an id; `chronos.compliance.
+DataExport.v1` builds the bundle; `GetDataExport` reports where it got to and
+mints the links once ready. `ListDataExports` is the caller's own history.
+A Security-class notification says when a bundle is ready, and another says when
+a request produced nothing — neither carries a link.
+
+**The resumable unit is a PAGE of the object listing.** The cursor lives in
+workflow state, so a worker that crashes after four pages replays those four
+from history — without touching the object store — and issues the fifth from
+where the fourth stopped. `blob.Store.ListPage` is the paged read; `ListPrefix`
+stays beside it because the two fail in opposite directions and both are right:
+an erasure that silently processed the first N would report success having left
+personal data behind, so it REFUSES past its bound, while an export's correct
+response to "there is more" is to come back for it.
+
+**Objects are LISTED, not copied.** Copying would put a second copy of the most
+concentrated personal data in the system beside the first, and erasure would
+then have to find both. The manifest is therefore a snapshot: an object deleted
+since has no download URL when the subject fetches, and is reported as an entry
+with no link rather than omitted — "you had a file here and it is gone now" is a
+true answer and silence is not.
+
+**The outcome lives in the LOG, not only in Temporal.** Asking Temporal whether
+an export is ready is the obvious design and wrong twice over: workflow
+histories are retained for a bounded period while Article 15's evidence that the
+right was exercised must outlive that, and a read path that asked Temporal would
+stop answering during a Temporal outage — on the one endpoint a person uses when
+they are already waiting.
+
+**The export walks the same object prefixes the erasure deletes**, and a test
+holds the two composition roots equal. An export covering less would hand
+somebody a plausible-looking bundle and then destroy the part it omitted, which
+is the worst combination available here.
+
+**Article 18 stands in front of Article 15.** Building an export is processing,
+so a restricted subject's run is refused — permanently, not retried, because a
+restricted subject will still be restricted on the hundredth attempt. An
+UNREADABLE restriction refuses too: an unreadable answer is not an absent one
+(ADR-010).
+
+**Not built: a bundle for a subject holding more objects than one run may
+enumerate.** Past its page budget the run FAILS rather than truncating, with
+`too_many_objects`, and the message tells the person to contact support. A
+truncating export would answer Article 15 with a short file and nothing to say
+it was short.
+
 ---
 
 ## 6. Rectification and restriction in an event-sourced system

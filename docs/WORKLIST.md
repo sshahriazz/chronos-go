@@ -770,38 +770,49 @@ already has a name for.
       and the address that was being claimed never proved it wanted anything, so
       mail to it would be unsolicited (NOTIFICATIONS §5).
 
-## In progress — export resumability (compliance.md §5)
+## Done — export resumability (compliance.md §5)
 
-- [ ] **Make the export asynchronous and resumable.** It is synchronous today —
-      one vault read and one small object, produced inside the request. §5 asks
-      for long-running and resumable with progress visible in the workflow.
+- [x] **The export is asynchronous and resumable.** Four RPCs, an aggregate, a
+      workflow with a paged listing, a reactor, a projection, two notifications
+      and a migration. Nine mutations, all killed.
 
-      **Three decisions taken with the user, not inferred:**
+      **Three decisions taken with the user:** notify-then-poll, break the
+      contract now, and include the object store as a second source. All three
+      are recorded in compliance.md §5.1 with their reasoning.
 
-      1. **Notify, then poll.** `ExportMyData` starts a workflow and returns an
-         id; `GetDataExport` returns status and mints the short-lived URLs once
-         the bundle is ready. A Security-class notification says "your export is
-         ready" and carries NO link — a URL in a mailbox is forwarded, archived
-         and outlives its hour, which is the same argument compliance.md §5
-         already makes about attachments.
+      **Five things the build found:**
 
-      2. **Break the contract now.** `ExportMyDataResponse.download_url` goes.
-         The `buf breaking` baseline is the `main` branch, so the break fails the
-         gate exactly once, on the commit that makes it, and passes from the next
-         commit onward. Nothing in the ruleset is widened — which is the
-         distinction from the `account_name` case, where the fix WOULD have been
-         to relax the gate and it stayed parked instead.
+      1. **EXPORT was not a MUTATING operation class**, and it is now: the call
+         appends a request and derives its id from the caller's key, so a retry
+         without one starts a second workflow. Being mutating is independent of
+         gate 4's exemption — BILLING_MANAGE was already both.
 
-      3. **The object store is a second source.** Without it the "resumable"
-         machinery would be a state machine wired to one cheap read, which is the
-         shape deliberately not built for the plan catalogue's editing half.
+      2. **`newExportReactor` was built and registered in nothing** for one
+         commit. The linter caught it only because the constructor was unused,
+         which is luck: a constructor called from a test would have been "used"
+         and the reactor would still have been wired to nobody. There is a
+         wiring test now.
 
-      **Copy or reference?** REFERENCE. The manifest records each object's key,
-      size and content type; `GetDataExport` mints a URL per object at fetch
-      time. Copying would put a second copy of the most concentrated personal
-      data in the system beside the first, and erasure would have to find both.
-      The cost is that the manifest is a snapshot of what existed and an object
-      deleted since simply has no URL — which the manifest says.
+      3. **The vault had no way to CLEAR a field.** `pii.Validate` refuses an
+         empty value on purpose — "" is indistinguishable from never-set, and
+         the notification path depends on telling those apart. `pii.Vault`
+         gained `Forget`.
+
+      4. **`minimum: 0` is proto3's zero value** and vanishes from the published
+         document; the floor has to be a `gte` rule. RevokeAllSessionsResponse
+         already carried that comment — this is the second time it earned it.
+
+      5. **int64's maximum does not survive the document's float64 round trip.**
+         The published ceiling is the largest int64 a JSON number carries
+         exactly, because a bound a client cannot read back is worse than an
+         honest smaller one.
+
+      **Still open: no integration test against the running stack.** Every layer
+      is unit-tested and the workflow is exercised through the Temporal test
+      suite, but nothing has driven a request through KurrentDB, the projector,
+      SeaweedFS and a real poll. That is the test that would catch a schema or a
+      wiring fault the way the email-change slice's did — where it found a CHECK
+      constraint that would have parked every change in production.
 
 ## Parked
 
