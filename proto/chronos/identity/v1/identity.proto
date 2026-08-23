@@ -60,8 +60,8 @@ syntax = "proto3";
 package chronos.identity.v1;
 
 import "buf/validate/validate.proto";
-import "gnostic/openapi/v3/annotations.proto";
 import "chronos/options/v1/options.proto";
+import "gnostic/openapi/v3/annotations.proto";
 import "google/protobuf/timestamp.proto";
 
 // MethodKind labels an authentication method.
@@ -198,29 +198,29 @@ message RegisterRequest {
     },
     (buf.validate.field) = {
       required: true
-    cel: [
-      {
-        id: "identity.email.length"
-        message: "an email address may not exceed 254 bytes"
-        expression: "bytes(this.trim()).size() <= 254"
-      },
-      {
-        id: "identity.email.shape"
-        message: "an email address must contain a local part and a fully qualified domain"
-        expression:
-          "this.trim().lastIndexOf('@') > 0"
-          " && this.trim().lastIndexOf('@') < this.trim().size() - 1"
-          " && this.trim().substring(this.trim().lastIndexOf('@') + 1).contains('.')"
-      },
-      {
-        id: "identity.email.local_part"
-        message: "the local part of an email address may not exceed 64 bytes"
-        expression:
-          "this.trim().lastIndexOf('@') <= 0"
-          " || bytes(this.trim().substring(0, this.trim().lastIndexOf('@'))).size() <= 64"
-      }
-    ]
-  }
+      cel: [
+        {
+          id: "identity.email.length"
+          message: "an email address may not exceed 254 bytes"
+          expression: "bytes(this.trim()).size() <= 254"
+        },
+        {
+          id: "identity.email.shape"
+          message: "an email address must contain a local part and a fully qualified domain"
+          expression:
+            "this.trim().lastIndexOf('@') > 0"
+            " && this.trim().lastIndexOf('@') < this.trim().size() - 1"
+            " && this.trim().substring(this.trim().lastIndexOf('@') + 1).contains('.')"
+        },
+        {
+          id: "identity.email.local_part"
+          message: "the local part of an email address may not exceed 64 bytes"
+          expression:
+            "this.trim().lastIndexOf('@') <= 0"
+            " || bytes(this.trim().substring(0, this.trim().lastIndexOf('@'))).size() <= 64"
+        }
+      ]
+    }
   ];
 }
 
@@ -423,29 +423,29 @@ message ResendEmailVerificationRequest {
     },
     (buf.validate.field) = {
       required: true
-    cel: [
-      {
-        id: "identity.email.length"
-        message: "an email address may not exceed 254 bytes"
-        expression: "bytes(this.trim()).size() <= 254"
-      },
-      {
-        id: "identity.email.shape"
-        message: "an email address must contain a local part and a fully qualified domain"
-        expression:
-          "this.trim().lastIndexOf('@') > 0"
-          " && this.trim().lastIndexOf('@') < this.trim().size() - 1"
-          " && this.trim().substring(this.trim().lastIndexOf('@') + 1).contains('.')"
-      },
-      {
-        id: "identity.email.local_part"
-        message: "the local part of an email address may not exceed 64 bytes"
-        expression:
-          "this.trim().lastIndexOf('@') <= 0"
-          " || bytes(this.trim().substring(0, this.trim().lastIndexOf('@'))).size() <= 64"
-      }
-    ]
-  }
+      cel: [
+        {
+          id: "identity.email.length"
+          message: "an email address may not exceed 254 bytes"
+          expression: "bytes(this.trim()).size() <= 254"
+        },
+        {
+          id: "identity.email.shape"
+          message: "an email address must contain a local part and a fully qualified domain"
+          expression:
+            "this.trim().lastIndexOf('@') > 0"
+            " && this.trim().lastIndexOf('@') < this.trim().size() - 1"
+            " && this.trim().substring(this.trim().lastIndexOf('@') + 1).contains('.')"
+        },
+        {
+          id: "identity.email.local_part"
+          message: "the local part of an email address may not exceed 64 bytes"
+          expression:
+            "this.trim().lastIndexOf('@') <= 0"
+            " || bytes(this.trim().substring(0, this.trim().lastIndexOf('@'))).size() <= 64"
+        }
+      ]
+    }
   ];
 }
 
@@ -496,31 +496,148 @@ message RequestPasswordResetRequest {
     },
     (buf.validate.field) = {
       required: true
-    cel: [
-      {
-        id: "identity.email.length"
-        message: "an email address may not exceed 254 bytes"
-        expression: "bytes(this.trim()).size() <= 254"
-      },
-      {
-        id: "identity.email.shape"
-        message: "an email address must contain a local part and a fully qualified domain"
-        expression:
-          "this.trim().lastIndexOf('@') > 0"
-          " && this.trim().lastIndexOf('@') < this.trim().size() - 1"
-          " && this.trim().substring(this.trim().lastIndexOf('@') + 1).contains('.')"
-      },
-      {
-        id: "identity.email.local_part"
-        message: "the local part of an email address may not exceed 64 bytes"
-        expression:
-          "this.trim().lastIndexOf('@') <= 0"
-          " || bytes(this.trim().substring(0, this.trim().lastIndexOf('@'))).size() <= 64"
-      }
-    ]
-  }
+      cel: [
+        {
+          id: "identity.email.length"
+          message: "an email address may not exceed 254 bytes"
+          expression: "bytes(this.trim()).size() <= 254"
+        },
+        {
+          id: "identity.email.shape"
+          message: "an email address must contain a local part and a fully qualified domain"
+          expression:
+            "this.trim().lastIndexOf('@') > 0"
+            " && this.trim().lastIndexOf('@') < this.trim().size() - 1"
+            " && this.trim().substring(this.trim().lastIndexOf('@') + 1).contains('.')"
+        },
+        {
+          id: "identity.email.local_part"
+          message: "the local part of an email address may not exceed 64 bytes"
+          expression:
+            "this.trim().lastIndexOf('@') <= 0"
+            " || bytes(this.trim().substring(0, this.trim().lastIndexOf('@'))).size() <= 64"
+        }
+      ]
+    }
   ];
 }
+
+// ---------------------------------------------------------------------------
+// Email change (identity.md §12)
+// ---------------------------------------------------------------------------
+
+// RequestEmailChangeRequest names the address the account is moving to.
+message RequestEmailChangeRequest {
+  // The new address as typed. Reduced to a blind index server-side; neither the
+  // raw nor the normalized form reaches an event, a log line or an error message
+  // (ADR-002).
+  //
+  // The rules are RegisterRequest.email's and RequestPasswordResetRequest.email's
+  // character for character, and the duplication is deliberate for the reason
+  // stated there: all of them front the same normalizer, so a rule that differed
+  // in either direction would be visible on the wire.
+  string new_email = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "ada@example.com"}
+      max_length: 254
+      pattern: "^.+@.+\\..+$"
+    },
+    (buf.validate.field) = {
+      required: true
+      cel: [
+        {
+          id: "identity.email.length"
+          message: "an email address may not exceed 254 bytes"
+          expression: "bytes(this.trim()).size() <= 254"
+        },
+        {
+          id: "identity.email.shape"
+          message: "an email address must contain a local part and a fully qualified domain"
+          expression:
+            "this.trim().lastIndexOf('@') > 0"
+            " && this.trim().lastIndexOf('@') < this.trim().size() - 1"
+            " && this.trim().substring(this.trim().lastIndexOf('@') + 1).contains('.')"
+        },
+        {
+          id: "identity.email.local_part"
+          message: "the local part of an email address may not exceed 64 bytes"
+          expression:
+            "this.trim().lastIndexOf('@') <= 0"
+            " || bytes(this.trim().substring(0, this.trim().lastIndexOf('@'))).size() <= 64"
+        }
+      ]
+    }
+  ];
+}
+
+// RequestEmailChangeResponse is deliberately empty, and its emptiness is the
+// feature.
+//
+// Three outcomes reach it and all three produce these zero bytes: the address
+// was free and is now claimed, the address is already claimed by somebody else,
+// and the address is the one this account already holds. Reporting which would
+// turn an authenticated caller into an address-enumeration oracle — they could
+// walk a list and learn which addresses have accounts, one refusal at a time,
+// which is the ability identity.md §7 removes from every other surface.
+//
+// The client renders one sentence: "check the new address for a link".
+message RequestEmailChangeResponse {}
+
+// CancelEmailChangeRequest calls off a pending change. It names nothing: the
+// account is the caller's own, and the pending change is whichever one it holds.
+message CancelEmailChangeRequest {}
+
+// CancelEmailChangeResponse is empty. Cancelling when nothing is pending is
+// success, so there is no outcome to report.
+message CancelEmailChangeResponse {}
+
+// ConfirmEmailChangeRequest presents the token from the link mailed to the new
+// address.
+message ConfirmEmailChangeRequest {
+  // The plaintext from the link. It is hashed and spent server-side and is never
+  // stored, logged or placed in an event.
+  //
+  // The ceiling is a DENIAL-OF-SERVICE bound rather than a format rule, and it
+  // is deliberately far above any token this system mints so it cannot become a
+  // probe for the token's real length. A wrong token, a spent one and an expired
+  // one remain one refusal.
+  string token = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "PLACEHOLDER-not-a-real-change-token"}
+      pattern: "^\\S+$"
+    },
+    (buf.validate.field) = {
+      required: true
+      string: {max_len: 512}
+    }
+  ];
+}
+
+// ConfirmEmailChangeResponse is empty.
+//
+// It reports neither the new address nor the old one. The caller is holding a
+// link from a mailbox and has not authenticated, so echoing an address would
+// tell whoever intercepted that mail which account it belongs to.
+message ConfirmEmailChangeResponse {}
+
+// RevertEmailChangeRequest presents the token from the link mailed to the
+// address the account moved away from.
+message RevertEmailChangeRequest {
+  // The plaintext from the link, under ConfirmEmailChangeRequest.token's rules.
+  string token = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "PLACEHOLDER-not-a-real-revert-token"}
+      pattern: "^\\S+$"
+    },
+    (buf.validate.field) = {
+      required: true
+      string: {max_len: 512}
+    }
+  ];
+}
+
+// RevertEmailChangeResponse is empty, under ConfirmEmailChangeResponse's rule.
+message RevertEmailChangeResponse {}
 
 // RequestPasswordResetResponse is deliberately empty, and its emptiness is the
 // feature.
@@ -1489,17 +1606,15 @@ message GenerateRecoveryCodesResponse {
   // client sizing a printable list gets it from the document. Each code is 10
   // bytes of entropy as unpadded base32, presented in groups of four: 16
   // characters from A-Z2-7 and three hyphens.
-  repeated string codes = 2 [
-    (buf.validate.field).repeated = {
-      max_items: 20
-      items: {
-        string: {
-          len: 19
-          pattern: "^[A-Z2-7]{4}(-[A-Z2-7]{4}){3}$"
-        }
+  repeated string codes = 2 [(buf.validate.field).repeated = {
+    max_items: 20
+    items: {
+      string: {
+        len: 19
+        pattern: "^[A-Z2-7]{4}(-[A-Z2-7]{4}){3}$"
       }
     }
-  ];
+  }];
 }
 
 // RevokeSessionRequest ends one of the caller's sessions.
@@ -3324,6 +3439,227 @@ service IdentityService {
           }
         }
       ]
+    };
+  }
+
+  // RequestEmailChange starts a move to a different email address.
+  //
+  // Nothing about the account moves here, and that is the design rather than a
+  // limitation: identity.md §12 requires the NEW address to be proven first,
+  // because otherwise an attacker holding a session takes ownership by naming an
+  // address they cannot read. This claims the address and mails a link to it.
+  //
+  // Two messages go out. The link goes to the new address. A SECURITY warning
+  // goes to the address the account uses today — with no link and not even the
+  // new address in it, since that mailbox is exactly the one an attacker may
+  // already be reading. That warning is what makes the flow survivable, and it
+  // is why this RPC is worth having rather than an administrator's edit.
+  //
+  // AAL2, because identity.md §4.3 lists an email change among the operations
+  // that require step-up. There is no `bootstrap_min_aal`: an account with no
+  // second factor has no business moving its recovery address, and the bootstrap
+  // exemption exists to let somebody ENROL a factor, not to widen what a
+  // single-factor session may do.
+  rpc RequestEmailChange(RequestEmailChangeRequest) returns (RequestEmailChangeResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+    option (chronos.options.v1.min_aal) = ASSURANCE_LEVEL_2;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+      responses: {
+        response_or_reference: [
+          {
+            name: "200"
+            value: {
+              response: {
+                description:
+                  "Accepted. The body is empty, and its emptiness is deliberate: this\n"
+                  "response is identical whether the address was free or is already\n"
+                  "claimed by somebody else. Reporting the difference would turn an\n"
+                  "authenticated caller into an address-enumeration oracle.\n"
+                  "Render one sentence — \"check the new address for a link\".\n"
+                content: {
+                  additional_properties: [
+                    {
+                      name: "application/json"
+                      value: {
+                        schema: {reference: {_ref: "#/components/schemas/chronos.identity.v1.RequestEmailChangeResponse"}}
+                        example: {yaml: "{}"}
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    };
+  }
+
+  // CancelEmailChange calls off a pending change.
+  //
+  // The action the security warning tells somebody to take. It releases the
+  // claim on the address and VOIDS the link already sitting in that mailbox, so
+  // a change the account holder refused cannot complete afterwards.
+  //
+  // Idempotent: cancelling when nothing is pending is success, because the
+  // caller asked for a state that already holds.
+  rpc CancelEmailChange(CancelEmailChangeRequest) returns (CancelEmailChangeResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+    option (chronos.options.v1.min_aal) = ASSURANCE_LEVEL_2;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // ConfirmEmailChange redeems the link mailed to the new address.
+  //
+  // Public: it is reached from a mailbox by a browser that has never
+  // authenticated — and after this call, could not be, because completing the
+  // change voids every session on the account (identity.md §4.4). The token IS
+  // the authentication and it is single-use.
+  //
+  // It grants nothing beyond the address move. No session is created and no
+  // bearer is returned; the caller's next act is an ordinary CreateSession with
+  // the new address.
+  //
+  // The old address is NOT released. It is held for a revert window and a link
+  // to undo the change is mailed to it, which is the remedy for the case where
+  // the party who proved the new address was not the account's owner.
+  rpc ConfirmEmailChange(ConfirmEmailChangeRequest) returns (ConfirmEmailChangeResponse) {
+    option (chronos.options.v1.public) = true;
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    option (gnostic.openapi.v3.operation) = {
+      security: [{}]
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+      responses: {
+        response_or_reference: [
+          {
+            name: "200"
+            value: {
+              response: {
+                description:
+                  "The account now uses the new address, and every session on it —\n"
+                  "including any held by whoever requested the change — has been\n"
+                  "signed out. Send the caller to sign in with the new address.\n"
+                  "The body is empty: an unknown token, a spent one and an expired\n"
+                  "one all answer VALIDATION_FAILED with one message, because\n"
+                  "distinguishing them tells whoever holds a stale link that the\n"
+                  "address it was sent to is real.\n"
+                content: {
+                  additional_properties: [
+                    {
+                      name: "application/json"
+                      value: {
+                        schema: {reference: {_ref: "#/components/schemas/chronos.identity.v1.ConfirmEmailChangeResponse"}}
+                        example: {yaml: "{}"}
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    };
+  }
+
+  // RevertEmailChange undoes a completed change.
+  //
+  // Public, and reached from a link mailed to the address the account moved AWAY
+  // from — so whoever redeems it has proven control of the address the account
+  // had BEFORE the change. That is the whole remedy identity.md §12 asks for: an
+  // attacker holding a session can move the address, and cannot stop the real
+  // owner being told and undoing it.
+  //
+  // It voids every session again, for a sharper reason than the change did: the
+  // party this is being undone against may still be holding the session they did
+  // it from.
+  //
+  // The window is finite. After it the old address is available to anybody, so
+  // this refuses rather than taking it back from whoever claimed it since.
+  rpc RevertEmailChange(RevertEmailChangeRequest) returns (RevertEmailChangeResponse) {
+    option (chronos.options.v1.public) = true;
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    option (gnostic.openapi.v3.operation) = {
+      security: [{}]
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+      responses: {
+        response_or_reference: [
+          {
+            name: "200"
+            value: {
+              response: {
+                description:
+                  "The account uses its previous address again and every session on it\n"
+                  "has been signed out. Tell the caller to sign in and change their\n"
+                  "password: somebody was able to move the address, so the credential\n"
+                  "that let them should be assumed compromised.\n"
+                content: {
+                  additional_properties: [
+                    {
+                      name: "application/json"
+                      value: {
+                        schema: {reference: {_ref: "#/components/schemas/chronos.identity.v1.RevertEmailChangeResponse"}}
+                        example: {yaml: "{}"}
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
     };
   }
 }

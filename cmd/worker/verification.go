@@ -115,3 +115,52 @@ func newVerificationMail(d *dependencies) (*identityreactor.VerificationMail, er
 	}
 	return r, nil
 }
+
+// newEmailChangeMail builds the email-change mail reactor (identity.md §12).
+//
+// A separate reactor on a SEPARATE subscription group from the verification
+// mail, for the reason that one gives for its own: a change mail that keeps
+// failing must park on its own queue rather than stop registrations from being
+// verified — which is the one mail that is the only way into a new account.
+func newEmailChangeMail(d *dependencies) (*identityreactor.EmailChangeMail, error) {
+	if d.verification == nil {
+		return nil, errors.New("no token issuer was constructed")
+	}
+	codec, _ := newIdentityCodec()
+
+	var opts []identityreactor.ChangeOption
+	if d.temporal != nil {
+		opts = append(opts, identityreactor.WithChangeWorkflows(d.temporal))
+	}
+	r, err := identityreactor.NewEmailChangeMail(
+		purposeIssuerAdapter{issuer: d.verification}, codec, d.Notify(), opts...)
+	if err != nil {
+		return nil, fmt.Errorf("email-change mail: %w", err)
+	}
+	return r, nil
+}
+
+// purposeIssuerAdapter presents the same use case as the wider port.
+//
+// Structurally identical to issuerAdapter above and separate for the reason that
+// one gives: identity/reactor must not import identity/app, so each port gets a
+// mechanical conversion at the composition root rather than a shared type that
+// would have to live in one of the two packages.
+type purposeIssuerAdapter struct{ issuer *app.VerificationIssuer }
+
+var _ identityreactor.PurposeIssuer = purposeIssuerAdapter{}
+
+func (a purposeIssuerAdapter) IssueFor(
+	ctx context.Context, purpose app.TokenPurpose, subjectID string,
+) (identityreactor.Verification, error) {
+	v, err := a.issuer.IssueFor(ctx, purpose, subjectID)
+	if err != nil {
+		return identityreactor.Verification{}, err
+	}
+	return identityreactor.Verification{
+		Plaintext:   v.Plaintext,
+		ExpiresAt:   v.ExpiresAt,
+		TTL:         v.TTL,
+		Fingerprint: v.Fingerprint,
+	}, nil
+}

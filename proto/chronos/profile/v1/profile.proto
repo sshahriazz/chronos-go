@@ -219,24 +219,20 @@ message UpdateProfileRequest {
   // could name. Sending an empty string is refused rather than silently
   // treated as "unchanged", because a client that meant to clear it deserves an
   // error instead of a save that appears to have worked.
-  optional string display_name = 1 [
-    (buf.validate.field).string = {
-      min_len: 1
-      max_len: 80
-      pattern: "^\\S(.*\\S)?$"
-    }
-  ];
+  optional string display_name = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 80
+    pattern: "^\\S(.*\\S)?$"
+  }];
 
   // The language to render wording in, as a BCP-47 tag: `en`, `en-GB`,
   // `zh-Hans`, `de-AT`.
   //
   // Cannot be cleared, for the same reason as `display_name`.
-  optional string locale = 2 [
-    (buf.validate.field).string = {
-      max_len: 35
-      pattern: "^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$"
-    }
-  ];
+  optional string locale = 2 [(buf.validate.field).string = {
+    max_len: 35
+    pattern: "^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$"
+  }];
 
   // The IANA zone to render timestamps in, e.g. `Europe/Berlin`, `UTC`.
   //
@@ -244,12 +240,10 @@ message UpdateProfileRequest {
   // wrong for half of every year in most of the world, and a person who set one
   // in January would silently receive mail an hour out from March. Cannot be
   // cleared, for the same reason as `display_name`.
-  optional string timezone = 3 [
-    (buf.validate.field).string = {
-      max_len: 64
-      pattern: "^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+.-]+)*$"
-    }
-  ];
+  optional string timezone = 3 [(buf.validate.field).string = {
+    max_len: 64
+    pattern: "^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+.-]+)*$"
+  }];
 
   // The object key of an avatar that has ALREADY been uploaded, or the empty
   // string to remove the current one.
@@ -265,12 +259,10 @@ message UpdateProfileRequest {
   // somebody else is rejected before the object store is contacted. The object
   // is then verified — it must exist, be non-empty, be within the size the
   // grant allowed, and still carry the media type the grant pinned.
-  optional string avatar_object_key = 4 [
-    (buf.validate.field).string = {
-      max_len: 128
-      pattern: "^$|^[a-z0-9]{1,72}/[a-z2-9]{20,48}$"
-    }
-  ];
+  optional string avatar_object_key = 4 [(buf.validate.field).string = {
+    max_len: 128
+    pattern: "^$|^[a-z0-9]{1,72}/[a-z2-9]{20,48}$"
+  }];
 }
 
 // UpdateProfileResponse is the profile as it now stands.
@@ -316,12 +308,10 @@ message CreateAvatarUploadRequest {
   // Declared so the signed policy can pin a `content-length-range`, which is
   // enforced BY THE OBJECT STORE before a byte is stored. That is the property
   // a presigned PUT cannot give, and it is why the upload is a POST.
-  int64 size_bytes = 2 [
-    (buf.validate.field).int64 = {
-      gt: 0
-      lte: 5242880
-    }
-  ];
+  int64 size_bytes = 2 [(buf.validate.field).int64 = {
+    gt: 0
+    lte: 5242880
+  }];
 }
 
 // CreateAvatarUploadResponse is a signed, single-use, expiring upload target.
@@ -454,7 +444,6 @@ service ProfileService {
         }
       ]
     };
-
   }
 
   // CreateAvatarUpload mints a signed target the browser uploads an image to
@@ -488,6 +477,5 @@ service ProfileService {
         }
       ]
     };
-
   }
 }

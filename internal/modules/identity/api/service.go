@@ -168,6 +168,19 @@ type Lifecycle interface {
 	) (app.CancelAccountDeletionResult, error)
 }
 
+// EmailChanges is identity.md §12's identifier-change flow.
+//
+// A port declared by its consumer (CONVENTIONS §2). Four methods because the
+// flow has four moments and each is reached by a different party: the holder
+// asks, the holder can call it off, whoever reads the NEW mailbox completes it,
+// and whoever reads the OLD one can undo it.
+type EmailChanges interface {
+	Request(ctx context.Context, cmd app.RequestEmailChangeCommand) error
+	Cancel(ctx context.Context, cmd app.CancelEmailChangeCommand) error
+	Confirm(ctx context.Context, cmd app.ConfirmEmailChangeCommand) error
+	Revert(ctx context.Context, cmd app.RevertEmailChangeCommand) error
+}
+
 // Queries is identity's read side.
 type Queries interface {
 	GetUser(ctx context.Context, subjectID string) (app.AccountView, error)
@@ -201,6 +214,9 @@ type Deps struct {
 	// Lifecycle is deactivation and the deletion request. Required; see New.
 	Lifecycle Lifecycle
 
+	// Emails is the identifier-change flow. Required; see New.
+	Emails EmailChanges
+
 	Queries Queries
 
 	// Directory turns the caller's pseudonym into the account id the second-factor
@@ -230,6 +246,7 @@ type Service struct {
 	authn        Authentication
 	secondFactor SecondFactor
 	lifecycle    Lifecycle
+	emails       EmailChanges
 	queries      Queries
 	directory    app.UserDirectory
 	callerScope  clientip.Resolver
@@ -279,6 +296,13 @@ func New(deps Deps) (*Service, error) {
 		// a person can switch their own account off — the control a worried account
 		// holder reaches for first.
 		return nil, missing("an account lifecycle service")
+	case deps.Emails == nil:
+		// Refused rather than tolerated. A nil here serves four RPCs with a panic,
+		// and one of them is the REVERT — the only remedy somebody has when their
+		// account's address has been moved out from under them. A panic on that
+		// path is an account takeover that cannot be undone, in a process that
+		// reported a healthy start.
+		return nil, missing("an email-change service")
 	case deps.Queries == nil:
 		return nil, missing("a read side")
 	case deps.Directory == nil:
@@ -292,6 +316,7 @@ func New(deps Deps) (*Service, error) {
 		authn:        deps.Authentication,
 		secondFactor: deps.SecondFactor,
 		lifecycle:    deps.Lifecycle,
+		emails:       deps.Emails,
 		queries:      deps.Queries,
 		directory:    deps.Directory,
 		callerScope:  deps.CallerScope,

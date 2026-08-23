@@ -63,6 +63,41 @@ func (q *Queries) DeleteReleasedReservations(ctx context.Context, releasedAt pgt
 	return result.RowsAffected(), nil
 }
 
+const DemoteEmailReservation = `-- name: DemoteEmailReservation :exec
+UPDATE email_reservation_view
+SET verified = false, expires_at = $3
+WHERE email_index = $1 AND subject_id = $2 AND released_at IS NULL
+`
+
+type DemoteEmailReservationParams struct {
+	EmailIndex string
+	SubjectID  string
+	ExpiresAt  pgtype.Timestamptz
+}
+
+// Applied from EmailReservationDemoted: a verified claim becomes a leased one.
+//
+// The old address of an email change, held open only for its revert window
+// (identity.md §12). The row keeps its subject — that is what stops anybody else
+// taking the address while the window is open — and gains a deadline, which is
+// what makes ListLapsedReservations pick it up when the window closes. The sweep
+// then issues the release against the STREAM, so the address frees itself
+// through the same path every lapsed claim takes and nothing special has to
+// remember it.
+//
+// Guarded on subject_id for ConfirmEmailReservation's reason: a demotion names
+// the subject whose claim is being timed out, and applying it to a row held by
+// somebody else would put a deadline on an address they own.
+//
+// `released_at IS NULL` keeps a released row released. Without it a replay of
+// this event after the window had closed and the sweep had run would resurrect
+// the claim as live-with-a-past-deadline, which the sweep would then release
+// again — an event per replay, forever.
+func (q *Queries) DemoteEmailReservation(ctx context.Context, arg DemoteEmailReservationParams) error {
+	_, err := q.db.Exec(ctx, DemoteEmailReservation, arg.EmailIndex, arg.SubjectID, arg.ExpiresAt)
+	return err
+}
+
 const GetEmailReservation = `-- name: GetEmailReservation :one
 SELECT email_index, subject_id, verified, expires_at, reserved_at, released_at
 FROM email_reservation_view

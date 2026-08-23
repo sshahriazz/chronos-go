@@ -206,12 +206,10 @@ message ChannelPreference {
   // Which channel. `CHANNEL_UNSPECIFIED` is refused rather than defaulted: a
   // toggle that silently applied to a channel the caller did not name is a
   // notification silenced by accident.
-  Channel channel = 1 [
-    (buf.validate.field).enum = {
-      defined_only: true
-      not_in: [0]
-    }
-  ];
+  Channel channel = 1 [(buf.validate.field).enum = {
+    defined_only: true
+    not_in: [0]
+  }];
 
   // Whether the caller wants this channel. Absence of a preference means
   // ENABLED, so a person who has never opened the settings screen still
@@ -340,19 +338,17 @@ message MarkNotificationsReadRequest {
   // An id that is not in the CALLER'S OWN feed is refused, and refused
   // identically to one that does not exist — a caller able to tell those apart
   // could test notification ids for existence.
-  repeated string notification_ids = 2 [
-    (buf.validate.field).repeated = {
-      min_items: 1
-      max_items: 100
-      unique: true
-      items: {
-        string: {
-          max_len: 32
-          pattern: "^notif_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
-        }
+  repeated string notification_ids = 2 [(buf.validate.field).repeated = {
+    min_items: 1
+    max_items: 100
+    unique: true
+    items: {
+      string: {
+        max_len: 32
+        pattern: "^notif_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
       }
     }
-  ];
+  }];
 }
 
 // MarkNotificationsReadResponse reports what changed.
@@ -397,34 +393,28 @@ message RegisterPushSubscriptionRequest {
   // literal, a loopback name or an internal suffix is refused. The server POSTs
   // to this URL, so an unconstrained value here is a request-forgery primitive
   // aimed at whatever the server can reach.
-  string endpoint = 2 [
-    (buf.validate.field).string = {
-      uri: true
-      min_len: 12
-      max_len: 2048
-      pattern: "^https://"
-    }
-  ];
+  string endpoint = 2 [(buf.validate.field).string = {
+    uri: true
+    min_len: 12
+    max_len: 2048
+    pattern: "^https://"
+  }];
 
   // The subscription's P-256 ECDH public key, base64url as the browser reports
   // it. A transport credential, never returned by any response.
-  string p256dh = 3 [
-    (buf.validate.field).string = {
-      min_len: 1
-      max_len: 256
-      pattern: "^[A-Za-z0-9_-]+=*$"
-    }
-  ];
+  string p256dh = 3 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 256
+    pattern: "^[A-Za-z0-9_-]+=*$"
+  }];
 
   // The subscription's authentication secret, base64url as the browser reports
   // it. A transport credential, never returned by any response.
-  string auth = 4 [
-    (buf.validate.field).string = {
-      min_len: 1
-      max_len: 256
-      pattern: "^[A-Za-z0-9_-]+=*$"
-    }
-  ];
+  string auth = 4 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 256
+    pattern: "^[A-Za-z0-9_-]+=*$"
+  }];
 
   // The browser's user agent, so a person can recognise a device in a support
   // conversation. Optional, and truncated rather than rejected by the client.
@@ -478,14 +468,12 @@ message RemovePushSubscriptionRequest {
   ];
 
   // The push service URL to retire. Same constraints as registration.
-  string endpoint = 2 [
-    (buf.validate.field).string = {
-      uri: true
-      min_len: 12
-      max_len: 2048
-      pattern: "^https://"
-    }
-  ];
+  string endpoint = 2 [(buf.validate.field).string = {
+    uri: true
+    min_len: 12
+    max_len: 2048
+    pattern: "^https://"
+  }];
 }
 
 // RemovePushSubscriptionResponse reports what happened.
@@ -702,7 +690,6 @@ service NotificationService {
         }
       ]
     };
-
   }
 
   // RemovePushSubscription retires a browser endpoint.
@@ -734,7 +721,6 @@ service NotificationService {
         }
       ]
     };
-
   }
 
   // GetNotificationPreferences returns the caller's own channel toggles, and
@@ -781,6 +767,5 @@ service NotificationService {
         }
       ]
     };
-
   }
 }

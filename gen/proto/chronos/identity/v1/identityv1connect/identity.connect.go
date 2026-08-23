@@ -149,6 +149,18 @@ const (
 	// IdentityServiceCancelAccountDeletionProcedure is the fully-qualified name of the
 	// IdentityService's CancelAccountDeletion RPC.
 	IdentityServiceCancelAccountDeletionProcedure = "/chronos.identity.v1.IdentityService/CancelAccountDeletion"
+	// IdentityServiceRequestEmailChangeProcedure is the fully-qualified name of the IdentityService's
+	// RequestEmailChange RPC.
+	IdentityServiceRequestEmailChangeProcedure = "/chronos.identity.v1.IdentityService/RequestEmailChange"
+	// IdentityServiceCancelEmailChangeProcedure is the fully-qualified name of the IdentityService's
+	// CancelEmailChange RPC.
+	IdentityServiceCancelEmailChangeProcedure = "/chronos.identity.v1.IdentityService/CancelEmailChange"
+	// IdentityServiceConfirmEmailChangeProcedure is the fully-qualified name of the IdentityService's
+	// ConfirmEmailChange RPC.
+	IdentityServiceConfirmEmailChangeProcedure = "/chronos.identity.v1.IdentityService/ConfirmEmailChange"
+	// IdentityServiceRevertEmailChangeProcedure is the fully-qualified name of the IdentityService's
+	// RevertEmailChange RPC.
+	IdentityServiceRevertEmailChangeProcedure = "/chronos.identity.v1.IdentityService/RevertEmailChange"
 )
 
 // IdentityServiceClient is a client for the chronos.identity.v1.IdentityService service.
@@ -477,6 +489,64 @@ type IdentityServiceClient interface {
 	// back to, and saying so specifically would confirm that a particular person
 	// once held it.
 	CancelAccountDeletion(context.Context, *connect.Request[v1.CancelAccountDeletionRequest]) (*connect.Response[v1.CancelAccountDeletionResponse], error)
+	// RequestEmailChange starts a move to a different email address.
+	//
+	// Nothing about the account moves here, and that is the design rather than a
+	// limitation: identity.md §12 requires the NEW address to be proven first,
+	// because otherwise an attacker holding a session takes ownership by naming an
+	// address they cannot read. This claims the address and mails a link to it.
+	//
+	// Two messages go out. The link goes to the new address. A SECURITY warning
+	// goes to the address the account uses today — with no link and not even the
+	// new address in it, since that mailbox is exactly the one an attacker may
+	// already be reading. That warning is what makes the flow survivable, and it
+	// is why this RPC is worth having rather than an administrator's edit.
+	//
+	// AAL2, because identity.md §4.3 lists an email change among the operations
+	// that require step-up. There is no `bootstrap_min_aal`: an account with no
+	// second factor has no business moving its recovery address, and the bootstrap
+	// exemption exists to let somebody ENROL a factor, not to widen what a
+	// single-factor session may do.
+	RequestEmailChange(context.Context, *connect.Request[v1.RequestEmailChangeRequest]) (*connect.Response[v1.RequestEmailChangeResponse], error)
+	// CancelEmailChange calls off a pending change.
+	//
+	// The action the security warning tells somebody to take. It releases the
+	// claim on the address and VOIDS the link already sitting in that mailbox, so
+	// a change the account holder refused cannot complete afterwards.
+	//
+	// Idempotent: cancelling when nothing is pending is success, because the
+	// caller asked for a state that already holds.
+	CancelEmailChange(context.Context, *connect.Request[v1.CancelEmailChangeRequest]) (*connect.Response[v1.CancelEmailChangeResponse], error)
+	// ConfirmEmailChange redeems the link mailed to the new address.
+	//
+	// Public: it is reached from a mailbox by a browser that has never
+	// authenticated — and after this call, could not be, because completing the
+	// change voids every session on the account (identity.md §4.4). The token IS
+	// the authentication and it is single-use.
+	//
+	// It grants nothing beyond the address move. No session is created and no
+	// bearer is returned; the caller's next act is an ordinary CreateSession with
+	// the new address.
+	//
+	// The old address is NOT released. It is held for a revert window and a link
+	// to undo the change is mailed to it, which is the remedy for the case where
+	// the party who proved the new address was not the account's owner.
+	ConfirmEmailChange(context.Context, *connect.Request[v1.ConfirmEmailChangeRequest]) (*connect.Response[v1.ConfirmEmailChangeResponse], error)
+	// RevertEmailChange undoes a completed change.
+	//
+	// Public, and reached from a link mailed to the address the account moved AWAY
+	// from — so whoever redeems it has proven control of the address the account
+	// had BEFORE the change. That is the whole remedy identity.md §12 asks for: an
+	// attacker holding a session can move the address, and cannot stop the real
+	// owner being told and undoing it.
+	//
+	// It voids every session again, for a sharper reason than the change did: the
+	// party this is being undone against may still be holding the session they did
+	// it from.
+	//
+	// The window is finite. After it the old address is available to anybody, so
+	// this refuses rather than taking it back from whoever claimed it since.
+	RevertEmailChange(context.Context, *connect.Request[v1.RevertEmailChangeRequest]) (*connect.Response[v1.RevertEmailChangeResponse], error)
 }
 
 // NewIdentityServiceClient constructs a client for the chronos.identity.v1.IdentityService service.
@@ -614,6 +684,30 @@ func NewIdentityServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(identityServiceMethods.ByName("CancelAccountDeletion")),
 			connect.WithClientOptions(opts...),
 		),
+		requestEmailChange: connect.NewClient[v1.RequestEmailChangeRequest, v1.RequestEmailChangeResponse](
+			httpClient,
+			baseURL+IdentityServiceRequestEmailChangeProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("RequestEmailChange")),
+			connect.WithClientOptions(opts...),
+		),
+		cancelEmailChange: connect.NewClient[v1.CancelEmailChangeRequest, v1.CancelEmailChangeResponse](
+			httpClient,
+			baseURL+IdentityServiceCancelEmailChangeProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("CancelEmailChange")),
+			connect.WithClientOptions(opts...),
+		),
+		confirmEmailChange: connect.NewClient[v1.ConfirmEmailChangeRequest, v1.ConfirmEmailChangeResponse](
+			httpClient,
+			baseURL+IdentityServiceConfirmEmailChangeProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("ConfirmEmailChange")),
+			connect.WithClientOptions(opts...),
+		),
+		revertEmailChange: connect.NewClient[v1.RevertEmailChangeRequest, v1.RevertEmailChangeResponse](
+			httpClient,
+			baseURL+IdentityServiceRevertEmailChangeProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("RevertEmailChange")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -639,6 +733,10 @@ type identityServiceClient struct {
 	deactivateAccount         *connect.Client[v1.DeactivateAccountRequest, v1.DeactivateAccountResponse]
 	requestAccountDeletion    *connect.Client[v1.RequestAccountDeletionRequest, v1.RequestAccountDeletionResponse]
 	cancelAccountDeletion     *connect.Client[v1.CancelAccountDeletionRequest, v1.CancelAccountDeletionResponse]
+	requestEmailChange        *connect.Client[v1.RequestEmailChangeRequest, v1.RequestEmailChangeResponse]
+	cancelEmailChange         *connect.Client[v1.CancelEmailChangeRequest, v1.CancelEmailChangeResponse]
+	confirmEmailChange        *connect.Client[v1.ConfirmEmailChangeRequest, v1.ConfirmEmailChangeResponse]
+	revertEmailChange         *connect.Client[v1.RevertEmailChangeRequest, v1.RevertEmailChangeResponse]
 }
 
 // Register calls chronos.identity.v1.IdentityService.Register.
@@ -739,6 +837,26 @@ func (c *identityServiceClient) RequestAccountDeletion(ctx context.Context, req 
 // CancelAccountDeletion calls chronos.identity.v1.IdentityService.CancelAccountDeletion.
 func (c *identityServiceClient) CancelAccountDeletion(ctx context.Context, req *connect.Request[v1.CancelAccountDeletionRequest]) (*connect.Response[v1.CancelAccountDeletionResponse], error) {
 	return c.cancelAccountDeletion.CallUnary(ctx, req)
+}
+
+// RequestEmailChange calls chronos.identity.v1.IdentityService.RequestEmailChange.
+func (c *identityServiceClient) RequestEmailChange(ctx context.Context, req *connect.Request[v1.RequestEmailChangeRequest]) (*connect.Response[v1.RequestEmailChangeResponse], error) {
+	return c.requestEmailChange.CallUnary(ctx, req)
+}
+
+// CancelEmailChange calls chronos.identity.v1.IdentityService.CancelEmailChange.
+func (c *identityServiceClient) CancelEmailChange(ctx context.Context, req *connect.Request[v1.CancelEmailChangeRequest]) (*connect.Response[v1.CancelEmailChangeResponse], error) {
+	return c.cancelEmailChange.CallUnary(ctx, req)
+}
+
+// ConfirmEmailChange calls chronos.identity.v1.IdentityService.ConfirmEmailChange.
+func (c *identityServiceClient) ConfirmEmailChange(ctx context.Context, req *connect.Request[v1.ConfirmEmailChangeRequest]) (*connect.Response[v1.ConfirmEmailChangeResponse], error) {
+	return c.confirmEmailChange.CallUnary(ctx, req)
+}
+
+// RevertEmailChange calls chronos.identity.v1.IdentityService.RevertEmailChange.
+func (c *identityServiceClient) RevertEmailChange(ctx context.Context, req *connect.Request[v1.RevertEmailChangeRequest]) (*connect.Response[v1.RevertEmailChangeResponse], error) {
+	return c.revertEmailChange.CallUnary(ctx, req)
 }
 
 // IdentityServiceHandler is an implementation of the chronos.identity.v1.IdentityService service.
@@ -1067,6 +1185,64 @@ type IdentityServiceHandler interface {
 	// back to, and saying so specifically would confirm that a particular person
 	// once held it.
 	CancelAccountDeletion(context.Context, *connect.Request[v1.CancelAccountDeletionRequest]) (*connect.Response[v1.CancelAccountDeletionResponse], error)
+	// RequestEmailChange starts a move to a different email address.
+	//
+	// Nothing about the account moves here, and that is the design rather than a
+	// limitation: identity.md §12 requires the NEW address to be proven first,
+	// because otherwise an attacker holding a session takes ownership by naming an
+	// address they cannot read. This claims the address and mails a link to it.
+	//
+	// Two messages go out. The link goes to the new address. A SECURITY warning
+	// goes to the address the account uses today — with no link and not even the
+	// new address in it, since that mailbox is exactly the one an attacker may
+	// already be reading. That warning is what makes the flow survivable, and it
+	// is why this RPC is worth having rather than an administrator's edit.
+	//
+	// AAL2, because identity.md §4.3 lists an email change among the operations
+	// that require step-up. There is no `bootstrap_min_aal`: an account with no
+	// second factor has no business moving its recovery address, and the bootstrap
+	// exemption exists to let somebody ENROL a factor, not to widen what a
+	// single-factor session may do.
+	RequestEmailChange(context.Context, *connect.Request[v1.RequestEmailChangeRequest]) (*connect.Response[v1.RequestEmailChangeResponse], error)
+	// CancelEmailChange calls off a pending change.
+	//
+	// The action the security warning tells somebody to take. It releases the
+	// claim on the address and VOIDS the link already sitting in that mailbox, so
+	// a change the account holder refused cannot complete afterwards.
+	//
+	// Idempotent: cancelling when nothing is pending is success, because the
+	// caller asked for a state that already holds.
+	CancelEmailChange(context.Context, *connect.Request[v1.CancelEmailChangeRequest]) (*connect.Response[v1.CancelEmailChangeResponse], error)
+	// ConfirmEmailChange redeems the link mailed to the new address.
+	//
+	// Public: it is reached from a mailbox by a browser that has never
+	// authenticated — and after this call, could not be, because completing the
+	// change voids every session on the account (identity.md §4.4). The token IS
+	// the authentication and it is single-use.
+	//
+	// It grants nothing beyond the address move. No session is created and no
+	// bearer is returned; the caller's next act is an ordinary CreateSession with
+	// the new address.
+	//
+	// The old address is NOT released. It is held for a revert window and a link
+	// to undo the change is mailed to it, which is the remedy for the case where
+	// the party who proved the new address was not the account's owner.
+	ConfirmEmailChange(context.Context, *connect.Request[v1.ConfirmEmailChangeRequest]) (*connect.Response[v1.ConfirmEmailChangeResponse], error)
+	// RevertEmailChange undoes a completed change.
+	//
+	// Public, and reached from a link mailed to the address the account moved AWAY
+	// from — so whoever redeems it has proven control of the address the account
+	// had BEFORE the change. That is the whole remedy identity.md §12 asks for: an
+	// attacker holding a session can move the address, and cannot stop the real
+	// owner being told and undoing it.
+	//
+	// It voids every session again, for a sharper reason than the change did: the
+	// party this is being undone against may still be holding the session they did
+	// it from.
+	//
+	// The window is finite. After it the old address is available to anybody, so
+	// this refuses rather than taking it back from whoever claimed it since.
+	RevertEmailChange(context.Context, *connect.Request[v1.RevertEmailChangeRequest]) (*connect.Response[v1.RevertEmailChangeResponse], error)
 }
 
 // NewIdentityServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -1200,6 +1376,30 @@ func NewIdentityServiceHandler(svc IdentityServiceHandler, opts ...connect.Handl
 		connect.WithSchema(identityServiceMethods.ByName("CancelAccountDeletion")),
 		connect.WithHandlerOptions(opts...),
 	)
+	identityServiceRequestEmailChangeHandler := connect.NewUnaryHandler(
+		IdentityServiceRequestEmailChangeProcedure,
+		svc.RequestEmailChange,
+		connect.WithSchema(identityServiceMethods.ByName("RequestEmailChange")),
+		connect.WithHandlerOptions(opts...),
+	)
+	identityServiceCancelEmailChangeHandler := connect.NewUnaryHandler(
+		IdentityServiceCancelEmailChangeProcedure,
+		svc.CancelEmailChange,
+		connect.WithSchema(identityServiceMethods.ByName("CancelEmailChange")),
+		connect.WithHandlerOptions(opts...),
+	)
+	identityServiceConfirmEmailChangeHandler := connect.NewUnaryHandler(
+		IdentityServiceConfirmEmailChangeProcedure,
+		svc.ConfirmEmailChange,
+		connect.WithSchema(identityServiceMethods.ByName("ConfirmEmailChange")),
+		connect.WithHandlerOptions(opts...),
+	)
+	identityServiceRevertEmailChangeHandler := connect.NewUnaryHandler(
+		IdentityServiceRevertEmailChangeProcedure,
+		svc.RevertEmailChange,
+		connect.WithSchema(identityServiceMethods.ByName("RevertEmailChange")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/chronos.identity.v1.IdentityService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case IdentityServiceRegisterProcedure:
@@ -1242,6 +1442,14 @@ func NewIdentityServiceHandler(svc IdentityServiceHandler, opts ...connect.Handl
 			identityServiceRequestAccountDeletionHandler.ServeHTTP(w, r)
 		case IdentityServiceCancelAccountDeletionProcedure:
 			identityServiceCancelAccountDeletionHandler.ServeHTTP(w, r)
+		case IdentityServiceRequestEmailChangeProcedure:
+			identityServiceRequestEmailChangeHandler.ServeHTTP(w, r)
+		case IdentityServiceCancelEmailChangeProcedure:
+			identityServiceCancelEmailChangeHandler.ServeHTTP(w, r)
+		case IdentityServiceConfirmEmailChangeProcedure:
+			identityServiceConfirmEmailChangeHandler.ServeHTTP(w, r)
+		case IdentityServiceRevertEmailChangeProcedure:
+			identityServiceRevertEmailChangeHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1329,4 +1537,20 @@ func (UnimplementedIdentityServiceHandler) RequestAccountDeletion(context.Contex
 
 func (UnimplementedIdentityServiceHandler) CancelAccountDeletion(context.Context, *connect.Request[v1.CancelAccountDeletionRequest]) (*connect.Response[v1.CancelAccountDeletionResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.CancelAccountDeletion is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) RequestEmailChange(context.Context, *connect.Request[v1.RequestEmailChangeRequest]) (*connect.Response[v1.RequestEmailChangeResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.RequestEmailChange is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) CancelEmailChange(context.Context, *connect.Request[v1.CancelEmailChangeRequest]) (*connect.Response[v1.CancelEmailChangeResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.CancelEmailChange is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) ConfirmEmailChange(context.Context, *connect.Request[v1.ConfirmEmailChangeRequest]) (*connect.Response[v1.ConfirmEmailChangeResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.ConfirmEmailChange is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) RevertEmailChange(context.Context, *connect.Request[v1.RevertEmailChangeRequest]) (*connect.Response[v1.RevertEmailChangeResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.RevertEmailChange is not implemented"))
 }

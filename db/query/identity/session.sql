@@ -97,9 +97,14 @@ UPDATE user_view SET username = NULL WHERE username = $1;
 -- names the holder whose claim ended, and applying it to whoever holds the
 -- address now would retire the live row and hand the index to nobody. On
 -- email_index because an account that has since moved to another address must
--- not be marked as having released the one it currently holds — the guard is
--- redundant today (there is no email-change flow) and is what keeps it correct
--- on the day there is one.
+-- not be marked as having released the one it currently holds.
+--
+-- That second guard was written while it was redundant, against the day an
+-- email-change flow existed. It exists now (identity.md §12), and the guard is
+-- what it was written for: the old address of a completed change is released by
+-- the sweep when its revert window closes, LONG after the account moved on, and
+-- an unguarded statement would then stamp `email_released_at` on an account that
+-- holds a perfectly good address — reporting it as holding none.
 --
 -- `email_released_at IS NULL` makes it idempotent: replayed, the second
 -- application matches no row and the first timestamp stands. Re-applying with

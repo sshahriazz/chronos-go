@@ -57,6 +57,39 @@ func NewUser(codec eventsourcing.Codec) *User {
 		return nil
 	})
 
+	// THE ADDRESS MOVING (identity.md §12), on both legs.
+	//
+	// Without these two the account is findable by the address it LEFT and by no
+	// other: `AccountByEmailIndex` reads this table, so a completed change would
+	// leave the person unable to sign in with their new address while whoever
+	// caused the change keeps signing in with the old one. That is the change
+	// achieving the exact opposite of what it is for.
+	//
+	// They write the same statement EmailVerified writes, because they assert the
+	// same two facts — this account's address is now X, and X is proven. The
+	// events are distinct rather than reusing EmailVerified so that the log says
+	// what happened; the projection collapses them because the ROW does not care
+	// how the address came to be proven.
+	//
+	// There is no handler clearing the old index, and there must not be: the row
+	// holds ONE address and these overwrite it. `EmailReleased` below is a
+	// different transition — an account holding no address at all — and firing it
+	// for the old address of a change would blank the account's identifier
+	// immediately after moving it.
+	d.On[contract.EmailChanged](func(
+		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.EmailChanged,
+	) error {
+		w.Exec(identitydb.MarkEmailVerified, e.SubjectID, string(e.ToIndex))
+		return nil
+	})
+
+	d.On[contract.EmailChangeReverted](func(
+		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.EmailChangeReverted,
+	) error {
+		w.Exec(identitydb.MarkEmailVerified, e.SubjectID, string(e.ToIndex))
+		return nil
+	})
+
 	// EmailReleased is the ONLY event that says an account has stopped holding
 	// its address, and it lives on the reservation stream rather than the
 	// account's own. Handling it here is therefore not a convenience: without it

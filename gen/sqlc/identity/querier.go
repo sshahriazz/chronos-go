@@ -163,6 +163,25 @@ type Querier interface {
 	// keep a derivative of a credential belonging to somebody who asked to be
 	// forgotten.
 	DeleteSessionTokensOfSubject(ctx context.Context, subjectID string) (int64, error)
+	// Applied from EmailReservationDemoted: a verified claim becomes a leased one.
+	//
+	// The old address of an email change, held open only for its revert window
+	// (identity.md §12). The row keeps its subject — that is what stops anybody else
+	// taking the address while the window is open — and gains a deadline, which is
+	// what makes ListLapsedReservations pick it up when the window closes. The sweep
+	// then issues the release against the STREAM, so the address frees itself
+	// through the same path every lapsed claim takes and nothing special has to
+	// remember it.
+	//
+	// Guarded on subject_id for ConfirmEmailReservation's reason: a demotion names
+	// the subject whose claim is being timed out, and applying it to a row held by
+	// somebody else would put a deadline on an address they own.
+	//
+	// `released_at IS NULL` keeps a released row released. Without it a replay of
+	// this event after the window had closed and the sweep had run would resurrect
+	// the claim as live-with-a-past-deadline, which the sweep would then release
+	// again — an event per replay, forever.
+	DemoteEmailReservation(ctx context.Context, arg DemoteEmailReservationParams) error
 	// Lock out one authenticator.
 	//
 	// Per authenticator, never per account: locking the ACCOUNT on failed attempts
@@ -503,9 +522,14 @@ type Querier interface {
 	// names the holder whose claim ended, and applying it to whoever holds the
 	// address now would retire the live row and hand the index to nobody. On
 	// email_index because an account that has since moved to another address must
-	// not be marked as having released the one it currently holds — the guard is
-	// redundant today (there is no email-change flow) and is what keeps it correct
-	// on the day there is one.
+	// not be marked as having released the one it currently holds.
+	//
+	// That second guard was written while it was redundant, against the day an
+	// email-change flow existed. It exists now (identity.md §12), and the guard is
+	// what it was written for: the old address of a completed change is released by
+	// the sweep when its revert window closes, LONG after the account moved on, and
+	// an unguarded statement would then stamp `email_released_at` on an account that
+	// holds a perfectly good address — reporting it as holding none.
 	//
 	// `email_released_at IS NULL` makes it idempotent: replayed, the second
 	// application matches no row and the first timestamp stands. Re-applying with

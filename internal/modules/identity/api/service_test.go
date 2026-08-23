@@ -364,6 +364,51 @@ type queryCall struct {
 // It records the COMMAND, not just that it was called, because the property
 // every test here asserts is which subject the handler named — and the handler is
 // required to take it from the principal and from nowhere else.
+// fakeEmailChanges records what each RPC handed the use case.
+//
+// It records COMMANDS rather than returning canned results, because the
+// handlers return nothing at all: the whole surface of the email-change RPCs is
+// what reaches the use case, and a fake that only reported errors would leave
+// every one of those tests asserting that an empty response is empty.
+type fakeEmailChanges struct {
+	mu sync.Mutex
+
+	requested []app.RequestEmailChangeCommand
+	cancelled []app.CancelEmailChangeCommand
+	confirmed []app.ConfirmEmailChangeCommand
+	reverted  []app.RevertEmailChangeCommand
+
+	err error
+}
+
+func (f *fakeEmailChanges) Request(_ context.Context, cmd app.RequestEmailChangeCommand) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requested = append(f.requested, cmd)
+	return f.err
+}
+
+func (f *fakeEmailChanges) Cancel(_ context.Context, cmd app.CancelEmailChangeCommand) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cancelled = append(f.cancelled, cmd)
+	return f.err
+}
+
+func (f *fakeEmailChanges) Confirm(_ context.Context, cmd app.ConfirmEmailChangeCommand) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.confirmed = append(f.confirmed, cmd)
+	return f.err
+}
+
+func (f *fakeEmailChanges) Revert(_ context.Context, cmd app.RevertEmailChangeCommand) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reverted = append(f.reverted, cmd)
+	return f.err
+}
+
 type fakeLifecycle struct {
 	mu sync.Mutex
 
@@ -615,6 +660,7 @@ func (f *fakeUsernames) checks() []app.CheckUsernameCommand {
 
 type harness struct {
 	client       identityv1connect.IdentityServiceClient
+	emails       *fakeEmailChanges
 	registration *fakeRegistration
 	resender     *fakeResender
 	resets       *fakeResets
@@ -658,6 +704,7 @@ func newHarness(t *testing.T, opts ...options) *harness {
 	}
 
 	h := &harness{
+		emails:       &fakeEmailChanges{},
 		registration: &fakeRegistration{},
 		resender:     &fakeResender{},
 		resets:       &fakeResets{},
@@ -685,6 +732,7 @@ func newHarness(t *testing.T, opts ...options) *harness {
 		Authentication: h.authn,
 		SecondFactor:   h.secondFactor,
 		Lifecycle:      h.lifecycle,
+		Emails:         h.emails,
 		Queries:        h.queries,
 		Directory:      h.directory,
 		CallerScope:    callerScope,
@@ -778,6 +826,7 @@ func TestNewRefusesAPartiallyWiredHandler(t *testing.T) {
 			Authentication: &fakeAuthentication{},
 			SecondFactor:   &fakeSecondFactor{},
 			Lifecycle:      &fakeLifecycle{},
+			Emails:         &fakeEmailChanges{},
 			Queries:        &fakeQueries{},
 			Directory:      &fakeDirectory{},
 		}
@@ -793,10 +842,15 @@ func TestNewRefusesAPartiallyWiredHandler(t *testing.T) {
 		// wiring.
 		"no username availability service": func(d *api.Deps) { d.Usernames = nil },
 		"no authentication service":        func(d *api.Deps) { d.Authentication = nil },
-		"no second-factor service":         func(d *api.Deps) { d.SecondFactor = nil },
-		"no lifecycle service":             func(d *api.Deps) { d.Lifecycle = nil },
-		"no read side":                     func(d *api.Deps) { d.Queries = nil },
-		"no user directory":                func(d *api.Deps) { d.Directory = nil },
+		// A nil here panics FOUR RPCs, and one of them is the revert — the only
+		// remedy somebody has when their account's address has been moved out
+		// from under them. A panic on that path is an account takeover that
+		// cannot be undone, in a process that reported a healthy start.
+		"no email-change service":  func(d *api.Deps) { d.Emails = nil },
+		"no second-factor service": func(d *api.Deps) { d.SecondFactor = nil },
+		"no lifecycle service":     func(d *api.Deps) { d.Lifecycle = nil },
+		"no read side":             func(d *api.Deps) { d.Queries = nil },
+		"no user directory":        func(d *api.Deps) { d.Directory = nil },
 	}
 	for name, remove := range tests {
 		t.Run(name, func(t *testing.T) {

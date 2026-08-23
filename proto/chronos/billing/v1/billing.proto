@@ -183,7 +183,10 @@ message ListInvoicesRequest {
   // How many to return. Defaults to 20 when unset.
   int32 page_size = 1 [
     (gnostic.openapi.v3.property) = {example: {yaml: "20"}},
-    (buf.validate.field).int32 = {gte: 0, lte: 100}
+    (buf.validate.field).int32 = {
+      gte: 0
+      lte: 100
+    }
   ];
 
   // The `next_page_token` from a previous response. Opaque: it encodes the sort
@@ -242,7 +245,6 @@ service BillingService {
     };
     option (chronos.options.v1.operation) = OPERATION_CLASS_BILLING_VIEW;
   }
-
 
   // CreateBillingPortalSession returns a signed link into Stripe's Customer
   // Portal for the caller's organization.

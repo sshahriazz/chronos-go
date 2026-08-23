@@ -911,6 +911,20 @@ components:
       title: CancelAccountDeletionResponse
       additionalProperties: false
       description: CancelAccountDeletionResponse reports whether anything was outstanding.
+    chronos.identity.v1.CancelEmailChangeRequest:
+      type: object
+      title: CancelEmailChangeRequest
+      additionalProperties: false
+      description: |-
+        CancelEmailChangeRequest calls off a pending change. It names nothing: the
+         account is the caller's own, and the pending change is whichever one it holds.
+    chronos.identity.v1.CancelEmailChangeResponse:
+      type: object
+      title: CancelEmailChangeResponse
+      additionalProperties: false
+      description: |-
+        CancelEmailChangeResponse is empty. Cancelling when nothing is pending is
+         success, so there is no outcome to report.
     chronos.identity.v1.CheckUsernameAvailabilityRequest:
       type: object
       properties:
@@ -970,6 +984,41 @@ components:
          held it was erased", which is a fact about a PERSON, and the tombstone exists
          precisely to protect that person. A field that distinguished it would undo the
          protection at the point of use.
+    chronos.identity.v1.ConfirmEmailChangeRequest:
+      type: object
+      properties:
+        token:
+          type: string
+          examples:
+            - PLACEHOLDER-not-a-real-change-token
+          title: token
+          maxLength: 512
+          pattern: ^\S+$
+          description: |-
+            The plaintext from the link. It is hashed and spent server-side and is never
+             stored, logged or placed in an event.
+
+             The ceiling is a DENIAL-OF-SERVICE bound rather than a format rule, and it
+             is deliberately far above any token this system mints so it cannot become a
+             probe for the token's real length. A wrong token, a spent one and an expired
+             one remain one refusal.
+      title: ConfirmEmailChangeRequest
+      required:
+        - token
+      additionalProperties: false
+      description: |-
+        ConfirmEmailChangeRequest presents the token from the link mailed to the new
+         address.
+    chronos.identity.v1.ConfirmEmailChangeResponse:
+      type: object
+      title: ConfirmEmailChangeResponse
+      additionalProperties: false
+      description: |-
+        ConfirmEmailChangeResponse is empty.
+
+         It reports neither the new address nor the old one. The caller is holding a
+         link from a mailbox and has not authenticated, so echoing an address would
+         tell whoever intercepted that mail which account it belongs to.
     chronos.identity.v1.ConfirmTotpRequest:
       type: object
       properties:
@@ -1905,6 +1954,49 @@ components:
          a Temporal workflow and has no inline fallback. With `TEMPORAL_ENABLED=false`
          the request is recorded and nothing runs, which the worker reports through its
          `temporal` health probe rather than leaving to be discovered.
+    chronos.identity.v1.RequestEmailChangeRequest:
+      type: object
+      properties:
+        newEmail:
+          type: string
+          examples:
+            - ada@example.com
+          title: new_email
+          maxLength: 254
+          pattern: ^.+@.+\..+$
+          description: |
+            The new address as typed. Reduced to a blind index server-side; neither the
+             raw nor the normalized form reaches an event, a log line or an error message
+             (ADR-002).
+
+             The rules are RegisterRequest.email's and RequestPasswordResetRequest.email's
+             character for character, and the duplication is deliberate for the reason
+             stated there: all of them front the same normalizer, so a rule that differed
+             in either direction would be visible on the wire.
+            identity.email.length // an email address may not exceed 254 bytes
+            identity.email.local_part // the local part of an email address may not exceed 64 bytes
+            identity.email.shape // an email address must contain a local part and a fully qualified domain
+      title: RequestEmailChangeRequest
+      required:
+        - newEmail
+      additionalProperties: false
+      description: RequestEmailChangeRequest names the address the account is moving to.
+    chronos.identity.v1.RequestEmailChangeResponse:
+      type: object
+      title: RequestEmailChangeResponse
+      additionalProperties: false
+      description: |-
+        RequestEmailChangeResponse is deliberately empty, and its emptiness is the
+         feature.
+
+         Three outcomes reach it and all three produce these zero bytes: the address
+         was free and is now claimed, the address is already claimed by somebody else,
+         and the address is the one this account already holds. Reporting which would
+         turn an authenticated caller into an address-enumeration oracle — they could
+         walk a list and learn which addresses have accounts, one refusal at a time,
+         which is the ability identity.md §7 removes from every other surface.
+
+         The client renders one sentence: "check the new address for a link".
     chronos.identity.v1.RequestPasswordResetRequest:
       type: object
       properties:
@@ -2098,6 +2190,29 @@ components:
          assurance level. A reset that returned a session would convert "the attacker
          can read the mailbox" into full account takeover in one step, and the surest
          way not to write that is to have no field to put it in.
+    chronos.identity.v1.RevertEmailChangeRequest:
+      type: object
+      properties:
+        token:
+          type: string
+          examples:
+            - PLACEHOLDER-not-a-real-revert-token
+          title: token
+          maxLength: 512
+          pattern: ^\S+$
+          description: The plaintext from the link, under ConfirmEmailChangeRequest.token's rules.
+      title: RevertEmailChangeRequest
+      required:
+        - token
+      additionalProperties: false
+      description: |-
+        RevertEmailChangeRequest presents the token from the link mailed to the
+         address the account moved away from.
+    chronos.identity.v1.RevertEmailChangeResponse:
+      type: object
+      title: RevertEmailChangeResponse
+      additionalProperties: false
+      description: RevertEmailChangeResponse is empty, under ConfirmEmailChangeResponse's rule.
     chronos.identity.v1.RevokeAllSessionsRequest:
       type: object
       properties:
@@ -5522,6 +5637,57 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.identity.v1.CancelAccountDeletionResponse'
+  /chronos.identity.v1.IdentityService/CancelEmailChange:
+    post:
+      tags:
+        - IdentityService
+      summary: CancelEmailChange calls off a pending change.
+      description: |-
+        The action the security warning tells somebody to take. It releases the
+         claim on the address and VOIDS the link already sitting in that mailbox, so
+         a change the account holder refused cannot complete afterwards.
+
+         Idempotent: cancelling when nothing is pending is success, because the
+         caller asked for a state that already holds.
+      operationId: IdentityService_CancelEmailChange
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.CancelEmailChangeRequest'
+            example: {}
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.CancelEmailChangeResponse'
   /chronos.identity.v1.IdentityService/CheckUsernameAvailability:
     post:
       tags:
@@ -5607,6 +5773,73 @@ paths:
               example:
                 available: false
                 username: ada_lovelace
+      security: []
+  /chronos.identity.v1.IdentityService/ConfirmEmailChange:
+    post:
+      tags:
+        - IdentityService
+      summary: ConfirmEmailChange redeems the link mailed to the new address.
+      description: |-
+        Public: it is reached from a mailbox by a browser that has never
+         authenticated — and after this call, could not be, because completing the
+         change voids every session on the account (identity.md §4.4). The token IS
+         the authentication and it is single-use.
+
+         It grants nothing beyond the address move. No session is created and no
+         bearer is returned; the caller's next act is an ordinary CreateSession with
+         the new address.
+
+         The old address is NOT released. It is held for a revert window and a link
+         to undo the change is mailed to it, which is the remedy for the case where
+         the party who proved the new address was not the account's owner.
+      operationId: IdentityService_ConfirmEmailChange
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.ConfirmEmailChangeRequest'
+            example:
+              token: PLACEHOLDER-not-a-real-change-token
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            The account now uses the new address, and every session on it —
+            including any held by whoever requested the change — has been
+            signed out. Send the caller to sign in with the new address.
+            The body is empty: an unknown token, a spent one and an expired
+            one all answer VALIDATION_FAILED with one message, because
+            distinguishing them tells whoever holds a stale link that the
+            address it was sent to is real.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.ConfirmEmailChangeResponse'
+              example: {}
       security: []
   /chronos.identity.v1.IdentityService/ConfirmTotp:
     post:
@@ -6821,6 +7054,74 @@ paths:
               example:
                 changed: true
                 scheduledFor: '2026-09-19T08:15:00Z'
+  /chronos.identity.v1.IdentityService/RequestEmailChange:
+    post:
+      tags:
+        - IdentityService
+      summary: RequestEmailChange starts a move to a different email address.
+      description: |-
+        Nothing about the account moves here, and that is the design rather than a
+         limitation: identity.md §12 requires the NEW address to be proven first,
+         because otherwise an attacker holding a session takes ownership by naming an
+         address they cannot read. This claims the address and mails a link to it.
+
+         Two messages go out. The link goes to the new address. A SECURITY warning
+         goes to the address the account uses today — with no link and not even the
+         new address in it, since that mailbox is exactly the one an attacker may
+         already be reading. That warning is what makes the flow survivable, and it
+         is why this RPC is worth having rather than an administrator's edit.
+
+         AAL2, because identity.md §4.3 lists an email change among the operations
+         that require step-up. There is no `bootstrap_min_aal`: an account with no
+         second factor has no business moving its recovery address, and the bootstrap
+         exemption exists to let somebody ENROL a factor, not to widen what a
+         single-factor session may do.
+      operationId: IdentityService_RequestEmailChange
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.RequestEmailChangeRequest'
+            example:
+              newEmail: ada@example.com
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            Accepted. The body is empty, and its emptiness is deliberate: this
+            response is identical whether the address was free or is already
+            claimed by somebody else. Reporting the difference would turn an
+            authenticated caller into an address-enumeration oracle.
+            Render one sentence — "check the new address for a link".
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.RequestEmailChangeResponse'
+              example: {}
   /chronos.identity.v1.IdentityService/RequestPasswordReset:
     post:
       tags:
@@ -7017,6 +7318,70 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.identity.v1.ResetPasswordResponse'
+              example: {}
+      security: []
+  /chronos.identity.v1.IdentityService/RevertEmailChange:
+    post:
+      tags:
+        - IdentityService
+      summary: RevertEmailChange undoes a completed change.
+      description: |-
+        Public, and reached from a link mailed to the address the account moved AWAY
+         from — so whoever redeems it has proven control of the address the account
+         had BEFORE the change. That is the whole remedy identity.md §12 asks for: an
+         attacker holding a session can move the address, and cannot stop the real
+         owner being told and undoing it.
+
+         It voids every session again, for a sharper reason than the change did: the
+         party this is being undone against may still be holding the session they did
+         it from.
+
+         The window is finite. After it the old address is available to anybody, so
+         this refuses rather than taking it back from whoever claimed it since.
+      operationId: IdentityService_RevertEmailChange
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.RevertEmailChangeRequest'
+            example:
+              token: PLACEHOLDER-not-a-real-revert-token
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: |
+            The account uses its previous address again and every session on it
+            has been signed out. Tell the caller to sign in and change their
+            password: somebody was able to move the address, so the credential
+            that let them should be assumed compromised.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.RevertEmailChangeResponse'
               example: {}
       security: []
   /chronos.identity.v1.IdentityService/RevokeAllSessions:

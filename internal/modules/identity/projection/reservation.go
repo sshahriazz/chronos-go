@@ -56,6 +56,27 @@ func NewReservation(codec eventsourcing.Codec) *Reservation {
 		return nil
 	})
 
+	// A verified claim becoming a leased one: the old address of an email change,
+	// held open only for its revert window (identity.md §12).
+	//
+	// The row keeps its subject, which is what stops anybody else taking the
+	// address while the window is open, and gains a deadline — which is what
+	// makes it appear in the SWEEP's work list once the window closes. The
+	// address is then released through exactly the path every lapsed claim takes,
+	// against the stream, so nothing special has to remember to free it.
+	//
+	// That is the whole reason the old address is demoted rather than released at
+	// the moment of the change: releasing it would let whoever performed the
+	// change re-register it immediately and leave the revert with nowhere to go
+	// back to.
+	d.On[contract.EmailReservationDemoted](func(
+		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.EmailReservationDemoted,
+	) error {
+		w.Exec(identitydb.DemoteEmailReservation,
+			string(e.Index), e.SubjectID, e.ExpiresAt)
+		return nil
+	})
+
 	d.On[contract.EmailReleased](func(
 		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.EmailReleased,
 	) error {

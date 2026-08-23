@@ -750,6 +750,56 @@ func (d *dependencies) buildIdentity(
 		return nil, fmt.Errorf("account lifecycle: %w", err)
 	}
 
+	// The identifier-change flow (identity.md §12).
+	//
+	// `Addresses` is the one dependency that is genuinely new rather than shared,
+	// and it exists so that no address crosses back into the module: identity's
+	// vault port is write-only by design, and every move this flow makes needs the
+	// CURRENT value. The moves therefore happen inside the vault adapter.
+	//
+	// Everything else is the reader or the appender the rest of the module already
+	// holds, for the reason stated at each of its other uses: a second reader is a
+	// second answer to a question that must have one. In particular `Revocations`
+	// is the SAME *app.Authentication the reset and the deactivation use, so
+	// "void every session for this subject" has one implementation and one epoch
+	// bump — and §4.4 is enforced identically whether the trigger was a recovery
+	// or an identifier change.
+	//
+	// TTL and Revert are left at zero so the use case applies its own defaults.
+	// Revert must stay equal to token.RevertTTL, and a test asserts it: a token
+	// that dies before the aggregate's window closes leaves a window nothing can
+	// act on, and one that outlives it leaves a link that redeems into a refusal.
+	//
+	// Built from `d.piiVault` rather than `d.vault`: the latter is identity's
+	// deliberately write-only view, and the address book is the one component
+	// that must read — inside the adapter, so nothing crosses back.
+	if d.piiVault == nil {
+		return nil, errors.New("no PII vault: an email change has to MOVE addresses " +
+			"between the vault's slots, and without it a completed change leaves the " +
+			"account's mail going to the address it just left")
+	}
+	addressBook, err := piivault.NewAddressBook(d.piiVault)
+	if err != nil {
+		return nil, fmt.Errorf("vault address book: %w", err)
+	}
+	emailChanges, err := app.NewEmailChange(app.EmailChangeDeps{
+		Clock:       clk,
+		Index:       index,
+		Subjects:    readModel,
+		Users:       users,
+		Claims:      reservations,
+		Appender:    d.store,
+		Schemas:     d.upcasters,
+		Addresses:   addressBook,
+		Tokens:      guards,
+		Digest:      token.Digest,
+		Revocations: authentication,
+		Log:         log,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("email change: %w", err)
+	}
+
 	// The public availability check. It holds a LOADER and a ceiling and nothing
 	// else — no appender, no token store, no vault — so the handler for it cannot
 	// create an account, spend a token or claim a handle. That narrowness is the
@@ -786,6 +836,7 @@ func (d *dependencies) buildIdentity(
 		Authentication: authentication,
 		SecondFactor:   secondFactor,
 		Lifecycle:      lifecycle,
+		Emails:         emailChanges,
 		Queries:        queries,
 		Directory:      readModel,
 		CallerScope:    callerScope,

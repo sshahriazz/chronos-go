@@ -402,6 +402,24 @@ func reactors(ctx context.Context, codec *eventcodec.JSON, d *dependencies) []re
 		rs = append(rs, r)
 	}
 
+	// The email-change mail (identity.md §12): the proof link to the new address,
+	// the warning to the old one, and the revert link once a change completes.
+	//
+	// Its own group, like the verification mail, and its absence is worse than
+	// that one's. A missing verification reactor strands people at signup, which
+	// they notice immediately. A missing email-change reactor lets a change be
+	// REQUESTED and never warns the address it is being moved away from — so an
+	// attacker holding a session moves the account in silence, and the person it
+	// belongs to first learns when they can no longer sign in.
+	if r, err := newEmailChangeMail(d); err != nil {
+		slog.Default().Error("the email-change mail reactor is NOT registered; a requested "+
+			"address change mails nobody — the new address never receives a link so no "+
+			"change can complete, and, far worse, the CURRENT address is never warned "+
+			"that somebody asked to move the account", "error", err)
+	} else {
+		rs = append(rs, r)
+	}
+
 	// The invitation mail. Same structure as the verification mail and the same
 	// reason for being its own reactor: its payload is a credential that has to
 	// be MINTED, which no catalogue Data function can do.
