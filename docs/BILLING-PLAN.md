@@ -320,9 +320,16 @@ deadlines disagree with.
    state. The alternative is to mark the org `Trialing` optimistically and let
    reconciliation repair a failed mirror — simpler, at the cost of a tenant that
    believes it has a subscription it does not.
-3. **Does the trial convert automatically at trial end when a card was added
-   mid-trial?** Stripe's default is yes — that is what a trial is. Worth
-   confirming it is what we want rather than inheriting it.
+3. ~~**Does the trial convert automatically at trial end when a card was added
+   mid-trial?**~~ **ANSWERED: yes, and confirmed rather than inherited.**
+   Verified against the test account with a test clock
+   (`TestATrialWithACardConvertsToActive`): card attached mid-trial, clock
+   advanced past trial end, subscription `active`, id unchanged.
+
+   The open question was never really the default — it was whether
+   `missing_payment_method: pause` suppressed it. The same field configures both
+   behaviours, so the setting that makes a cardless trial pause could plausibly
+   have stopped a card-holding one converting. It does not.
 4. **Annual plans at launch?** Changes nothing structurally, but it changes the
    proration surface and the catalogue's shape, and is cheaper to decide before
    the catalogue exists than after.

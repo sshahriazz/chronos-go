@@ -503,10 +503,22 @@ already has a name for.
 
 ### P2 — small, and each closes a decision
 
-- [ ] **§9.3 — Stripe's auto-convert default.** Verifiable against the test
-      account rather than reasoned about: add a payment method mid-trial, let
-      the clock pass trial end, observe whether the subscription becomes
-      `active` on its own.
+- [x] **§9.3 — Stripe's auto-convert default: CONFIRMED, and it is what we
+      want.** Verified against the real test account with a test clock rather
+      than reasoned from the documentation
+      (`TestATrialWithACardConvertsToActive`): a card attached mid-trial, the
+      clock advanced a day past trial end, and the subscription is `active`.
+
+      The thing worth verifying was not the default itself but whether
+      `missing_payment_method: pause` suppressed it. Both behaviours are
+      configured by the same field, so it was entirely possible for the setting
+      that makes a cardless trial pause to also stop a card-holding one
+      converting. It does not.
+
+      The subscription ID is UNCHANGED across the conversion, which is
+      billing.md §5 case 25's requirement — one subscription for the
+      organization's whole life, so billing history stays continuous and the
+      mirror needs no re-keying.
 - [ ] **The two deactivation flakes.** Nine clean runs. A targeted reproduction
       attempt is cheap; if it does not reproduce again, the honest outcome is to
       leave it open with the count updated rather than to close it.
