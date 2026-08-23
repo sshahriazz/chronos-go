@@ -2785,39 +2785,41 @@ func (x *ListLoginHistoryResponse) GetNextPageToken() string {
 	return ""
 }
 
-// EnrollTotpRequest asks for a new authenticator secret.
+// EnrollTotpRequest asks for a new authenticator secret. It carries nothing.
+//
+// # Field 1 held `account_name`, and it is gone
+//
+// It used to carry the account's email address, and that put personal data in
+// the otpauth:// URI — rendered to a QR code, then stored PERMANENTLY by the
+// authenticator app, synced to the holder's cloud backup and shown on their lock
+// screen. That is the one place ADR-002 can never reach to erase.
+//
+// The server derives the label from the account's own public handle (ADR-051),
+// which is public by design and is what a public label should carry. Deriving it
+// server-side also removes a caller-controlled string from a QR code: a session
+// holder could otherwise enrol with the label "security@chronos.io" and produce
+// an entry indistinguishable from an official one.
+//
+// # Why it is deleted now, having been deprecated-in-place before
+//
+// The field was kept because removing it fails `buf breaking`'s FIELD_NO_DELETE,
+// and the note it carried was right about the thing it refused: RELAXING the
+// ruleset to admit the deletion would be widening a gate to fit a change. That
+// is still refused, and nothing in buf.yaml has moved.
+//
+// What changed is that this repository has now taken a DELIBERATE break, with
+// the gate intact — the same one `ExportMyDataResponse` took. No release has
+// been cut, so the baseline is the previous commit rather than a published
+// contract, and the break costs one gate failure on the commit that makes it.
+// Carrying a field whose value is discarded until an unscheduled release
+// boundary was the more expensive option: every client generated from this
+// schema offered a parameter that did nothing.
+//
+// RESERVED, not reused. A client built against the old schema decodes nothing
+// here rather than reading some future field's value into what it calls
+// `accountName`.
 type EnrollTotpRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// IGNORED. The authenticator label is derived by the server.
-	//
-	// It used to carry the account's email address, and that put personal data in
-	// the otpauth:// URI — rendered to a QR code, then stored PERMANENTLY by the
-	// authenticator app, synced to the holder's cloud backup and shown on their
-	// lock screen. That is the one place ADR-002 can never reach to erase.
-	//
-	// The server now uses the account's own public handle (ADR-051), which is
-	// public by design and is what a public label should carry. Deriving it
-	// server-side also removes a caller-controlled string from a QR code: a session
-	// holder could otherwise enrol with the label "security@chronos.io" and produce
-	// an entry indistinguishable from an official one.
-	//
-	// DEPRECATED rather than deleted, and the distinction is not cosmetic. Removing
-	// field 1 fails `buf breaking`'s FIELD_NO_DELETE, which the FILE ruleset in
-	// buf.yaml includes; relaxing that ruleset to admit this deletion would be
-	// widening a gate to fit a change, which is how gates stop meaning anything.
-	// So the field stays, is documented as ignored, and is deleted at the first
-	// release boundary — the standard protobuf deprecation path.
-	//
-	// A value sent here is discarded. No validation rule applies, because a rule
-	// on an ignored field only tells a client its input mattered.
-	//
-	// The published bounds are ANNOTATIONS, which is the only form that keeps the
-	// sentence above true: they describe the field for a document that may not
-	// contain an unbounded string, and they add no rule, so a client still learns
-	// nothing about whether its input mattered. It did not.
-	//
-	// Deprecated: Marked as deprecated in chronos/identity/v1/identity.proto.
-	AccountName   string `protobuf:"bytes,1,opt,name=account_name,json=accountName,proto3" json:"account_name,omitempty"`
+	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2850,14 +2852,6 @@ func (x *EnrollTotpRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use EnrollTotpRequest.ProtoReflect.Descriptor instead.
 func (*EnrollTotpRequest) Descriptor() ([]byte, []int) {
 	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{35}
-}
-
-// Deprecated: Marked as deprecated in chronos/identity/v1/identity.proto.
-func (x *EnrollTotpRequest) GetAccountName() string {
-	if x != nil {
-		return x.AccountName
-	}
-	return ""
 }
 
 // EnrollTotpResponse carries the provisioning material back to the caller ONCE.
@@ -3956,10 +3950,8 @@ const file_chronos_identity_v1_identity_proto_rawDesc = "" +
 	"occurredAt\"\xda\x01\n" +
 	"\x18ListLoginHistoryResponse\x12H\n" +
 	"\battempts\x18\x01 \x03(\v2!.chronos.identity.v1.LoginAttemptB\t\xbaH\x06\x92\x01\x03\x10\xc8\x01R\battempts\x12t\n" +
-	"\x0fnext_page_token\x18\x02 \x01(\tBL\xbaG/:-\x12+PLACEHOLDER-opaque-cursor-for-the-next-page\xbaH\x17r\x15\x18\x80\b2\x10^[A-Za-z0-9_-]*$R\rnextPageToken\"O\n" +
-	"\x11EnrollTotpRequest\x12:\n" +
-	"\faccount_name\x18\x01 \x01(\tB\x17\xbaG\x12:\x00x\x80\x02\x8a\x01\n" +
-	"^[^\\r\\n]*$\x18\x01R\vaccountName\"\xc7\x02\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tBL\xbaG/:-\x12+PLACEHOLDER-opaque-cursor-for-the-next-page\xbaH\x17r\x15\x18\x80\b2\x10^[A-Za-z0-9_-]*$R\rnextPageToken\"'\n" +
+	"\x11EnrollTotpRequestJ\x04\b\x01\x10\x02R\faccount_name\"\xc7\x02\n" +
 	"\x12EnrollTotpResponse\x12v\n" +
 	"\rcredential_id\x18\x01 \x01(\tBQ\xbaG#:!\x12\x1fcred_01ARZ3NDEKTSV4RRFFQ69G5FAV\xbaH(r&\x18\x1f2\"^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\fcredentialId\x120\n" +
 	"\x06secret\x18\x02 \x01(\tB\x18\xbaH\x15r\x132\x0e^[A-Z2-7]{32}$\x98\x01 R\x06secret\x12L\n" +

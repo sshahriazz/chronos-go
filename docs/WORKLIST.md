@@ -888,25 +888,23 @@ already has a name for.
       argues against specific attacks, and a knob that relaxes them for tests is
       a knob that can relax them in production. Verified by four consecutive full
       protocolit runs and two of identityit, where the third used to fail.
-- [ ] `account_name` deprecated field — **BLOCKED, and now probed rather than
-      assumed.** Deleting field 1 was attempted with `reserved 1;` and
-      `reserved "account_name";`, which is the standard protobuf path and the
-      obvious thing to try. `buf breaking` still refuses:
+- [x] `account_name` deprecated field — **deleted.** It was parked as BLOCKED,
+      and the note was right about the thing it refused: `reserved` is not an
+      escape hatch from FIELD_NO_DELETE, and RELAXING the ruleset to admit the
+      deletion would be widening a gate to fit a change.
 
-      ```
-      Previously present field "1" with name "account_name" on message
-      "EnrollTotpRequest" was deleted.
-      ```
+      What changed is not the gate — nothing in `buf.yaml` moved — but that this
+      repository has now taken a deliberate break with the gate intact, the same
+      one `ExportMyDataResponse` took. No release has been cut, so the baseline
+      is the previous commit rather than a published contract, and the break
+      costs one gate failure on the commit that makes it. `buf breaking` reports
+      exactly one finding.
 
-      The FILE ruleset's FIELD_NO_DELETE does not admit a reserved range, and
-      the baseline is the `main` branch rather than a tag — so with no release
-      ever cut, every deletion is a breaking change against the previous commit.
-      Relaxing the ruleset to admit it would be widening a gate to fit a change,
-      which the field's own comment already refuses.
+      Carrying it was the more expensive option: every client generated from the
+      schema offered a parameter whose value the server discards. The number is
+      RESERVED, so an old client decodes nothing rather than reading a future
+      field into what it calls `accountName`.
 
-      It comes out at the first release boundary, when the baseline can move to
-      a tag. Recorded here so the next person does not spend the same twenty
-      minutes discovering that `reserved` is not the escape hatch it looks like.
 - [x] **WebAuthn storage ADR — written as [ADR-057](DECISIONS.md).** A passkey's
       material goes in its own `passkey_credential` table rather than
       `credential.verifier`, because the three values behave differently: the
