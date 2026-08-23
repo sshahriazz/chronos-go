@@ -36,7 +36,9 @@ func (f *fakeSessions) Create(
 
 func portalService(t *testing.T, sessions *fakeSessions) *billingapi.Service {
 	t.Helper()
-	svc, err := billingapi.New(billingapi.Deps{Sessions: sessions})
+	svc, err := billingapi.New(billingapi.Deps{
+		Sessions: sessions, Invoices: &fakeInvoiceQueries{},
+	})
 	if err != nil {
 		t.Fatalf("billingapi.New: %v", err)
 	}
@@ -56,6 +58,18 @@ func portalRequest(returnURL, key string) *connect.Request[billingv1.CreateBilli
 
 func tenantCtx(orgID string) context.Context {
 	return db.WithTenant(context.Background(), db.Tenant{OrgID: orgID})
+}
+
+// fakeInvoiceQueries satisfies the read side for tests about the portal.
+type fakeInvoiceQueries struct {
+	page app.InvoicePage
+	err  error
+}
+
+func (f *fakeInvoiceQueries) List(
+	_ context.Context, _ app.ListInvoicesQuery,
+) (app.InvoicePage, error) {
+	return f.page, f.err
 }
 
 // THE ORGANIZATION COMES FROM THE CONTEXT.
@@ -166,8 +180,16 @@ func TestStripesErrorTextIsNotReturnedToTheCaller(t *testing.T) {
 
 // AN INCOMPLETE WIRING IS REFUSED AT CONSTRUCTION.
 func TestTheBillingServiceRefusesAnIncompleteWiring(t *testing.T) {
-	if _, err := billingapi.New(billingapi.Deps{}); err == nil {
+	if _, err := billingapi.New(billingapi.Deps{
+		Invoices: &fakeInvoiceQueries{},
+	}); err == nil {
 		t.Error("a service with no session use case was accepted; every call would " +
 			"panic on a nil port at the moment a customer tries to pay")
+	}
+	if _, err := billingapi.New(billingapi.Deps{
+		Sessions: &fakeSessions{},
+	}); err == nil {
+		t.Error("a service with no invoice list was accepted; a customer being charged " +
+			"cannot see what for")
 	}
 }

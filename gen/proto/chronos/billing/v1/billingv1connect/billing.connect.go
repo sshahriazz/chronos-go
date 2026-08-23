@@ -53,6 +53,9 @@ const (
 // reflection-formatted method names, remove the leading slash and convert the remaining slash to a
 // period.
 const (
+	// BillingServiceListInvoicesProcedure is the fully-qualified name of the BillingService's
+	// ListInvoices RPC.
+	BillingServiceListInvoicesProcedure = "/chronos.billing.v1.BillingService/ListInvoices"
 	// BillingServiceCreateBillingPortalSessionProcedure is the fully-qualified name of the
 	// BillingService's CreateBillingPortalSession RPC.
 	BillingServiceCreateBillingPortalSessionProcedure = "/chronos.billing.v1.BillingService/CreateBillingPortalSession"
@@ -60,6 +63,27 @@ const (
 
 // BillingServiceClient is a client for the chronos.billing.v1.BillingService service.
 type BillingServiceClient interface {
+	// ListInvoices returns the organization's billing history, newest first.
+	//
+	// A reference and a status per invoice, never a computed total — the full
+	// breakdown and the PDF live on Stripe's hosted invoice page, which each entry
+	// links to. There is nothing here to reconcile against Stripe because nothing
+	// here was calculated.
+	//
+	// # Why BILLING_VIEW and not BILLING_MANAGE
+	//
+	// `billing_viewer` includes organization ADMINS, while `billing_manager`
+	// resolves to the owner alone (organization.md §5.1). That split is ADR-027's:
+	// an admin may always see what the company is spending without being able to
+	// change what it is committed to. Seeing an invoice is the first half.
+	//
+	// Never blocked by gate 4, in any organization state. A suspended tenant's
+	// admin may still read what they were billed — withholding it is leverage, not
+	// security, and the invoice is theirs.
+	//
+	// A trialing organization has no invoices and a paused one generates none, so
+	// an empty list is the ordinary answer during a trial rather than a fault.
+	ListInvoices(context.Context, *connect.Request[v1.ListInvoicesRequest]) (*connect.Response[v1.ListInvoicesResponse], error)
 	// CreateBillingPortalSession returns a signed link into Stripe's Customer
 	// Portal for the caller's organization.
 	//
@@ -111,6 +135,12 @@ func NewBillingServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 	baseURL = strings.TrimRight(baseURL, "/")
 	billingServiceMethods := v1.File_chronos_billing_v1_billing_proto.Services().ByName("BillingService").Methods()
 	return &billingServiceClient{
+		listInvoices: connect.NewClient[v1.ListInvoicesRequest, v1.ListInvoicesResponse](
+			httpClient,
+			baseURL+BillingServiceListInvoicesProcedure,
+			connect.WithSchema(billingServiceMethods.ByName("ListInvoices")),
+			connect.WithClientOptions(opts...),
+		),
 		createBillingPortalSession: connect.NewClient[v1.CreateBillingPortalSessionRequest, v1.CreateBillingPortalSessionResponse](
 			httpClient,
 			baseURL+BillingServiceCreateBillingPortalSessionProcedure,
@@ -122,7 +152,13 @@ func NewBillingServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 
 // billingServiceClient implements BillingServiceClient.
 type billingServiceClient struct {
+	listInvoices               *connect.Client[v1.ListInvoicesRequest, v1.ListInvoicesResponse]
 	createBillingPortalSession *connect.Client[v1.CreateBillingPortalSessionRequest, v1.CreateBillingPortalSessionResponse]
+}
+
+// ListInvoices calls chronos.billing.v1.BillingService.ListInvoices.
+func (c *billingServiceClient) ListInvoices(ctx context.Context, req *connect.Request[v1.ListInvoicesRequest]) (*connect.Response[v1.ListInvoicesResponse], error) {
+	return c.listInvoices.CallUnary(ctx, req)
 }
 
 // CreateBillingPortalSession calls chronos.billing.v1.BillingService.CreateBillingPortalSession.
@@ -132,6 +168,27 @@ func (c *billingServiceClient) CreateBillingPortalSession(ctx context.Context, r
 
 // BillingServiceHandler is an implementation of the chronos.billing.v1.BillingService service.
 type BillingServiceHandler interface {
+	// ListInvoices returns the organization's billing history, newest first.
+	//
+	// A reference and a status per invoice, never a computed total — the full
+	// breakdown and the PDF live on Stripe's hosted invoice page, which each entry
+	// links to. There is nothing here to reconcile against Stripe because nothing
+	// here was calculated.
+	//
+	// # Why BILLING_VIEW and not BILLING_MANAGE
+	//
+	// `billing_viewer` includes organization ADMINS, while `billing_manager`
+	// resolves to the owner alone (organization.md §5.1). That split is ADR-027's:
+	// an admin may always see what the company is spending without being able to
+	// change what it is committed to. Seeing an invoice is the first half.
+	//
+	// Never blocked by gate 4, in any organization state. A suspended tenant's
+	// admin may still read what they were billed — withholding it is leverage, not
+	// security, and the invoice is theirs.
+	//
+	// A trialing organization has no invoices and a paused one generates none, so
+	// an empty list is the ordinary answer during a trial rather than a fault.
+	ListInvoices(context.Context, *connect.Request[v1.ListInvoicesRequest]) (*connect.Response[v1.ListInvoicesResponse], error)
 	// CreateBillingPortalSession returns a signed link into Stripe's Customer
 	// Portal for the caller's organization.
 	//
@@ -179,6 +236,12 @@ type BillingServiceHandler interface {
 // and JSON codecs. They also support gzip compression.
 func NewBillingServiceHandler(svc BillingServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
 	billingServiceMethods := v1.File_chronos_billing_v1_billing_proto.Services().ByName("BillingService").Methods()
+	billingServiceListInvoicesHandler := connect.NewUnaryHandler(
+		BillingServiceListInvoicesProcedure,
+		svc.ListInvoices,
+		connect.WithSchema(billingServiceMethods.ByName("ListInvoices")),
+		connect.WithHandlerOptions(opts...),
+	)
 	billingServiceCreateBillingPortalSessionHandler := connect.NewUnaryHandler(
 		BillingServiceCreateBillingPortalSessionProcedure,
 		svc.CreateBillingPortalSession,
@@ -187,6 +250,8 @@ func NewBillingServiceHandler(svc BillingServiceHandler, opts ...connect.Handler
 	)
 	return "/chronos.billing.v1.BillingService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case BillingServiceListInvoicesProcedure:
+			billingServiceListInvoicesHandler.ServeHTTP(w, r)
 		case BillingServiceCreateBillingPortalSessionProcedure:
 			billingServiceCreateBillingPortalSessionHandler.ServeHTTP(w, r)
 		default:
@@ -197,6 +262,10 @@ func NewBillingServiceHandler(svc BillingServiceHandler, opts ...connect.Handler
 
 // UnimplementedBillingServiceHandler returns CodeUnimplemented from all methods.
 type UnimplementedBillingServiceHandler struct{}
+
+func (UnimplementedBillingServiceHandler) ListInvoices(context.Context, *connect.Request[v1.ListInvoicesRequest]) (*connect.Response[v1.ListInvoicesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.billing.v1.BillingService.ListInvoices is not implemented"))
+}
 
 func (UnimplementedBillingServiceHandler) CreateBillingPortalSession(context.Context, *connect.Request[v1.CreateBillingPortalSessionRequest]) (*connect.Response[v1.CreateBillingPortalSessionResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.billing.v1.BillingService.CreateBillingPortalSession is not implemented"))

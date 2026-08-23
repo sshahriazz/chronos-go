@@ -78,6 +78,24 @@ type InvitationView struct {
 	SettledAt    pgtype.Timestamptz
 }
 
+// Invoice references and statuses from Stripe. Never a computed total; not the source of truth for whether an org has paid — the subscription status is.
+type InvoiceView struct {
+	InvoiceID            string
+	OrgID                string
+	StripeSubscriptionID string
+	Number               string
+	Status               string
+	AmountDue            int64
+	AmountPaid           int64
+	Currency             string
+	PeriodStart          pgtype.Timestamptz
+	PeriodEnd            pgtype.Timestamptz
+	HostedUrl            string
+	PdfUrl               string
+	CreatedAt            pgtype.Timestamptz
+	UpdatedAt            pgtype.Timestamptz
+}
+
 // Authentication outcomes. subject_id is NULL when the identifier matched no account.
 type LoginHistoryView struct {
 	ID         int64

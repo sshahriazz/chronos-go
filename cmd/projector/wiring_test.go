@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
+	billingprojection "github.com/chronos/chronos-go/internal/modules/billing/projection"
 	"github.com/chronos/chronos-go/internal/modules/identity"
 	identityprojection "github.com/chronos/chronos-go/internal/modules/identity/projection"
 	"github.com/chronos/chronos-go/internal/platform/config"
@@ -79,6 +80,14 @@ func TestEveryProjectionIsRegistered(t *testing.T) {
 		identityprojection.UserName,
 		identityprojection.SessionName,
 		identityprojection.ReservationName,
+
+		// Billing's invoice mirror, named here because its absence is silent in
+		// the direction that matters: the events accumulate in the log, the
+		// table stays empty, and "this customer has no invoices" is a perfectly
+		// ordinary thing for a trialing tenant. So an unregistered projection
+		// and a tenant who has genuinely never been billed look identical from
+		// every screen.
+		billingprojection.InvoicesName,
 	} {
 		if !registered[name] {
 			t.Errorf("projection %q is not registered on the projector, so it never runs "+

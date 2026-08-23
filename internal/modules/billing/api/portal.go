@@ -29,18 +29,25 @@ type Service struct {
 	billingv1connect.UnimplementedBillingServiceHandler
 
 	sessions Sessions
+	invoices Invoices
 }
 
 // Deps is what Service needs.
 type Deps struct {
 	Sessions Sessions
+	Invoices Invoices
 }
 
 func New(d Deps) (*Service, error) {
-	if d.Sessions == nil {
+	switch {
+	case d.Sessions == nil:
 		return nil, fmt.Errorf("billing: a portal session use case is required")
+	case d.Invoices == nil:
+		return nil, fmt.Errorf("billing: an invoice list use case is required; without one " +
+			"ListInvoices answers 'unimplemented' and a customer being charged cannot see " +
+			"what for")
 	}
-	return &Service{sessions: d.Sessions}, nil
+	return &Service{sessions: d.Sessions, invoices: d.Invoices}, nil
 }
 
 // CreateBillingPortalSession hands the caller a signed link into Stripe's

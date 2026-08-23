@@ -9,6 +9,7 @@ import (
 	stripe "github.com/stripe/stripe-go/v86"
 	"github.com/stripe/stripe-go/v86/webhook"
 
+	billingapp "github.com/chronos/chronos-go/internal/modules/billing/app"
 	"github.com/chronos/chronos-go/internal/modules/organization/app"
 	"github.com/chronos/chronos-go/internal/modules/organization/domain"
 	"github.com/chronos/chronos-go/internal/platform/codec"
@@ -183,4 +184,118 @@ func (v *Verifier) SubscriptionFor(ctx context.Context, payload []byte) (app.Sub
 		Status:         domain.StripeStatus(sub.Status),
 		TrialEndsAt:    trialEndsAt,
 	}, nil
+}
+
+// InvoiceFor re-fetches the invoice an event names.
+//
+// The same discipline as SubscriptionFor and for the same reason (billing.md §4
+// step 5): only the object ID is read from the payload, and every value comes
+// from the re-fetch. Stripe does not guarantee ordering, so applying a payload
+// as a delta will eventually apply a stale one.
+//
+// # Where the organization comes from
+//
+// Stripe's Invoice carries its own metadata, but ours is written on the CUSTOMER
+// and the SUBSCRIPTION by the provisioner — not on invoices, which Stripe
+// creates itself. So the org id is read from the invoice's parent subscription,
+// which is where provisioning put it.
+//
+// An invoice with no subscription is not an error worth parking: Stripe permits
+// an operator to raise a one-off invoice by hand, and this build has nothing to
+// say about one. It is reported as "not ours" and skipped.
+func (v *Verifier) InvoiceFor(ctx context.Context, payload []byte) (billingapp.InvoiceState, error) {
+	// TOLERANT, because this is somebody else's document (ADR-047).
+	envelope, err := codec.Tolerant[eventEnvelope](payload)
+	if err != nil {
+		return billingapp.InvoiceState{}, fmt.Errorf("stripe: reading the event envelope: %w", err)
+	}
+	id := envelope.Data.Object.ID
+	if envelope.Data.Object.Object != "invoice" || id == "" {
+		return billingapp.InvoiceState{}, fmt.Errorf("stripe: this event does not name an "+
+			"invoice (object %q)", envelope.Data.Object.Object)
+	}
+
+	inv, err := v.api.V1Invoices.Retrieve(ctx, id, nil)
+	if err != nil {
+		return billingapp.InvoiceState{}, fmt.Errorf("stripe: re-fetching invoice %s: %w", id, err)
+	}
+
+	subscriptionID, snapshot := invoiceParent(inv)
+	if subscriptionID == "" {
+		return billingapp.InvoiceState{}, fmt.Errorf("stripe: invoice %s names no "+
+			"subscription, so it is a one-off this build does not record", id)
+	}
+
+	// # Two ways to the organization, and the cheap one is tried first
+	//
+	// Stripe snapshots the subscription's metadata onto the invoice at
+	// FINALIZATION, so a finalized invoice already carries our org id and needs
+	// no second round trip. It is not a payload we are trusting — it arrived on
+	// the object this method just re-fetched.
+	//
+	// A DRAFT has no snapshot yet, and invoices created before June 2023 never
+	// got one. For those the subscription itself is fetched, which is where
+	// provisioning wrote the id in the first place. Falling back rather than
+	// always fetching keeps the common case to one call; falling back at all is
+	// what stops a draft invoice from being unattributable.
+	orgID := snapshot[orgMetadataKey]
+	if orgID == "" {
+		sub, err := v.api.V1Subscriptions.Retrieve(ctx, subscriptionID, nil)
+		if err != nil {
+			return billingapp.InvoiceState{}, fmt.Errorf(
+				"stripe: re-fetching subscription %s for invoice %s: %w", subscriptionID, id, err)
+		}
+		orgID = sub.Metadata[orgMetadataKey]
+	}
+	if orgID == "" {
+		return billingapp.InvoiceState{}, fmt.Errorf("stripe: neither invoice %s nor "+
+			"subscription %s carries %s in its metadata, so it belongs to no organization "+
+			"this system knows", id, subscriptionID, orgMetadataKey)
+	}
+
+	return billingapp.InvoiceState{
+		OrgID:          orgID,
+		InvoiceID:      inv.ID,
+		SubscriptionID: subscriptionID,
+		Number:         inv.Number,
+		Status:         string(inv.Status),
+		AmountDue:      inv.AmountDue,
+		AmountPaid:     inv.AmountPaid,
+		Currency:       string(inv.Currency),
+		PeriodStart:    unixUTC(inv.PeriodStart),
+		PeriodEnd:      unixUTC(inv.PeriodEnd),
+		HostedURL:      inv.HostedInvoiceURL,
+		PDFURL:         inv.InvoicePDF,
+		CreatedAt:      unixUTC(inv.Created),
+	}, nil
+}
+
+// unixUTC turns Stripe's epoch seconds into a UTC time, and 0 into a zero time.
+//
+// Stripe writes 0 for "no value", which as an epoch is 1970 — a date that
+// renders happily and means nothing. The zero time is what the projection turns
+// into NULL.
+func unixUTC(sec int64) time.Time {
+	if sec == 0 {
+		return time.Time{}
+	}
+	return time.Unix(sec, 0).UTC()
+}
+
+// invoiceParent reads the subscription an invoice came from, and the metadata
+// Stripe snapshotted from it.
+//
+// `Invoice.Subscription` no longer exists: recent API versions moved it under
+// `Parent`, alongside a quote parent for invoices that came from one. The nested
+// Subscription is expandable, so it can arrive as a stub carrying only an id —
+// which is all this needs.
+func invoiceParent(inv *stripe.Invoice) (subscriptionID string, metadata map[string]string) {
+	if inv == nil || inv.Parent == nil || inv.Parent.SubscriptionDetails == nil {
+		return "", nil
+	}
+	details := inv.Parent.SubscriptionDetails
+	if details.Subscription != nil {
+		subscriptionID = details.Subscription.ID
+	}
+	return subscriptionID, details.Metadata
 }

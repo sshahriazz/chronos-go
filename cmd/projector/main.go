@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
+	"github.com/chronos/chronos-go/internal/modules/billing"
+	billingprojection "github.com/chronos/chronos-go/internal/modules/billing/projection"
 	"github.com/chronos/chronos-go/internal/modules/identity"
 	identityprojection "github.com/chronos/chronos-go/internal/modules/identity/projection"
 	"github.com/chronos/chronos-go/internal/modules/notification"
@@ -258,6 +260,11 @@ func projections(codec *eventcodec.JSON) []projection.Projection {
 
 		organizationprojection.NewStatus(codec),
 
+		// Billing's invoice mirror. Its own projection because it is its own
+		// table, and its own STREAM CATEGORY because an invoice is Stripe's
+		// object rather than part of the organization's lifecycle.
+		billingprojection.NewInvoices(codec),
+
 		// Both membership projections belong to WORKSPACE, including the one
 		// that builds `org_member_index`: belonging to an organization comes
 		// from organization events AND from workspace joins, one table has one
@@ -289,6 +296,7 @@ func registerEvents(codec *eventcodec.JSON) {
 	// here, for the reason identity already is: three binaries register these,
 	// and a type registered in two of them is a projector that stops on an event
 	// the API can happily write.
+	billing.RegisterEvents(codec)
 	notification.RegisterEvents(codec)
 	profile.RegisterEvents(codec)
 	organization.RegisterEvents(codec)

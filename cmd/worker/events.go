@@ -4,6 +4,8 @@ import (
 	"strings"
 
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
+	"github.com/chronos/chronos-go/internal/modules/billing"
+	billingevents "github.com/chronos/chronos-go/internal/modules/billing/contract"
 	"github.com/chronos/chronos-go/internal/modules/identity"
 	identityevents "github.com/chronos/chronos-go/internal/modules/identity/contract"
 	"github.com/chronos/chronos-go/internal/modules/notification/contract"
@@ -54,6 +56,7 @@ func registerEvents(codec *eventcodec.JSON) {
 	profile.RegisterEvents(codec)
 	organization.RegisterEvents(codec)
 	workspace.RegisterEvents(codec)
+	billing.RegisterEvents(codec)
 }
 
 // notifications declares what each event sends, and to whom.
@@ -471,6 +474,21 @@ func identityNotifications(cat *notify.Catalogue) {
 	// catalogue honest: the gate demands a decision per event, so the choice is
 	// visible in review instead of being an event nobody considered. Each of
 	// these becomes an `On` when there is a set to address.
+
+	// ── billing ────────────────────────────────────────────────────────────
+	//
+	// An invoice notifies NOBODY, and that is a decision rather than an
+	// omission. Stripe emails its own receipts and its own dunning, and
+	// billing.md §5 case 5 refuses to double-message a customer about money:
+	// a second mail saying what Stripe just said is the duplicate-dunning
+	// mistake applied to invoices.
+	//
+	// The event carries no SubjectIDs for the same reason, so even a future
+	// `On` here would need an audience before it could send anything.
+	cat.Silent[billingevents.InvoiceRecorded](
+		"Stripe emails the receipt and owns the dunning schedule. A mail of ours saying " +
+			"what Stripe just said is billing.md §5 case 5's duplicate-dunning mistake, " +
+			"applied to invoices. The billing history is a SCREEN, not a notification")
 
 	cat.Silent[orgevents.OrganizationCreated](
 		"the creator is looking at the screen that created it, and the org is not usable " +

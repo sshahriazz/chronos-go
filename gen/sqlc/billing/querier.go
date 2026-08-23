@@ -9,6 +9,16 @@ import (
 )
 
 type Querier interface {
+	// One page of an organization's billing history, newest first.
+	//
+	// Keyset paging on `(created_at, invoice_id)` DESC, because an offset shifts
+	// under a concurrent webhook and silently skips a row — and the row it skips is
+	// an invoice somebody is looking for. The id breaks ties: Stripe can create
+	// several invoices in the same second.
+	//
+	// The cursor comparison is a ROW comparison rather than an OR-chain, so it uses
+	// the index directly.
+	ListInvoices(ctx context.Context, arg ListInvoicesParams) ([]ListInvoicesRow, error)
 	// Records why, without marking it processed, so a retry still applies it.
 	MarkWebhookEventFailed(ctx context.Context, arg MarkWebhookEventFailedParams) error
 	MarkWebhookEventProcessed(ctx context.Context, eventID string) error
@@ -20,6 +30,33 @@ type Querier interface {
 	// nothing. Checking first and inserting after would leave a window in which two
 	// concurrent deliveries both see "not seen" and both apply the change.
 	RecordWebhookEvent(ctx context.Context, arg RecordWebhookEventParams) (string, error)
+	// TRUNCATE, because a rebuild empties the table from an UNSCOPED system
+	// transaction where RLS hides every row, so DELETE would remove none (ADR-019).
+	TruncateInvoices(ctx context.Context) error
+	// Queries for the invoice projection.
+	//
+	// Every write here is an UPSERT, because Stripe sends several events per invoice
+	// — created, finalized, paid — and each one carries the WHOLE object after a
+	// re-fetch. There is no incremental update to make: the handler is convergent by
+	// construction, so applying an out-of-order or duplicated event reaches the same
+	// row.
+	// Record an invoice's current state.
+	//
+	// # Why created_at is preserved and everything else overwritten
+	//
+	// created_at is Stripe's creation instant and is immutable — a redelivery must
+	// not move an invoice in the customer's history. Everything else is the CURRENT
+	// state of a mutable object: a draft becomes open becomes paid, a number appears
+	// at finalization, and the hosted URLs appear with it.
+	//
+	// # Why the ordering guard is on created_at and not on a version
+	//
+	// Stripe does not version invoices and does not guarantee webhook ordering. What
+	// makes overwriting safe anyway is the RE-FETCH: the handler asks Stripe for the
+	// object before writing, so two deliveries in either order write the same state,
+	// and a stale event writes what is currently true rather than what was true when
+	// it fired.
+	UpsertInvoice(ctx context.Context, arg UpsertInvoiceParams) error
 	// Has this event already been APPLIED, as opposed to merely received?
 	//
 	// A row that exists with a NULL processed_at is an earlier attempt that failed

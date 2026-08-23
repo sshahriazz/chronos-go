@@ -15,6 +15,7 @@ import (
 
 	stripeadapter "github.com/chronos/chronos-go/internal/adapter/stripe"
 	billingapi "github.com/chronos/chronos-go/internal/modules/billing/api"
+	billingapp "github.com/chronos/chronos-go/internal/modules/billing/app"
 	orgapp "github.com/chronos/chronos-go/internal/modules/organization/app"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 )
@@ -25,6 +26,34 @@ type fakeVerifier struct {
 	state orgapp.SubscriptionState
 	//nolint:unused // set by tests that need SubscriptionFor to fail
 	stateErr error
+
+	invoice billingapp.InvoiceState
+	//nolint:unused // set by tests that need InvoiceFor to fail
+	invoiceErr error
+}
+
+// recordingInvoices stands in for the invoice mirror.
+type recordingInvoices struct {
+	mu    sync.Mutex
+	calls int
+	state billingapp.InvoiceState
+	err   error
+}
+
+func (r *recordingInvoices) Record(
+	_ context.Context, state billingapp.InvoiceState, _ string,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+	r.state = state
+	return r.err
+}
+
+func (r *recordingInvoices) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
 }
 
 func (f fakeVerifier) Verify([]byte, string) (stripeadapter.Event, error) {
@@ -33,6 +62,10 @@ func (f fakeVerifier) Verify([]byte, string) (stripeadapter.Event, error) {
 
 func (f fakeVerifier) SubscriptionFor(context.Context, []byte) (orgapp.SubscriptionState, error) {
 	return f.state, f.stateErr
+}
+
+func (f fakeVerifier) InvoiceFor(context.Context, []byte) (billingapp.InvoiceState, error) {
+	return f.invoice, f.invoiceErr
 }
 
 // recordingTrials stands in for the trial-warning use case.
@@ -87,6 +120,7 @@ func TestAnUnverifiedWebhookChangesNothing(t *testing.T) {
 
 	sync := &countingSync{}
 	hook, err := billingapi.NewWebhook(billingapi.WebhookDeps{
+		Invoices: &recordingInvoices{},
 		Trials:   &recordingTrials{},
 		Verifier: fakeVerifier{err: errors.New("bad signature")},
 		Sync:     sync,
@@ -118,6 +152,7 @@ func TestTheRefusalDoesNotExplainItself(t *testing.T) {
 	t.Parallel()
 
 	hook, err := billingapi.NewWebhook(billingapi.WebhookDeps{
+		Invoices: &recordingInvoices{},
 		Trials:   &recordingTrials{},
 		Verifier: fakeVerifier{err: errors.New("timestamp outside the tolerance window")},
 		Sync:     &countingSync{},
@@ -146,6 +181,7 @@ func TestAPoisonEventIsNotRetriedForever(t *testing.T) {
 	t.Parallel()
 
 	hook, err := billingapi.NewWebhook(billingapi.WebhookDeps{
+		Invoices: &recordingInvoices{},
 		Trials:   &recordingTrials{},
 		Verifier: fakeVerifier{event: stripeadapter.Event{ID: "evt_1", Type: "x"}},
 		Sync: &countingSync{err: errors.New(
@@ -173,6 +209,7 @@ func TestOnlyPostIsAccepted(t *testing.T) {
 	t.Parallel()
 
 	hook, err := billingapi.NewWebhook(billingapi.WebhookDeps{
+		Invoices: &recordingInvoices{},
 		Trials:   &recordingTrials{},
 		Verifier: fakeVerifier{},
 		Sync:     &countingSync{},
@@ -237,8 +274,9 @@ func hookFor(
 			event: stripeadapter.Event{ID: "evt_1", Type: eventType},
 			state: state,
 		},
-		Sync:   sync,
-		Trials: trials,
+		Sync:     sync,
+		Trials:   trials,
+		Invoices: &recordingInvoices{},
 		// claimed: THIS delivery is the one that applies. Left false the handler
 		// correctly short-circuits as a duplicate and every assertion below
 		// would measure a no-op.
@@ -372,5 +410,179 @@ func TestAWebhookWithNoTrialPortIsRefused(t *testing.T) {
 	}); err == nil {
 		t.Error("a webhook with no trial warning port was accepted; trial_will_end would be " +
 			"consumed and dropped, and no cardless trial would ever be warned")
+	}
+}
+
+// hookForInvoice builds an endpoint over one verified invoice event.
+func hookForInvoice(
+	t *testing.T, eventType string, state billingapp.InvoiceState,
+	invoiceErr error, sync *countingSync, invoices *recordingInvoices,
+) *billingapi.Webhook {
+	t.Helper()
+	hook, err := billingapi.NewWebhook(billingapi.WebhookDeps{
+		Verifier: fakeVerifier{
+			event:      stripeadapter.Event{ID: "evt_1", Type: eventType},
+			invoice:    state,
+			invoiceErr: invoiceErr,
+		},
+		Sync:     sync,
+		Trials:   &recordingTrials{},
+		Invoices: invoices,
+		Events:   &fakeEvents{claimed: true},
+		Log:      discardLogger(),
+	})
+	if err != nil {
+		t.Fatalf("NewWebhook: %v", err)
+	}
+	return hook
+}
+
+func invoiceState() billingapp.InvoiceState {
+	return billingapp.InvoiceState{
+		OrgID: "org_x", InvoiceID: "in_1", SubscriptionID: "sub_1",
+		Status: "paid", AmountDue: 2400, AmountPaid: 2400, Currency: "usd",
+	}
+}
+
+// AN INVOICE EVENT IS RECORDED, AND DOES NOT GO THROUGH THE SUBSCRIPTION PATH.
+//
+// An invoice event names an INVOICE, so SubscriptionFor would report "not ours"
+// for every one of them and the status sync has nothing to say about any of
+// them. Routing them through it would drop the whole billing history silently —
+// which is exactly what this build did until this commit.
+func TestAnInvoiceEventIsRecorded(t *testing.T) {
+	t.Parallel()
+
+	invoices := &recordingInvoices{}
+	sync := &countingSync{}
+	hook := hookForInvoice(t, "invoice.paid", invoiceState(), nil, sync, invoices)
+
+	if code := post(hook).Code; code != http.StatusOK {
+		t.Fatalf("answered %d, want 200", code)
+	}
+	if invoices.count() != 1 {
+		t.Fatalf("recorded %d invoices, want 1; the billing history stays empty for a "+
+			"customer who is being charged", invoices.count())
+	}
+	if invoices.state.InvoiceID != "in_1" {
+		t.Errorf("recorded %q", invoices.state.InvoiceID)
+	}
+	if sync.count() != 0 {
+		t.Error("an invoice event was pushed through the SUBSCRIPTION sync, which cannot " +
+			"read it")
+	}
+}
+
+// EVERY INVOICE EVENT, not a hand-maintained list.
+//
+// billing.md §4 names eight, and the handler treats them identically because it
+// re-fetches the invoice and records its current state rather than interpreting
+// which event arrived. A list would have to be kept in step with Stripe's for no
+// gain: an invoice event this build had not heard of would be skipped, and
+// skipping it means an invoice whose state moved and whose row did not.
+func TestEveryInvoiceEventKindIsRecorded(t *testing.T) {
+	t.Parallel()
+
+	for _, eventType := range []string{
+		"invoice.created", "invoice.finalized", "invoice.paid",
+		"invoice.payment_failed", "invoice.payment_action_required",
+		"invoice.marked_uncollectible", "invoice.voided",
+		// Deliberately included: a kind this build has never heard of must still
+		// record, because the re-fetch is what decides whether it is ours.
+		"invoice.some_future_stripe_event",
+	} {
+		t.Run(eventType, func(t *testing.T) {
+			invoices := &recordingInvoices{}
+			hook := hookForInvoice(t, eventType, invoiceState(), nil,
+				&countingSync{}, invoices)
+
+			post(hook)
+			if invoices.count() != 1 {
+				t.Errorf("%s recorded nothing; that invoice's state moved and its row "+
+					"did not", eventType)
+			}
+		})
+	}
+}
+
+// AN EVENT THAT NAMES NO INVOICE OF OURS IS SKIPPED, NOT PARKED.
+//
+// A one-off invoice raised by an operator has no subscription and so no
+// organization; `invoice.upcoming` is a preview with no id at all. Neither is a
+// failure, and asking Stripe to redeliver them would park an event that can
+// never apply.
+func TestAnInvoiceEventThatIsNotOursIsSkipped(t *testing.T) {
+	t.Parallel()
+
+	invoices := &recordingInvoices{}
+	hook := hookForInvoice(t, "invoice.upcoming", billingapp.InvoiceState{},
+		errors.New("stripe: this event does not name an invoice"), &countingSync{}, invoices)
+
+	if code := post(hook).Code; code != http.StatusOK {
+		t.Fatalf("answered %d, want 200; Stripe will redeliver an event that can never "+
+			"apply until it gives up", code)
+	}
+	if invoices.count() != 0 {
+		t.Error("an unrecognised invoice event was recorded anyway")
+	}
+}
+
+// A FAILED RECORDING IS RETRIED.
+func TestAFailedInvoiceRecordingIsRetried(t *testing.T) {
+	t.Parallel()
+
+	invoices := &recordingInvoices{err: errors.New("kurrentdb: unavailable")}
+	hook := hookForInvoice(t, "invoice.paid", invoiceState(), nil,
+		&countingSync{}, invoices)
+
+	if code := post(hook).Code; code != http.StatusInternalServerError {
+		t.Fatalf("answered %d, want 500 so Stripe retries", code)
+	}
+}
+
+// A SUBSCRIPTION EVENT DOES NOT REACH THE INVOICE RECORDER.
+//
+// The mirror of the first test, and it fails independently: a prefix match that
+// was too loose would push subscription events into a recorder that cannot read
+// them.
+func TestASubscriptionEventDoesNotTouchInvoices(t *testing.T) {
+	t.Parallel()
+
+	invoices := &recordingInvoices{}
+	hook, err := billingapi.NewWebhook(billingapi.WebhookDeps{
+		Verifier: fakeVerifier{
+			event: stripeadapter.Event{ID: "evt_1", Type: "customer.subscription.updated"},
+			state: orgapp.SubscriptionState{OrgID: "org_x", SubscriptionID: "sub_1"},
+		},
+		Sync:     &countingSync{},
+		Trials:   &recordingTrials{},
+		Invoices: invoices,
+		Events:   &fakeEvents{claimed: true},
+		Log:      discardLogger(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	post(hook)
+	if invoices.count() != 0 {
+		t.Error("a subscription event reached the invoice recorder")
+	}
+}
+
+// A WEBHOOK WITH NO INVOICE RECORDER IS REFUSED AT CONSTRUCTION.
+func TestAWebhookWithNoInvoiceRecorderIsRefused(t *testing.T) {
+	t.Parallel()
+
+	if _, err := billingapi.NewWebhook(billingapi.WebhookDeps{
+		Verifier: fakeVerifier{},
+		Sync:     &countingSync{},
+		Trials:   &recordingTrials{},
+		Events:   &fakeEvents{},
+		Log:      discardLogger(),
+	}); err == nil {
+		t.Error("a webhook with no invoice recorder was accepted; every invoice event " +
+			"would be consumed and dropped, and the billing history would be empty for " +
+			"customers who are being charged")
 	}
 }

@@ -12,9 +12,11 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	stripeadapter "github.com/chronos/chronos-go/internal/adapter/stripe"
+	"github.com/chronos/chronos-go/internal/modules/billing/app"
 	orgapp "github.com/chronos/chronos-go/internal/modules/organization/app"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 )
@@ -30,6 +32,7 @@ const maxBody = 1 << 20 // 1 MiB
 type Verifier interface {
 	Verify(payload []byte, signatureHeader string) (stripeadapter.Event, error)
 	SubscriptionFor(ctx context.Context, payload []byte) (orgapp.SubscriptionState, error)
+	InvoiceFor(ctx context.Context, payload []byte) (app.InvoiceState, error)
 }
 
 // EventLog is the idempotency boundary: it records what arrived and reports
@@ -59,6 +62,27 @@ type Trials interface {
 	Warn(ctx context.Context, orgID string, trialEndsAt time.Time, eventID string) error
 }
 
+// InvoiceRecorder records what Stripe reports about an invoice.
+type InvoiceRecorder interface {
+	Record(ctx context.Context, state app.InvoiceState, eventID string) error
+}
+
+// invoiceEventPrefix is what an invoice event's type starts with.
+//
+// A PREFIX rather than a list, and that is the deliberate choice. billing.md §4
+// names eight invoice events — created, finalized, paid, payment_failed,
+// payment_action_required, upcoming, marked_uncollectible, voided — and the
+// handler treats every one of them identically, because it RE-FETCHES the
+// invoice and records its current state rather than interpreting which event
+// arrived. A list would have to be kept in step with Stripe's for no gain: a
+// new invoice event this build had not heard of would be skipped, and skipping
+// it means an invoice whose state moved and whose row did not.
+//
+// `invoice.upcoming` is the one that does not name a real invoice — it is a
+// preview with no id — and it is not special-cased here: the re-fetch reports
+// that the payload names no invoice, which is already the "not ours" path.
+const invoiceEventPrefix = "invoice."
+
 // TrialWillEndEvent is Stripe's warning, three days before a trial ends.
 //
 // For a CARDLESS trial it is the only warning anybody gets: the subscription
@@ -71,6 +95,7 @@ type Webhook struct {
 	verifier Verifier
 	sync     Sync
 	trials   Trials
+	invoices InvoiceRecorder
 	events   EventLog
 	log      *slog.Logger
 }
@@ -80,6 +105,7 @@ type WebhookDeps struct {
 	Verifier Verifier
 	Sync     Sync
 	Trials   Trials
+	Invoices InvoiceRecorder
 	Events   EventLog
 	Log      *slog.Logger
 }
@@ -91,6 +117,10 @@ func NewWebhook(d WebhookDeps) (*Webhook, error) {
 			"unverified events would be an unauthenticated way to suspend a tenant")
 	case d.Sync == nil:
 		return nil, fmt.Errorf("billing: a subscription sync is required")
+	case d.Invoices == nil:
+		return nil, fmt.Errorf("billing: an invoice recorder is required; without one every " +
+			"invoice event is consumed and dropped, and the billing history is empty for " +
+			"customers who are being charged")
 	case d.Trials == nil:
 		return nil, fmt.Errorf("billing: a trial warning use case is required; without one " +
 			"trial_will_end is consumed and dropped, and a cardless trial's only warning " +
@@ -102,7 +132,7 @@ func NewWebhook(d WebhookDeps) (*Webhook, error) {
 		return nil, fmt.Errorf("billing: a logger is required")
 	}
 	return &Webhook{
-		verifier: d.Verifier, sync: d.Sync, trials: d.Trials,
+		verifier: d.Verifier, sync: d.Sync, trials: d.Trials, invoices: d.Invoices,
 		events: d.Events, log: d.Log,
 	}, nil
 }
@@ -212,6 +242,14 @@ func (w *Webhook) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 }
 
 func (w *Webhook) apply(ctx context.Context, event stripeadapter.Event, payload []byte) error {
+	// Invoices first, and they are a SEPARATE object rather than a branch inside
+	// the subscription path: an invoice event names an invoice, not a
+	// subscription, so SubscriptionFor would report "not ours" for every one of
+	// them and the subscription sync has nothing to say about any of them.
+	if strings.HasPrefix(event.Type, invoiceEventPrefix) {
+		return w.applyInvoice(ctx, event, payload)
+	}
+
 	state, err := w.verifier.SubscriptionFor(ctx, payload)
 	if err != nil {
 		// Not every event names a subscription — Stripe sends invoices, payment
@@ -235,6 +273,24 @@ func (w *Webhook) apply(ctx context.Context, event stripeadapter.Event, payload 
 		return w.trials.Warn(ctx, state.OrgID, state.TrialEndsAt, event.ID)
 	}
 	return nil
+}
+
+// applyInvoice records one invoice's current state.
+func (w *Webhook) applyInvoice(
+	ctx context.Context, event stripeadapter.Event, payload []byte,
+) error {
+	state, err := w.verifier.InvoiceFor(ctx, payload)
+	if err != nil {
+		// Not every invoice event names an invoice this build records. A
+		// one-off invoice raised by an operator has no subscription and so no
+		// organization; `invoice.upcoming` is a preview with no id at all.
+		// Neither is a failure, and asking Stripe to redeliver them would park
+		// an event that can never apply.
+		w.log.DebugContext(ctx, "an invoice event names no invoice this build records",
+			"event_id", event.ID, "type", event.Type, "reason", err)
+		return nil
+	}
+	return w.invoices.Record(ctx, state, event.ID)
 }
 
 // note records why an event failed, without marking it processed.

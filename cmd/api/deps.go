@@ -13,6 +13,7 @@ import (
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
 	"github.com/chronos/chronos-go/internal/adapter/seaweedfs"
 	valkeyadapter "github.com/chronos/chronos-go/internal/adapter/valkey"
+	"github.com/chronos/chronos-go/internal/modules/billing"
 	billingapi "github.com/chronos/chronos-go/internal/modules/billing/api"
 	entitlementapp "github.com/chronos/chronos-go/internal/modules/entitlement/app"
 	"github.com/chronos/chronos-go/internal/modules/identity"
@@ -348,12 +349,14 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 	// GET stay green while writes are dead. Found by protocolit's
 	// TestASecondWriteToAnAggregateIsRefused.
 	d.upcasters = eventsourcing.NewUpcasterRegistry()
+	billing.RegisterSchemas(d.upcasters)
 	identity.RegisterSchemas(d.upcasters)
 	notification.RegisterSchemas(d.upcasters)
 	profile.RegisterSchemas(d.upcasters)
 	organization.RegisterSchemas(d.upcasters)
 	workspace.RegisterSchemas(d.upcasters)
 	d.codec = eventcodec.NewJSON(d.upcasters)
+	billing.RegisterEvents(d.codec)
 	identity.RegisterEvents(d.codec)
 	notification.RegisterEvents(d.codec)
 	profile.RegisterEvents(d.codec)

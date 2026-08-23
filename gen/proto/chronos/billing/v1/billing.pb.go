@@ -33,6 +33,7 @@ import (
 	_ "github.com/google/gnostic/openapiv3"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -156,17 +157,323 @@ func (x *CreateBillingPortalSessionResponse) GetUrl() string {
 	return ""
 }
 
+// Invoice is one invoice, as Stripe reported it.
+//
+// A REFERENCE and a STATUS. There is no line-item breakdown, no tax detail and
+// no computed total, because billing.md §6's rule generalises: we never compute
+// an amount, since reimplementing the arithmetic guarantees the two disagree
+// eventually. Anything richer than this is on Stripe's hosted invoice page,
+// which `hosted_url` links to.
+type Invoice struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Stripe's invoice id.
+	//
+	// The pattern deliberately does NOT spell the `in_` prefix, even though every
+	// Stripe invoice id has one. A published pattern of the form `^xx_...` claims
+	// this repository's identifier grammar — a prefixed ULID that
+	// internal/platform/ids can parse — and `internal/tools/checkopenapi` holds
+	// every such field to it. This id is STRIPE'S: they own its shape, they may
+	// change its length, and nothing here can parse it. Describing the character
+	// set is honest; claiming our grammar would be a bound that lies.
+	InvoiceId string `protobuf:"bytes,1,opt,name=invoice_id,json=invoiceId,proto3" json:"invoice_id,omitempty"`
+	// The human-facing reference a customer quotes to support. Empty on a draft:
+	// Stripe assigns it at finalization, and inventing one would create a
+	// reference nobody else can match.
+	Number string `protobuf:"bytes,2,opt,name=number,proto3" json:"number,omitempty"`
+	// Stripe's own vocabulary: draft, open, paid, uncollectible, void. NOT a
+	// mapping of ours — this value is shown to people, and a translation would
+	// make our word differ from the word on Stripe's dashboard during exactly the
+	// conversation where they must not.
+	Status string `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"`
+	// MINOR UNITS — cents, or the currency's smallest denomination — exactly as
+	// Stripe sent them. Not converted to a decimal, because converting means
+	// choosing a scale per currency, which is the arithmetic we refuse to
+	// reimplement. Divide by the exponent for `currency` to render.
+	// The ceiling is 2^31-1 rather than the wire type's maximum, for the reason
+	// notification.GetUnreadCountResponse records: gnostic's `maximum` is a
+	// DOUBLE, and 2^63-1 does not survive a round trip through one — it comes back
+	// larger than any int64 and looks like a typo in the published document. In
+	// minor units 2^31-1 is about 21 million dollars on one invoice, which is a
+	// bound a client can act on.
+	//
+	// The floor is a `gte` rule and not an annotation because `minimum: 0` is
+	// proto3's zero value for that field and is dropped before the generator sees
+	// it.
+	AmountDue int64 `protobuf:"varint,4,opt,name=amount_due,json=amountDue,proto3" json:"amount_due,omitempty"`
+	// Minor units, with the same bounds and for the same reasons.
+	AmountPaid int64 `protobuf:"varint,5,opt,name=amount_paid,json=amountPaid,proto3" json:"amount_paid,omitempty"`
+	// ISO 4217, lower case, as Stripe sends it. A customer's currency is fixed by
+	// their first invoice (billing.md §5 case 12), so this is where that becomes
+	// observable.
+	Currency string `protobuf:"bytes,6,opt,name=currency,proto3" json:"currency,omitempty"`
+	// The billing period covered. UNSET on a one-off invoice, which reports none.
+	//
+	// Timestamps rather than formatted strings, which is this schema's convention
+	// for an instant: a string would need a pattern that re-implements RFC 3339
+	// badly, and every client would parse it by hand.
+	PeriodStart *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=period_start,json=periodStart,proto3" json:"period_start,omitempty"`
+	// The billing period covered. Unset on a one-off invoice.
+	PeriodEnd *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=period_end,json=periodEnd,proto3" json:"period_end,omitempty"`
+	// Stripe's hosted invoice page: the full breakdown, and the PDF download. We
+	// render neither. Empty on a draft, which has no hosted page yet.
+	HostedUrl string `protobuf:"bytes,9,opt,name=hosted_url,json=hostedUrl,proto3" json:"hosted_url,omitempty"`
+	// When Stripe created it. The ordering this list returns.
+	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Invoice) Reset() {
+	*x = Invoice{}
+	mi := &file_chronos_billing_v1_billing_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Invoice) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Invoice) ProtoMessage() {}
+
+func (x *Invoice) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_billing_v1_billing_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Invoice.ProtoReflect.Descriptor instead.
+func (*Invoice) Descriptor() ([]byte, []int) {
+	return file_chronos_billing_v1_billing_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *Invoice) GetInvoiceId() string {
+	if x != nil {
+		return x.InvoiceId
+	}
+	return ""
+}
+
+func (x *Invoice) GetNumber() string {
+	if x != nil {
+		return x.Number
+	}
+	return ""
+}
+
+func (x *Invoice) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *Invoice) GetAmountDue() int64 {
+	if x != nil {
+		return x.AmountDue
+	}
+	return 0
+}
+
+func (x *Invoice) GetAmountPaid() int64 {
+	if x != nil {
+		return x.AmountPaid
+	}
+	return 0
+}
+
+func (x *Invoice) GetCurrency() string {
+	if x != nil {
+		return x.Currency
+	}
+	return ""
+}
+
+func (x *Invoice) GetPeriodStart() *timestamppb.Timestamp {
+	if x != nil {
+		return x.PeriodStart
+	}
+	return nil
+}
+
+func (x *Invoice) GetPeriodEnd() *timestamppb.Timestamp {
+	if x != nil {
+		return x.PeriodEnd
+	}
+	return nil
+}
+
+func (x *Invoice) GetHostedUrl() string {
+	if x != nil {
+		return x.HostedUrl
+	}
+	return ""
+}
+
+func (x *Invoice) GetCreatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return nil
+}
+
+// ListInvoicesRequest asks for a page of the organization's billing history.
+type ListInvoicesRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// How many to return. Defaults to 20 when unset.
+	PageSize int32 `protobuf:"varint,1,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
+	// The `next_page_token` from a previous response. Opaque: it encodes the sort
+	// key this list pages on, and is bound to the query that issued it — a token
+	// from a different list is refused rather than silently reinterpreted.
+	PageToken     string `protobuf:"bytes,2,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListInvoicesRequest) Reset() {
+	*x = ListInvoicesRequest{}
+	mi := &file_chronos_billing_v1_billing_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListInvoicesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListInvoicesRequest) ProtoMessage() {}
+
+func (x *ListInvoicesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_billing_v1_billing_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListInvoicesRequest.ProtoReflect.Descriptor instead.
+func (*ListInvoicesRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_billing_v1_billing_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *ListInvoicesRequest) GetPageSize() int32 {
+	if x != nil {
+		return x.PageSize
+	}
+	return 0
+}
+
+func (x *ListInvoicesRequest) GetPageToken() string {
+	if x != nil {
+		return x.PageToken
+	}
+	return ""
+}
+
+// ListInvoicesResponse is one page, newest first.
+type ListInvoicesResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The page, ordered by creation instant descending.
+	Invoices []*Invoice `protobuf:"bytes,1,rep,name=invoices,proto3" json:"invoices,omitempty"`
+	// Empty when there are no more. Pass it back as `page_token`.
+	NextPageToken string `protobuf:"bytes,2,opt,name=next_page_token,json=nextPageToken,proto3" json:"next_page_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListInvoicesResponse) Reset() {
+	*x = ListInvoicesResponse{}
+	mi := &file_chronos_billing_v1_billing_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListInvoicesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListInvoicesResponse) ProtoMessage() {}
+
+func (x *ListInvoicesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_billing_v1_billing_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListInvoicesResponse.ProtoReflect.Descriptor instead.
+func (*ListInvoicesResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_billing_v1_billing_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *ListInvoicesResponse) GetInvoices() []*Invoice {
+	if x != nil {
+		return x.Invoices
+	}
+	return nil
+}
+
+func (x *ListInvoicesResponse) GetNextPageToken() string {
+	if x != nil {
+		return x.NextPageToken
+	}
+	return ""
+}
+
 var File_chronos_billing_v1_billing_proto protoreflect.FileDescriptor
 
 const file_chronos_billing_v1_billing_proto_rawDesc = "" +
 	"\n" +
-	" chronos/billing/v1/billing.proto\x12\x12chronos.billing.v1\x1a\x1bbuf/validate/validate.proto\x1a chronos/options/v1/options.proto\x1a$gnostic/openapi/v3/annotations.proto\"\x91\x01\n" +
+	" chronos/billing/v1/billing.proto\x12\x12chronos.billing.v1\x1a\x1bbuf/validate/validate.proto\x1a chronos/options/v1/options.proto\x1a$gnostic/openapi/v3/annotations.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x91\x01\n" +
 	"!CreateBillingPortalSessionRequest\x12l\n" +
 	"\n" +
 	"return_url\x18\x01 \x01(\tBM\xbaG/:*\x12(https://app.example.com/settings/billingx\x80\x10\xbaH\x18\xc8\x01\x01r\x13\x10\b\x18\x80\x102\t^https://\x88\x01\x01R\treturnUrl\"\x83\x01\n" +
 	"\"CreateBillingPortalSessionResponse\x12]\n" +
-	"\x03url\x18\x01 \x01(\tBK\xbaGH:7\x125https://billing.stripe.com/p/session/live_YWNjdF8xMjMx\x80\x10\x8a\x01\t^https://R\x03url2\x93\x02\n" +
-	"\x0eBillingService\x12\x80\x02\n" +
+	"\x03url\x18\x01 \x01(\tBK\xbaGH:7\x125https://billing.stripe.com/p/session/live_YWNjdF8xMjMx\x80\x10\x8a\x01\t^https://R\x03url\"\xc7\x05\n" +
+	"\aInvoice\x12V\n" +
+	"\n" +
+	"invoice_id\x18\x01 \x01(\tB7\xbaG4:\x1d\x12\x1bin_1MtHbELkdIwHu7ixl4OzzPMvx\xff\x01\x8a\x01\x0f^[A-Za-z0-9_]+$R\tinvoiceId\x12@\n" +
+	"\x06number\x18\x02 \x01(\tB(\xbaG%:\x0f\x12\rC1D2E3F4-0001x@\x8a\x01\x0f^[A-Za-z0-9-]*$R\x06number\x12N\n" +
+	"\x06status\x18\x03 \x01(\tB6\xbaG3:\x06\x12\x04paidx \x8a\x01&^(draft|open|paid|uncollectible|void)$R\x06status\x12:\n" +
+	"\n" +
+	"amount_due\x18\x04 \x01(\x03B\x1b\xbaG\x11:\x06\x12\x042400Y\x00\x00\xc0\xff\xff\xff\xdfA\xbaH\x04\"\x02(\x00R\tamountDue\x12<\n" +
+	"\vamount_paid\x18\x05 \x01(\x03B\x1b\xbaG\x11:\x06\x12\x042400Y\x00\x00\xc0\xff\xff\xff\xdfA\xbaH\x04\"\x02(\x00R\n" +
+	"amountPaid\x125\n" +
+	"\bcurrency\x18\x06 \x01(\tB\x19\xbaG\x16:\x05\x12\x03usdx\x03\x8a\x01\n" +
+	"^[a-z]{3}$R\bcurrency\x12=\n" +
+	"\fperiod_start\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\vperiodStart\x129\n" +
+	"\n" +
+	"period_end\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tperiodEnd\x12l\n" +
+	"\n" +
+	"hosted_url\x18\t \x01(\tBM\xbaGJ:3\x121https://invoice.stripe.com/i/acct_1/test_YWNjdF8xx\x80\x10\x8a\x01\x0f^(https://.*)?$R\thostedUrl\x129\n" +
+	"\n" +
+	"created_at\x18\n" +
+	" \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\x87\x01\n" +
+	"\x13ListInvoicesRequest\x12/\n" +
+	"\tpage_size\x18\x01 \x01(\x05B\x12\xbaG\x06:\x04\x12\x0220\xbaH\x06\x1a\x04\x18d(\x00R\bpageSize\x12?\n" +
+	"\n" +
+	"page_token\x18\x02 \x01(\tB \xbaG\x03x\x80\x04\xbaH\x17r\x15\x18\x80\x042\x10^[A-Za-z0-9_-]*$R\tpageToken\"\xa2\x01\n" +
+	"\x14ListInvoicesResponse\x12G\n" +
+	"\binvoices\x18\x01 \x03(\v2\x1b.chronos.billing.v1.InvoiceB\x0e\xbaG\x03\x90\x01d\xbaH\x05\x92\x01\x02\x10dR\binvoices\x12A\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tB\x19\xbaG\x16x\x80\x04\x8a\x01\x10^[A-Za-z0-9_-]*$R\rnextPageToken2\x9f\x03\n" +
+	"\x0eBillingService\x12\x89\x01\n" +
+	"\fListInvoices\x12'.chronos.billing.v1.ListInvoicesRequest\x1a(.chronos.billing.v1.ListInvoicesResponse\"&\xca\xf3\x18\x1e\n" +
+	"\x0ebilling_viewer\x12\forganization\xd0\xf3\x18\x04\x12\x80\x02\n" +
 	"\x1aCreateBillingPortalSession\x125.chronos.billing.v1.CreateBillingPortalSessionRequest\x1a6.chronos.billing.v1.CreateBillingPortalSessionResponse\"s\xbaGI2G\n" +
 	"E\n" +
 	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
@@ -186,19 +493,29 @@ func file_chronos_billing_v1_billing_proto_rawDescGZIP() []byte {
 	return file_chronos_billing_v1_billing_proto_rawDescData
 }
 
-var file_chronos_billing_v1_billing_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_chronos_billing_v1_billing_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_chronos_billing_v1_billing_proto_goTypes = []any{
 	(*CreateBillingPortalSessionRequest)(nil),  // 0: chronos.billing.v1.CreateBillingPortalSessionRequest
 	(*CreateBillingPortalSessionResponse)(nil), // 1: chronos.billing.v1.CreateBillingPortalSessionResponse
+	(*Invoice)(nil),               // 2: chronos.billing.v1.Invoice
+	(*ListInvoicesRequest)(nil),   // 3: chronos.billing.v1.ListInvoicesRequest
+	(*ListInvoicesResponse)(nil),  // 4: chronos.billing.v1.ListInvoicesResponse
+	(*timestamppb.Timestamp)(nil), // 5: google.protobuf.Timestamp
 }
 var file_chronos_billing_v1_billing_proto_depIdxs = []int32{
-	0, // 0: chronos.billing.v1.BillingService.CreateBillingPortalSession:input_type -> chronos.billing.v1.CreateBillingPortalSessionRequest
-	1, // 1: chronos.billing.v1.BillingService.CreateBillingPortalSession:output_type -> chronos.billing.v1.CreateBillingPortalSessionResponse
-	1, // [1:2] is the sub-list for method output_type
-	0, // [0:1] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	5, // 0: chronos.billing.v1.Invoice.period_start:type_name -> google.protobuf.Timestamp
+	5, // 1: chronos.billing.v1.Invoice.period_end:type_name -> google.protobuf.Timestamp
+	5, // 2: chronos.billing.v1.Invoice.created_at:type_name -> google.protobuf.Timestamp
+	2, // 3: chronos.billing.v1.ListInvoicesResponse.invoices:type_name -> chronos.billing.v1.Invoice
+	3, // 4: chronos.billing.v1.BillingService.ListInvoices:input_type -> chronos.billing.v1.ListInvoicesRequest
+	0, // 5: chronos.billing.v1.BillingService.CreateBillingPortalSession:input_type -> chronos.billing.v1.CreateBillingPortalSessionRequest
+	4, // 6: chronos.billing.v1.BillingService.ListInvoices:output_type -> chronos.billing.v1.ListInvoicesResponse
+	1, // 7: chronos.billing.v1.BillingService.CreateBillingPortalSession:output_type -> chronos.billing.v1.CreateBillingPortalSessionResponse
+	6, // [6:8] is the sub-list for method output_type
+	4, // [4:6] is the sub-list for method input_type
+	4, // [4:4] is the sub-list for extension type_name
+	4, // [4:4] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_chronos_billing_v1_billing_proto_init() }
@@ -212,7 +529,7 @@ func file_chronos_billing_v1_billing_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chronos_billing_v1_billing_proto_rawDesc), len(file_chronos_billing_v1_billing_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -313,9 +313,44 @@ grant to a team, and removing them needs the member list, which the access
 reactor cannot read without racing the projector that empties the same table on
 that event. Both land together.
 
-## Then
-- [ ] **Billing** — Stripe, per [BILLING-PLAN.md](BILLING-PLAN.md). Additive
-      after any of the above.
+## Now — Billing
+
+Per [BILLING-PLAN.md](BILLING-PLAN.md). Webhook ingestion was already complete;
+what landed since is the part that turns a trial into revenue.
+
+- [x] **The Customer Portal.** `CreateBillingPortalSession`, gated
+      `billing_manager` (the owner alone) and classed `BILLING_MANAGE`, which
+      gate 4 never blocks — if it did, a suspended organization could never pay
+      and suspension would stop being reversible. The Portal is the ONLY way a
+      card is ever added: there is no card field of ours, by design.
+- [x] **The trial-ending warning.** `customer.subscription.trial_will_end` three
+      days out, which for a cardless trial is the only warning anybody gets. The
+      guard is a recorded DEADLINE rather than a boolean, because Stripe permits
+      extending a trial and a boolean would announce the old date and never the
+      real one.
+- [x] **Invoices (§5).** A reference and a status per invoice, projected from
+      webhooks; `ListInvoices` gated `billing_viewer`, which includes admins
+      (ADR-027). We render nothing and compute no totals.
+
+### Still open in the plan
+
+- [ ] **§7 key custody.** `STRIPE_SECRET_KEY` comes from the environment via
+      `config.Secret`. ADR-028 says OpenBao. The webhook secret's
+      rotation-with-overlap is already built; the API key itself is not.
+- [ ] **§9.3** — does a trial convert automatically at trial end when a card was
+      added mid-trial? Stripe's default is yes. Worth confirming rather than
+      inheriting.
+- [ ] **§9.4** — annual plans at launch? Structural for the catalogue's shape,
+      and cheaper to decide before the catalogue exists.
+
+### Suspension notifies nobody, and that is now conspicuous
+
+`OrganizationTrialEndingSoon` mails: "your trial ends in three days". When it
+actually ends, `OrganizationSuspended` is `cat.Silent`, so the customer hears
+nothing. The stated reason still holds — suspension ends access for EVERY
+member, and telling the owner alone tells the one person who can fix it and
+nobody who is affected — but the half-conversation is worse than the silence
+was. It needs an organization-member audience, which does not exist yet.
 
 ---
 

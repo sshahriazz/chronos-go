@@ -25,6 +25,7 @@ package chronos.billing.v1;
 import "buf/validate/validate.proto";
 import "chronos/options/v1/options.proto";
 import "gnostic/openapi/v3/annotations.proto";
+import "google/protobuf/timestamp.proto";
 
 // CreateBillingPortalSessionRequest asks for a signed link into Stripe's
 // Customer Portal.
@@ -73,8 +74,176 @@ message CreateBillingPortalSessionResponse {
   }];
 }
 
+// Invoice is one invoice, as Stripe reported it.
+//
+// A REFERENCE and a STATUS. There is no line-item breakdown, no tax detail and
+// no computed total, because billing.md §6's rule generalises: we never compute
+// an amount, since reimplementing the arithmetic guarantees the two disagree
+// eventually. Anything richer than this is on Stripe's hosted invoice page,
+// which `hosted_url` links to.
+message Invoice {
+  // Stripe's invoice id.
+  //
+  // The pattern deliberately does NOT spell the `in_` prefix, even though every
+  // Stripe invoice id has one. A published pattern of the form `^xx_...` claims
+  // this repository's identifier grammar — a prefixed ULID that
+  // internal/platform/ids can parse — and `internal/tools/checkopenapi` holds
+  // every such field to it. This id is STRIPE'S: they own its shape, they may
+  // change its length, and nothing here can parse it. Describing the character
+  // set is honest; claiming our grammar would be a bound that lies.
+  string invoice_id = 1 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "in_1MtHbELkdIwHu7ixl4OzzPMv"}
+    max_length: 255
+    pattern: "^[A-Za-z0-9_]+$"
+  }];
+
+  // The human-facing reference a customer quotes to support. Empty on a draft:
+  // Stripe assigns it at finalization, and inventing one would create a
+  // reference nobody else can match.
+  string number = 2 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "C1D2E3F4-0001"}
+    max_length: 64
+    pattern: "^[A-Za-z0-9-]*$"
+  }];
+
+  // Stripe's own vocabulary: draft, open, paid, uncollectible, void. NOT a
+  // mapping of ours — this value is shown to people, and a translation would
+  // make our word differ from the word on Stripe's dashboard during exactly the
+  // conversation where they must not.
+  string status = 3 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "paid"}
+    max_length: 32
+    pattern: "^(draft|open|paid|uncollectible|void)$"
+  }];
+
+  // MINOR UNITS — cents, or the currency's smallest denomination — exactly as
+  // Stripe sent them. Not converted to a decimal, because converting means
+  // choosing a scale per currency, which is the arithmetic we refuse to
+  // reimplement. Divide by the exponent for `currency` to render.
+  // The ceiling is 2^31-1 rather than the wire type's maximum, for the reason
+  // notification.GetUnreadCountResponse records: gnostic's `maximum` is a
+  // DOUBLE, and 2^63-1 does not survive a round trip through one — it comes back
+  // larger than any int64 and looks like a typo in the published document. In
+  // minor units 2^31-1 is about 21 million dollars on one invoice, which is a
+  // bound a client can act on.
+  //
+  // The floor is a `gte` rule and not an annotation because `minimum: 0` is
+  // proto3's zero value for that field and is dropped before the generator sees
+  // it.
+  int64 amount_due = 4 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "2400"}
+      maximum: 2147483647
+    },
+    (buf.validate.field).int64.gte = 0
+  ];
+
+  // Minor units, with the same bounds and for the same reasons.
+  int64 amount_paid = 5 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "2400"}
+      maximum: 2147483647
+    },
+    (buf.validate.field).int64.gte = 0
+  ];
+
+  // ISO 4217, lower case, as Stripe sends it. A customer's currency is fixed by
+  // their first invoice (billing.md §5 case 12), so this is where that becomes
+  // observable.
+  string currency = 6 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "usd"}
+    max_length: 3
+    pattern: "^[a-z]{3}$"
+  }];
+
+  // The billing period covered. UNSET on a one-off invoice, which reports none.
+  //
+  // Timestamps rather than formatted strings, which is this schema's convention
+  // for an instant: a string would need a pattern that re-implements RFC 3339
+  // badly, and every client would parse it by hand.
+  google.protobuf.Timestamp period_start = 7;
+
+  // The billing period covered. Unset on a one-off invoice.
+  google.protobuf.Timestamp period_end = 8;
+
+  // Stripe's hosted invoice page: the full breakdown, and the PDF download. We
+  // render neither. Empty on a draft, which has no hosted page yet.
+  string hosted_url = 9 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "https://invoice.stripe.com/i/acct_1/test_YWNjdF8x"}
+    max_length: 2048
+    pattern: "^(https://.*)?$"
+  }];
+
+  // When Stripe created it. The ordering this list returns.
+  google.protobuf.Timestamp created_at = 10;
+}
+
+// ListInvoicesRequest asks for a page of the organization's billing history.
+message ListInvoicesRequest {
+  // How many to return. Defaults to 20 when unset.
+  int32 page_size = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "20"}},
+    (buf.validate.field).int32 = {gte: 0, lte: 100}
+  ];
+
+  // The `next_page_token` from a previous response. Opaque: it encodes the sort
+  // key this list pages on, and is bound to the query that issued it — a token
+  // from a different list is refused rather than silently reinterpreted.
+  string page_token = 2 [
+    (gnostic.openapi.v3.property) = {max_length: 512},
+    (buf.validate.field).string = {
+      max_len: 512
+      pattern: "^[A-Za-z0-9_-]*$"
+    }
+  ];
+}
+
+// ListInvoicesResponse is one page, newest first.
+message ListInvoicesResponse {
+  // The page, ordered by creation instant descending.
+  repeated Invoice invoices = 1 [
+    (gnostic.openapi.v3.property) = {max_items: 100},
+    (buf.validate.field).repeated = {max_items: 100}
+  ];
+
+  // Empty when there are no more. Pass it back as `page_token`.
+  string next_page_token = 2 [(gnostic.openapi.v3.property) = {
+    max_length: 512
+    pattern: "^[A-Za-z0-9_-]*$"
+  }];
+}
+
 // BillingService is the commercial self-service surface.
 service BillingService {
+  // ListInvoices returns the organization's billing history, newest first.
+  //
+  // A reference and a status per invoice, never a computed total — the full
+  // breakdown and the PDF live on Stripe's hosted invoice page, which each entry
+  // links to. There is nothing here to reconcile against Stripe because nothing
+  // here was calculated.
+  //
+  // # Why BILLING_VIEW and not BILLING_MANAGE
+  //
+  // `billing_viewer` includes organization ADMINS, while `billing_manager`
+  // resolves to the owner alone (organization.md §5.1). That split is ADR-027's:
+  // an admin may always see what the company is spending without being able to
+  // change what it is committed to. Seeing an invoice is the first half.
+  //
+  // Never blocked by gate 4, in any organization state. A suspended tenant's
+  // admin may still read what they were billed — withholding it is leverage, not
+  // security, and the invoice is theirs.
+  //
+  // A trialing organization has no invoices and a paused one generates none, so
+  // an empty list is the ordinary answer during a trial rather than a fault.
+  rpc ListInvoices(ListInvoicesRequest) returns (ListInvoicesResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "billing_viewer"
+      resource_type: "organization"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_BILLING_VIEW;
+  }
+
+
   // CreateBillingPortalSession returns a signed link into Stripe's Customer
   // Portal for the caller's organization.
   //

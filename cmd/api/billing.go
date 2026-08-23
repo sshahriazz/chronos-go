@@ -12,6 +12,7 @@ import (
 	billingpg "github.com/chronos/chronos-go/internal/modules/billing/adapter/postgres"
 	billingapi "github.com/chronos/chronos-go/internal/modules/billing/api"
 	billingapp "github.com/chronos/chronos-go/internal/modules/billing/app"
+	billingdomain "github.com/chronos/chronos-go/internal/modules/billing/domain"
 	orgapp "github.com/chronos/chronos-go/internal/modules/organization/app"
 	orgdomain "github.com/chronos/chronos-go/internal/modules/organization/domain"
 	"github.com/chronos/chronos-go/internal/platform/config"
@@ -82,10 +83,25 @@ func (d *dependencies) buildStripeWebhook(
 		return nil, fmt.Errorf("webhook event log: %w", err)
 	}
 
+	// The invoice mirror. Its own repository and its own stream category: an
+	// invoice is Stripe's object, not part of the organization's lifecycle, and
+	// putting it on the organization's stream would grow that aggregate by one
+	// event per invoice forever for facts no organization rule ever reads.
+	invoices, err := billingapp.NewInvoices(billingapp.InvoicesDeps{
+		Repo: eventsourcing.NewRepository[*billingdomain.Invoice](
+			d.store, d.codec, d.upcasters,
+			billingdomain.InvoiceCategory, billingdomain.NewInvoice),
+		Now: d.clock.Now,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("invoice recorder: %w", err)
+	}
+
 	return billingapi.NewWebhook(billingapi.WebhookDeps{
 		Verifier: verifier,
 		Sync:     sync,
 		Trials:   trials,
+		Invoices: invoices,
 		Events:   events,
 		Log:      log,
 	})
@@ -165,5 +181,18 @@ func (d *dependencies) buildBilling(cfg *config.Config) (*billingapi.Service, er
 	if err != nil {
 		return nil, fmt.Errorf("portal sessions: %w", err)
 	}
-	return billingapi.New(billingapi.Deps{Sessions: sessions})
+
+	if d.pool == nil {
+		return nil, errors.New("no read model: the billing history is invoice_view")
+	}
+	reads, err := billingpg.NewInvoiceReads(pgadapter.New(d.pool))
+	if err != nil {
+		return nil, fmt.Errorf("invoice reads: %w", err)
+	}
+	invoices, err := billingapp.NewInvoiceQueries(reads)
+	if err != nil {
+		return nil, fmt.Errorf("invoice queries: %w", err)
+	}
+
+	return billingapi.New(billingapi.Deps{Sessions: sessions, Invoices: invoices})
 }

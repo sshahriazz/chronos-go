@@ -57,6 +57,7 @@ func eventTypes() []string {
 	return []string{
 		(&contract.OrganizationCreated{}).EventType(),
 		(&contract.OrganizationTrialStarted{}).EventType(),
+		(&contract.OrganizationTrialEndingSoon{}).EventType(),
 		(&contract.OrganizationActivated{}).EventType(),
 		(&contract.OrganizationPastDue{}).EventType(),
 		(&contract.OrganizationSuspended{}).EventType(),

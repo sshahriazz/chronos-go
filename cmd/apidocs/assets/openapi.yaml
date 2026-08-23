@@ -328,6 +328,183 @@ components:
       title: CreateBillingPortalSessionResponse
       additionalProperties: false
       description: CreateBillingPortalSessionResponse carries the door.
+    chronos.billing.v1.Invoice:
+      type: object
+      properties:
+        invoiceId:
+          type: string
+          examples:
+            - in_1MtHbELkdIwHu7ixl4OzzPMv
+          title: invoice_id
+          maxLength: 255
+          pattern: ^[A-Za-z0-9_]+$
+          description: |-
+            Stripe's invoice id.
+
+             The pattern deliberately does NOT spell the `in_` prefix, even though every
+             Stripe invoice id has one. A published pattern of the form `^xx_...` claims
+             this repository's identifier grammar — a prefixed ULID that
+             internal/platform/ids can parse — and `internal/tools/checkopenapi` holds
+             every such field to it. This id is STRIPE'S: they own its shape, they may
+             change its length, and nothing here can parse it. Describing the character
+             set is honest; claiming our grammar would be a bound that lies.
+        number:
+          type: string
+          examples:
+            - C1D2E3F4-0001
+          title: number
+          maxLength: 64
+          pattern: ^[A-Za-z0-9-]*$
+          description: |-
+            The human-facing reference a customer quotes to support. Empty on a draft:
+             Stripe assigns it at finalization, and inventing one would create a
+             reference nobody else can match.
+        status:
+          type: string
+          examples:
+            - paid
+          title: status
+          maxLength: 32
+          pattern: ^(draft|open|paid|uncollectible|void)$
+          description: |-
+            Stripe's own vocabulary: draft, open, paid, uncollectible, void. NOT a
+             mapping of ours — this value is shown to people, and a translation would
+             make our word differ from the word on Stripe's dashboard during exactly the
+             conversation where they must not.
+        amountDue:
+          examples:
+            - "2400"
+          title: amount_due
+          description: |-
+            MINOR UNITS — cents, or the currency's smallest denomination — exactly as
+             Stripe sent them. Not converted to a decimal, because converting means
+             choosing a scale per currency, which is the arithmetic we refuse to
+             reimplement. Divide by the exponent for `currency` to render.
+             The ceiling is 2^31-1 rather than the wire type's maximum, for the reason
+             notification.GetUnreadCountResponse records: gnostic's `maximum` is a
+             DOUBLE, and 2^63-1 does not survive a round trip through one — it comes back
+             larger than any int64 and looks like a typo in the published document. In
+             minor units 2^31-1 is about 21 million dollars on one invoice, which is a
+             bound a client can act on.
+
+             The floor is a `gte` rule and not an annotation because `minimum: 0` is
+             proto3's zero value for that field and is dropped before the generator sees
+             it.
+          oneOf:
+            - type: integer
+              format: int64
+              minimum: 0
+              maximum: 2147483647
+            - type: string
+              pattern: ^-?[0-9]+$
+              maxLength: 20
+        amountPaid:
+          examples:
+            - "2400"
+          title: amount_paid
+          description: Minor units, with the same bounds and for the same reasons.
+          oneOf:
+            - type: integer
+              format: int64
+              minimum: 0
+              maximum: 2147483647
+            - type: string
+              pattern: ^-?[0-9]+$
+              maxLength: 20
+        currency:
+          type: string
+          examples:
+            - usd
+          title: currency
+          maxLength: 3
+          pattern: ^[a-z]{3}$
+          description: |-
+            ISO 4217, lower case, as Stripe sends it. A customer's currency is fixed by
+             their first invoice (billing.md §5 case 12), so this is where that becomes
+             observable.
+        periodStart:
+          title: period_start
+          description: |-
+            The billing period covered. UNSET on a one-off invoice, which reports none.
+
+             Timestamps rather than formatted strings, which is this schema's convention
+             for an instant: a string would need a pattern that re-implements RFC 3339
+             badly, and every client would parse it by hand.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+        periodEnd:
+          title: period_end
+          description: The billing period covered. Unset on a one-off invoice.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+        hostedUrl:
+          type: string
+          examples:
+            - https://invoice.stripe.com/i/acct_1/test_YWNjdF8x
+          title: hosted_url
+          maxLength: 2048
+          pattern: ^(https://.*)?$
+          description: |-
+            Stripe's hosted invoice page: the full breakdown, and the PDF download. We
+             render neither. Empty on a draft, which has no hosted page yet.
+        createdAt:
+          title: created_at
+          description: When Stripe created it. The ordering this list returns.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: Invoice
+      additionalProperties: false
+      description: |-
+        Invoice is one invoice, as Stripe reported it.
+
+         A REFERENCE and a STATUS. There is no line-item breakdown, no tax detail and
+         no computed total, because billing.md §6's rule generalises: we never compute
+         an amount, since reimplementing the arithmetic guarantees the two disagree
+         eventually. Anything richer than this is on Stripe's hosted invoice page,
+         which `hosted_url` links to.
+    chronos.billing.v1.ListInvoicesRequest:
+      type: object
+      properties:
+        pageSize:
+          type: integer
+          examples:
+            - "20"
+          title: page_size
+          maximum: 100
+          minimum: 0
+          format: int32
+          description: How many to return. Defaults to 20 when unset.
+        pageToken:
+          type: string
+          title: page_token
+          maxLength: 512
+          pattern: ^[A-Za-z0-9_-]*$
+          description: |-
+            The `next_page_token` from a previous response. Opaque: it encodes the sort
+             key this list pages on, and is bound to the query that issued it — a token
+             from a different list is refused rather than silently reinterpreted.
+      title: ListInvoicesRequest
+      additionalProperties: false
+      description: ListInvoicesRequest asks for a page of the organization's billing history.
+    chronos.billing.v1.ListInvoicesResponse:
+      type: object
+      properties:
+        invoices:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.billing.v1.Invoice'
+          title: invoices
+          maxItems: 100
+          description: The page, ordered by creation instant descending.
+        nextPageToken:
+          type: string
+          title: next_page_token
+          maxLength: 512
+          pattern: ^[A-Za-z0-9_-]*$
+          description: Empty when there are no more. Pass it back as `page_token`.
+      title: ListInvoicesResponse
+      additionalProperties: false
+      description: ListInvoicesResponse is one page, newest first.
     chronos.errors.v1.ErrorDetail:
       type: object
       title: Error detail
@@ -4779,6 +4956,64 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.billing.v1.CreateBillingPortalSessionResponse'
+  /chronos.billing.v1.BillingService/ListInvoices:
+    post:
+      tags:
+        - BillingService
+      summary: ListInvoices returns the organization's billing history, newest first.
+      description: |-
+        A reference and a status per invoice, never a computed total — the full
+         breakdown and the PDF live on Stripe's hosted invoice page, which each entry
+         links to. There is nothing here to reconcile against Stripe because nothing
+         here was calculated.
+
+         # Why BILLING_VIEW and not BILLING_MANAGE
+
+         `billing_viewer` includes organization ADMINS, while `billing_manager`
+         resolves to the owner alone (organization.md §5.1). That split is ADR-027's:
+         an admin may always see what the company is spending without being able to
+         change what it is committed to. Seeing an invoice is the first half.
+
+         Never blocked by gate 4, in any organization state. A suspended tenant's
+         admin may still read what they were billed — withholding it is leverage, not
+         security, and the invoice is theirs.
+
+         A trialing organization has no invoices and a paused one generates none, so
+         an empty list is the ordinary answer during a trial rather than a fault.
+      operationId: BillingService_ListInvoices
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.billing.v1.ListInvoicesRequest'
+            example:
+              pageSize: "20"
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.billing.v1.ListInvoicesResponse'
   /chronos.identity.v1.IdentityService/Authenticate:
     post:
       tags:

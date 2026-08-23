@@ -3,8 +3,10 @@ package main
 import (
 	"log/slog"
 	"slices"
+	"strings"
 	"testing"
 
+	"github.com/chronos/chronos-go/internal/modules/billing"
 	"github.com/chronos/chronos-go/internal/modules/notification"
 	"github.com/chronos/chronos-go/internal/modules/organization"
 	"github.com/chronos/chronos-go/internal/modules/profile"
@@ -63,6 +65,7 @@ func TestTheCodecRegistersEveryModuleThisBinaryWrites(t *testing.T) {
 		name  string
 		types []string
 	}{
+		{"billing", billing.EventTypes()},
 		{"notification", notification.EventTypes()},
 		{"profile", profile.EventTypes()},
 		{"organization", organization.EventTypes()},
@@ -79,6 +82,55 @@ func TestTheCodecRegistersEveryModuleThisBinaryWrites(t *testing.T) {
 					"The projector registers it and keeps answering reads, so nothing in "+
 					"the read path shows the failure.", want, module.name)
 			}
+		}
+	}
+
+	assertNothingIsRegisteredButUndeclared(t, registered)
+}
+
+// THE OTHER DIRECTION, and it is not symmetry for its own sake.
+//
+// The check above asks "is everything DECLARED also REGISTERED". This asks "is
+// everything REGISTERED also DECLARED", and the omission it catches is worse
+// than the one above rather than milder.
+//
+// A module's eventTypes() drives RegisterSchemas, which is what gives each event
+// a schema version. Repository.decode calls UpcasterRegistry.Apply on EVERY
+// read, and Apply fails with `event type %q is not registered` for a type that
+// has none. So an event added to RegisterEvents and forgotten in eventTypes()
+// writes perfectly and then makes its aggregate PERMANENTLY UNLOADABLE in every
+// binary that carries a real upcaster registry — which is cmd/api.
+//
+// Nothing else finds it. The write succeeds, the projector is fine, and unit
+// tests pass because they build repositories over a nil registry, where decode
+// skips upcasting entirely. It was found by making exactly this mistake while
+// adding organization.TrialEndingSoon.v1.
+func assertNothingIsRegisteredButUndeclared(t *testing.T, registered []string) {
+	t.Helper()
+
+	declared := map[string]bool{}
+	for _, types := range [][]string{
+		billing.EventTypes(), notification.EventTypes(), profile.EventTypes(),
+		organization.EventTypes(), workspace.EventTypes(),
+	} {
+		for _, e := range types {
+			declared[e] = true
+		}
+	}
+
+	for _, got := range registered {
+		// Identity keeps its list unexported, so it cannot be compared this way
+		// and is skipped by prefix rather than silently passing.
+		if strings.HasPrefix(got, "identity.") {
+			continue
+		}
+		if !declared[got] {
+			t.Errorf("the codec registers %q but no module DECLARES it in EventTypes(). "+
+				"eventTypes() drives RegisterSchemas, so this event is written with no "+
+				"schema version — and UpcasterRegistry.Apply, which runs on every read, "+
+				"refuses a type it has no version for. The first aggregate to record this "+
+				"event becomes unloadable in cmd/api forever, while the write, the "+
+				"projector and every unit test keep working.", got)
 		}
 	}
 }
