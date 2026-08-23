@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Design complete; the platform kernel is under construction.** Read in this
 order before touching anything:
 
-1. [docs/DECISIONS.md](docs/DECISIONS.md) — 47 ADRs. Settled; do not relitigate.
+1. [docs/DECISIONS.md](docs/DECISIONS.md) — 57 ADRs. Settled; do not relitigate.
 2. [docs/CONVENTIONS.md](docs/CONVENTIONS.md) — **layout, import contract, event
    schema, IDs, errors, idempotency, API and test conventions.** Read before
    writing any Go.

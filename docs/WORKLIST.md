@@ -432,9 +432,67 @@ was. It needs an organization-member audience, which does not exist yet.
       argues against specific attacks, and a knob that relaxes them for tests is
       a knob that can relax them in production. Verified by four consecutive full
       protocolit runs and two of identityit, where the third used to fail.
-- [ ] `account_name` deprecated field — delete at the first release boundary.
-- [ ] WebAuthn 3-field ADR.
-- [ ] CONVENTIONS §5 doc/code reconciliation.
+- [ ] `account_name` deprecated field — **BLOCKED, and now probed rather than
+      assumed.** Deleting field 1 was attempted with `reserved 1;` and
+      `reserved "account_name";`, which is the standard protobuf path and the
+      obvious thing to try. `buf breaking` still refuses:
+
+      ```
+      Previously present field "1" with name "account_name" on message
+      "EnrollTotpRequest" was deleted.
+      ```
+
+      The FILE ruleset's FIELD_NO_DELETE does not admit a reserved range, and
+      the baseline is the `main` branch rather than a tag — so with no release
+      ever cut, every deletion is a breaking change against the previous commit.
+      Relaxing the ruleset to admit it would be widening a gate to fit a change,
+      which the field's own comment already refuses.
+
+      It comes out at the first release boundary, when the baseline can move to
+      a tag. Recorded here so the next person does not spend the same twenty
+      minutes discovering that `reserved` is not the escape hatch it looks like.
+- [x] **WebAuthn storage ADR — written as [ADR-057](DECISIONS.md).** A passkey's
+      material goes in its own `passkey_credential` table rather than
+      `credential.verifier`, because the three values behave differently: the
+      credential ID and public key are immutable and written once, the sign count
+      is mutable and written on EVERY login. Packing them into one opaque column
+      makes the monotonic comparison a read-modify-write in Go instead of an
+      atomic `UPDATE`.
+
+      The credential ID is UNIQUE across every account, which is WebAuthn L3
+      §7.1 step 27 and IDENTITY-REVIEW C3: an attacker who registers a victim's
+      credential ID and public key as their own signs the victim into the
+      ATTACKER's account. Neither value is secret, so the control is a unique
+      index plus a pre-insert check.
+
+      Settled now rather than in slice 2 because `credential`'s migration is
+      already applied and migrations are append-only (ADR-011) — deciding later
+      means columns added to the wrong table, and columns are far harder to
+      remove than to never add.
+
+- [x] **CONVENTIONS §5 doc/code reconciliation — the cause fixed, not the cells.**
+      §5 carried a hand-written copy of the error catalogue, and four of its
+      eleven rows disagreed with `internal/server/connect`:
+      `PLAN_UPGRADE_REQUIRED` and `ORG_SUSPENDED` documented as
+      `FailedPrecondition`, actually `PermissionDenied`; `QUOTA_EXCEEDED` as
+      `FailedPrecondition`, actually `ResourceExhausted`; `CONFLICT` as
+      `Aborted`, actually `AlreadyExists`.
+
+      `docs/api/errors.md` is GENERATED from the same package and was correct all
+      along, so the table was a second copy of a generated document. It is gone,
+      replaced by a pointer to the generated one — patching the four cells would
+      have left the mechanism that produced the drift in place.
+
+      §5.1 also described the disclosure ladder's parent-visibility check in the
+      present tense. It is NOT built: `interceptor/gates.go` returns `NOT_FOUND`
+      for every authz denial and says so in a comment. The doc now says so too,
+      including what it costs — a member refused something inside their own
+      organization is told the same thing as a stranger, so the actionable "ask
+      an admin" journey is unreachable for those cases. A product gap, not a
+      security one.
+
+      Also fixed while here: CLAUDE.md's first numbered line said "47 ADRs" and
+      there are 57.
 
 ---
 

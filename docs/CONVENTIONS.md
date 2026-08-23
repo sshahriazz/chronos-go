@@ -315,23 +315,28 @@ org_01H8XG5N2QK7VB3C9WPYZR4TFM
 `platform/errs.DomainError` carries a **reason**, mapped once to a Connect code
 at the API boundary. Handlers never construct transport errors.
 
-| Reason | Connect code | Meaning | User action |
-| --- | --- | --- | --- |
-| `UNAUTHENTICATED` | `Unauthenticated` | no/invalid session | sign in |
-| `STEP_UP_REQUIRED` | `PermissionDenied` | AAL too low | re-authenticate |
-| `ACCESS_DENIED` | `PermissionDenied` | authorization said no | **ask an admin** |
-| `PLAN_UPGRADE_REQUIRED` | `FailedPrecondition` | feature not in plan | **upgrade** |
-| `QUOTA_EXCEEDED` | `FailedPrecondition` | limit reached | reduce or upgrade |
-| `ORG_SUSPENDED` | `FailedPrecondition` | payment state | pay |
-| `NOT_FOUND` | `NotFound` | absent, or invisible | — |
-| `CONFLICT` | `Aborted` | optimistic concurrency | retry |
-| `VALIDATION_FAILED` | `InvalidArgument` | protovalidate or domain | fix input |
-| `RATE_LIMITED` | `ResourceExhausted` | throttled | back off |
-| `INTERNAL` | `Internal` | ours | — |
+**The catalogue is [docs/api/errors.md](api/errors.md), and it is GENERATED**
+from `internal/platform/errs` by `make api-docs`. Every reason, its Connect code,
+its HTTP status, whether it is retryable, and what a client should do about it
+are there.
 
-**The gate distinction is the point.** `ACCESS_DENIED` and
-`PLAN_UPGRADE_REQUIRED` are completely different user journeys — "ask an admin"
-versus "upgrade" — so a generic 403 for both is a product bug, not a shortcut.
+There is deliberately no copy of that table here. There used to be, and it
+drifted: four of its eleven rows disagreed with the code — `PLAN_UPGRADE_REQUIRED`
+and `ORG_SUSPENDED` were documented as `FailedPrecondition` and are
+`PermissionDenied`, `QUOTA_EXCEEDED` as `FailedPrecondition` and is
+`ResourceExhausted`, `CONFLICT` as `Aborted` and is `AlreadyExists`. A
+hand-maintained second copy of a generated document is a second copy that
+eventually contradicts the first, and the one people read is not the one the
+server obeys.
+
+**The gate distinction is the point, and the codes do not carry it.**
+`ACCESS_DENIED` and `PLAN_UPGRADE_REQUIRED` are completely different user
+journeys — "ask an admin" versus "upgrade" — and both are `permission_denied` on
+the wire, along with `STEP_UP_REQUIRED` and `ORG_SUSPENDED`. All four mean *you
+are known, and the answer is still no*; the thing a client branches on is the
+**reason**, which travels in the error detail. A client that switches on the
+Connect code cannot tell an upgrade prompt from an access request, and will send
+people down the wrong one.
 
 ### 5.1 Which error may I return? — the disclosure ladder (ADR-036)
 
@@ -356,8 +361,20 @@ authz denies (principal, relation, resource):
 
 Mechanical, not a judgment call: the parent edge is the ADR-006 topology, and
 each registered type declares a **minimum-visibility relation** for this check.
-It runs **in the interceptor** — handlers are never consulted, so they cannot
+It belongs **in the interceptor** — handlers are never consulted, so they cannot
 get it wrong — and costs one `Check` on the denial path only.
+
+**NOT BUILT YET, and the code says so where it matters.** `interceptor/gates.go`
+returns `NOT_FOUND` for every authz denial and carries a comment explaining that
+the parent-visibility check is the thing that would upgrade some of them to
+`ACCESS_DENIED`. Sitting on the rung that discloses LESS is the correct place to
+wait: turning a `NOT_FOUND` into an `ACCESS_DENIED` later is a feature, while
+going the other way is a disclosure that has already happened.
+
+The cost, stated plainly rather than left to be discovered: a member of an
+organization who is refused something inside it is currently told the same thing
+as a stranger, so the actionable "ask an admin" journey above is unreachable for
+those cases. That is a product gap, not a security one.
 
 **Outward errors are opaque.** Reason plus stable metadata. No SQL, no driver
 text, no stack traces — those go to logs correlated by trace ID (ADR-015).

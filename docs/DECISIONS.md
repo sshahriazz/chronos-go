@@ -3964,3 +3964,135 @@ cross-site scripting.
   `profile_view` as its reference list (CONVENTIONS §1.5, a Temporal Schedule) —
   not something a request handler does inline, where a failure would either fail a
   save that already succeeded or leak an object silently.
+
+---
+
+## ADR-057 — A passkey's material lives in its own table, and the credential ID is unique across every account
+
+**Date:** 2026-08-23 · **Status:** Accepted · **Completes ADR-049 · Answers IDENTITY-REVIEW C3**
+
+### Decision
+
+A WebAuthn credential does not fit the `credential` table's shape, and the
+mismatch is not cosmetic. `credential` holds ONE opaque `verifier` per row —
+migration 00013 documents it as `NULL` for `passkey` — and a passkey needs three
+things that behave completely differently from one another:
+
+| Field | Written | Read by | Nature |
+| --- | --- | --- | --- |
+| **Credential ID** | once, at registration | every ceremony, to find the row | immutable, **globally unique** |
+| **Public key** (COSE) | once, at registration | every ceremony, to verify | immutable |
+| **Sign count** | on EVERY successful login | the clone check | **mutable, monotonic** |
+
+So: a `passkey_credential` table, one row per credential, keyed on the credential
+ID, with `credential_id` **UNIQUE across the whole table** rather than unique per
+subject.
+
+The other per-credential values identity-features §4 lists — AAGUID, transports,
+backup eligibility, backup state, UV status, the user's own label — are columns
+on the same row. They are immutable-at-registration like the public key and are
+listed separately here only because they are display material rather than
+verification material.
+
+### Why not the `credential` table
+
+Three reasons, and the third is the one that decides it.
+
+**The verifier column is one value.** Packing three into it — a struct encoded as
+bytes — makes the sign count unreadable by SQL, so a monotonic comparison becomes
+a read-modify-write in Go and the `UPDATE … WHERE sign_count < $new` that makes
+it atomic is unavailable.
+
+**The uniqueness scopes differ.** `credential`'s existing indexes are per-subject
+("one usable password and one usable TOTP per account"). Credential-ID uniqueness
+is **per installation**, and a per-subject unique index would not catch the attack
+below.
+
+**The write patterns differ.** Everything in `credential` is written at
+enrolment and then read. A sign count is written on every successful
+authentication, which is a different table's worth of write traffic and a
+different vacuum profile — on the row that every login already contends for.
+
+### Why the credential ID is unique across every account
+
+**WebAuthn L3 §7.1 step 27** requires verifying that a credential ID is not
+already registered *for any user*, and the spec's own rationale is an
+account-takeover:
+
+> An attacker who obtains a victim's credential ID and public key registers them
+> as their own. If the RP replaces the victim's registration and the credentials
+> are discoverable, **the victim is signed into the attacker's account** at their
+> next attempt — and everything they do there is the attacker's.
+
+Neither half of that is secret. A credential ID travels in every
+`allowCredentials` list, and a public key is a public key.
+
+So the control is a **UNIQUE constraint plus a pre-insert check**, not one or the
+other. The constraint is what makes it true under concurrency; the check is what
+turns the violation into a message rather than a 500. IDENTITY-REVIEW C3 requires
+a negative test that constructs the collision, and it belongs in the integration
+suite rather than a unit test, because what is being asserted is the INDEX.
+
+### The sign count is authoritative state a handler may not write
+
+This is ADR-049's shape exactly, and the reasoning transfers without change:
+mutable authentication state lives in PostgreSQL, is written by the code that
+verifies, and fails closed. A projector cannot own it — projections are rebuilt
+from the log, and a rebuilt sign count would reset the clone detector to zero.
+
+Three rules, and the first two are what stop it locking people out:
+
+- **0/0 is never a failure.** Synced passkey providers report `signCount = 0`
+  permanently, because there is no coherent place to keep a monotonic counter
+  across N devices. Refusing a login on it would lock out most of the passkeys in
+  existence.
+- **A regression is not a hard deny.** The spec lists an out-of-order race as a
+  benign cause, and identity.md §6/§9 make concurrent sessions ordinary rather
+  than theoretical. A regression emits a **warning event and requires step-up**.
+- **A regression must be OBSERVABLE.** `go-webauthn` sets
+  `credential.Authenticator.CloneWarning` and returns no error, so
+  `FinishLogin` succeeds. An application that never inspects that flag has clone
+  detection that does nothing while every test passes — which is the failure mode
+  this codebase has shipped before, in three notification adapters nothing
+  constructed. The flag is read, and the test asserts the event.
+
+### Consequences
+
+- **`passkey_credential` is NOT rebuildable from the event log**, and joins
+  `credential` in that category. A public key never enters an event, for the same
+  reason a verifier does not: the log is permanent and replicated, and a
+  credential ID plus a public key is exactly the pair the attack above needs.
+  The event records that a passkey was registered and its id — never its material.
+- **It is not personal data either**, so it is not in the vault. It is
+  per-credential secret-adjacent material, which is a third category the codebase
+  already has one member of.
+- **Erasure destroys the row.** Unlike vault data, there is no key to shred: the
+  material is not encrypted with a subject key, so the row is deleted with the
+  account. That is a difference from every other erasure path and is stated here
+  so it is not discovered later.
+- **AAL3 is not reachable this way and the row should go.** IDENTITY-REVIEW C4:
+  SP 800-63B-4 Appendix B forbids syncable authenticators at AAL3, and Apple and
+  Google return no attestation statement for synced passkeys — so requesting
+  `direct` yields `fmt: "none"` and the mechanism silently no-ops on the two
+  platforms most users are on. This ADR does not add an attestation column,
+  because storing an attestation this system cannot act on would imply a
+  capability it does not have.
+- **`pquerna/otp` must be pinned at or above v1.5.0**, and this is recorded here
+  rather than only in the review because it is invisible to tooling:
+  IDENTITY-REVIEW T2 found that earlier versions used a short `Read` instead of
+  `io.ReadFull`, leaving part of a generated secret as zero bytes. **No CVE or
+  GHSA was ever filed**, so `govulncheck` will never report it. It is a TOTP
+  defect rather than a WebAuthn one and belongs to the same slice.
+- **Recovery codes are issued at first passkey registration**, not offered
+  afterwards (identity.md §5). A user whose only method is a passkey on a lost
+  device must still be able to get back in, and an afterthought is a recovery
+  path most people never take.
+
+### What this does not decide
+
+The ceremony itself — challenge storage, RP ID configuration, conditional UI,
+hybrid transport — is slice 2's, and this ADR deliberately stops at the storage
+shape. The reason to settle that early is that `credential`'s migration is
+already applied and migrations are append-only (ADR-011): deciding after the
+table exists means a migration that adds columns to the wrong table, and columns
+are much harder to remove than to never add.
