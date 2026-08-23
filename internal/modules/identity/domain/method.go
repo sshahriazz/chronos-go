@@ -107,6 +107,15 @@ type Method struct {
 	// failures. Recovery is by rebinding the method, not by waiting: a
 	// time-based unlock is a timer an attacker can also wait out.
 	DisabledAt time.Time
+
+	// UserVerified is meaningful for a PASSKEY and false for everything else.
+	//
+	// It is the difference between AAL1 and AAL2 for that method (identity.md
+	// §2), and it is a property of the CREDENTIAL rather than of a ceremony: an
+	// authenticator registered without user verification cannot start producing
+	// it, so the account's activation and its removal invariants can be decided
+	// from the enrolled set rather than from whatever the last login reported.
+	UserVerified bool
 }
 
 // Usable reports whether this method can take part in an authentication now.
@@ -121,7 +130,30 @@ func (m Method) Pending() bool { return m.EnabledAt.IsZero() && m.DisabledAt.IsZ
 // thing an attacker steals once, so what counts is whether the set spans a
 // primary factor and something the primary factor's compromise would not also
 // yield.
+//
+// A passkey listed here is treated as NOT user-verified. Use AALForVerified when
+// the ceremony reported UV — see there for why the distinction is a parameter
+// rather than an assumption.
 func AALFor(used []contract.MethodKind) contract.AssuranceLevel {
+	return AALForVerified(used, false)
+}
+
+// AALForVerified is AALFor with the passkey's user-verification state supplied.
+//
+// # Why UV is a parameter and not an assumption
+//
+// identity.md §2 puts a passkey on BOTH rows of the table: `UV=false` is AAL1,
+// and `UV=true` is AAL2 on its own, because the authenticator is the possession
+// factor and the PIN or biometric that unlocked it is the second. NIST SP
+// 800-63B-4 recognises that pairing.
+//
+// The previous signature could not express it, and its comment said so: it
+// treated any passkey as AAL2 and left the caller "responsible for not listing a
+// passkey it accepted without UV". That is a rule enforced by a sentence, on the
+// one input that decides whether a session is trusted for a password change.
+// Passing the flag makes the strong answer unreachable without the evidence for
+// it — a caller that forgets now gets AAL1, which is the safe direction.
+func AALForVerified(used []contract.MethodKind, userVerified bool) contract.AssuranceLevel {
 	var primary, second bool
 	for _, k := range used {
 		switch RoleOf(k) {
@@ -138,18 +170,14 @@ func AALFor(used []contract.MethodKind) contract.AssuranceLevel {
 		return contract.AAL0
 	case second:
 		return contract.AAL2
-	case len(used) == 1 && used[0] == contract.MethodPasskey:
-		// A passkey with user verification is two factors in one ceremony: the
-		// authenticator is the possession factor and the PIN or biometric that
-		// unlocked it is the second. NIST SP 800-63B-4 recognises this; treating
-		// it as AAL1 would force a redundant TOTP prompt on the strongest method
-		// available and push users back to passwords.
-		//
-		// This is correct ONLY when user verification actually occurred. The
-		// caller is responsible for not listing a passkey it accepted without
-		// UV — which is why slice 2 must pass UV state, not just the kind.
+	case len(used) == 1 && used[0] == contract.MethodPasskey && userVerified:
+		// One gesture, two factors. Treating it as AAL1 would force a redundant
+		// TOTP prompt on the strongest method available and push users back to
+		// passwords.
 		return contract.AAL2
 	default:
+		// This is where a passkey with UV=false lands: AAL1, exactly as §2's
+		// table says, rather than AAL0 — the credential did identify the account.
 		return contract.AAL1
 	}
 }

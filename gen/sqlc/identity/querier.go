@@ -11,6 +11,26 @@ import (
 )
 
 type Querier interface {
+	// Move the signature counter forward, and ONLY forward.
+	//
+	// The whole clone check, as one atomic statement. `sign_count < $2` is what
+	// makes it safe under concurrent logins: two sessions authenticating at once
+	// cannot both advance past each other, and the loser simply matches no row.
+	//
+	// ZERO ROWS IS NOT AN ERROR, and reading it as one would lock people out. It
+	// means the presented count did not exceed the stored one, which has two very
+	// different causes:
+	//
+	//   * 0 → 0, which is the ordinary case for a SYNCED passkey. Apple and Google
+	//     report 0 permanently because there is no coherent place to keep a
+	//     monotonic counter across N devices. Refusing on it would refuse most of
+	//     the passkeys in existence.
+	//   * a genuine REGRESSION, which the caller turns into a warning and a step-up
+	//     rather than a denial — the spec lists an out-of-order race as a benign
+	//     cause, and this system treats concurrent sessions as ordinary.
+	//
+	// The caller distinguishes them; this statement only refuses to go backwards.
+	AdvancePasskeySignCount(ctx context.Context, arg AdvancePasskeySignCountParams) (int64, error)
 	// Applied from identity.UsernameAssigned: this account's public handle.
 	//
 	// An UPDATE rather than an upsert, for RecordDeletionRequest's reason: the event
@@ -113,6 +133,7 @@ type Querier interface {
 	// this exists to remove — a page can be empty because the limit was reached on a
 	// previous pass and the caller forgot to loop.
 	CountCredentialsAtKeyVersion(ctx context.Context, arg CountCredentialsAtKeyVersionParams) (int64, error)
+	CountPasskeysForSubject(ctx context.Context, subjectID string) (int64, error)
 	// Consecutive-failure detection across accounts for one identifier: the
 	// credential-stuffing signal.
 	CountRecentFailures(ctx context.Context, arg CountRecentFailuresParams) (int64, error)
@@ -139,6 +160,20 @@ type Querier interface {
 	// which it does only when the account's own stream records no usable password.
 	// See app.PasswordCredentials.StoreFirst.
 	DeleteOrphanedPasswordCredential(ctx context.Context, subjectID string) (int64, error)
+	// Remove one credential.
+	//
+	// Scoped by subject as well as by id, unlike GetPasskey above, and the
+	// difference is the direction of trust: a ceremony asks "whose is this", while
+	// a removal is a caller acting on their own account and must not be able to
+	// delete somebody else's passkey by naming its id.
+	DeletePasskey(ctx context.Context, arg DeletePasskeyParams) (int64, error)
+	// Erasure.
+	//
+	// The row is DELETED rather than crypto-shredded, because there is no subject
+	// key to destroy: this material is not encrypted under one. That makes it the
+	// one erasure path that removes rows rather than making them unreadable
+	// (ADR-057).
+	DeletePasskeysForSubject(ctx context.Context, subjectID string) (int64, error)
 	// Replace the whole set. Whole-set replacement, never incremental top-up: a mix
 	// of old and new codes makes "how many do I have left" unanswerable and leaves
 	// codes the user believes were replaced still live.
@@ -216,6 +251,13 @@ type Querier interface {
 	// most one row by construction rather than by hope.
 	GetCredentialOfKind(ctx context.Context, arg GetCredentialOfKindParams) (GetCredentialOfKindRow, error)
 	GetEmailReservation(ctx context.Context, emailIndex string) (EmailReservationView, error)
+	// Find a credential by its id, for a ceremony.
+	//
+	// NOT scoped by subject, deliberately. A WebAuthn assertion names the credential
+	// and the RP looks it up to learn WHOSE it is — scoping by a subject the caller
+	// supplied would mean trusting the caller's claim about their own identity,
+	// which is what the ceremony exists to establish.
+	GetPasskey(ctx context.Context, credentialID string) (PasskeyCredential, error)
 	// Resolve a bearer token to a session. This is the authenticator's query, and it
 	// runs on EVERY authenticated request.
 	//
@@ -313,6 +355,22 @@ type Querier interface {
 	// that could not show a person their own handle would be hiding the one piece of
 	// their identity that is not secret.
 	GetUserBySubject(ctx context.Context, subjectID string) (GetUserBySubjectRow, error)
+	// Queries for passkey_credential (ADR-057).
+	//
+	// This table is NOT a projection. Nothing here is rebuildable from the log — a
+	// public key never enters an event — so these statements are the system of
+	// record for WebAuthn material, exactly as `credential`'s are for a verifier.
+	// Register one credential.
+	//
+	// A plain INSERT, and the absence of an upsert is the point: the primary key is
+	// the credential ID and it is UNIQUE ACROSS EVERY ACCOUNT (WebAuthn L3 §7.1
+	// step 27). An upsert would silently REPLACE a victim's registration with an
+	// attacker's — which is the exact takeover the uniqueness exists to prevent,
+	// implemented as a convenience.
+	//
+	// The caller checks first and handles the violation as a message; this refuses
+	// under concurrency, where a check alone cannot.
+	InsertPasskey(ctx context.Context, arg InsertPasskeyParams) error
 	InsertRecoveryCode(ctx context.Context, arg InsertRecoveryCodeParams) error
 	// The AUTHORITATIVE half, written by the login handler.
 	//
@@ -444,6 +502,10 @@ type Querier interface {
 	// Ordered by deadline so the longest-overdue is handled first, and limited so
 	// one sweep cannot fan out unboundedly.
 	ListOverdueDeletions(ctx context.Context, arg ListOverdueDeletionsParams) ([]ListOverdueDeletionsRow, error)
+	// Every passkey an account holds, newest first.
+	//
+	// Used to build an `allowCredentials` list and to render the security screen.
+	ListPasskeysForSubject(ctx context.Context, subjectID string) ([]PasskeyCredential, error)
 	// The device list, newest first.
 	//
 	// Keyset pagination: ordered by (created_at, session_id) so the tiebreak column
@@ -673,6 +735,12 @@ type Querier interface {
 	// rather than a lifetime one. Without it, an account that has ever failed enough
 	// times is locked out permanently, however many successes came after.
 	TouchCredential(ctx context.Context, credentialID string) error
+	// Record a successful use that did not advance the counter.
+	//
+	// The 0 → 0 case above still happened, and "when did I last use this passkey"
+	// is a question the security screen has to answer. Separate from the advance so
+	// that neither statement has to branch.
+	TouchPasskey(ctx context.Context, arg TouchPasskeyParams) error
 	// Push the idle deadline forward.
 	//
 	// Writes the AUTHORITATIVE half only. The idle deadline is not in the log —
@@ -726,6 +794,7 @@ type Querier interface {
 	// with every other projection and because it does not accumulate dead tuples on
 	// a table that may be rebuilt repeatedly.
 	TruncateIdentityProjections(ctx context.Context) error
+	TruncatePasskeys(ctx context.Context) error
 	// Credential storage: the one identity table that is NOT rebuildable from the
 	// log, because verifiers and TOTP secrets must never enter an event.
 	//
@@ -777,6 +846,12 @@ type Querier interface {
 	// otherwise idempotent. A statement that failed on replay would stop the
 	// projector, and a rebuild from position zero would never complete.
 	UpsertUser(ctx context.Context, arg UpsertUserParams) error
+	// Record that a signature counter went BACKWARDS.
+	//
+	// Stamped rather than counted: what an operator needs is "has this credential
+	// ever regressed, and when", and a counter would invite somebody to set a
+	// threshold on a signal whose benign cause is a race.
+	WarnPasskeyClone(ctx context.Context, arg WarnPasskeyCloneParams) error
 }
 
 var _ Querier = (*Queries)(nil)

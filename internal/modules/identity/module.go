@@ -60,6 +60,9 @@ func RegisterEvents(codec *eventcodec.JSON) {
 	eventcodec.Register[contract.TotpEnrollmentStarted](codec)
 	eventcodec.Register[contract.TotpEnabled](codec)
 	eventcodec.Register[contract.TotpDisabled](codec)
+	eventcodec.Register[contract.PasskeyRegistered](codec)
+	eventcodec.Register[contract.PasskeyRemoved](codec)
+	eventcodec.Register[contract.PasskeyCloneWarning](codec)
 	eventcodec.Register[contract.RecoveryCodesGenerated](codec)
 	eventcodec.Register[contract.RecoveryCodeConsumed](codec)
 	eventcodec.Register[contract.RecoveryCodesExhausted](codec)
@@ -142,6 +145,8 @@ func eventTypes() []string {
 
 		&contract.TotpEnrollmentStarted{}, &contract.TotpEnabled{},
 		&contract.TotpDisabled{}, &contract.RecoveryCodesGenerated{},
+		&contract.PasskeyRegistered{}, &contract.PasskeyRemoved{},
+		&contract.PasskeyCloneWarning{},
 		&contract.RecoveryCodeConsumed{}, &contract.RecoveryCodesExhausted{},
 
 		&contract.AuthenticationSucceeded{}, &contract.AuthenticationFailed{},

@@ -279,6 +279,48 @@ func identityNotifications(cat *notify.Catalogue) {
 			"would be noise, and noise in a security stream trains people to ignore the " +
 			"message that matters")
 
+	// ---- Passkeys (identity.md §5, ADR-057) ----------------------------------
+	cat.On[identityevents.PasskeyRegistered](notify.Spec{
+		Template: "identity.passkey_registered",
+		// SECURITY. A new way into the account appeared, and that is the fact a
+		// person must hear about even if they have muted everything else — if
+		// they did not register it, somebody else has a key to their account.
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, func(e *identityevents.PasskeyRegistered) map[string]any {
+		return map[string]any{
+			// The person's own label for the device, so the mail can say "MacBook"
+			// rather than a base64 blob. NOT the credential id: it means nothing to
+			// the reader and it travels in every allowCredentials list, so putting
+			// it in a mailbox adds exposure for no benefit.
+			"Label": e.Label,
+			// Whether the key SYNCS. A synced passkey is present on every device
+			// the person's account touches, which changes what "somebody
+			// registered a key" means — and it is the difference between one lost
+			// laptop and a compromised cloud account.
+			"Synced": e.BackupState,
+		}
+	})
+	cat.On[identityevents.PasskeyRemoved](notify.Spec{
+		Template: "identity.passkey_removed",
+		// SECURITY for the mirror reason: a way in was taken away. An attacker
+		// removing a victim's passkey to force them onto a weaker method is the
+		// attack this message exists to interrupt.
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, nil)
+
+	cat.Silent[identityevents.PasskeyCloneWarning](
+		"a signature counter went backwards, which the spec lists an out-of-order race " +
+			"as a benign cause of — and this system treats concurrent sessions as " +
+			"ordinary (identity.md §6, §9). Mailing a security warning on it would " +
+			"train people to ignore security mail, which is the cost this catalogue " +
+			"keeps refusing to pay. The consequence is carried where it belongs: the " +
+			"ceremony's assurance is reduced and the caller must step up. The event " +
+			"exists so the check is OBSERVABLE — go-webauthn sets the flag and returns " +
+			"no error, so a build that never reads it has clone detection that does " +
+			"nothing while every test passes")
+
 	cat.Silent[identityevents.UserActivated](
 		"activation is the conjunction of two facts that each notify on their own — the " +
 			"address was proven (EmailVerified) and a second factor was enrolled " +

@@ -1,0 +1,11 @@
+Hello{{if .Name}} {{.Name}}{{end}},
+
+A passkey was added to your Chronos account{{if .Label}}, named "{{.Label}}"{{end}}.
+{{if .Synced}}
+This passkey syncs across your devices, so it works anywhere you are signed in
+to the account that stores it.
+{{else}}
+This passkey lives on one device.
+{{end}}
+IF YOU DID NOT ADD IT, somebody else can now sign in as you. Remove it from your
+security settings and change your password.

@@ -1016,3 +1016,121 @@ type EmailReservationDemoted struct {
 }
 
 func (*EmailReservationDemoted) EventType() string { return "identity.EmailReservationDemoted.v1" }
+
+// ---------------------------------------------------------------------------
+// Passkeys (WebAuthn) — identity slice 2, ADR-057
+// ---------------------------------------------------------------------------
+
+// PasskeyRegistered records that an account gained a WebAuthn credential.
+//
+// # What is here, and what may never be
+//
+// The credential's ID and nothing else that identifies the key. The PUBLIC KEY
+// is deliberately absent, and its absence is a security control rather than
+// economy: the log is permanent and replicated, and a credential ID plus a
+// public key is exactly the pair WebAuthn L3 §7.1 step 27's takeover needs — an
+// attacker registers a victim's pair as their own and the victim signs into the
+// attacker's account. Keeping the key out of the log means a replica, a backup
+// or a rebuild never hands anybody half of that.
+//
+// So this event says a passkey EXISTS. `passkey_credential` says what it is, is
+// not rebuildable from the log, and is deleted rather than crypto-shredded on
+// erasure — there is no subject key to destroy (ADR-057).
+type PasskeyRegistered struct {
+	SubjectID string
+
+	// CredentialID is the WebAuthn credential id, base64url. It appears in every
+	// `allowCredentials` list a browser is handed, so it is not secret — which is
+	// precisely why the uniqueness constraint, and not obscurity, is the control.
+	CredentialID string
+
+	// Label is what the PERSON called the device. Free text they wrote about
+	// their own hardware.
+	//
+	// It is the one string here a caller chooses, and it is bounded on the wire
+	// rather than trusted: a label is rendered on a security screen beside other
+	// people's sessions, and an unbounded one is a permanent entry in a log
+	// nobody can edit.
+	Label string
+
+	// BackupEligible reports whether the authenticator may sync this credential
+	// to other devices, and BackupState whether it currently is.
+	//
+	// Recorded because they change what the credential MEANS: a synced passkey is
+	// present on every device the person's account touches, which is why SP
+	// 800-63B-4 Appendix B forbids one at AAL3 (IDENTITY-REVIEW C4). Neither is
+	// personal data; both are properties of the key.
+	BackupEligible bool
+	BackupState    bool
+
+	// UserVerified reports whether the registration ceremony proved a PIN or a
+	// biometric, not merely possession of the authenticator.
+	//
+	// It is the difference between AAL1 and AAL2 for this credential
+	// (identity.md §2), and it belongs in the event because it is a property of
+	// the CREDENTIAL: an authenticator registered without user verification
+	// cannot start producing it. Recording it here is what lets the account's
+	// activation rule and its removal invariant be decided by replaying the log,
+	// rather than by reading a table that is not rebuildable from it.
+	UserVerified bool
+
+	RegisteredAt time.Time
+}
+
+func (*PasskeyRegistered) EventType() string { return "identity.PasskeyRegistered.v1" }
+
+// PasskeyRemoved records that a credential no longer authenticates.
+//
+// Refused by the aggregate when it would leave an Active account with no usable
+// method, which is the same rule that stops the last TOTP factor being removed.
+// A person who deletes their only passkey from a device they no longer have is
+// not helped by an endpoint that lets them.
+type PasskeyRemoved struct {
+	SubjectID    string
+	CredentialID string
+
+	// ActorID is who removed it. Normally the holder; recorded separately
+	// because a removal is a security-relevant act and "who did this" is the
+	// first question asked about one.
+	ActorID string
+
+	RemovedAt time.Time
+}
+
+func (*PasskeyRemoved) EventType() string { return "identity.PasskeyRemoved.v1" }
+
+// PasskeyCloneWarning records that an authenticator's signature counter went
+// BACKWARDS.
+//
+// # It is a warning and not a denial, deliberately
+//
+// The WebAuthn spec lists an out-of-order race as a benign cause, and this
+// system treats concurrent sessions as ordinary rather than theoretical
+// (identity.md §6, §9). Denying on it would sign people out for using two
+// devices at once. So the authentication SUCCEEDS at a reduced assurance and the
+// caller is required to step up.
+//
+// # Why it is an event rather than a log line
+//
+// `go-webauthn` sets `CloneWarning` on the credential and returns NO ERROR, so
+// `FinishLogin` succeeds and an application that never inspects the flag has
+// clone detection that does nothing while every test passes. That is the exact
+// failure this repository has shipped before — three notification adapters,
+// fully built and constructed by no binary. An event is what makes the check
+// observable: it is asserted by a test, it reaches the security stream, and its
+// absence over a fleet is a measurable fact rather than an assumption.
+type PasskeyCloneWarning struct {
+	SubjectID    string
+	CredentialID string
+
+	// Stored and Presented are the counters, in that order. Both are recorded
+	// because the DIFFERENCE is what distinguishes a race — which lands one or
+	// two behind — from a cloned authenticator replaying an old counter, which
+	// can land arbitrarily far back.
+	Stored    uint32
+	Presented uint32
+
+	DetectedAt time.Time
+}
+
+func (*PasskeyCloneWarning) EventType() string { return "identity.PasskeyCloneWarning.v1" }

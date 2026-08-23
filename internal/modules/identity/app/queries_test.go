@@ -779,9 +779,14 @@ func TestResultShapes_CarryNothingThatVerifiesOrIdentifies(t *testing.T) {
 		{
 			name: "AuthMethod", typ: reflect.TypeFor[AuthMethod](),
 			want: []string{"Method", "ID", "Kind", "EnabledAt", "DisabledAt",
-				"AddedAt", "LastUsedAt"},
+				"AddedAt", "LastUsedAt", "UserVerified"},
 			notes: "no verifier, no sealed TOTP secret, no pepper version, no failure " +
-				"count; all four live in the same credential row as the metadata above",
+				"count; all four live in the same credential row as the metadata above. " +
+				"UserVerified is DISPLAY material and not verification material: it is " +
+				"whether a passkey required a PIN or a biometric, which decides the AAL " +
+				"it establishes (identity.md §2) and is exactly what a security screen " +
+				"must show to explain why one method is stronger than another. Nothing " +
+				"can be authenticated with it",
 		},
 		{
 			name: "LoginRecord", typ: reflect.TypeFor[LoginRecord](),

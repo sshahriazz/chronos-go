@@ -1,0 +1,6 @@
+{{define "title"}}A passkey was removed from your account{{end}}
+{{define "content"}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 20px;">A passkey was removed from your Chronos account. It can no longer be used to sign in.</p>
+<p style="margin:0;color:#6b7280;font-size:13px;"><strong>If you did not remove it</strong>, treat the account as compromised: somebody with access may be taking away your strongest way in so that a weaker one can be attacked. Change your password and review the passkeys and sessions on your account.</p>
+{{end}}

@@ -213,13 +213,22 @@ func (u *User) StrongestUsablePrimary() Strength {
 	return best
 }
 
-func (u *User) hasUsable(role Role) bool {
+func (u *User) hasUsable(role Role) bool { return u.countUsable(role) > 0 }
+
+// countUsable counts the usable methods in one role.
+//
+// A COUNT rather than a boolean, because the removal paths need to know whether
+// this is the LAST one — "does the account have a primary method" and "would
+// removing this leave it with none" are different questions, and answering the
+// second with the first is how an account ends up with nothing that can sign in.
+func (u *User) countUsable(role Role) int {
+	var n int
 	for _, m := range u.methods {
 		if m.Usable() && RoleOf(m.Kind) == role {
-			return true
+			n++
 		}
 	}
-	return false
+	return n
 }
 
 // hasRealSecondFactor reports a usable second factor that is not a recovery
@@ -232,12 +241,37 @@ func (u *User) hasUsable(role Role) bool {
 // sheet away from having no second factor at all.
 func (u *User) hasRealSecondFactor() bool { return u.countRealSecondFactors() > 0 }
 
-// countRealSecondFactors counts usable second factors excluding recovery codes.
+// countRealSecondFactors counts what satisfies the mandatory-second-factor
+// policy: usable second factors excluding recovery codes, PLUS user-verified
+// passkeys.
+//
+// # Why a passkey counts here despite being RolePrimary
+//
+// identity.md §2: a passkey with user verification is AAL2 ON ITS OWN, because
+// the authenticator is the possession factor and the PIN or biometric that
+// unlocked it is the second. It is one gesture that is stronger than password
+// plus TOTP and phishing-resistant, which is why §5 calls passkeys the preferred
+// path.
+//
+// Without this an account whose only method is a passkey could never activate —
+// maybeActivate would demand a second factor the person already has, expressed
+// differently — and the strongest available method would be the one that leaves
+// you stuck. The policy is "two independent factors", not "an entry in the
+// second-factor column".
+//
+// A passkey WITHOUT user verification does not count, and that is the same rule
+// from the other side: no PIN and no biometric means one factor, so it is a
+// primary and nothing more.
 func (u *User) countRealSecondFactors() int {
 	var n int
 	for _, m := range u.methods {
-		if m.Usable() && RoleOf(m.Kind) == RoleSecondFactor &&
-			StrengthOf(m.Kind) > StrengthRecoveryCode {
+		if !m.Usable() {
+			continue
+		}
+		switch {
+		case RoleOf(m.Kind) == RoleSecondFactor && StrengthOf(m.Kind) > StrengthRecoveryCode:
+			n++
+		case m.Kind == contract.MethodPasskey && m.UserVerified:
 			n++
 		}
 	}
@@ -347,6 +381,35 @@ func (u *User) Apply(e eventsourcing.Event) {
 		// this.
 		u.everSecondFactor = true
 
+	case *contract.PasskeyRegistered:
+		// ENABLED immediately, unlike a TOTP secret. There is no provisioned-but-
+		// unproven state for a passkey: the registration ceremony IS the proof —
+		// the authenticator signed the challenge — so a credential that exists has
+		// already demonstrated itself. A pending state here would be a method that
+		// only exists on the server's side of an exchange that already completed.
+		u.enablePasskey(ev.CredentialID, ev.UserVerified, ev.RegisteredAt)
+		if ev.UserVerified {
+			// A user-verified passkey is AAL2 on its own (identity.md §2), so it
+			// is a second factor being PROVEN — recorded permanently, exactly as
+			// TotpEnabled does, and deliberately not undone by PasskeyRemoved.
+			u.everSecondFactor = true
+		}
+
+	case *contract.PasskeyRemoved:
+		// DELETED from the set, as TotpDisabled does. A removed passkey is not a
+		// disabled one: the credential is gone from `passkey_credential` too, so
+		// leaving a lingering method would describe an authenticator nothing can
+		// verify against.
+		if id, err := ids.Parse[ids.Credential](ev.CredentialID); err == nil {
+			delete(u.methods, id)
+		}
+
+	case *contract.PasskeyCloneWarning:
+		// No state. The warning is a fact about a ceremony, recorded so it is
+		// observable; what it CHANGES — the reduced assurance and the required
+		// step-up — belongs to the session that ceremony produced, not to the
+		// account. Folding it in here would make a transient signal permanent.
+
 	case *contract.TotpDisabled:
 		if id, err := ids.Parse[ids.Credential](ev.CredentialID); err == nil {
 			delete(u.methods, id)
@@ -376,6 +439,24 @@ func (u *User) Apply(e eventsourcing.Event) {
 		if id, err := ids.Parse[ids.Credential](ev.CredentialID); err == nil {
 			delete(u.methods, id)
 		}
+	}
+}
+
+// enablePasskey is enable, carrying the credential's user-verification state.
+//
+// UV is a property of the CREDENTIAL rather than of a ceremony: an authenticator
+// registered without user verification cannot start producing it. Storing it on
+// the method is what lets activation and the removal invariant be decided from
+// the enrolled set instead of from whatever the last login happened to report.
+func (u *User) enablePasskey(credentialID string, userVerified bool, at time.Time) {
+	u.enable(credentialID, contract.MethodPasskey, at)
+	id, err := ids.Parse[ids.Credential](credentialID)
+	if err != nil {
+		return
+	}
+	if m, ok := u.methods[id]; ok {
+		m.UserVerified = userVerified
+		u.methods[id] = m
 	}
 }
 
@@ -882,6 +963,172 @@ func (u *User) EnableTotp(credentialID ids.CredentialID, at time.Time) error {
 	})
 	u.maybeActivate(at)
 	return nil
+}
+
+// RegisterPasskey records a WebAuthn credential the account just proved.
+//
+// # There is no pending state, unlike TOTP
+//
+// A TOTP secret is provisioned and then proven by a code, so it has a moment of
+// existing-but-unusable. A passkey's registration ceremony IS the proof: the
+// authenticator signed the challenge before this is ever called. A credential
+// that exists has already demonstrated itself, and a pending state would
+// describe a method that only exists on the server's side of an exchange that
+// already completed.
+//
+// # It can complete activation, and only when user-verified
+//
+// identity.md §2 puts a passkey on both rows: with user verification it is AAL2
+// on its own — the authenticator is the possession factor and the PIN or
+// biometric that unlocked it is the second — and without, it is one factor and
+// nothing more. maybeActivate therefore accepts the first and not the second,
+// which is why the flag is a parameter here rather than an assumption made
+// later.
+//
+// The LABEL is the one caller-chosen string. It is bounded on the wire and
+// checked again here, because it lands in a permanent log nobody can edit and is
+// rendered on a security screen beside other people's devices.
+func (u *User) RegisterPasskey(
+	credentialID ids.CredentialID, label string,
+	backupEligible, backupState, userVerified bool, at time.Time,
+) error {
+	if err := u.mutable(); err != nil {
+		return err
+	}
+	if credentialID.IsZero() {
+		return errs.ValidationFailedf("a credential id is required")
+	}
+	if !u.emailVerified {
+		// The same ordering SetPassword enforces, and for the same reason: a
+		// method enrolled on an unproven address is a method a stranger who typed
+		// somebody else's address can attach to the account they are hijacking.
+		return errs.Conflictf("verify this account's address before registering a passkey")
+	}
+	if len(label) > MaxPasskeyLabel {
+		return errs.ValidationFailedf(
+			"a passkey label may not exceed %d characters", MaxPasskeyLabel)
+	}
+	if m, ok := u.methods[credentialID]; ok && m.Usable() {
+		// Already registered. A retried ceremony is not an error — and this is a
+		// no-op rather than a second event, because the credential id is the
+		// authenticator's own and a duplicate would describe one key twice.
+		return nil
+	}
+
+	eventsourcing.Record(u, &contract.PasskeyRegistered{
+		SubjectID:      u.subjectID,
+		CredentialID:   credentialID.String(),
+		Label:          label,
+		BackupEligible: backupEligible,
+		BackupState:    backupState,
+		UserVerified:   userVerified,
+		RegisteredAt:   at.UTC(),
+	})
+	u.maybeActivate(at)
+	return nil
+}
+
+// MaxPasskeyLabel bounds the name a person gives their own device.
+//
+// Generous, because it is a human label and the alternative is somebody unable
+// to tell two work laptops apart. Bounded at all, because it is permanent: an
+// event cannot be edited, and an unbounded string in one is an unbounded row in
+// every replica of the log forever.
+const MaxPasskeyLabel = 64
+
+// RemovePasskey deletes a credential.
+//
+// # Guarded by the same invariant that protects the last TOTP factor
+//
+// identity.md §5 says removal is guarded by AtLeastOneUsableMethod and requires
+// step-up. Both halves matter and they guard different things: the step-up is
+// the transport's (the RPC declares it), and this is the one that stops an
+// account being left with nothing that can authenticate.
+//
+// Two checks rather than one, because a passkey occupies two roles at once. It
+// is a PRIMARY method, so removing the last one can leave an account unable to
+// start an authentication at all; and a user-verified one also satisfies the
+// mandatory-second-factor policy, so removing it can leave an Active account
+// below the policy even though a password remains. A single count would miss
+// whichever case it was not written for.
+func (u *User) RemovePasskey(
+	credentialID ids.CredentialID, actorID string, at time.Time,
+) error {
+	if err := u.mutable(); err != nil {
+		return err
+	}
+	m, ok := u.methods[credentialID]
+	if !ok || m.Kind != contract.MethodPasskey {
+		return errs.NotFoundf("no such passkey")
+	}
+	if actorID == "" {
+		return errs.Internalf("no actor reached the passkey removal")
+	}
+
+	if m.Usable() {
+		if u.countUsable(RolePrimary) <= 1 {
+			return errs.Conflictf("removing this would leave the account with no way to " +
+				"sign in; set a password or register another passkey first")
+		}
+		if u.state == StateActive && m.UserVerified && u.countRealSecondFactors() <= 1 {
+			return errs.Conflictf("removing this would leave the account with no second " +
+				"factor; enrol another first")
+		}
+	}
+
+	eventsourcing.Record(u, &contract.PasskeyRemoved{
+		SubjectID:    u.subjectID,
+		CredentialID: credentialID.String(),
+		ActorID:      actorID,
+		RemovedAt:    at.UTC(),
+	})
+	return nil
+}
+
+// NoteCloneWarning records that an authenticator's counter went backwards.
+//
+// # It records and refuses nothing
+//
+// The WebAuthn spec lists an out-of-order race as a benign cause, and this
+// system treats concurrent sessions as ordinary (identity.md §6, §9), so denying
+// would sign people out for using two devices at once. §5 says the counter is
+// "not treated as mandatory, because most synced passkeys never increment it. A
+// regression here locks out legitimate users."
+//
+// What it buys is OBSERVABILITY. `go-webauthn` sets CloneWarning and returns no
+// error, so an application that never inspects the flag has clone detection that
+// does nothing while every test passes — the exact failure this repository
+// shipped three times in notification adapters. The consequence for the session
+// is the caller's: reduced assurance and a required step-up.
+func (u *User) NoteCloneWarning(
+	credentialID ids.CredentialID, stored, presented uint32, at time.Time,
+) error {
+	if err := u.mutable(); err != nil {
+		return err
+	}
+	m, ok := u.methods[credentialID]
+	if !ok || m.Kind != contract.MethodPasskey {
+		return errs.NotFoundf("no such passkey")
+	}
+	eventsourcing.Record(u, &contract.PasskeyCloneWarning{
+		SubjectID:    u.subjectID,
+		CredentialID: credentialID.String(),
+		Stored:       stored,
+		Presented:    presented,
+		DetectedAt:   at.UTC(),
+	})
+	return nil
+}
+
+// Passkeys returns the account's usable WebAuthn credentials.
+func (u *User) Passkeys() []Method {
+	var out []Method
+	for _, m := range u.methods {
+		if m.Kind == contract.MethodPasskey && m.Usable() {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // DisableTotp removes the authenticator.

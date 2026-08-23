@@ -160,6 +160,24 @@ type OrgStatusView struct {
 	CreatedAt            pgtype.Timestamptz
 }
 
+// WebAuthn credentials (ADR-057). NOT rebuildable from the log: a public key never enters an event. credential_id is unique across every account — WebAuthn L3 §7.1 step 27.
+type PasskeyCredential struct {
+	CredentialID string
+	SubjectID    string
+	PublicKey    []byte
+	// Authenticator signature counter. 0 is normal for synced passkeys. Advanced by an atomic UPDATE … WHERE sign_count < $new; a regression sets clone_warned_at and forces step-up rather than denying.
+	SignCount      int64
+	Aaguid         []byte
+	Transports     []string
+	BackupEligible bool
+	BackupState    bool
+	UserVerified   bool
+	Label          pgtype.Text
+	CreatedAt      pgtype.Timestamptz
+	LastUsedAt     pgtype.Timestamptz
+	CloneWarnedAt  pgtype.Timestamptz
+}
+
 // Per-subject data keys, wrapped by the OpenBao KEK. Erasure nulls the key.
 type PiiKey struct {
 	SubjectID  string

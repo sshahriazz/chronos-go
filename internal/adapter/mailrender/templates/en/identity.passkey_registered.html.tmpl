@@ -1,0 +1,12 @@
+{{define "title"}}A passkey was added to your account{{end}}
+{{define "content"}}
+{{/*
+  The person's own LABEL, never the credential id: the id means nothing to the
+  reader and it travels in every allowCredentials list a browser is handed, so
+  putting it in a mailbox adds exposure for no benefit.
+*/}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 20px;">A passkey was added to your Chronos account{{if .Label}}, named <strong>{{.Label}}</strong>{{end}}.</p>
+{{if .Synced}}<p style="margin:0 0 20px;">This passkey syncs across your devices, so it works anywhere you are signed in to the account that stores it.</p>{{else}}<p style="margin:0 0 20px;">This passkey lives on one device.</p>{{end}}
+<p style="margin:0;color:#6b7280;font-size:13px;"><strong>If you did not add it</strong>, somebody else can now sign in as you. Remove it from your security settings and change your password.</p>
+{{end}}
