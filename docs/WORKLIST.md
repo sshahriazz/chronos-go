@@ -657,10 +657,28 @@ already has a name for.
       with progress visible in the workflow. It is synchronous today because the
       bundle is one vault read and one small object; it needs the workflow
       treatment when a subject's data spans modules that do not exist yet.
-- [ ] **The plan catalogue.** Billing's webhooks, portal and invoices are done;
-      the catalogue is one hardcoded lookup and `STRIPE_TRIAL_PRICE_ID` is still
-      an env var whose own comment says it disappears when the catalogue lands.
-      Carries the annual-plans decision already recorded above.
+- [x] **The plan catalogue.** `billing/domain.Published()` is the catalogue;
+      `cmd/worker` mirrors it into Stripe at startup and provisioning asks it for
+      the trial price and trial length. `STRIPE_TRIAL_PRICE_ID` and
+      `STRIPE_TRIAL_DAYS` are gone. Annual ships from day one, so `Interval` is a
+      dimension of `PlanVersion` rather than a field added later.
+
+      Three findings from the live API, none reachable from a unit test:
+      idempotency is by `lookup_key` and NOT by searching metadata (a Price was
+      still unfindable by search sixty seconds after creation); `lookup_key`
+      uniqueness spans ARCHIVED Prices, so a republished version needs
+      `transfer_lookup_key` — taken only after proving no active Price holds the
+      key, so a race cannot steal it; and the Stripe Product id is derived from
+      the plan, which is why `PlanID` is constrained to Stripe's id charset.
+
+      Mutating the entitlement bridge found a real bug: it kept the FIRST monthly
+      version per plan and `All()` is sorted by id, so a v2 would never have
+      reached entitlement. It asks for the latest by name now.
+
+      **Not built: the operator's editing half.** billing.md §2 describes an
+      operator publishing a catalogue with a two-phase flow and a mirror reactor.
+      That needs `operator`, which is a separate deployable that does not exist.
+      When it arrives this becomes its seed rather than its replacement.
 
 ### BLOCKED BY SCOPE — analysed, and deliberately not built
 
