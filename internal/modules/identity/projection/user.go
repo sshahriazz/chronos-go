@@ -155,6 +155,34 @@ func NewUser(codec eventsourcing.Codec) *User {
 		return nil
 	})
 
+	// A CANCELLATION CLEARS BOTH COLUMNS.
+	//
+	// It was missing when UserDeletionCancelled was added, and the consequence is
+	// worse than a stale date: `deletion_requested_at` is what
+	// RecordDeletionRequest's `IS NULL` guard tests, so a row left set makes a
+	// LATER request a silent no-op here while the aggregate records one happily.
+	// The log and the read model would then disagree about whether somebody is
+	// scheduled for erasure, and the read model is what a screen shows and what
+	// the overdue sweep reads.
+	d.On[contract.UserDeletionCancelled](func(
+		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.UserDeletionCancelled,
+	) error {
+		w.Exec(identitydb.ClearDeletionRequest, e.SubjectID)
+		return nil
+	})
+
+	// ERASURE is a state like any other here, and it is terminal.
+	//
+	// The deletion columns are deliberately NOT cleared: "this account was
+	// erased, and it was scheduled for that date" is the fact, and clearing them
+	// would leave a row that looks like an account that simply stopped.
+	d.On[contract.UserErased](func(
+		_ context.Context, w db.Writer, _ projection.Envelope, e *contract.UserErased,
+	) error {
+		w.Exec(identitydb.SetUserState, e.SubjectID, domain.StateErased.String())
+		return nil
+	})
+
 	// The four state transitions share one shape. Written as a loop over a table
 	// rather than four near-identical closures, so a state added to the domain
 	// without a projector handler is a visibly missing table entry rather than a

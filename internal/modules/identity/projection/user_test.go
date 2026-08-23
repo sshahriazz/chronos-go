@@ -38,13 +38,25 @@ func TestUserProjectionHandlesEveryEventThatChangesAnAccountRow(t *testing.T) {
 		&contract.UserReactivated{},
 		&contract.UserSuspended{},
 
-		// Not a state transition — the account keeps working until `compliance`
-		// acts, and that module does not exist. Projected anyway, because this row
-		// is the only place the request is visible until then AND because an event
-		// nothing projects is an event whose REPLAY is never exercised: the first
-		// rebuild after the consumer lands is the worst moment to discover it
-		// stops the projector.
+		// Not a state transition — the account keeps working until the grace
+		// period ends. Projected because this row is the only place the request
+		// is visible until then, AND because it is the OVERDUE SWEEP's work list:
+		// a request the projection does not carry is one the backstop cannot find.
 		&contract.UserDeletionRequested{},
+
+		// The other two thirds of that lifecycle, and both were missing when the
+		// events were added — this list is what should have caught it and did
+		// not, because the list is also hand-maintained.
+		//
+		// The CANCELLATION is the one whose absence is actively harmful rather
+		// than merely stale: `deletion_requested_at` is what
+		// RecordDeletionRequest's `IS NULL` guard tests, so a row left set makes
+		// a LATER request a silent no-op in the projection while the aggregate
+		// records one. The log and the read model then disagree about whether
+		// somebody is scheduled for erasure — and the overdue sweep reads the
+		// read model, so it would erase an account whose owner cancelled.
+		&contract.UserDeletionCancelled{},
+		&contract.UserErased{},
 
 		// The public handle (ADR-051), and the pair is the same trap EmailReleased
 		// is, twice over. UsernameAssigned arrives on the ACCOUNT's stream;

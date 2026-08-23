@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/chronos/chronos-go/internal/adapter/piivault"
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
@@ -18,6 +19,7 @@ import (
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/platform/pii"
+	"github.com/chronos/chronos-go/internal/platform/workflow"
 )
 
 // newAccountErasure builds identity's half of an erasure.
@@ -160,4 +162,94 @@ func subjectObjectPrefixes(subjectID string) []string {
 		// names and ADR-056 left unreclaimed.
 		profiledomain.AvatarPrefix(subjectID),
 	}
+}
+
+// newErasureSweep builds the backstop for requests the reactor never picked up.
+//
+// The client is passed IN rather than read from d.temporal: this runs while the
+// worker is being built, which happens BEFORE startTemporal publishes the client
+// — and reading the field here would find nil and disable the backstop on every
+// boot, silently.
+func newErasureSweep(
+	d *dependencies, client *temporaladapter.Client, log *slog.Logger,
+) (*complianceapp.Sweep, error) {
+	if d.pool == nil {
+		return nil, errors.New("no read model: the work list is user_view's deletion " +
+			"deadlines, so nothing can find a request whose clock never started")
+	}
+	if client == nil {
+		return nil, errors.New("no Temporal client: the backstop restarts CLOCKS, and " +
+			"there is nowhere to run one")
+	}
+
+	reads, err := identitypg.NewReadModel(pgadapter.New(d.pool))
+	if err != nil {
+		return nil, fmt.Errorf("overdue deletions: %w", err)
+	}
+	return complianceapp.NewSweep(complianceapp.SweepDeps{
+		Requests: overdueAdapter{reads: reads},
+		Starter:  erasureStarter{starter: client},
+		Log:      log,
+	})
+}
+
+// overdueAdapter narrows identity's read model to compliance's port.
+//
+// It converts between two structurally identical row types, which is the cost of
+// the import contract: compliance may not read identity's tables and identity
+// may not know compliance's vocabulary, so the shape is declared twice and
+// matched here — in one place, where a mismatch is a compile error.
+type overdueAdapter struct{ reads *identitypg.ReadModel }
+
+func (a overdueAdapter) ListOverdue(
+	ctx context.Context, before time.Time, limit int,
+) ([]complianceapp.OverdueRequest, error) {
+	rows, err := a.reads.ListOverdueDeletions(ctx, before, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]complianceapp.OverdueRequest, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, complianceapp.OverdueRequest{
+			SubjectID: r.SubjectID, ScheduledFor: r.ScheduledFor,
+		})
+	}
+	return out, nil
+}
+
+// erasureStarter starts the SAME workflow the reactor starts.
+//
+// The same id, so a sweep for a request that already has a clock finds it
+// running rather than starting a second. That is what keeps the backstop from
+// being a second path to an irreversible action: it can only ever cause what the
+// ordinary path causes.
+type erasureStarter struct{ starter *temporaladapter.Client }
+
+func (s erasureStarter) StartErasure(ctx context.Context, subjectID string) error {
+	_, err := s.starter.Start(ctx, workflow.Start{
+		ID:    "erasure:" + subjectID,
+		Name:  temporaladapter.ErasureWorkflow,
+		Input: compliancereactor.ErasureArgs{SubjectID: subjectID},
+	})
+	if errors.Is(err, workflow.ErrAlreadyStarted) {
+		// The ordinary case on a healthy system: every overdue request already
+		// has a clock, and this is the sweep confirming it.
+		return nil
+	}
+	return err
+}
+
+// sweepAdapterForErasure narrows the use case to the activity's port.
+type sweepAdapterForErasure struct{ sweep *complianceapp.Sweep }
+
+func (a sweepAdapterForErasure) SweepOnce(
+	ctx context.Context, now time.Time, limit int,
+) (temporaladapter.ErasureSweepPass, error) {
+	res, err := a.sweep.SweepOnce(ctx, now, limit)
+	if err != nil {
+		return temporaladapter.ErasureSweepPass{}, err
+	}
+	return temporaladapter.ErasureSweepPass{
+		Scanned: res.Scanned, Started: res.Started, Failed: res.Failed, More: res.More,
+	}, nil
 }

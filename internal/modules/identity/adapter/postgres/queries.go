@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	identitydb "github.com/chronos/chronos-go/gen/sqlc/identity"
@@ -500,4 +501,60 @@ func (r *ReadModel) UserBySubject(ctx context.Context, subjectID string) (ids.Us
 		return ids.UserID{}, err
 	}
 	return account.UserID, nil
+}
+
+// OverdueDeletion is one deletion request whose deadline has passed.
+type OverdueDeletion struct {
+	SubjectID    string
+	ScheduledFor time.Time
+}
+
+// ListOverdueDeletions is the erasure backstop's work list.
+//
+// # Why identity answers a compliance question
+//
+// The deadline is projected onto `user_view`, and that table belongs to
+// identity's projection (CONVENTIONS §8). compliance may not read another
+// module's tables directly, so the query lives here and the composition root
+// narrows it to compliance's port.
+//
+// A SYSTEM transaction: the caller is a scheduled workflow with no request and
+// no tenant scope, and `user_view` carries no row security — a profile is global
+// to a person and isolation there is by pseudonym, not by organization.
+func (r *ReadModel) ListOverdueDeletions(
+	ctx context.Context, before time.Time, limit int,
+) ([]OverdueDeletion, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("identity: a positive limit is required, got %d", limit)
+	}
+
+	var out []OverdueDeletion
+	err := r.tx.InSystemTx(ctx, func(ctx context.Context, q db.Querier) error {
+		if limit > math.MaxInt32 {
+			return fmt.Errorf("identity: a limit of %d does not fit a query bound", limit)
+		}
+		rows, err := q.Query(ctx, identitydb.ListOverdueDeletions,
+			before.UTC(), int32(limit)) //nolint:gosec // bounded on the line above
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var row OverdueDeletion
+			var scheduled pgtype.Timestamptz
+			if err := rows.Scan(&row.SubjectID, &scheduled); err != nil {
+				return err
+			}
+			if scheduled.Valid {
+				row.ScheduledFor = scheduled.Time.UTC()
+			}
+			out = append(out, row)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("identity: listing overdue deletion requests: %w", err)
+	}
+	return out, nil
 }

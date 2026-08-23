@@ -460,7 +460,7 @@ nothing ever ran.
       personal data today, so erasing it is erasing everything — but that stops
       being true the moment a second module does, and the traversal is what
       makes the guarantee hold then.
-- [ ] **No reconciliation sweep.** The workflow is durable, so a lost one is
+- [x] **The reconciliation sweep.** The workflow is durable, so a lost one is
       unlikely rather than impossible; a sweep over overdue requests is the
       backstop billing.md §5 case 15 uses for the same class of failure.
 - [ ] **The other five DSAR rights** — access, portability, rectification,

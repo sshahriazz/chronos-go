@@ -183,6 +183,10 @@ type dependencies struct {
 	accountErasure *app.Erasure
 	erasure        *complianceapp.Erasure
 
+	// erasureSweep is the backstop: it finds deletion requests whose clock was
+	// never started and starts it. Zero restarts is the healthy answer.
+	erasureSweep *complianceapp.Sweep
+
 	closes []func()
 }
 
@@ -568,6 +572,7 @@ func (d *dependencies) startTemporal(cfg *config.Config, log *slog.Logger) {
 	d.scheduleRetention(log)
 	d.scheduleReseal(log)
 	d.scheduleInvitationSweep(log)
+	d.scheduleErasureSweep(log)
 
 	// After scheduling, not before: a probe asks the server whether the schedule
 	// exists, and asking before the attempt would report a state this process was
@@ -701,7 +706,26 @@ func (d *dependencies) newTemporalWorker(
 	if err != nil {
 		return nil, nil, err
 	}
-	return w, append(names, erasureNames...), nil
+	names = append(names, erasureNames...)
+
+	// And its backstop, for the request whose clock was never started at all.
+	// Built here rather than in newDependencies because it needs the CLIENT,
+	// which startTemporal has not published yet at this point.
+	erasureSweep, err := newErasureSweep(d, client, slog.Default())
+	if err != nil {
+		return nil, nil, fmt.Errorf("erasure backstop: %w", err)
+	}
+	d.erasureSweep = erasureSweep
+	sweepActivities, err := temporaladapter.NewErasureSweepActivities(
+		sweepAdapterForErasure{sweep: erasureSweep})
+	if err != nil {
+		return nil, nil, fmt.Errorf("erasure sweep activities: %w", err)
+	}
+	sweptErasures, err := w.RegisterErasureSweep(sweepActivities)
+	if err != nil {
+		return nil, nil, fmt.Errorf("registering the erasure sweep: %w", err)
+	}
+	return w, append(names, sweptErasures...), nil
 }
 
 // registerErasure wires the grace-period workflow and its activities.
@@ -907,4 +931,34 @@ func (s *statuses) failures() []string {
 		out = append(out, name)
 	}
 	return out
+}
+
+// scheduleErasureSweep makes the erasure backstop recur.
+//
+// Loud but not fatal like the others (ADR-010), and the wording is the strongest
+// of the four because the failure it guards is the only one with a legal
+// deadline. A registered workflow no schedule ever starts is indistinguishable
+// from a working one — the worker is healthy, the queue is empty, every metric
+// is green — and a person who asked to be forgotten stays in the database past
+// the date they were given.
+func (d *dependencies) scheduleErasureSweep(log *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), scheduleTimeout)
+	defer cancel()
+
+	created, err := temporaladapter.EnsureErasureSweepSchedule(ctx, d.temporal,
+		temporaladapter.SweepErasuresInput{}, temporaladapter.DefaultErasureSweepInterval)
+	switch {
+	case err != nil:
+		log.Error("the erasure backstop is NOT scheduled; a deletion request whose clock "+
+			"the reactor missed is never picked up, and nothing else in this system will "+
+			"report it",
+			"schedule", temporaladapter.SweepErasuresScheduleID, "error", err)
+	case created:
+		log.Info("erasure backstop scheduled",
+			"schedule", temporaladapter.SweepErasuresScheduleID,
+			"every", temporaladapter.DefaultErasureSweepInterval)
+	default:
+		log.Info("erasure backstop already scheduled",
+			"schedule", temporaladapter.SweepErasuresScheduleID)
+	}
 }

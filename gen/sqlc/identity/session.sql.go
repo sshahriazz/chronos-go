@@ -42,6 +42,25 @@ func (q *Queries) AssignUsername(ctx context.Context, arg AssignUsernameParams) 
 	return err
 }
 
+const ClearDeletionRequest = `-- name: ClearDeletionRequest :exec
+UPDATE user_view
+SET deletion_requested_at  = NULL,
+    deletion_scheduled_for = NULL
+WHERE subject_id = $1
+`
+
+// Applied from UserDeletionCancelled.
+//
+// Both columns, not just the deadline. `deletion_requested_at` is what
+// RecordDeletionRequest's `IS NULL` guard tests, so leaving it set would make a
+// later request a silent no-op in the projection while the aggregate happily
+// recorded one — the read model and the log would then disagree about whether
+// somebody is scheduled for erasure, and the read model is what a screen shows.
+func (q *Queries) ClearDeletionRequest(ctx context.Context, subjectID string) error {
+	_, err := q.db.Exec(ctx, ClearDeletionRequest, subjectID)
+	return err
+}
+
 const ClearUsername = `-- name: ClearUsername :exec
 UPDATE user_view SET username = NULL WHERE username = $1
 `
@@ -473,6 +492,67 @@ func (q *Queries) ListLoginHistory(ctx context.Context, arg ListLoginHistoryPara
 			&i.DeviceID,
 			&i.OccurredAt,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const ListOverdueDeletions = `-- name: ListOverdueDeletions :many
+SELECT subject_id, deletion_scheduled_for
+FROM user_view
+WHERE deletion_requested_at IS NOT NULL
+  AND deletion_scheduled_for <= $1
+  AND state <> 'erased'
+ORDER BY deletion_scheduled_for
+LIMIT $2
+`
+
+type ListOverdueDeletionsParams struct {
+	DeletionScheduledFor pgtype.Timestamptz
+	Limit                int32
+}
+
+type ListOverdueDeletionsRow struct {
+	SubjectID            string
+	DeletionScheduledFor pgtype.Timestamptz
+}
+
+// The erasure sweep's work list: requests whose deadline has passed.
+//
+// # Why this exists when the workflow is durable
+//
+// Temporal does not lose workflows, and that is not the failure this guards. The
+// failure is a request whose workflow was NEVER STARTED — the reactor was
+// unregistered for a deployment, the group was renamed, or Temporal was disabled
+// when the request came in. Each of those leaves a person who asked to be
+// forgotten, was told a date, and is not in any workflow at all.
+//
+// Every other timer in this system has a sweep behind it for that reason
+// (billing.md §5 case 15). This is the one where the missed deadline is
+// statutory.
+//
+// `state <> 'erased'` is REDUNDANT against the aggregate, which refuses a second
+// erasure, and is kept for the reason ListLapsedReservations keeps its own
+// redundant predicate: freeing an already-erased subject is the worst thing this
+// query can cause, so it should take two independent mistakes rather than one.
+//
+// Ordered by deadline so the longest-overdue is handled first, and limited so
+// one sweep cannot fan out unboundedly.
+func (q *Queries) ListOverdueDeletions(ctx context.Context, arg ListOverdueDeletionsParams) ([]ListOverdueDeletionsRow, error) {
+	rows, err := q.db.Query(ctx, ListOverdueDeletions, arg.DeletionScheduledFor, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListOverdueDeletionsRow{}
+	for rows.Next() {
+		var i ListOverdueDeletionsRow
+		if err := rows.Scan(&i.SubjectID, &i.DeletionScheduledFor); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
