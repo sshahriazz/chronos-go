@@ -807,11 +807,24 @@ already has a name for.
          exactly, because a bound a client cannot read back is worse than an
          honest smaller one.
 
-      **The integration test is written, and it found three things.** Six tests
-      in `protocolit`: the request half through the real API and projector, and
-      the bundle half by driving the workflow's ACTIVITIES against the real
-      KurrentDB, vault and object store — then fetching the manifest through the
-      signed URL a browser would use and decoding it.
+      **The integration test is written, and it found three things.** Eight tests
+      in `protocolit`, in three layers, and the layering is deliberate — each one
+      covers what the one below it cannot:
+
+      1. **The request half** through the real API and projector.
+      2. **The bundle half**, by driving the workflow's ACTIVITIES against the
+         real KurrentDB, vault and object store — then fetching the manifest
+         through the signed URL a browser would use and decoding it. It also
+         seeds real objects under the subject's prefix, so the listing finds
+         something and every download link is fetched and its bytes compared.
+      3. **The whole path with NOBODY DRIVING IT**: a real Temporal worker on a
+         unique queue, the real reactor on a real KurrentDB persistent
+         subscription, one API call, then only polling. Between an accepted
+         request and a built bundle sit four things that exist only at runtime —
+         the subscription receiving the event, the reactor starting a run, a
+         worker answering to the workflow NAME, and that worker having every
+         activity registered under the name the workflow executes. Every one
+         fails silently, and layer 2 proves none of them.
 
       1. **The export asked for a one-hour download link and the object store
          refuses anything over fifteen minutes.** Every ready export answered its

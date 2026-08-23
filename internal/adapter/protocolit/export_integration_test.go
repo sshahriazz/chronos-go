@@ -19,6 +19,7 @@ import (
 	complianceapp "github.com/chronos/chronos-go/internal/modules/compliance/app"
 	compliancedomain "github.com/chronos/chronos-go/internal/modules/compliance/domain"
 	profiledomain "github.com/chronos/chronos-go/internal/modules/profile/domain"
+	"github.com/chronos/chronos-go/internal/platform/blob"
 	"github.com/chronos/chronos-go/internal/platform/codec"
 	"github.com/chronos/chronos-go/internal/platform/db"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
@@ -543,4 +544,124 @@ func truncate(b []byte) string {
 		return string(b[:400]) + "…"
 	}
 	return string(b)
+}
+
+// THE BUNDLE REFERENCES THE PERSON'S ACTUAL FILES, WITH FETCHABLE LINKS.
+//
+// # Why this is separate from the test above
+//
+// That one exercises the whole activity chain and happens to find NO objects,
+// because a fresh account has uploaded nothing. So it proves the listing runs
+// and proves nothing about what the listing FINDS — an implementation that
+// returned an empty page unconditionally would pass it.
+//
+// This one puts real objects under the subject's own prefix first. Written
+// directly to the store rather than through the profile module's upload flow,
+// deliberately: how a file GOT there is profile's business, and the export's
+// contract is "everything under this person's prefixes appears in the bundle
+// with a working link". Coupling this test to the avatar ceremony would make it
+// fail for reasons that are not about exports.
+func TestTheBundleReferencesTheSubjectsFilesWithWorkingLinks(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	account := h.disposableAccount(t, "export-files")
+	prefix := profiledomain.AvatarPrefix(account.subjectID)
+
+	// TWO objects, so "the bundle lists what it found" cannot be satisfied by a
+	// implementation that returns the first key it sees.
+	want := map[string]string{}
+	for i, body := range []string{"first-file-bytes", "second-file-bytes"} {
+		key, err := blob.NewKey(prefix)
+		if err != nil {
+			t.Fatalf("minting an object key: %v", err)
+		}
+		if err := h.blobs.Put(ctx, key, []byte(body), "application/octet-stream"); err != nil {
+			t.Fatalf("seeding object %d: %v", i, err)
+		}
+		want[key.String()] = body
+	}
+
+	res, err := h.compliance.ExportMyData(ctx, authed(
+		&compliancev1.ExportMyDataRequest{}, account.bearer))
+	if err != nil {
+		t.Fatalf("ExportMyData: %v\n%s", err, h.serverLogs())
+	}
+	exportID := res.Msg.GetExportId()
+
+	// Drive the activities, as the neighbouring test does — the orchestration is
+	// covered end to end elsewhere, and what is under test here is the CONTENT.
+	runs := h.exportRuns(t)
+	plan, err := runs.Begin(ctx, exportID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var objects []complianceapp.ExportedObject
+	for _, p := range plan.Prefixes {
+		cursor := ""
+		for pages := 0; pages < 10; pages++ {
+			page, listErr := runs.ListObjects(ctx, p, cursor)
+			if listErr != nil {
+				t.Fatalf("ListObjects: %v", listErr)
+			}
+			for _, o := range page.Objects {
+				objects = append(objects, complianceapp.ExportedObject{
+					Key: o.Key.String(), Size: o.Size, ModifiedAt: o.ModifiedAt,
+				})
+			}
+			if page.Cursor == "" {
+				break
+			}
+			cursor = page.Cursor
+		}
+	}
+	if len(objects) != len(want) {
+		t.Fatalf("the listing found %d objects and the subject holds %d. A person's files "+
+			"are missing from their Article 15 bundle, and the erasure that follows will "+
+			"delete them", len(objects), len(want))
+	}
+	if _, err := runs.WriteManifest(ctx, exportID, objects); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+
+	got := awaitExport(t, account.bearer, exportID,
+		compliancev1.DataExportStatus_DATA_EXPORT_STATUS_READY)
+	if len(got.GetFiles()) != len(want) {
+		t.Fatalf("the poll reports %d file(s) and the subject holds %d",
+			len(got.GetFiles()), len(want))
+	}
+
+	// EVERY link works, and returns the bytes that were stored. This is what
+	// makes the manifest a portability answer rather than a list of names.
+	for _, f := range got.GetFiles() {
+		expected, known := want[f.GetKey()]
+		if !known {
+			t.Errorf("the bundle references %q, which this subject does not hold", f.GetKey())
+			continue
+		}
+		if f.GetDownloadUrl() == "" {
+			t.Errorf("file %q has no download link; the person can see it exists and "+
+				"cannot fetch it", f.GetKey())
+			continue
+		}
+		if body := string(fetch(t, f.GetDownloadUrl())); body != expected {
+			t.Errorf("file %q downloaded %q, want %q", f.GetKey(), body, expected)
+		}
+		if f.GetSizeBytes() != int64(len(expected)) {
+			t.Errorf("file %q reports %d bytes and holds %d",
+				f.GetKey(), f.GetSizeBytes(), len(expected))
+		}
+	}
+
+	// And the MANIFEST agrees with the poll — the two are produced by different
+	// code from the same stored bundle, so a mismatch means one of them is
+	// inventing.
+	bundle, err := codec.Tolerant[complianceapp.Bundle](fetch(t, got.GetManifestUrl()))
+	if err != nil {
+		t.Fatalf("the manifest does not decode: %v", err)
+	}
+	if len(bundle.Objects) != len(want) {
+		t.Errorf("the manifest lists %d objects and the poll reported %d",
+			len(bundle.Objects), len(got.GetFiles()))
+	}
 }
