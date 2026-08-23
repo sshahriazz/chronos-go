@@ -467,6 +467,100 @@ nothing ever ran.
       restriction, objection (compliance.md §3). Erasure was the one with a
       hollow guarantee; the rest are unbuilt features.
 
+## The remaining work, analysed
+
+Every open item was read against its spec and the code before being ranked. Two
+turned out to be BLOCKED BY SCOPE rather than by effort, and saying so is the
+point of the exercise — building either would repeat the failure this repository
+already has a name for.
+
+### P1 — erasure is incomplete, and these are why
+
+- [ ] **An erased subject's AVATARS survive.** The crypto-shred destroys the
+      vault key, which makes every vault field unreadable at once — and an
+      avatar is not in the vault. It is an OBJECT in SeaweedFS, and a photograph
+      of a person is personal data by any reading.
+
+      Nothing deletes it. ADR-056 named object lifecycle as unbuilt and this is
+      the case where that stops being a tidiness question: erasure reports
+      success while the person's picture is still served by a signed URL.
+
+      Tractable because `AvatarPrefix(subjectID)` is a deterministic digest, so
+      deletion is prefix-scoped rather than a scan — and it covers ABANDONED
+      uploads too, which ADR-056 also left unreclaimed. Needs a `List` on the
+      blob port, which does not exist yet.
+
+      This IS compliance.md §4 step 4 — "traverse the subject graph → which
+      streams, rows, objects" — with its first real member. The traversal was
+      previously listed as premature because only identity held personal data;
+      that was wrong, and this is the correction.
+
+- [ ] **No reconciliation sweep.** The erasure workflow is durable, so a lost
+      one is unlikely rather than impossible. Every other timer in this system
+      has a sweep behind it for exactly that reason (billing.md §5 case 15), and
+      erasure is the one where the backstop matters most because the failure is
+      a statutory deadline nobody notices passing.
+
+### P2 — small, and each closes a decision
+
+- [ ] **§9.3 — Stripe's auto-convert default.** Verifiable against the test
+      account rather than reasoned about: add a payment method mid-trial, let
+      the clock pass trial end, observe whether the subscription becomes
+      `active` on its own.
+- [ ] **The two deactivation flakes.** Nine clean runs. A targeted reproduction
+      attempt is cheap; if it does not reproduce again, the honest outcome is to
+      leave it open with the count updated rather than to close it.
+
+### P3 — real features, unblocked
+
+- [ ] **Restriction (Art. 18)** — a flag on the subject that reactors skip while
+      projectors continue. Storage continues, which is exactly what the article
+      requires. Small once the flag exists.
+- [ ] **Rectification (Art. 16)** — `PersonalDataCorrected`, a new event rather
+      than a rewrite. The log stays truthful: it recorded what we believed then,
+      and when we learned otherwise.
+- [ ] **Export and portability (Art. 15/20)** — the same traversal as erasure,
+      which is why compliance.md §5 says they are built together: a traversal
+      that misses data exports incompletely AND erases incompletely, and only
+      one of those is noticed. Needs the P1 traversal first.
+- [ ] **The plan catalogue.** Billing's webhooks, portal and invoices are done;
+      the catalogue is one hardcoded lookup and `STRIPE_TRIAL_PRICE_ID` is still
+      an env var whose own comment says it disappears when the catalogue lands.
+      Carries the annual-plans decision already recorded above.
+
+### BLOCKED BY SCOPE — analysed, and deliberately not built
+
+- [ ] **`access` grants (access.md §4).** The substrate is complete: `Check`,
+      `BatchCheck`, `Write`, `Delete`, the topology, and a projector writing
+      membership and team edges. What is missing is a `Grant` aggregate, grant
+      RPCs and a grants projection.
+
+      **They cannot be built yet, and the reason is not effort.** A grant is
+      `Principal × Relation × ResourceRef`, and the authorization model declares
+      exactly four types — `user`, `organization`, `workspace`, `team`. There is
+      NOTHING TO GRANT ON. Granting a relation on a workspace is membership,
+      which exists; everything else access.md §4 describes targets a resource
+      inside a workspace, and feature verticals inside a workspace are
+      explicitly out of scope (ADR-006, FEATURES.md).
+
+      Building it now would produce a grant aggregate, an RPC and a projection
+      wired to a resource type that does not exist — which is precisely the
+      "adapters wired to nothing" failure slice 1b was reordered to avoid.
+
+      It unblocks the moment one shareable resource type exists, and it is what
+      the two deferred cascades — team deletion to grants, and the team's own
+      member edges — are waiting for.
+
+- [ ] **Legal holds (compliance.md §4 step 2).** Same shape. The erasure ignores
+      holds because NOTHING CAN PLACE ONE: a hold has an owner and a recorded
+      justification, both of which are operator concerns, and `operator` is a
+      separate deployable (ADR-024) that does not exist. A `LegalHold` aggregate
+      with no way to create a hold is a check that can only ever pass.
+
+- [ ] **`operator` — the back-office (operator.md).** A separate binary, build
+      order #10, "once there is something to operate". Large, and the gate for
+      legal holds above.
+
 ## Parked
 
 - [ ] **The two deactivation flakes — NOT reproduced, and one plausible cause
