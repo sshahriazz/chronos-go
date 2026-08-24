@@ -1,0 +1,17 @@
+{{define "title"}}A sign-in method was added to your account{{end}}
+{{define "content"}}
+{{/*
+  NO LINK AND NO PROVIDER SUBJECT. This message goes to somebody who may not have
+  made the change, and the provider's identifier for them means nothing to a
+  reader while identifying them precisely to anybody else who sees the mail.
+  "Google" is what a person needs to decide whether they did this.
+*/}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+{{if .AutoLinked}}
+<p style="margin:0 0 20px;">Your Chronos account can now be signed into with <strong>{{.Provider}}</strong>. This link was made automatically, because that provider confirmed it had verified the same email address your account uses.</p>
+{{else}}
+<p style="margin:0 0 20px;">You added <strong>{{.Provider}}</strong> as a way to sign in to your Chronos account.</p>
+{{end}}
+<p style="margin:0 0 20px;"><strong>If this was not you</strong>, someone else may be able to sign in as you. Change your password, then remove the connection from your security settings.</p>
+<p style="margin:0;color:#6b7280;font-size:13px;">We are telling you at the address your account uses, so you hear about it even if the change was not yours.</p>
+{{end}}

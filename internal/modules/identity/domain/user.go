@@ -9,6 +9,7 @@
 package domain
 
 import (
+	"sort"
 	"time"
 
 	"github.com/chronos/chronos-go/internal/modules/identity/contract"
@@ -100,6 +101,14 @@ type User struct {
 	// when the window to move back closes (identity.md §12).
 	revertIndex contract.EmailIndex
 	revertUntil time.Time
+
+	// links are the federated identities that can sign this account in, keyed by
+	// issuer and provider subject (identity.md §7).
+	//
+	// A map rather than a slice because rule 4 — a provider identity links to at
+	// most one user — makes the pair a key, and because §4.4's void has to
+	// distinguish links the acting party PROVED from ones they did not.
+	links map[federatedKey]federatedLink
 
 	// username is the account's public handle (ADR-051), in the clear.
 	//
@@ -380,6 +389,21 @@ func (u *User) Apply(e eventsourcing.Event) {
 		// TotpDisabled below removes the method and deliberately does not touch
 		// this.
 		u.everSecondFactor = true
+
+	case *contract.FederatedIdentityLinked:
+		if u.links == nil {
+			u.links = make(map[federatedKey]federatedLink)
+		}
+		u.links[federatedKey{Issuer: ev.Issuer, Subject: ev.ProviderSubject}] = federatedLink{
+			// AutoLinked is what §4.4's void turns on: a link the holder created
+			// deliberately from an authenticated session was proven by THEM, and
+			// one the system made on a provider's claim was not.
+			AutoLinked: ev.AutoLinked,
+			LinkedAt:   ev.LinkedAt,
+		}
+
+	case *contract.FederatedIdentityUnlinked:
+		delete(u.links, federatedKey{Issuer: ev.Issuer, Subject: ev.ProviderSubject})
 
 	case *contract.PasskeyRegistered:
 		// ENABLED immediately, unlike a TOTP secret. There is no provisioned-but-
@@ -1822,4 +1846,192 @@ func (u *User) maybeActivate(at time.Time) {
 		SubjectID:   u.subjectID,
 		ActivatedAt: at.UTC(),
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Federated identity (identity.md §7)
+// ---------------------------------------------------------------------------
+
+// federatedKey is the pair that identifies a person at a provider.
+//
+// Both halves, always. A `sub` is unique within an issuer and nowhere else, so
+// keying on the subject alone would let two providers' identifiers collide into
+// one link — and the collision would be silent, because neither provider can see
+// the other's namespace.
+type federatedKey struct {
+	Issuer  contract.Issuer
+	Subject string
+}
+
+// federatedLink is what the account remembers about one link.
+type federatedLink struct {
+	// AutoLinked records that the SYSTEM created this on a verified-email match
+	// rather than the holder creating it deliberately.
+	//
+	// It is the whole of what §4.4's void turns on. A link somebody made from an
+	// authenticated session was proven by them; one made automatically was proven
+	// by a provider's claim about an address, and a recovery exists precisely
+	// because claims about that account may no longer be trustworthy.
+	AutoLinked bool
+
+	LinkedAt time.Time
+}
+
+// FederatedLinks reports how many provider identities can sign this account in.
+func (u *User) FederatedLinks() int { return len(u.links) }
+
+// HasFederatedLink reports whether one specific provider identity is linked.
+func (u *User) HasFederatedLink(issuer contract.Issuer, subject string) bool {
+	_, ok := u.links[federatedKey{Issuer: issuer, Subject: subject}]
+	return ok
+}
+
+// LinkFederatedIdentity attaches a provider identity to this account.
+//
+// # What this method does NOT decide
+//
+// Whether the link is ALLOWED. identity.md §7's auto-link rules — the provider's
+// verification claim, the trusted-verification list, whether the local address
+// is verified — are decided by the caller against a provider's response, which
+// is not something an aggregate can see. What lives here is what the ACCOUNT
+// knows: that a pair may link once, that it may not link twice, and that a
+// suspended or erased account links nothing.
+//
+// `autoLinked` is carried rather than judged, for the same reason: this records
+// HOW the link came about so §4.4 can act on it later, and the judgement about
+// whether it should have happened belongs where the provider's claims are.
+func (u *User) LinkFederatedIdentity(
+	issuer contract.Issuer, subject string, verification contract.ProviderVerification,
+	autoLinked bool, at time.Time,
+) error {
+	if err := u.mutable(); err != nil {
+		return err
+	}
+	switch {
+	case issuer == "":
+		return errs.ValidationFailedf("an issuer is required")
+	case subject == "":
+		// A link with no provider subject matches nothing and would be matched by
+		// anything else with no subject — which across accounts is one identity
+		// signing into all of them.
+		return errs.ValidationFailedf("a provider subject is required")
+	}
+
+	if _, already := u.links[federatedKey{Issuer: issuer, Subject: subject}]; already {
+		// Idempotent for the SAME pair. A retried callback must not fail, and must
+		// not record a second link that a later unlink would only half remove.
+		return nil
+	}
+
+	eventsourcing.Record(u, &contract.FederatedIdentityLinked{
+		SubjectID:         u.subjectID,
+		Issuer:            issuer,
+		ProviderSubject:   subject,
+		EmailVerification: verification,
+		AutoLinked:        autoLinked,
+		LinkedAt:          at.UTC(),
+	})
+	return nil
+}
+
+// UnlinkFederatedIdentity removes a provider identity.
+//
+// # The refusal identity.md §7 names precisely
+//
+// "Removing the last federated link from a passwordless account is refused with
+// an actionable error telling the user to set a password or register a passkey
+// first." A person who signed up with Google has no password by design — §7
+// calls that a first-class state, not a degraded one — so removing their only
+// link leaves them with nothing at all, and an endpoint that allowed it would be
+// the account-loss path dressed as a settings toggle.
+//
+// The check is AtLeastOneUsableMethod expressed for this method: what matters is
+// not that a link is going, but that something can still start an
+// authentication afterwards.
+func (u *User) UnlinkFederatedIdentity(
+	issuer contract.Issuer, subject, actorID string, at time.Time,
+) error {
+	if err := u.mutable(); err != nil {
+		return err
+	}
+	key := federatedKey{Issuer: issuer, Subject: subject}
+	if _, ok := u.links[key]; !ok {
+		return errs.NotFoundf("no such linked account")
+	}
+
+	// The account's OTHER ways in, counted after this link is gone.
+	if len(u.links) == 1 && !u.hasUsable(RolePrimary) {
+		return errs.Conflictf("removing this would leave the account with no way to sign " +
+			"in; set a password or register a passkey first")
+	}
+
+	eventsourcing.Record(u, &contract.FederatedIdentityUnlinked{
+		SubjectID:       u.subjectID,
+		Issuer:          issuer,
+		ProviderSubject: subject,
+		Reason:          contract.UnlinkByHolder,
+		ActorID:         actorID,
+		UnlinkedAt:      at.UTC(),
+	})
+	return nil
+}
+
+// VoidUnprovenFederatedLinks removes every link the acting party did not prove.
+//
+// # The variant this closes
+//
+// identity.md §4.4 and §7 rule 7, from Sudhodanan & Paverd: the TROJAN
+// IDENTIFIER. An attacker attaches a provider identity they control to the
+// victim's account and waits. The victim resets their password, believes they
+// have taken the account back, and the attacker signs straight back in — because
+// a reset changes a credential and leaves a link alone.
+//
+// # Which links go, and which stay
+//
+// AUTO-LINKED ones go. They were created on a provider's claim about an email
+// address, and a recovery exists precisely because claims about this account may
+// no longer be trustworthy — the address may be the attacker's, which is how the
+// link got there.
+//
+// Links the HOLDER created deliberately stay. Those were made from a session
+// that had already proven the account, which is what "proven by the acting
+// party" means in §4.4's wording, and voiding them would sign people out of
+// their own legitimately linked providers every time they forgot a password.
+//
+// # It records nothing when there is nothing to void
+//
+// Called by the password reset on EVERY run, so an unconditional event would put
+// an unlink on the stream of every account that ever reset a password.
+func (u *User) VoidUnprovenFederatedLinks(at time.Time) error {
+	if err := u.mutable(); err != nil {
+		return err
+	}
+
+	// Sorted, so a replay records the same events in the same order. Map order
+	// is randomised in Go, and two runs of one command producing two different
+	// event sequences would make a retried reset non-idempotent.
+	var unproven []federatedKey
+	for key, link := range u.links {
+		if link.AutoLinked {
+			unproven = append(unproven, key)
+		}
+	}
+	sort.Slice(unproven, func(i, j int) bool {
+		if unproven[i].Issuer != unproven[j].Issuer {
+			return unproven[i].Issuer < unproven[j].Issuer
+		}
+		return unproven[i].Subject < unproven[j].Subject
+	})
+
+	for _, key := range unproven {
+		eventsourcing.Record(u, &contract.FederatedIdentityUnlinked{
+			SubjectID:       u.subjectID,
+			Issuer:          key.Issuer,
+			ProviderSubject: key.Subject,
+			Reason:          contract.UnlinkPasswordReset,
+			// No actor: nobody chose this, a rule did.
+			UnlinkedAt: at.UTC(),
+		})
+	}
+	return nil
 }

@@ -1,0 +1,12 @@
+{{define "title"}}A sign-in method was removed from your account{{end}}
+{{define "content"}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+{{if eq .Reason "password_reset"}}
+<p style="margin:0 0 20px;">When you recovered your account, we removed the connection to <strong>{{.Provider}}</strong>.</p>
+<p style="margin:0 0 20px;">It was added automatically rather than by you, so we could not treat it as something you had approved — and a connection someone else set up would have let them back in after your recovery. Removing it is the point of the recovery.</p>
+<p style="margin:0;color:#6b7280;font-size:13px;">If you do use {{.Provider}} to sign in, add it again from your security settings. You will be asked to prove it is yours.</p>
+{{else}}
+<p style="margin:0 0 20px;"><strong>{{.Provider}}</strong> was removed as a way to sign in to your Chronos account.</p>
+<p style="margin:0;color:#6b7280;font-size:13px;">If this was not you, someone else may have access. Change your password and review the sign-in methods on your account.</p>
+{{end}}
+{{end}}

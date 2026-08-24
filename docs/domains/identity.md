@@ -855,9 +855,18 @@ The browser holds N independent sessions plus a pointer to the active one.
 
 ## 7. Federated identity
 
-> **NOT BUILT.** There is no federated linking in this module today — no RPC, no
-> use case, no event. That absence is the only reason C8's **trojan identifier**
-> variant is currently unreachable, and it expires the moment linking is written.
+> **PARTLY BUILT.** The DOMAIN exists — `FederatedIdentityLinked`,
+> `FederatedIdentityUnlinked`, the link and unlink commands, the at-most-one-way-
+> in refusal, and §4.4's void. No provider adapter and no RPC yet, so nothing can
+> create a link from outside.
+>
+> **C8's trojan-identifier variant is CLOSED**, not merely unreachable. A
+> password reset voids every AUTO-LINKED identity — those were created on a
+> provider's claim about an address, and a recovery exists because claims about
+> the account may no longer be trustworthy — while keeping links the holder made
+> deliberately from an authenticated session, which is what "proven by the acting
+> party" means. Voiding those instead would sign people out of their own
+> providers for forgetting a password.
 >
 > **On arrival, linking MUST obey §4.4.** Specifically: a federated link attached
 > to an account the linking party has not proven control of is a trojan

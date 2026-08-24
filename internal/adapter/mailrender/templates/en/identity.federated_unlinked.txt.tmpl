@@ -1,0 +1,13 @@
+Hello{{if .Name}} {{.Name}}{{end}},
+
+{{if eq .Reason "password_reset"}}When you recovered your account, we removed the connection to {{.Provider}}.
+
+It was added automatically rather than by you, so we could not treat it as
+something you had approved — and a connection someone else set up would have
+let them back in after your recovery. Removing it is the point of the recovery.
+
+If you do use {{.Provider}} to sign in, add it again from your security
+settings. You will be asked to prove it is yours.{{else}}{{.Provider}} was removed as a way to sign in to your Chronos account.
+
+IF THIS WAS NOT YOU, someone else may have access. Change your password and
+review the sign-in methods on your account.{{end}}

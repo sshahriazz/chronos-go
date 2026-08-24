@@ -28,6 +28,7 @@ import (
 //     performing the reset;
 //  2. void every outstanding token of EVERY purpose, not only reset tokens;
 //  3. void any pending identifier change;
+//  4. void every federated link the acting party did not prove;
 //  4. never bypass the second factor;
 //  5. send the link to the STORED verified address, never one the request
 //     supplied.
@@ -714,6 +715,28 @@ func (p *PasswordReset) Complete(
 	if err := user.VoidPendingIdentifierChange(now); err != nil {
 		return ResetPasswordResult{}, fmt.Errorf(
 			"voiding a pending identifier change for a reset: %w", err)
+	}
+
+	// (4) Every federated link the acting party did not prove — §4.4's third
+	// variant, the TROJAN IDENTIFIER.
+	//
+	// An attacker attaches a provider identity they control to the victim's
+	// account and waits. The victim resets their password, believes they have
+	// taken the account back, and the attacker signs straight back in, because a
+	// reset changes a credential and leaves a link alone.
+	//
+	// Only AUTO-LINKED ones go: those were created on a provider's claim about an
+	// email address, and a recovery exists precisely because claims about this
+	// account may no longer be trustworthy. Links the holder made deliberately
+	// from an authenticated session were proven by them, and voiding those would
+	// sign people out of their own providers every time they forgot a password.
+	//
+	// On the same aggregate as the change above, so any events ride the same
+	// atomic append as PasswordChanged rather than being a second write that can
+	// fail alone.
+	if err := user.VoidUnprovenFederatedLinks(now); err != nil {
+		return ResetPasswordResult{}, fmt.Errorf(
+			"voiding unproven federated links for a reset: %w", err)
 	}
 
 	// (1) Every session, sparing NONE. Except is zero and must stay zero: a reset

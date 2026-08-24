@@ -279,6 +279,47 @@ func identityNotifications(cat *notify.Catalogue) {
 			"would be noise, and noise in a security stream trains people to ignore the " +
 			"message that matters")
 
+	// ---- Federated identity (identity.md §7) ---------------------------------
+	cat.On[identityevents.FederatedIdentityLinked](notify.Spec{
+		Template: "identity.federated_linked",
+		// SECURITY. A new way into the account appeared, and this is the message
+		// that interrupts the TROJAN IDENTIFIER: an attacker who attaches their
+		// own provider identity is betting the holder never finds out, because a
+		// later password reset changes a credential and leaves a link alone.
+		//
+		// Telling them at the moment it happens is the only warning that arrives
+		// before the damage rather than after it.
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, func(e *identityevents.FederatedIdentityLinked) map[string]any {
+		return map[string]any{
+			// The ISSUER only — never the provider subject, which identifies the
+			// person at that provider and means nothing to the reader. "Google"
+			// is what somebody needs to decide whether they did this.
+			"Provider": string(e.Issuer),
+			// Whether the SYSTEM made this link on a verified-email match or the
+			// holder made it deliberately. The two need different sentences: one
+			// is "you linked this", the other is "this was linked for you".
+			"AutoLinked": e.AutoLinked,
+		}
+	})
+	cat.On[identityevents.FederatedIdentityUnlinked](notify.Spec{
+		Template: "identity.federated_unlinked",
+		// SECURITY for the mirror reason, and with a second one: a link removed
+		// by a RECOVERY is the system telling somebody their account may have
+		// been compromised, which is the most important thing it can say.
+		Class:    notify.Security,
+		Audience: notify.AudienceSubject,
+	}, func(e *identityevents.FederatedIdentityUnlinked) map[string]any {
+		return map[string]any{
+			"Provider": string(e.Issuer),
+			// The reason, so the wording can distinguish "you removed this" from
+			// "we removed this because you recovered your account and it was not
+			// a link you had proven".
+			"Reason": e.Reason,
+		}
+	})
+
 	// ---- Passkeys (identity.md §5, ADR-057) ----------------------------------
 	cat.On[identityevents.PasskeyRegistered](notify.Spec{
 		Template: "identity.passkey_registered",

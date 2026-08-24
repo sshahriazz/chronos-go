@@ -1134,3 +1134,136 @@ type PasskeyCloneWarning struct {
 }
 
 func (*PasskeyCloneWarning) EventType() string { return "identity.PasskeyCloneWarning.v1" }
+
+// ---------------------------------------------------------------------------
+// Federated identity (identity.md §7)
+// ---------------------------------------------------------------------------
+
+// Issuer identifies an identity provider.
+//
+// The OIDC issuer URL for Google, Apple and Entra; a constant for GitHub, which
+// issues no ID token and therefore has no issuer of its own. It is half of the
+// pair that identifies a person at a provider, and it is stored so a `sub` that
+// collides across two providers cannot be one identity.
+type Issuer string
+
+// ProviderVerification is what a provider says about an address, and it is
+// TRI-STATE.
+//
+// identity.md §7 rule 6: `verified`, `unverified`, or NOT ASSERTED — and the
+// third is not the second. Entra emits no trustworthy signal at all and GitHub's
+// noreply addresses assert verification for something that is not deliverable
+// mail; collapsing either into `false` loses the distinction between "the
+// provider says no" and "the provider did not say", which is the difference
+// between refusing an auto-link and refusing to consider one.
+type ProviderVerification string
+
+const (
+	// VerificationNotAsserted is the DEFAULT, and the zero value deliberately:
+	// a build that forgets to set this gets the answer that grants nothing.
+	VerificationNotAsserted ProviderVerification = ""
+
+	// VerificationVerified means the provider asserts it verified the address.
+	VerificationVerified ProviderVerification = "verified"
+
+	// VerificationUnverified means the provider asserts it did NOT.
+	VerificationUnverified ProviderVerification = "unverified"
+)
+
+// FederatedIdentityLinked records that an account gained a provider identity.
+//
+// # What is here, and what may never be
+//
+// The issuer and the provider's IMMUTABLE subject identifier, and nothing else.
+// No email, no display name, no profile picture URL — all of them are personal
+// data and belong in the vault (ADR-002), and the address in particular must
+// never be the thing a link is matched on (§7 rule 5).
+//
+// # The rule this event's existence makes reachable
+//
+// A link attached to an account the linking party has not proven control of is a
+// TROJAN IDENTIFIER: the attacker attaches their own provider identity to the
+// victim's account and it survives every later recovery, because a reset changes
+// the password and leaves the link alone. So a link may only be created by a
+// session that has proven the account, and §4.4 requires a reset to void every
+// link the acting party did not prove.
+type FederatedIdentityLinked struct {
+	SubjectID string
+
+	Issuer Issuer
+
+	// ProviderSubject is the provider's own immutable identifier — `sub` for
+	// Google and Apple, the numeric id for GitHub, and the `tid`+`oid` tuple for
+	// Entra, joined.
+	//
+	// NEVER an email address. §7 rule 5: matching on email is the takeover this
+	// whole section exists to prevent, and an identifier that can change is not
+	// an identity.
+	ProviderSubject string
+
+	// EmailVerification is what the provider claimed about the address at the
+	// moment of linking, kept because the auto-link decision turns on it and an
+	// auditor asking "why was this allowed" needs the answer the code saw.
+	EmailVerification ProviderVerification
+
+	// AutoLinked distinguishes a link the SYSTEM made on a verified-email match
+	// from one a person made deliberately from settings.
+	//
+	// Recorded because the two carry different risk and §4.4 treats them
+	// differently on recovery: a link somebody explicitly created while
+	// authenticated was proven by them, and one made automatically was proven by
+	// a provider's claim.
+	AutoLinked bool
+
+	LinkedAt time.Time
+}
+
+func (*FederatedIdentityLinked) EventType() string {
+	return "identity.FederatedIdentityLinked.v1"
+}
+
+// FederatedIdentityUnlinked records that a provider identity no longer signs in.
+//
+// Refused by the aggregate when it would leave the account with no usable way to
+// authenticate — identity.md §7's de-linking rule, which names the case
+// precisely: removing the last federated link from a PASSWORDLESS account, whose
+// holder would then have nothing at all.
+type FederatedIdentityUnlinked struct {
+	SubjectID string
+
+	Issuer          Issuer
+	ProviderSubject string
+
+	// Reason distinguishes a person removing a link from §4.4 voiding one.
+	//
+	// Load-bearing rather than descriptive: "was this link killed by a recovery"
+	// is a security question, and the log has to answer it.
+	Reason string
+
+	// ActorID is who did it. Empty for a system-initiated void, which is itself
+	// the answer: nobody chose it.
+	ActorID string
+
+	UnlinkedAt time.Time
+}
+
+func (*FederatedIdentityUnlinked) EventType() string {
+	return "identity.FederatedIdentityUnlinked.v1"
+}
+
+// Reasons a federated link ends.
+const (
+	// UnlinkByHolder is the account holder removing it from settings.
+	UnlinkByHolder = "unlinked_by_holder"
+
+	// UnlinkPasswordReset is identity.md §4.4 being enforced.
+	//
+	// The variant it closes is Sudhodanan & Paverd's TROJAN IDENTIFIER: an
+	// attacker pre-attaches a provider identity they control, the victim
+	// recovers the account believing they have secured it, and the attacker
+	// signs straight back in through a link the reset never touched.
+	UnlinkPasswordReset = "password_reset"
+
+	// UnlinkErased is the account being erased.
+	UnlinkErased = "erased"
+)
