@@ -147,8 +147,16 @@ func TestReservationProjectionStatements(t *testing.T) {
 			EmailIndex: released, SubjectID: "sub_sweep", ReleasedAt: ts(now),
 		}))
 
+		// A limit far above any row count this database accumulates, NOT the
+		// production batch size. The sweep orders by expires_at, so with a
+		// realistic limit the rows left by every previous run of this suite fill
+		// the page before this test's own rows are reached — and the assertion
+		// then fails for a reason that has nothing to do with the statement.
+		//
+		// The same trap was hit by TestALapsedReservationIsReleased earlier, at
+		// 1032 accumulated rows against a limit of 1000.
 		rows, err := q.ListLapsedReservations(ctx, identitydb.ListLapsedReservationsParams{
-			ExpiresAt: ts(now), Limit: 1000,
+			ExpiresAt: ts(now), Limit: 1_000_000,
 		})
 		if err != nil {
 			t.Fatalf("sweep: %v", err)

@@ -163,8 +163,9 @@ type OrgStatusView struct {
 // WebAuthn credentials (ADR-057). NOT rebuildable from the log: a public key never enters an event. credential_id is unique across every account — WebAuthn L3 §7.1 step 27.
 type PasskeyCredential struct {
 	CredentialID string
-	SubjectID    string
-	PublicKey    []byte
+	// The owning subject. Deliberately NOT a foreign key to user_view: that table is a projection, a rebuild truncates it, and a cascade would delete every passkey in the installation — none of which any replay can restore (ADR-057). Erasure removes these rows explicitly instead.
+	SubjectID string
+	PublicKey []byte
 	// Authenticator signature counter. 0 is normal for synced passkeys. Advanced by an atomic UPDATE … WHERE sign_count < $new; a regression sets clone_warned_at and forces step-up rather than denying.
 	SignCount      int64
 	Aaguid         []byte
@@ -369,11 +370,12 @@ type UserView struct {
 // One WebAuthn ceremony in flight. Single-use, enforced by DELETE … RETURNING rather than read-then-write. Expires; swept.
 type WebauthnChallenge struct {
 	ChallengeID string
-	SubjectID   *string
-	Purpose     string
-	State       []byte
-	CreatedAt   pgtype.Timestamptz
-	ExpiresAt   pgtype.Timestamptz
+	// The subject a registration ceremony is for; NULL for a discoverable login. Deliberately NOT a foreign key to user_view: that table is a projection, and PostgreSQL refuses to TRUNCATE a table referenced by a foreign key — so the key would make a rebuild impossible rather than merely lossy.
+	SubjectID *string
+	Purpose   string
+	State     []byte
+	CreatedAt pgtype.Timestamptz
+	ExpiresAt pgtype.Timestamptz
 }
 
 // Membership per (workspace, subject). Counts here decide when a seat is taken and returned.
