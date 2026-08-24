@@ -161,6 +161,24 @@ const (
 	// IdentityServiceRevertEmailChangeProcedure is the fully-qualified name of the IdentityService's
 	// RevertEmailChange RPC.
 	IdentityServiceRevertEmailChangeProcedure = "/chronos.identity.v1.IdentityService/RevertEmailChange"
+	// IdentityServiceBeginPasskeyRegistrationProcedure is the fully-qualified name of the
+	// IdentityService's BeginPasskeyRegistration RPC.
+	IdentityServiceBeginPasskeyRegistrationProcedure = "/chronos.identity.v1.IdentityService/BeginPasskeyRegistration"
+	// IdentityServiceFinishPasskeyRegistrationProcedure is the fully-qualified name of the
+	// IdentityService's FinishPasskeyRegistration RPC.
+	IdentityServiceFinishPasskeyRegistrationProcedure = "/chronos.identity.v1.IdentityService/FinishPasskeyRegistration"
+	// IdentityServiceBeginPasskeyLoginProcedure is the fully-qualified name of the IdentityService's
+	// BeginPasskeyLogin RPC.
+	IdentityServiceBeginPasskeyLoginProcedure = "/chronos.identity.v1.IdentityService/BeginPasskeyLogin"
+	// IdentityServiceFinishPasskeyLoginProcedure is the fully-qualified name of the IdentityService's
+	// FinishPasskeyLogin RPC.
+	IdentityServiceFinishPasskeyLoginProcedure = "/chronos.identity.v1.IdentityService/FinishPasskeyLogin"
+	// IdentityServiceListPasskeysProcedure is the fully-qualified name of the IdentityService's
+	// ListPasskeys RPC.
+	IdentityServiceListPasskeysProcedure = "/chronos.identity.v1.IdentityService/ListPasskeys"
+	// IdentityServiceRemovePasskeyProcedure is the fully-qualified name of the IdentityService's
+	// RemovePasskey RPC.
+	IdentityServiceRemovePasskeyProcedure = "/chronos.identity.v1.IdentityService/RemovePasskey"
 )
 
 // IdentityServiceClient is a client for the chronos.identity.v1.IdentityService service.
@@ -547,6 +565,65 @@ type IdentityServiceClient interface {
 	// The window is finite. After it the old address is available to anybody, so
 	// this refuses rather than taking it back from whoever claimed it since.
 	RevertEmailChange(context.Context, *connect.Request[v1.RevertEmailChangeRequest]) (*connect.Response[v1.RevertEmailChangeResponse], error)
+	// BeginPasskeyRegistration starts enrolling an authenticator.
+	//
+	// Returns the JSON for `navigator.credentials.create` and an opaque ceremony
+	// id. Nothing is enrolled until FinishPasskeyRegistration verifies what the
+	// authenticator signed.
+	//
+	// AAL2: adding a credential that can sign in on its own is a credential
+	// change, and identity.md §4.3 requires step-up for those.
+	BeginPasskeyRegistration(context.Context, *connect.Request[v1.BeginPasskeyRegistrationRequest]) (*connect.Response[v1.BeginPasskeyRegistrationResponse], error)
+	// FinishPasskeyRegistration verifies the authenticator's answer and enrols it.
+	//
+	// The ceremony is SINGLE-USE: replaying one is refused, because one signature
+	// must not become two credentials.
+	//
+	// On an account's FIRST passkey this returns recovery codes, once.
+	// identity.md §5 calls lockout "the real design problem" — somebody whose only
+	// method is a passkey on a lost device must still get back in — so the codes
+	// are issued here rather than offered afterwards, because an afterthought is a
+	// path most people never take.
+	FinishPasskeyRegistration(context.Context, *connect.Request[v1.FinishPasskeyRegistrationRequest]) (*connect.Response[v1.FinishPasskeyRegistrationResponse], error)
+	// BeginPasskeyLogin starts a usernameless sign-in.
+	//
+	// PUBLIC, and it carries NO identifier. That absence is the feature: the
+	// authenticator names the account, so this endpoint cannot be asked whether an
+	// address exists. A field for one would reintroduce the enumeration oracle
+	// every other public surface in this module removes.
+	//
+	// It looks up nothing and answers identically whether or not any account
+	// exists.
+	BeginPasskeyLogin(context.Context, *connect.Request[v1.BeginPasskeyLoginRequest]) (*connect.Response[v1.BeginPasskeyLoginResponse], error)
+	// FinishPasskeyLogin verifies an assertion and creates a session.
+	//
+	// Public: the assertion IS the authentication. A user-verified passkey reaches
+	// AAL2 on its own (identity.md §2) — the authenticator is the possession
+	// factor and the PIN or biometric that unlocked it is the second — so this can
+	// mint a full session in one gesture. Without user verification it reaches
+	// AAL1 and anything sensitive will ask for step-up.
+	//
+	// A signature counter that went BACKWARDS does NOT refuse the sign-in. Most
+	// synced passkeys report a counter of zero forever, and identity.md §5 is
+	// explicit that treating a regression as fatal "locks out legitimate users".
+	// The session is capped at AAL1 instead and the response says so.
+	FinishPasskeyLogin(context.Context, *connect.Request[v1.FinishPasskeyLoginRequest]) (*connect.Response[v1.FinishPasskeyLoginResponse], error)
+	// ListPasskeys shows the caller their own enrolled authenticators.
+	//
+	// The security screen. It returns the label the person chose, when each was
+	// added and last used, and whether one has ever produced a counter regression
+	// — which is what lets somebody notice a credential they do not recognise.
+	ListPasskeys(context.Context, *connect.Request[v1.ListPasskeysRequest]) (*connect.Response[v1.ListPasskeysResponse], error)
+	// RemovePasskey deletes one of the caller's authenticators.
+	//
+	// Refused when it would leave the account with no way to sign in, which is the
+	// same rule that stops the last second factor being removed. Somebody deleting
+	// their only passkey from a device they no longer have is not helped by an
+	// endpoint that lets them.
+	//
+	// AAL2 with no bootstrap exemption: removing a credential is not a way to
+	// enrol one.
+	RemovePasskey(context.Context, *connect.Request[v1.RemovePasskeyRequest]) (*connect.Response[v1.RemovePasskeyResponse], error)
 }
 
 // NewIdentityServiceClient constructs a client for the chronos.identity.v1.IdentityService service.
@@ -708,6 +785,42 @@ func NewIdentityServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(identityServiceMethods.ByName("RevertEmailChange")),
 			connect.WithClientOptions(opts...),
 		),
+		beginPasskeyRegistration: connect.NewClient[v1.BeginPasskeyRegistrationRequest, v1.BeginPasskeyRegistrationResponse](
+			httpClient,
+			baseURL+IdentityServiceBeginPasskeyRegistrationProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("BeginPasskeyRegistration")),
+			connect.WithClientOptions(opts...),
+		),
+		finishPasskeyRegistration: connect.NewClient[v1.FinishPasskeyRegistrationRequest, v1.FinishPasskeyRegistrationResponse](
+			httpClient,
+			baseURL+IdentityServiceFinishPasskeyRegistrationProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("FinishPasskeyRegistration")),
+			connect.WithClientOptions(opts...),
+		),
+		beginPasskeyLogin: connect.NewClient[v1.BeginPasskeyLoginRequest, v1.BeginPasskeyLoginResponse](
+			httpClient,
+			baseURL+IdentityServiceBeginPasskeyLoginProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("BeginPasskeyLogin")),
+			connect.WithClientOptions(opts...),
+		),
+		finishPasskeyLogin: connect.NewClient[v1.FinishPasskeyLoginRequest, v1.FinishPasskeyLoginResponse](
+			httpClient,
+			baseURL+IdentityServiceFinishPasskeyLoginProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("FinishPasskeyLogin")),
+			connect.WithClientOptions(opts...),
+		),
+		listPasskeys: connect.NewClient[v1.ListPasskeysRequest, v1.ListPasskeysResponse](
+			httpClient,
+			baseURL+IdentityServiceListPasskeysProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("ListPasskeys")),
+			connect.WithClientOptions(opts...),
+		),
+		removePasskey: connect.NewClient[v1.RemovePasskeyRequest, v1.RemovePasskeyResponse](
+			httpClient,
+			baseURL+IdentityServiceRemovePasskeyProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("RemovePasskey")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -737,6 +850,12 @@ type identityServiceClient struct {
 	cancelEmailChange         *connect.Client[v1.CancelEmailChangeRequest, v1.CancelEmailChangeResponse]
 	confirmEmailChange        *connect.Client[v1.ConfirmEmailChangeRequest, v1.ConfirmEmailChangeResponse]
 	revertEmailChange         *connect.Client[v1.RevertEmailChangeRequest, v1.RevertEmailChangeResponse]
+	beginPasskeyRegistration  *connect.Client[v1.BeginPasskeyRegistrationRequest, v1.BeginPasskeyRegistrationResponse]
+	finishPasskeyRegistration *connect.Client[v1.FinishPasskeyRegistrationRequest, v1.FinishPasskeyRegistrationResponse]
+	beginPasskeyLogin         *connect.Client[v1.BeginPasskeyLoginRequest, v1.BeginPasskeyLoginResponse]
+	finishPasskeyLogin        *connect.Client[v1.FinishPasskeyLoginRequest, v1.FinishPasskeyLoginResponse]
+	listPasskeys              *connect.Client[v1.ListPasskeysRequest, v1.ListPasskeysResponse]
+	removePasskey             *connect.Client[v1.RemovePasskeyRequest, v1.RemovePasskeyResponse]
 }
 
 // Register calls chronos.identity.v1.IdentityService.Register.
@@ -857,6 +976,36 @@ func (c *identityServiceClient) ConfirmEmailChange(ctx context.Context, req *con
 // RevertEmailChange calls chronos.identity.v1.IdentityService.RevertEmailChange.
 func (c *identityServiceClient) RevertEmailChange(ctx context.Context, req *connect.Request[v1.RevertEmailChangeRequest]) (*connect.Response[v1.RevertEmailChangeResponse], error) {
 	return c.revertEmailChange.CallUnary(ctx, req)
+}
+
+// BeginPasskeyRegistration calls chronos.identity.v1.IdentityService.BeginPasskeyRegistration.
+func (c *identityServiceClient) BeginPasskeyRegistration(ctx context.Context, req *connect.Request[v1.BeginPasskeyRegistrationRequest]) (*connect.Response[v1.BeginPasskeyRegistrationResponse], error) {
+	return c.beginPasskeyRegistration.CallUnary(ctx, req)
+}
+
+// FinishPasskeyRegistration calls chronos.identity.v1.IdentityService.FinishPasskeyRegistration.
+func (c *identityServiceClient) FinishPasskeyRegistration(ctx context.Context, req *connect.Request[v1.FinishPasskeyRegistrationRequest]) (*connect.Response[v1.FinishPasskeyRegistrationResponse], error) {
+	return c.finishPasskeyRegistration.CallUnary(ctx, req)
+}
+
+// BeginPasskeyLogin calls chronos.identity.v1.IdentityService.BeginPasskeyLogin.
+func (c *identityServiceClient) BeginPasskeyLogin(ctx context.Context, req *connect.Request[v1.BeginPasskeyLoginRequest]) (*connect.Response[v1.BeginPasskeyLoginResponse], error) {
+	return c.beginPasskeyLogin.CallUnary(ctx, req)
+}
+
+// FinishPasskeyLogin calls chronos.identity.v1.IdentityService.FinishPasskeyLogin.
+func (c *identityServiceClient) FinishPasskeyLogin(ctx context.Context, req *connect.Request[v1.FinishPasskeyLoginRequest]) (*connect.Response[v1.FinishPasskeyLoginResponse], error) {
+	return c.finishPasskeyLogin.CallUnary(ctx, req)
+}
+
+// ListPasskeys calls chronos.identity.v1.IdentityService.ListPasskeys.
+func (c *identityServiceClient) ListPasskeys(ctx context.Context, req *connect.Request[v1.ListPasskeysRequest]) (*connect.Response[v1.ListPasskeysResponse], error) {
+	return c.listPasskeys.CallUnary(ctx, req)
+}
+
+// RemovePasskey calls chronos.identity.v1.IdentityService.RemovePasskey.
+func (c *identityServiceClient) RemovePasskey(ctx context.Context, req *connect.Request[v1.RemovePasskeyRequest]) (*connect.Response[v1.RemovePasskeyResponse], error) {
+	return c.removePasskey.CallUnary(ctx, req)
 }
 
 // IdentityServiceHandler is an implementation of the chronos.identity.v1.IdentityService service.
@@ -1243,6 +1392,65 @@ type IdentityServiceHandler interface {
 	// The window is finite. After it the old address is available to anybody, so
 	// this refuses rather than taking it back from whoever claimed it since.
 	RevertEmailChange(context.Context, *connect.Request[v1.RevertEmailChangeRequest]) (*connect.Response[v1.RevertEmailChangeResponse], error)
+	// BeginPasskeyRegistration starts enrolling an authenticator.
+	//
+	// Returns the JSON for `navigator.credentials.create` and an opaque ceremony
+	// id. Nothing is enrolled until FinishPasskeyRegistration verifies what the
+	// authenticator signed.
+	//
+	// AAL2: adding a credential that can sign in on its own is a credential
+	// change, and identity.md §4.3 requires step-up for those.
+	BeginPasskeyRegistration(context.Context, *connect.Request[v1.BeginPasskeyRegistrationRequest]) (*connect.Response[v1.BeginPasskeyRegistrationResponse], error)
+	// FinishPasskeyRegistration verifies the authenticator's answer and enrols it.
+	//
+	// The ceremony is SINGLE-USE: replaying one is refused, because one signature
+	// must not become two credentials.
+	//
+	// On an account's FIRST passkey this returns recovery codes, once.
+	// identity.md §5 calls lockout "the real design problem" — somebody whose only
+	// method is a passkey on a lost device must still get back in — so the codes
+	// are issued here rather than offered afterwards, because an afterthought is a
+	// path most people never take.
+	FinishPasskeyRegistration(context.Context, *connect.Request[v1.FinishPasskeyRegistrationRequest]) (*connect.Response[v1.FinishPasskeyRegistrationResponse], error)
+	// BeginPasskeyLogin starts a usernameless sign-in.
+	//
+	// PUBLIC, and it carries NO identifier. That absence is the feature: the
+	// authenticator names the account, so this endpoint cannot be asked whether an
+	// address exists. A field for one would reintroduce the enumeration oracle
+	// every other public surface in this module removes.
+	//
+	// It looks up nothing and answers identically whether or not any account
+	// exists.
+	BeginPasskeyLogin(context.Context, *connect.Request[v1.BeginPasskeyLoginRequest]) (*connect.Response[v1.BeginPasskeyLoginResponse], error)
+	// FinishPasskeyLogin verifies an assertion and creates a session.
+	//
+	// Public: the assertion IS the authentication. A user-verified passkey reaches
+	// AAL2 on its own (identity.md §2) — the authenticator is the possession
+	// factor and the PIN or biometric that unlocked it is the second — so this can
+	// mint a full session in one gesture. Without user verification it reaches
+	// AAL1 and anything sensitive will ask for step-up.
+	//
+	// A signature counter that went BACKWARDS does NOT refuse the sign-in. Most
+	// synced passkeys report a counter of zero forever, and identity.md §5 is
+	// explicit that treating a regression as fatal "locks out legitimate users".
+	// The session is capped at AAL1 instead and the response says so.
+	FinishPasskeyLogin(context.Context, *connect.Request[v1.FinishPasskeyLoginRequest]) (*connect.Response[v1.FinishPasskeyLoginResponse], error)
+	// ListPasskeys shows the caller their own enrolled authenticators.
+	//
+	// The security screen. It returns the label the person chose, when each was
+	// added and last used, and whether one has ever produced a counter regression
+	// — which is what lets somebody notice a credential they do not recognise.
+	ListPasskeys(context.Context, *connect.Request[v1.ListPasskeysRequest]) (*connect.Response[v1.ListPasskeysResponse], error)
+	// RemovePasskey deletes one of the caller's authenticators.
+	//
+	// Refused when it would leave the account with no way to sign in, which is the
+	// same rule that stops the last second factor being removed. Somebody deleting
+	// their only passkey from a device they no longer have is not helped by an
+	// endpoint that lets them.
+	//
+	// AAL2 with no bootstrap exemption: removing a credential is not a way to
+	// enrol one.
+	RemovePasskey(context.Context, *connect.Request[v1.RemovePasskeyRequest]) (*connect.Response[v1.RemovePasskeyResponse], error)
 }
 
 // NewIdentityServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -1400,6 +1608,42 @@ func NewIdentityServiceHandler(svc IdentityServiceHandler, opts ...connect.Handl
 		connect.WithSchema(identityServiceMethods.ByName("RevertEmailChange")),
 		connect.WithHandlerOptions(opts...),
 	)
+	identityServiceBeginPasskeyRegistrationHandler := connect.NewUnaryHandler(
+		IdentityServiceBeginPasskeyRegistrationProcedure,
+		svc.BeginPasskeyRegistration,
+		connect.WithSchema(identityServiceMethods.ByName("BeginPasskeyRegistration")),
+		connect.WithHandlerOptions(opts...),
+	)
+	identityServiceFinishPasskeyRegistrationHandler := connect.NewUnaryHandler(
+		IdentityServiceFinishPasskeyRegistrationProcedure,
+		svc.FinishPasskeyRegistration,
+		connect.WithSchema(identityServiceMethods.ByName("FinishPasskeyRegistration")),
+		connect.WithHandlerOptions(opts...),
+	)
+	identityServiceBeginPasskeyLoginHandler := connect.NewUnaryHandler(
+		IdentityServiceBeginPasskeyLoginProcedure,
+		svc.BeginPasskeyLogin,
+		connect.WithSchema(identityServiceMethods.ByName("BeginPasskeyLogin")),
+		connect.WithHandlerOptions(opts...),
+	)
+	identityServiceFinishPasskeyLoginHandler := connect.NewUnaryHandler(
+		IdentityServiceFinishPasskeyLoginProcedure,
+		svc.FinishPasskeyLogin,
+		connect.WithSchema(identityServiceMethods.ByName("FinishPasskeyLogin")),
+		connect.WithHandlerOptions(opts...),
+	)
+	identityServiceListPasskeysHandler := connect.NewUnaryHandler(
+		IdentityServiceListPasskeysProcedure,
+		svc.ListPasskeys,
+		connect.WithSchema(identityServiceMethods.ByName("ListPasskeys")),
+		connect.WithHandlerOptions(opts...),
+	)
+	identityServiceRemovePasskeyHandler := connect.NewUnaryHandler(
+		IdentityServiceRemovePasskeyProcedure,
+		svc.RemovePasskey,
+		connect.WithSchema(identityServiceMethods.ByName("RemovePasskey")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/chronos.identity.v1.IdentityService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case IdentityServiceRegisterProcedure:
@@ -1450,6 +1694,18 @@ func NewIdentityServiceHandler(svc IdentityServiceHandler, opts ...connect.Handl
 			identityServiceConfirmEmailChangeHandler.ServeHTTP(w, r)
 		case IdentityServiceRevertEmailChangeProcedure:
 			identityServiceRevertEmailChangeHandler.ServeHTTP(w, r)
+		case IdentityServiceBeginPasskeyRegistrationProcedure:
+			identityServiceBeginPasskeyRegistrationHandler.ServeHTTP(w, r)
+		case IdentityServiceFinishPasskeyRegistrationProcedure:
+			identityServiceFinishPasskeyRegistrationHandler.ServeHTTP(w, r)
+		case IdentityServiceBeginPasskeyLoginProcedure:
+			identityServiceBeginPasskeyLoginHandler.ServeHTTP(w, r)
+		case IdentityServiceFinishPasskeyLoginProcedure:
+			identityServiceFinishPasskeyLoginHandler.ServeHTTP(w, r)
+		case IdentityServiceListPasskeysProcedure:
+			identityServiceListPasskeysHandler.ServeHTTP(w, r)
+		case IdentityServiceRemovePasskeyProcedure:
+			identityServiceRemovePasskeyHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1553,4 +1809,28 @@ func (UnimplementedIdentityServiceHandler) ConfirmEmailChange(context.Context, *
 
 func (UnimplementedIdentityServiceHandler) RevertEmailChange(context.Context, *connect.Request[v1.RevertEmailChangeRequest]) (*connect.Response[v1.RevertEmailChangeResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.RevertEmailChange is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) BeginPasskeyRegistration(context.Context, *connect.Request[v1.BeginPasskeyRegistrationRequest]) (*connect.Response[v1.BeginPasskeyRegistrationResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.BeginPasskeyRegistration is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) FinishPasskeyRegistration(context.Context, *connect.Request[v1.FinishPasskeyRegistrationRequest]) (*connect.Response[v1.FinishPasskeyRegistrationResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.FinishPasskeyRegistration is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) BeginPasskeyLogin(context.Context, *connect.Request[v1.BeginPasskeyLoginRequest]) (*connect.Response[v1.BeginPasskeyLoginResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.BeginPasskeyLogin is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) FinishPasskeyLogin(context.Context, *connect.Request[v1.FinishPasskeyLoginRequest]) (*connect.Response[v1.FinishPasskeyLoginResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.FinishPasskeyLogin is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) ListPasskeys(context.Context, *connect.Request[v1.ListPasskeysRequest]) (*connect.Response[v1.ListPasskeysResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.ListPasskeys is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) RemovePasskey(context.Context, *connect.Request[v1.RemovePasskeyRequest]) (*connect.Response[v1.RemovePasskeyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.RemovePasskey is not implemented"))
 }

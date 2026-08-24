@@ -643,18 +643,7 @@ already has a name for.
       same data. The gap is a missing identity FEATURE, not a missing compliance
       mechanism.
 
-- [ ] **Email change — identity's, well specified, and the last real
-      rectification gap.** identity.md §12 already states what it must do:
-      verify the NEW address before switching, notify the OLD one, allow a revert
-      window, and obey §4.4 in both directions — re-verification voids every
-      session, and a password reset MUST void any PENDING change, or an attacker
-      queues a change to their own address and the victim's recovery hands the
-      account back afterwards.
-
-      Every primitive it needs already exists: token minting and single-use
-      consumption, the email reservation aggregate, the blind index, and a
-      `VerifyEmail` that already voids sessions. It is a slice of its own rather
-      than a step in a compliance one.
+- [x] **Email change — BUILT.** See "Done — email change" below.
 - [x] **Export and portability (Art. 15/20).** `ExportMyData` produces a JSON
       bundle of every vault field, writes it to SeaweedFS and returns an
       expiring signed link.

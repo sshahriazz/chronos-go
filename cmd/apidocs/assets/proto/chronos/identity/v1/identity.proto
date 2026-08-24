@@ -1292,7 +1292,11 @@ message ListMethodsRequest {}
 message AuthMethod {
   // The credential's identifier, a prefixed ULID (ADR-030).
   string credential_id = 1 [
-    (gnostic.openapi.v3.property) = {example: {yaml: "cred_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "cred_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 31
+      pattern: "^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
     (buf.validate.field).string = {
       max_len: 31
       pattern: "^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
@@ -1476,7 +1480,11 @@ message EnrollTotpRequest {
 message EnrollTotpResponse {
   // The credential this enrolment provisioned, a prefixed ULID (ADR-030).
   string credential_id = 1 [
-    (gnostic.openapi.v3.property) = {example: {yaml: "cred_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "cred_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 31
+      pattern: "^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
     (buf.validate.field).string = {
       max_len: 31
       pattern: "^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
@@ -1547,7 +1555,11 @@ message ConfirmTotpRequest {
 message ConfirmTotpResponse {
   // The credential that was proven.
   string credential_id = 1 [
-    (gnostic.openapi.v3.property) = {example: {yaml: "cred_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "cred_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 31
+      pattern: "^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
     (buf.validate.field).string = {
       max_len: 31
       pattern: "^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
@@ -1590,7 +1602,11 @@ message GenerateRecoveryCodesRequest {
 message GenerateRecoveryCodesResponse {
   // The credential holding this set, a prefixed ULID (ADR-030).
   string credential_id = 1 [
-    (gnostic.openapi.v3.property) = {example: {yaml: "cred_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "cred_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 31
+      pattern: "^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
     (buf.validate.field).string = {
       max_len: 31
       pattern: "^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
@@ -1874,6 +1890,349 @@ message RequestAccountDeletionResponse {
   // When erasure falls due, UTC. Always set on a successful call.
   google.protobuf.Timestamp scheduled_for = 2;
 }
+
+// IdentityService is the account, its credentials and its sessions.
+//
+// # The gates, and the one that is not honest yet
+//
+// Every RPC declares its enforcement policy or the server refuses to boot
+// (ADR-021). Four of these are public because they run before any session
+// exists; the other nine act on the CALLER'S OWN account, which identity has no
+// established annotation for.
+//
+// Identity is not organization-scoped — a person exists before any organization
+// does, so there is no org for the org-context gate to resolve and no
+// `workspace_id` for row-level security to scope by. The authz gate's two
+// shapes both assume otherwise: an empty `resource_id_field` means "the org
+// already resolved for this request", and a named one means "read the id from
+// this request field", which no message here carries because the account is
+// resolved from the session rather than named by the caller.
+//
+// So `{relation: "self", resource_type: "user"}` below names a self-scoped
+// convention that the authz gate now implements: `selfCheck` answers gate 2
+// from the principal alone, substituting `principal.Subject.ID` as the resource
+// and skipping gates 1 and 3, which are both questions ABOUT an organization
+// that a self-scoped method has none of. The resource is read from the session
+// and from nowhere else — not from the request, not from a header — so a caller
+// cannot aim the check at somebody else's account.
+//
+// The convention is keyed on the STRING "self", which is the weak part of it.
+// A method that declares a relation this gate does not recognise falls through
+// to the org-scoped shape and fails closed for want of an active organization,
+// so the failure direction is safe; a method that MISSPELLS "self" gets the same
+// treatment and is simply unreachable. Both are safe and neither is obvious.
+// Replacing the string with a declared marker is tracked separately.
+//
+// # Assurance levels
+//
+// A session is normally AAL2, but AAL1 SESSIONS EXIST: an account with a
+// verified address and no second factor may mint exactly one, for the sole
+// purpose of enrolling its first factor (the bootstrap carve-out). So an
+// unannotated method is NOT automatically two-factor any more — its floor is
+// AAL1 by declaration, and the four read methods here that declare no `min_aal`
+// are reachable from a bootstrap session.
+//
+// That makes the explicit declarations on the credential- and session-changing
+// methods load-bearing rather than documentary: they are what stops a
+// password-only session from touching credentials or sessions. A method added
+// here without a `min_aal` is single-factor by default, and the enrolment
+// carve-out is what makes that reachable in practice.
+// BeginPasskeyRegistrationRequest starts an enrolment. It carries nothing: the
+// account is the authenticated caller and there is no other input.
+message BeginPasskeyRegistrationRequest {}
+
+// BeginPasskeyRegistrationResponse is what the browser needs.
+message BeginPasskeyRegistrationResponse {
+  // The opaque ceremony id, returned with the answer.
+  //
+  // NOT a credential: holding one lets somebody complete a ceremony they must
+  // still produce a valid signature for. It is unguessable so that a ceremony
+  // cannot be answered by whoever wants to.
+  string ceremony_id = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "cred_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 31
+      pattern: "^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    (buf.validate.field) = {
+      required: true
+      string: {max_len: 64}
+    }
+  ];
+
+  // The JSON to hand to `navigator.credentials.create`, verbatim.
+  //
+  // Passed through rather than modelled field by field. The shape is WebAuthn's
+  // and it changes with the spec, so re-declaring it here would create a second
+  // definition that drifts from the library actually producing it — and a
+  // mismatch would be a ceremony the browser refuses for reasons nothing here
+  // could explain.
+  string options_json = 2 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "'{\"publicKey\":{\"challenge\":\"...\"}}'"}
+    max_length: 16384
+    pattern: "^\\{[\\s\\S]*\\}$"
+  }];
+
+  // When the ceremony stops being redeemable server-side.
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+// FinishPasskeyRegistrationRequest presents what the authenticator signed.
+message FinishPasskeyRegistrationRequest {
+  // The ceremony id from the begin call.
+  string ceremony_id = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "cred_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 31
+      pattern: "^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    (buf.validate.field) = {
+      required: true
+      string: {max_len: 64}
+    }
+  ];
+
+  // The browser's attestation payload, verbatim. Passed through for
+  // BeginPasskeyRegistrationResponse.options_json's reason.
+  string response_json = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "'{\"id\":\"...\",\"response\":{}}'"}
+      max_length: 65536
+      pattern: "^\\{[\\s\\S]*\\}$"
+    },
+    (buf.validate.field) = {
+      required: true
+      string: {max_len: 65536}
+    }
+  ];
+
+  // What the person calls this device.
+  //
+  // Free text they wrote about their own hardware, and the one caller-chosen
+  // string that reaches an event — so it is bounded here rather than trusted. A
+  // label is rendered on a security screen beside other entries, and an
+  // unbounded one is a permanent row in a log nobody can edit.
+  string label = 3 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "MacBook Pro"}
+      max_length: 64
+      pattern: "^[\\x20-\\x7E]*$"
+    },
+    (buf.validate.field) = {string: {max_len: 64}}
+  ];
+}
+
+// FinishPasskeyRegistrationResponse reports what was enrolled.
+message FinishPasskeyRegistrationResponse {
+  // The credential id, as the authenticator produced it. Not secret: it travels
+  // in every `allowCredentials` list the browser is handed.
+  string credential_id = 1 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "AQIDBAUGBwgJCgsMDQ4PEA"}
+    max_length: 1024
+    pattern: "^[A-Za-z0-9_-]+$"
+  }];
+
+  // Recovery codes, returned ONCE and only on the account's FIRST passkey.
+  //
+  // Never recoverable afterwards — only digests are stored — so a client that
+  // does not show them has lost them. identity.md §5: somebody whose only method
+  // is a passkey on a lost device must still be able to get back in.
+  repeated string recovery_codes = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "['ABCD-EFGH-IJKL-MNOP']"}},
+    // Bounded through buf.validate rather than the annotation, matching
+    // GenerateRecoveryCodesResponse.codes exactly: the two carry the same values
+    // from the same minter, and a second grammar here would be a second
+    // definition of what a recovery code looks like.
+    (buf.validate.field).repeated = {
+      max_items: 20
+      items: {
+        string: {
+          len: 19
+          pattern: "^[A-Z2-7]{4}(-[A-Z2-7]{4}){3}$"
+        }
+      }
+    }
+  ];
+
+  // Whether this registration completed the account's activation.
+  bool activated = 3;
+}
+
+// BeginPasskeyLoginRequest carries NOTHING, and that is the point: the
+// authenticator names the account, so this endpoint cannot be asked whether an
+// address exists.
+message BeginPasskeyLoginRequest {}
+
+// BeginPasskeyLoginResponse is what the browser needs to sign.
+message BeginPasskeyLoginResponse {
+  // The opaque ceremony id, returned with the assertion. Not a credential.
+  string ceremony_id = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "cred_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 31
+      pattern: "^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    (buf.validate.field) = {
+      required: true
+      string: {max_len: 64}
+    }
+  ];
+
+  // The JSON for `navigator.credentials.get`. It names no credentials, so the
+  // authenticator offers whatever it holds for this relying party — which is
+  // what makes the response identical whether or not any account exists.
+  string options_json = 2 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "'{\"publicKey\":{\"challenge\":\"...\"}}'"}
+    max_length: 16384
+    pattern: "^\\{[\\s\\S]*\\}$"
+  }];
+
+  // When the ceremony stops being redeemable server-side.
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+// FinishPasskeyLoginRequest presents the assertion.
+message FinishPasskeyLoginRequest {
+  // The ceremony id from the begin call.
+  string ceremony_id = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "cred_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 31
+      pattern: "^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    (buf.validate.field) = {
+      required: true
+      string: {max_len: 64}
+    }
+  ];
+
+  // The browser's assertion payload, verbatim. It names the credential, which
+  // names the account.
+  string response_json = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "'{\"id\":\"...\",\"response\":{}}'"}
+      max_length: 65536
+      pattern: "^\\{[\\s\\S]*\\}$"
+    },
+    (buf.validate.field) = {
+      required: true
+      string: {max_len: 65536}
+    }
+  ];
+
+  // The device this session is being created on, as on CreateSessionRequest.
+  string device_id = 3 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "dev_9f2c1b7e"}
+      max_length: 64
+      pattern: "^[\\x20-\\x7E]*$"
+    },
+    (buf.validate.field) = {string: {max_len: 64}}
+  ];
+}
+
+// FinishPasskeyLoginResponse carries the session.
+message FinishPasskeyLoginResponse {
+  // The bearer token. Returned once and stored by nothing here.
+  string token = 1 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "PLACEHOLDER-not-a-real-token"}
+    max_length: 43
+    pattern: "^[A-Za-z0-9_-]{43}$"
+  }];
+
+  // The session this ceremony created, a prefixed ULID (ADR-030).
+  string session_id = 2 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "sess_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+    max_length: 31
+    pattern: "^sess_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+  }];
+
+  // The level this ceremony established. AAL2 for a user-verified passkey,
+  // AAL1 without user verification or when a counter regression capped it.
+  chronos.options.v1.AssuranceLevel assurance_level = 3;
+
+  // Whether the authenticator's signature counter went BACKWARDS.
+  //
+  // Reported so a client can explain why the session is reduced. It is not the
+  // enforcement — the assurance level already carries that — it is the reason.
+  // A regression does not refuse the sign-in: most synced passkeys report a
+  // counter of zero forever, and identity.md §5 is explicit that treating one as
+  // fatal locks out legitimate users.
+  bool clone_warning = 4;
+
+  // When the session's idle window runs out.
+  google.protobuf.Timestamp expires_at = 5;
+}
+
+// ListPasskeysRequest asks for the caller's own authenticators.
+message ListPasskeysRequest {}
+
+// Passkey is one enrolled authenticator, as a security screen shows it.
+message Passkey {
+  // The credential id, as the authenticator produced it. Not secret.
+  string credential_id = 1 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "AQIDBAUGBwgJCgsMDQ4PEA"}
+    max_length: 1024
+    pattern: "^[A-Za-z0-9_-]+$"
+  }];
+
+  // What the person called it.
+  string label = 2 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "MacBook Pro"}
+    max_length: 64
+    pattern: "^[\\x20-\\x7E]*$"
+  }];
+
+  // When it was enrolled.
+  google.protobuf.Timestamp created_at = 3;
+
+  // Zero when it has never been used to sign in.
+  google.protobuf.Timestamp last_used_at = 4;
+
+  // Whether the authenticator may sync this credential to other devices, and
+  // whether it currently is.
+  //
+  // Shown because they change what the credential MEANS: a synced passkey is
+  // present on every device the person's account touches, which is why SP
+  // 800-63B-4 Appendix B forbids one at AAL3.
+  bool backup_eligible = 5;
+
+  // Whether the credential is currently backed up. See backup_eligible.
+  bool backup_state = 6;
+
+  // Set when this credential's signature counter has ever gone backwards.
+  //
+  // Surfaced so somebody can see a credential worth removing. It is not proof of
+  // a clone — an out-of-order race produces the same signal — which is why it is
+  // shown rather than acted on automatically.
+  google.protobuf.Timestamp clone_warned_at = 7;
+}
+
+// ListPasskeysResponse is the caller's own authenticators, newest first.
+message ListPasskeysResponse {
+  // The caller's own authenticators, newest first. Never anybody else's.
+  repeated Passkey passkeys = 1 [(gnostic.openapi.v3.property) = {max_items: 100}];
+}
+
+// RemovePasskeyRequest names one of the caller's own credentials.
+message RemovePasskeyRequest {
+  // The credential to remove. Scoped to the caller: naming somebody else's does
+  // not delete theirs.
+  string credential_id = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "AQIDBAUGBwgJCgsMDQ4PEA"}
+      max_length: 1024
+      pattern: "^[A-Za-z0-9_-]+$"
+    },
+    (buf.validate.field) = {
+      required: true
+      string: {max_len: 1024}
+    }
+  ];
+}
+
+// RemovePasskeyResponse is empty. The credential is gone or the call failed.
+message RemovePasskeyResponse {}
 
 // IdentityService is the account, its credentials and its sessions.
 //
@@ -3659,6 +4018,178 @@ service IdentityService {
           }
         ]
       }
+    };
+  }
+
+  // BeginPasskeyRegistration starts enrolling an authenticator.
+  //
+  // Returns the JSON for `navigator.credentials.create` and an opaque ceremony
+  // id. Nothing is enrolled until FinishPasskeyRegistration verifies what the
+  // authenticator signed.
+  //
+  // AAL2: adding a credential that can sign in on its own is a credential
+  // change, and identity.md §4.3 requires step-up for those.
+  rpc BeginPasskeyRegistration(BeginPasskeyRegistrationRequest) returns (BeginPasskeyRegistrationResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+    option (chronos.options.v1.min_aal) = ASSURANCE_LEVEL_2;
+    // A first enrolment is the one case that legitimately runs below AAL2: an
+    // account with no second factor presenting the only factor it has, in order
+    // to enrol the one it is required to have. Without this a passkey could
+    // never be somebody's FIRST second factor, and the strongest method
+    // available would be reachable only by people who already have another.
+    option (chronos.options.v1.bootstrap_min_aal) = ASSURANCE_LEVEL_1;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // FinishPasskeyRegistration verifies the authenticator's answer and enrols it.
+  //
+  // The ceremony is SINGLE-USE: replaying one is refused, because one signature
+  // must not become two credentials.
+  //
+  // On an account's FIRST passkey this returns recovery codes, once.
+  // identity.md §5 calls lockout "the real design problem" — somebody whose only
+  // method is a passkey on a lost device must still get back in — so the codes
+  // are issued here rather than offered afterwards, because an afterthought is a
+  // path most people never take.
+  rpc FinishPasskeyRegistration(FinishPasskeyRegistrationRequest) returns (FinishPasskeyRegistrationResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+    option (chronos.options.v1.min_aal) = ASSURANCE_LEVEL_2;
+    option (chronos.options.v1.bootstrap_min_aal) = ASSURANCE_LEVEL_1;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // BeginPasskeyLogin starts a usernameless sign-in.
+  //
+  // PUBLIC, and it carries NO identifier. That absence is the feature: the
+  // authenticator names the account, so this endpoint cannot be asked whether an
+  // address exists. A field for one would reintroduce the enumeration oracle
+  // every other public surface in this module removes.
+  //
+  // It looks up nothing and answers identically whether or not any account
+  // exists.
+  rpc BeginPasskeyLogin(BeginPasskeyLoginRequest) returns (BeginPasskeyLoginResponse) {
+    option (chronos.options.v1.public) = true;
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    option (gnostic.openapi.v3.operation) = {
+      security: [{}]
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // FinishPasskeyLogin verifies an assertion and creates a session.
+  //
+  // Public: the assertion IS the authentication. A user-verified passkey reaches
+  // AAL2 on its own (identity.md §2) — the authenticator is the possession
+  // factor and the PIN or biometric that unlocked it is the second — so this can
+  // mint a full session in one gesture. Without user verification it reaches
+  // AAL1 and anything sensitive will ask for step-up.
+  //
+  // A signature counter that went BACKWARDS does NOT refuse the sign-in. Most
+  // synced passkeys report a counter of zero forever, and identity.md §5 is
+  // explicit that treating a regression as fatal "locks out legitimate users".
+  // The session is capped at AAL1 instead and the response says so.
+  rpc FinishPasskeyLogin(FinishPasskeyLoginRequest) returns (FinishPasskeyLoginResponse) {
+    option (chronos.options.v1.public) = true;
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    option (gnostic.openapi.v3.operation) = {
+      security: [{}]
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // ListPasskeys shows the caller their own enrolled authenticators.
+  //
+  // The security screen. It returns the label the person chose, when each was
+  // added and last used, and whether one has ever produced a counter regression
+  // — which is what lets somebody notice a credential they do not recognise.
+  rpc ListPasskeys(ListPasskeysRequest) returns (ListPasskeysResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_READ;
+  }
+
+  // RemovePasskey deletes one of the caller's authenticators.
+  //
+  // Refused when it would leave the account with no way to sign in, which is the
+  // same rule that stops the last second factor being removed. Somebody deleting
+  // their only passkey from a device they no longer have is not helped by an
+  // endpoint that lets them.
+  //
+  // AAL2 with no bootstrap exemption: removing a credential is not a way to
+  // enrol one.
+  rpc RemovePasskey(RemovePasskeyRequest) returns (RemovePasskeyResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+    option (chronos.options.v1.min_aal) = ASSURANCE_LEVEL_2;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
     };
   }
 }

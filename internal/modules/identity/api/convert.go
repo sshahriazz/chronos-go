@@ -153,3 +153,15 @@ func protoFailureReason(r contract.FailureReason) identityv1.FailureReason {
 		return identityv1.FailureReason_FAILURE_REASON_UNSPECIFIED
 	}
 }
+
+// optionalTime renders a zero time as absent rather than as the Unix epoch.
+//
+// A zero timestamp marshals to 1970, which a client renders as a real date — so
+// "this passkey has never been used" and "this passkey was used in 1970" become
+// the same thing on screen. Absent is the honest answer.
+func optionalTime(t time.Time) *timestamppb.Timestamp {
+	if t.IsZero() {
+		return nil
+	}
+	return timestamppb.New(t.UTC())
+}

@@ -3802,6 +3802,838 @@ func (x *RequestAccountDeletionResponse) GetScheduledFor() *timestamppb.Timestam
 	return nil
 }
 
+// IdentityService is the account, its credentials and its sessions.
+//
+// # The gates, and the one that is not honest yet
+//
+// Every RPC declares its enforcement policy or the server refuses to boot
+// (ADR-021). Four of these are public because they run before any session
+// exists; the other nine act on the CALLER'S OWN account, which identity has no
+// established annotation for.
+//
+// Identity is not organization-scoped — a person exists before any organization
+// does, so there is no org for the org-context gate to resolve and no
+// `workspace_id` for row-level security to scope by. The authz gate's two
+// shapes both assume otherwise: an empty `resource_id_field` means "the org
+// already resolved for this request", and a named one means "read the id from
+// this request field", which no message here carries because the account is
+// resolved from the session rather than named by the caller.
+//
+// So `{relation: "self", resource_type: "user"}` below names a self-scoped
+// convention that the authz gate now implements: `selfCheck` answers gate 2
+// from the principal alone, substituting `principal.Subject.ID` as the resource
+// and skipping gates 1 and 3, which are both questions ABOUT an organization
+// that a self-scoped method has none of. The resource is read from the session
+// and from nowhere else — not from the request, not from a header — so a caller
+// cannot aim the check at somebody else's account.
+//
+// The convention is keyed on the STRING "self", which is the weak part of it.
+// A method that declares a relation this gate does not recognise falls through
+// to the org-scoped shape and fails closed for want of an active organization,
+// so the failure direction is safe; a method that MISSPELLS "self" gets the same
+// treatment and is simply unreachable. Both are safe and neither is obvious.
+// Replacing the string with a declared marker is tracked separately.
+//
+// # Assurance levels
+//
+// A session is normally AAL2, but AAL1 SESSIONS EXIST: an account with a
+// verified address and no second factor may mint exactly one, for the sole
+// purpose of enrolling its first factor (the bootstrap carve-out). So an
+// unannotated method is NOT automatically two-factor any more — its floor is
+// AAL1 by declaration, and the four read methods here that declare no `min_aal`
+// are reachable from a bootstrap session.
+//
+// That makes the explicit declarations on the credential- and session-changing
+// methods load-bearing rather than documentary: they are what stops a
+// password-only session from touching credentials or sessions. A method added
+// here without a `min_aal` is single-factor by default, and the enrolment
+// carve-out is what makes that reachable in practice.
+// BeginPasskeyRegistrationRequest starts an enrolment. It carries nothing: the
+// account is the authenticated caller and there is no other input.
+type BeginPasskeyRegistrationRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BeginPasskeyRegistrationRequest) Reset() {
+	*x = BeginPasskeyRegistrationRequest{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[51]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BeginPasskeyRegistrationRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BeginPasskeyRegistrationRequest) ProtoMessage() {}
+
+func (x *BeginPasskeyRegistrationRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[51]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BeginPasskeyRegistrationRequest.ProtoReflect.Descriptor instead.
+func (*BeginPasskeyRegistrationRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{51}
+}
+
+// BeginPasskeyRegistrationResponse is what the browser needs.
+type BeginPasskeyRegistrationResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The opaque ceremony id, returned with the answer.
+	//
+	// NOT a credential: holding one lets somebody complete a ceremony they must
+	// still produce a valid signature for. It is unguessable so that a ceremony
+	// cannot be answered by whoever wants to.
+	CeremonyId string `protobuf:"bytes,1,opt,name=ceremony_id,json=ceremonyId,proto3" json:"ceremony_id,omitempty"`
+	// The JSON to hand to `navigator.credentials.create`, verbatim.
+	//
+	// Passed through rather than modelled field by field. The shape is WebAuthn's
+	// and it changes with the spec, so re-declaring it here would create a second
+	// definition that drifts from the library actually producing it — and a
+	// mismatch would be a ceremony the browser refuses for reasons nothing here
+	// could explain.
+	OptionsJson string `protobuf:"bytes,2,opt,name=options_json,json=optionsJson,proto3" json:"options_json,omitempty"`
+	// When the ceremony stops being redeemable server-side.
+	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BeginPasskeyRegistrationResponse) Reset() {
+	*x = BeginPasskeyRegistrationResponse{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[52]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BeginPasskeyRegistrationResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BeginPasskeyRegistrationResponse) ProtoMessage() {}
+
+func (x *BeginPasskeyRegistrationResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[52]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BeginPasskeyRegistrationResponse.ProtoReflect.Descriptor instead.
+func (*BeginPasskeyRegistrationResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{52}
+}
+
+func (x *BeginPasskeyRegistrationResponse) GetCeremonyId() string {
+	if x != nil {
+		return x.CeremonyId
+	}
+	return ""
+}
+
+func (x *BeginPasskeyRegistrationResponse) GetOptionsJson() string {
+	if x != nil {
+		return x.OptionsJson
+	}
+	return ""
+}
+
+func (x *BeginPasskeyRegistrationResponse) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
+// FinishPasskeyRegistrationRequest presents what the authenticator signed.
+type FinishPasskeyRegistrationRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The ceremony id from the begin call.
+	CeremonyId string `protobuf:"bytes,1,opt,name=ceremony_id,json=ceremonyId,proto3" json:"ceremony_id,omitempty"`
+	// The browser's attestation payload, verbatim. Passed through for
+	// BeginPasskeyRegistrationResponse.options_json's reason.
+	ResponseJson string `protobuf:"bytes,2,opt,name=response_json,json=responseJson,proto3" json:"response_json,omitempty"`
+	// What the person calls this device.
+	//
+	// Free text they wrote about their own hardware, and the one caller-chosen
+	// string that reaches an event — so it is bounded here rather than trusted. A
+	// label is rendered on a security screen beside other entries, and an
+	// unbounded one is a permanent row in a log nobody can edit.
+	Label         string `protobuf:"bytes,3,opt,name=label,proto3" json:"label,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FinishPasskeyRegistrationRequest) Reset() {
+	*x = FinishPasskeyRegistrationRequest{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[53]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FinishPasskeyRegistrationRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FinishPasskeyRegistrationRequest) ProtoMessage() {}
+
+func (x *FinishPasskeyRegistrationRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[53]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FinishPasskeyRegistrationRequest.ProtoReflect.Descriptor instead.
+func (*FinishPasskeyRegistrationRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{53}
+}
+
+func (x *FinishPasskeyRegistrationRequest) GetCeremonyId() string {
+	if x != nil {
+		return x.CeremonyId
+	}
+	return ""
+}
+
+func (x *FinishPasskeyRegistrationRequest) GetResponseJson() string {
+	if x != nil {
+		return x.ResponseJson
+	}
+	return ""
+}
+
+func (x *FinishPasskeyRegistrationRequest) GetLabel() string {
+	if x != nil {
+		return x.Label
+	}
+	return ""
+}
+
+// FinishPasskeyRegistrationResponse reports what was enrolled.
+type FinishPasskeyRegistrationResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The credential id, as the authenticator produced it. Not secret: it travels
+	// in every `allowCredentials` list the browser is handed.
+	CredentialId string `protobuf:"bytes,1,opt,name=credential_id,json=credentialId,proto3" json:"credential_id,omitempty"`
+	// Recovery codes, returned ONCE and only on the account's FIRST passkey.
+	//
+	// Never recoverable afterwards — only digests are stored — so a client that
+	// does not show them has lost them. identity.md §5: somebody whose only method
+	// is a passkey on a lost device must still be able to get back in.
+	RecoveryCodes []string `protobuf:"bytes,2,rep,name=recovery_codes,json=recoveryCodes,proto3" json:"recovery_codes,omitempty"`
+	// Whether this registration completed the account's activation.
+	Activated     bool `protobuf:"varint,3,opt,name=activated,proto3" json:"activated,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FinishPasskeyRegistrationResponse) Reset() {
+	*x = FinishPasskeyRegistrationResponse{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[54]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FinishPasskeyRegistrationResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FinishPasskeyRegistrationResponse) ProtoMessage() {}
+
+func (x *FinishPasskeyRegistrationResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[54]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FinishPasskeyRegistrationResponse.ProtoReflect.Descriptor instead.
+func (*FinishPasskeyRegistrationResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{54}
+}
+
+func (x *FinishPasskeyRegistrationResponse) GetCredentialId() string {
+	if x != nil {
+		return x.CredentialId
+	}
+	return ""
+}
+
+func (x *FinishPasskeyRegistrationResponse) GetRecoveryCodes() []string {
+	if x != nil {
+		return x.RecoveryCodes
+	}
+	return nil
+}
+
+func (x *FinishPasskeyRegistrationResponse) GetActivated() bool {
+	if x != nil {
+		return x.Activated
+	}
+	return false
+}
+
+// BeginPasskeyLoginRequest carries NOTHING, and that is the point: the
+// authenticator names the account, so this endpoint cannot be asked whether an
+// address exists.
+type BeginPasskeyLoginRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BeginPasskeyLoginRequest) Reset() {
+	*x = BeginPasskeyLoginRequest{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[55]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BeginPasskeyLoginRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BeginPasskeyLoginRequest) ProtoMessage() {}
+
+func (x *BeginPasskeyLoginRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[55]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BeginPasskeyLoginRequest.ProtoReflect.Descriptor instead.
+func (*BeginPasskeyLoginRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{55}
+}
+
+// BeginPasskeyLoginResponse is what the browser needs to sign.
+type BeginPasskeyLoginResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The opaque ceremony id, returned with the assertion. Not a credential.
+	CeremonyId string `protobuf:"bytes,1,opt,name=ceremony_id,json=ceremonyId,proto3" json:"ceremony_id,omitempty"`
+	// The JSON for `navigator.credentials.get`. It names no credentials, so the
+	// authenticator offers whatever it holds for this relying party — which is
+	// what makes the response identical whether or not any account exists.
+	OptionsJson string `protobuf:"bytes,2,opt,name=options_json,json=optionsJson,proto3" json:"options_json,omitempty"`
+	// When the ceremony stops being redeemable server-side.
+	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BeginPasskeyLoginResponse) Reset() {
+	*x = BeginPasskeyLoginResponse{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[56]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BeginPasskeyLoginResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BeginPasskeyLoginResponse) ProtoMessage() {}
+
+func (x *BeginPasskeyLoginResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[56]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BeginPasskeyLoginResponse.ProtoReflect.Descriptor instead.
+func (*BeginPasskeyLoginResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{56}
+}
+
+func (x *BeginPasskeyLoginResponse) GetCeremonyId() string {
+	if x != nil {
+		return x.CeremonyId
+	}
+	return ""
+}
+
+func (x *BeginPasskeyLoginResponse) GetOptionsJson() string {
+	if x != nil {
+		return x.OptionsJson
+	}
+	return ""
+}
+
+func (x *BeginPasskeyLoginResponse) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
+// FinishPasskeyLoginRequest presents the assertion.
+type FinishPasskeyLoginRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The ceremony id from the begin call.
+	CeremonyId string `protobuf:"bytes,1,opt,name=ceremony_id,json=ceremonyId,proto3" json:"ceremony_id,omitempty"`
+	// The browser's assertion payload, verbatim. It names the credential, which
+	// names the account.
+	ResponseJson string `protobuf:"bytes,2,opt,name=response_json,json=responseJson,proto3" json:"response_json,omitempty"`
+	// The device this session is being created on, as on CreateSessionRequest.
+	DeviceId      string `protobuf:"bytes,3,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FinishPasskeyLoginRequest) Reset() {
+	*x = FinishPasskeyLoginRequest{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[57]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FinishPasskeyLoginRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FinishPasskeyLoginRequest) ProtoMessage() {}
+
+func (x *FinishPasskeyLoginRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[57]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FinishPasskeyLoginRequest.ProtoReflect.Descriptor instead.
+func (*FinishPasskeyLoginRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{57}
+}
+
+func (x *FinishPasskeyLoginRequest) GetCeremonyId() string {
+	if x != nil {
+		return x.CeremonyId
+	}
+	return ""
+}
+
+func (x *FinishPasskeyLoginRequest) GetResponseJson() string {
+	if x != nil {
+		return x.ResponseJson
+	}
+	return ""
+}
+
+func (x *FinishPasskeyLoginRequest) GetDeviceId() string {
+	if x != nil {
+		return x.DeviceId
+	}
+	return ""
+}
+
+// FinishPasskeyLoginResponse carries the session.
+type FinishPasskeyLoginResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The bearer token. Returned once and stored by nothing here.
+	Token string `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	// The session this ceremony created, a prefixed ULID (ADR-030).
+	SessionId string `protobuf:"bytes,2,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	// The level this ceremony established. AAL2 for a user-verified passkey,
+	// AAL1 without user verification or when a counter regression capped it.
+	AssuranceLevel v1.AssuranceLevel `protobuf:"varint,3,opt,name=assurance_level,json=assuranceLevel,proto3,enum=chronos.options.v1.AssuranceLevel" json:"assurance_level,omitempty"`
+	// Whether the authenticator's signature counter went BACKWARDS.
+	//
+	// Reported so a client can explain why the session is reduced. It is not the
+	// enforcement — the assurance level already carries that — it is the reason.
+	// A regression does not refuse the sign-in: most synced passkeys report a
+	// counter of zero forever, and identity.md §5 is explicit that treating one as
+	// fatal locks out legitimate users.
+	CloneWarning bool `protobuf:"varint,4,opt,name=clone_warning,json=cloneWarning,proto3" json:"clone_warning,omitempty"`
+	// When the session's idle window runs out.
+	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FinishPasskeyLoginResponse) Reset() {
+	*x = FinishPasskeyLoginResponse{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[58]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FinishPasskeyLoginResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FinishPasskeyLoginResponse) ProtoMessage() {}
+
+func (x *FinishPasskeyLoginResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[58]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FinishPasskeyLoginResponse.ProtoReflect.Descriptor instead.
+func (*FinishPasskeyLoginResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{58}
+}
+
+func (x *FinishPasskeyLoginResponse) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+func (x *FinishPasskeyLoginResponse) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *FinishPasskeyLoginResponse) GetAssuranceLevel() v1.AssuranceLevel {
+	if x != nil {
+		return x.AssuranceLevel
+	}
+	return v1.AssuranceLevel(0)
+}
+
+func (x *FinishPasskeyLoginResponse) GetCloneWarning() bool {
+	if x != nil {
+		return x.CloneWarning
+	}
+	return false
+}
+
+func (x *FinishPasskeyLoginResponse) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
+// ListPasskeysRequest asks for the caller's own authenticators.
+type ListPasskeysRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListPasskeysRequest) Reset() {
+	*x = ListPasskeysRequest{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[59]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListPasskeysRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListPasskeysRequest) ProtoMessage() {}
+
+func (x *ListPasskeysRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[59]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListPasskeysRequest.ProtoReflect.Descriptor instead.
+func (*ListPasskeysRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{59}
+}
+
+// Passkey is one enrolled authenticator, as a security screen shows it.
+type Passkey struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The credential id, as the authenticator produced it. Not secret.
+	CredentialId string `protobuf:"bytes,1,opt,name=credential_id,json=credentialId,proto3" json:"credential_id,omitempty"`
+	// What the person called it.
+	Label string `protobuf:"bytes,2,opt,name=label,proto3" json:"label,omitempty"`
+	// When it was enrolled.
+	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	// Zero when it has never been used to sign in.
+	LastUsedAt *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=last_used_at,json=lastUsedAt,proto3" json:"last_used_at,omitempty"`
+	// Whether the authenticator may sync this credential to other devices, and
+	// whether it currently is.
+	//
+	// Shown because they change what the credential MEANS: a synced passkey is
+	// present on every device the person's account touches, which is why SP
+	// 800-63B-4 Appendix B forbids one at AAL3.
+	BackupEligible bool `protobuf:"varint,5,opt,name=backup_eligible,json=backupEligible,proto3" json:"backup_eligible,omitempty"`
+	// Whether the credential is currently backed up. See backup_eligible.
+	BackupState bool `protobuf:"varint,6,opt,name=backup_state,json=backupState,proto3" json:"backup_state,omitempty"`
+	// Set when this credential's signature counter has ever gone backwards.
+	//
+	// Surfaced so somebody can see a credential worth removing. It is not proof of
+	// a clone — an out-of-order race produces the same signal — which is why it is
+	// shown rather than acted on automatically.
+	CloneWarnedAt *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=clone_warned_at,json=cloneWarnedAt,proto3" json:"clone_warned_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Passkey) Reset() {
+	*x = Passkey{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[60]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Passkey) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Passkey) ProtoMessage() {}
+
+func (x *Passkey) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[60]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Passkey.ProtoReflect.Descriptor instead.
+func (*Passkey) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{60}
+}
+
+func (x *Passkey) GetCredentialId() string {
+	if x != nil {
+		return x.CredentialId
+	}
+	return ""
+}
+
+func (x *Passkey) GetLabel() string {
+	if x != nil {
+		return x.Label
+	}
+	return ""
+}
+
+func (x *Passkey) GetCreatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return nil
+}
+
+func (x *Passkey) GetLastUsedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastUsedAt
+	}
+	return nil
+}
+
+func (x *Passkey) GetBackupEligible() bool {
+	if x != nil {
+		return x.BackupEligible
+	}
+	return false
+}
+
+func (x *Passkey) GetBackupState() bool {
+	if x != nil {
+		return x.BackupState
+	}
+	return false
+}
+
+func (x *Passkey) GetCloneWarnedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CloneWarnedAt
+	}
+	return nil
+}
+
+// ListPasskeysResponse is the caller's own authenticators, newest first.
+type ListPasskeysResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The caller's own authenticators, newest first. Never anybody else's.
+	Passkeys      []*Passkey `protobuf:"bytes,1,rep,name=passkeys,proto3" json:"passkeys,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListPasskeysResponse) Reset() {
+	*x = ListPasskeysResponse{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[61]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListPasskeysResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListPasskeysResponse) ProtoMessage() {}
+
+func (x *ListPasskeysResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[61]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListPasskeysResponse.ProtoReflect.Descriptor instead.
+func (*ListPasskeysResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{61}
+}
+
+func (x *ListPasskeysResponse) GetPasskeys() []*Passkey {
+	if x != nil {
+		return x.Passkeys
+	}
+	return nil
+}
+
+// RemovePasskeyRequest names one of the caller's own credentials.
+type RemovePasskeyRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The credential to remove. Scoped to the caller: naming somebody else's does
+	// not delete theirs.
+	CredentialId  string `protobuf:"bytes,1,opt,name=credential_id,json=credentialId,proto3" json:"credential_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemovePasskeyRequest) Reset() {
+	*x = RemovePasskeyRequest{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[62]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemovePasskeyRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemovePasskeyRequest) ProtoMessage() {}
+
+func (x *RemovePasskeyRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[62]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemovePasskeyRequest.ProtoReflect.Descriptor instead.
+func (*RemovePasskeyRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{62}
+}
+
+func (x *RemovePasskeyRequest) GetCredentialId() string {
+	if x != nil {
+		return x.CredentialId
+	}
+	return ""
+}
+
+// RemovePasskeyResponse is empty. The credential is gone or the call failed.
+type RemovePasskeyResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemovePasskeyResponse) Reset() {
+	*x = RemovePasskeyResponse{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[63]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemovePasskeyResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemovePasskeyResponse) ProtoMessage() {}
+
+func (x *RemovePasskeyResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[63]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemovePasskeyResponse.ProtoReflect.Descriptor instead.
+func (*RemovePasskeyResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{63}
+}
+
 var File_chronos_identity_v1_identity_proto protoreflect.FileDescriptor
 
 const file_chronos_identity_v1_identity_proto_rawDesc = "" +
@@ -3923,10 +4755,10 @@ const file_chronos_identity_v1_identity_proto_rawDesc = "" +
 	"\x14ListSessionsResponse\x12C\n" +
 	"\bsessions\x18\x01 \x03(\v2\x1c.chronos.identity.v1.SessionB\t\xbaH\x06\x92\x01\x03\x10\xc8\x01R\bsessions\x12t\n" +
 	"\x0fnext_page_token\x18\x02 \x01(\tBL\xbaG/:-\x12+PLACEHOLDER-opaque-cursor-for-the-next-page\xbaH\x17r\x15\x18\x80\b2\x10^[A-Za-z0-9_-]*$R\rnextPageToken\"\x14\n" +
-	"\x12ListMethodsRequest\"\x81\x03\n" +
+	"\x12ListMethodsRequest\"\xa9\x03\n" +
 	"\n" +
-	"AuthMethod\x12v\n" +
-	"\rcredential_id\x18\x01 \x01(\tBQ\xbaG#:!\x12\x1fcred_01ARZ3NDEKTSV4RRFFQ69G5FAV\xbaH(r&\x18\x1f2\"^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\fcredentialId\x123\n" +
+	"AuthMethod\x12\x9d\x01\n" +
+	"\rcredential_id\x18\x01 \x01(\tBx\xbaGJ:!\x12\x1fcred_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\x8a\x01\"^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$\xbaH(r&\x18\x1f2\"^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\fcredentialId\x123\n" +
 	"\x04kind\x18\x02 \x01(\x0e2\x1f.chronos.identity.v1.MethodKindR\x04kind\x12\x16\n" +
 	"\x06usable\x18\x03 \x01(\bR\x06usable\x125\n" +
 	"\badded_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\aaddedAt\x129\n" +
@@ -3951,24 +4783,24 @@ const file_chronos_identity_v1_identity_proto_rawDesc = "" +
 	"\x18ListLoginHistoryResponse\x12H\n" +
 	"\battempts\x18\x01 \x03(\v2!.chronos.identity.v1.LoginAttemptB\t\xbaH\x06\x92\x01\x03\x10\xc8\x01R\battempts\x12t\n" +
 	"\x0fnext_page_token\x18\x02 \x01(\tBL\xbaG/:-\x12+PLACEHOLDER-opaque-cursor-for-the-next-page\xbaH\x17r\x15\x18\x80\b2\x10^[A-Za-z0-9_-]*$R\rnextPageToken\"'\n" +
-	"\x11EnrollTotpRequestJ\x04\b\x01\x10\x02R\faccount_name\"\xc7\x02\n" +
-	"\x12EnrollTotpResponse\x12v\n" +
-	"\rcredential_id\x18\x01 \x01(\tBQ\xbaG#:!\x12\x1fcred_01ARZ3NDEKTSV4RRFFQ69G5FAV\xbaH(r&\x18\x1f2\"^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\fcredentialId\x120\n" +
+	"\x11EnrollTotpRequestJ\x04\b\x01\x10\x02R\faccount_name\"\xef\x02\n" +
+	"\x12EnrollTotpResponse\x12\x9d\x01\n" +
+	"\rcredential_id\x18\x01 \x01(\tBx\xbaGJ:!\x12\x1fcred_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\x8a\x01\"^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$\xbaH(r&\x18\x1f2\"^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\fcredentialId\x120\n" +
 	"\x06secret\x18\x02 \x01(\tB\x18\xbaH\x15r\x132\x0e^[A-Z2-7]{32}$\x98\x01 R\x06secret\x12L\n" +
 	"\x10provisioning_uri\x18\x03 \x01(\tB!\xbaH\x1er\x1c\x18\x80\x042\x17^otpauth://totp/[^\\s]*$R\x0fprovisioningUri\x129\n" +
 	"\n" +
 	"expires_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"N\n" +
 	"\x12ConfirmTotpRequest\x128\n" +
 	"\x04code\x18\x01 \x01(\tB$\xbaG\x17:\b\x12\x06000000\x8a\x01\n" +
-	"^[^\\r\\n]+$\xbaH\a\xc8\x01\x01r\x02\x18 R\x04code\"\xc5\x01\n" +
-	"\x13ConfirmTotpResponse\x12v\n" +
-	"\rcredential_id\x18\x01 \x01(\tBQ\xbaG#:!\x12\x1fcred_01ARZ3NDEKTSV4RRFFQ69G5FAV\xbaH(r&\x18\x1f2\"^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\fcredentialId\x12\x1c\n" +
+	"^[^\\r\\n]+$\xbaH\a\xc8\x01\x01r\x02\x18 R\x04code\"\xed\x01\n" +
+	"\x13ConfirmTotpResponse\x12\x9d\x01\n" +
+	"\rcredential_id\x18\x01 \x01(\tBx\xbaGJ:!\x12\x1fcred_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\x8a\x01\"^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$\xbaH(r&\x18\x1f2\"^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\fcredentialId\x12\x1c\n" +
 	"\tactivated\x18\x02 \x01(\bR\tactivated\x12\x18\n" +
 	"\achanged\x18\x03 \x01(\bR\achanged\"?\n" +
 	"\x1cGenerateRecoveryCodesRequest\x12\x1f\n" +
-	"\x05count\x18\x01 \x01(\x05B\t\xbaH\x06\x1a\x04\x18\x14(\x00R\x05count\"\xde\x01\n" +
-	"\x1dGenerateRecoveryCodesResponse\x12v\n" +
-	"\rcredential_id\x18\x01 \x01(\tBQ\xbaG#:!\x12\x1fcred_01ARZ3NDEKTSV4RRFFQ69G5FAV\xbaH(r&\x18\x1f2\"^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\fcredentialId\x12E\n" +
+	"\x05count\x18\x01 \x01(\x05B\t\xbaH\x06\x1a\x04\x18\x14(\x00R\x05count\"\x86\x02\n" +
+	"\x1dGenerateRecoveryCodesResponse\x12\x9d\x01\n" +
+	"\rcredential_id\x18\x01 \x01(\tBx\xbaGJ:!\x12\x1fcred_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\x8a\x01\"^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$\xbaH(r&\x18\x1f2\"^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\fcredentialId\x12E\n" +
 	"\x05codes\x18\x02 \x03(\tB/\xbaH,\x92\x01)\x10\x14\"%r#2\x1e^[A-Z2-7]{4}(-[A-Z2-7]{4}){3}$\x98\x01\x13R\x05codes\"\xd8\x01\n" +
 	"\x14RevokeSessionRequest\x12s\n" +
 	"\n" +
@@ -3997,7 +4829,59 @@ const file_chronos_identity_v1_identity_proto_rawDesc = "" +
 	"\achanged\x18\x01 \x01(\bR\achanged\"{\n" +
 	"\x1eRequestAccountDeletionResponse\x12\x18\n" +
 	"\achanged\x18\x01 \x01(\bR\achanged\x12?\n" +
-	"\rscheduled_for\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\fscheduledFor*\xac\x01\n" +
+	"\rscheduled_for\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\fscheduledFor\"!\n" +
+	"\x1fBeginPasskeyRegistrationRequest\"\xba\x02\n" +
+	" BeginPasskeyRegistrationResponse\x12x\n" +
+	"\vceremony_id\x18\x01 \x01(\tBW\xbaGJ:!\x12\x1fcred_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\x8a\x01\"^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$\xbaH\a\xc8\x01\x01r\x02\x18@R\n" +
+	"ceremonyId\x12a\n" +
+	"\foptions_json\x18\x02 \x01(\tB>\xbaG;:%\x12#'{\"publicKey\":{\"challenge\":\"...\"}}'x\x80\x80\x01\x8a\x01\r^\\{[\\s\\S]*\\}$R\voptionsJson\x129\n" +
+	"\n" +
+	"expires_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"\xca\x02\n" +
+	" FinishPasskeyRegistrationRequest\x12x\n" +
+	"\vceremony_id\x18\x01 \x01(\tBW\xbaGJ:!\x12\x1fcred_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\x8a\x01\"^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$\xbaH\a\xc8\x01\x01r\x02\x18@R\n" +
+	"ceremonyId\x12h\n" +
+	"\rresponse_json\x18\x02 \x01(\tBC\xbaG4:\x1e\x12\x1c'{\"id\":\"...\",\"response\":{}}'x\x80\x80\x04\x8a\x01\r^\\{[\\s\\S]*\\}$\xbaH\t\xc8\x01\x01r\x04\x18\x80\x80\x04R\fresponseJson\x12B\n" +
+	"\x05label\x18\x03 \x01(\tB,\xbaG\":\r\x12\vMacBook Prox@\x8a\x01\x0e^[\\x20-\\x7E]*$\xbaH\x04r\x02\x18@R\x05label\"\x91\x02\n" +
+	"!FinishPasskeyRegistrationResponse\x12X\n" +
+	"\rcredential_id\x18\x01 \x01(\tB3\xbaG0:\x18\x12\x16AQIDBAUGBwgJCgsMDQ4PEAx\x80\b\x8a\x01\x10^[A-Za-z0-9_-]+$R\fcredentialId\x12t\n" +
+	"\x0erecovery_codes\x18\x02 \x03(\tBM\xbaG\x1b:\x19\x12\x17['ABCD-EFGH-IJKL-MNOP']\xbaH,\x92\x01)\x10\x14\"%r#2\x1e^[A-Z2-7]{4}(-[A-Z2-7]{4}){3}$\x98\x01\x13R\rrecoveryCodes\x12\x1c\n" +
+	"\tactivated\x18\x03 \x01(\bR\tactivated\"\x1a\n" +
+	"\x18BeginPasskeyLoginRequest\"\xb3\x02\n" +
+	"\x19BeginPasskeyLoginResponse\x12x\n" +
+	"\vceremony_id\x18\x01 \x01(\tBW\xbaGJ:!\x12\x1fcred_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\x8a\x01\"^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$\xbaH\a\xc8\x01\x01r\x02\x18@R\n" +
+	"ceremonyId\x12a\n" +
+	"\foptions_json\x18\x02 \x01(\tB>\xbaG;:%\x12#'{\"publicKey\":{\"challenge\":\"...\"}}'x\x80\x80\x01\x8a\x01\r^\\{[\\s\\S]*\\}$R\voptionsJson\x129\n" +
+	"\n" +
+	"expires_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"\xcb\x02\n" +
+	"\x19FinishPasskeyLoginRequest\x12x\n" +
+	"\vceremony_id\x18\x01 \x01(\tBW\xbaGJ:!\x12\x1fcred_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\x8a\x01\"^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$\xbaH\a\xc8\x01\x01r\x02\x18@R\n" +
+	"ceremonyId\x12h\n" +
+	"\rresponse_json\x18\x02 \x01(\tBC\xbaG4:\x1e\x12\x1c'{\"id\":\"...\",\"response\":{}}'x\x80\x80\x04\x8a\x01\r^\\{[\\s\\S]*\\}$\xbaH\t\xc8\x01\x01r\x04\x18\x80\x80\x04R\fresponseJson\x12J\n" +
+	"\tdevice_id\x18\x03 \x01(\tB-\xbaG#:\x0e\x12\fdev_9f2c1b7ex@\x8a\x01\x0e^[\\x20-\\x7E]*$\xbaH\x04r\x02\x18@R\bdeviceId\"\x8a\x03\n" +
+	"\x1aFinishPasskeyLoginResponse\x12Q\n" +
+	"\x05token\x18\x01 \x01(\tB;\xbaG8:\x1e\x12\x1cPLACEHOLDER-not-a-real-tokenx+\x8a\x01\x13^[A-Za-z0-9_-]{43}$R\x05token\x12l\n" +
+	"\n" +
+	"session_id\x18\x02 \x01(\tBM\xbaGJ:!\x12\x1fsess_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\x8a\x01\"^sess_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\tsessionId\x12K\n" +
+	"\x0fassurance_level\x18\x03 \x01(\x0e2\".chronos.options.v1.AssuranceLevelR\x0eassuranceLevel\x12#\n" +
+	"\rclone_warning\x18\x04 \x01(\bR\fcloneWarning\x129\n" +
+	"\n" +
+	"expires_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"\x15\n" +
+	"\x13ListPasskeysRequest\"\xa9\x03\n" +
+	"\aPasskey\x12X\n" +
+	"\rcredential_id\x18\x01 \x01(\tB3\xbaG0:\x18\x12\x16AQIDBAUGBwgJCgsMDQ4PEAx\x80\b\x8a\x01\x10^[A-Za-z0-9_-]+$R\fcredentialId\x12;\n" +
+	"\x05label\x18\x02 \x01(\tB%\xbaG\":\r\x12\vMacBook Prox@\x8a\x01\x0e^[\\x20-\\x7E]*$R\x05label\x129\n" +
+	"\n" +
+	"created_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12<\n" +
+	"\flast_used_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"lastUsedAt\x12'\n" +
+	"\x0fbackup_eligible\x18\x05 \x01(\bR\x0ebackupEligible\x12!\n" +
+	"\fbackup_state\x18\x06 \x01(\bR\vbackupState\x12B\n" +
+	"\x0fclone_warned_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\rcloneWarnedAt\"X\n" +
+	"\x14ListPasskeysResponse\x12@\n" +
+	"\bpasskeys\x18\x01 \x03(\v2\x1c.chronos.identity.v1.PasskeyB\x06\xbaG\x03\x90\x01dR\bpasskeys\"{\n" +
+	"\x14RemovePasskeyRequest\x12c\n" +
+	"\rcredential_id\x18\x01 \x01(\tB>\xbaG0:\x18\x12\x16AQIDBAUGBwgJCgsMDQ4PEAx\x80\b\x8a\x01\x10^[A-Za-z0-9_-]+$\xbaH\b\xc8\x01\x01r\x03\x18\x80\bR\fcredentialId\"\x17\n" +
+	"\x15RemovePasskeyResponse*\xac\x01\n" +
 	"\n" +
 	"MethodKind\x12\x1b\n" +
 	"\x17METHOD_KIND_UNSPECIFIED\x10\x00\x12\x18\n" +
@@ -4022,7 +4906,7 @@ const file_chronos_identity_v1_identity_proto_rawDesc = "" +
 	"$FAILURE_REASON_INCOMPLETE_ENROLLMENT\x10\x06\x12\x1e\n" +
 	"\x1aFAILURE_REASON_DEACTIVATED\x10\a\x12\x1c\n" +
 	"\x18FAILURE_REASON_SUSPENDED\x10\b\x12\x1f\n" +
-	"\x1bFAILURE_REASON_RATE_LIMITED\x10\t2\xa7\xa3\x01\n" +
+	"\x1bFAILURE_REASON_RATE_LIMITED\x10\t2\xf9\xac\x01\n" +
 	"\x0fIdentityService\x12\xee\x04\n" +
 	"\bRegister\x12$.chronos.identity.v1.RegisterRequest\x1a%.chronos.identity.v1.RegisterResponse\"\x94\x04\xbaG\x88\x042G\n" +
 	"E\n" +
@@ -4560,7 +5444,32 @@ const file_chronos_identity_v1_identity_proto_rawDesc = "" +
 	"b\n" +
 	"\x10application/json\x12N\n" +
 	"F\x12D\n" +
-	"B#/components/schemas/chronos.identity.v1.RevertEmailChangeResponse\x12\x04\x12\x02{}Z\x00\xd0\xf3\x18\x02\xe8\xf3\x18\x01B\xde\x01\n" +
+	"B#/components/schemas/chronos.identity.v1.RevertEmailChangeResponse\x12\x04\x12\x02{}Z\x00\xd0\xf3\x18\x02\xe8\xf3\x18\x01\x12\xf1\x01\n" +
+	"\x18BeginPasskeyRegistration\x124.chronos.identity.v1.BeginPasskeyRegistrationRequest\x1a5.chronos.identity.v1.BeginPasskeyRegistrationResponse\"h\xbaGI2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-key\xca\xf3\x18\f\n" +
+	"\x04self\x12\x04user\xd0\xf3\x18\x02\xe0\xf3\x18\x02\xf0\xf3\x18\x01\x12\xf4\x01\n" +
+	"\x19FinishPasskeyRegistration\x125.chronos.identity.v1.FinishPasskeyRegistrationRequest\x1a6.chronos.identity.v1.FinishPasskeyRegistrationResponse\"h\xbaGI2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-key\xca\xf3\x18\f\n" +
+	"\x04self\x12\x04user\xd0\xf3\x18\x02\xe0\xf3\x18\x02\xf0\xf3\x18\x01\x12\xca\x01\n" +
+	"\x11BeginPasskeyLogin\x12-.chronos.identity.v1.BeginPasskeyLoginRequest\x1a..chronos.identity.v1.BeginPasskeyLoginResponse\"V\xbaGK2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-keyZ\x00\xd0\xf3\x18\x02\xe8\xf3\x18\x01\x12\xcd\x01\n" +
+	"\x12FinishPasskeyLogin\x12..chronos.identity.v1.FinishPasskeyLoginRequest\x1a/.chronos.identity.v1.FinishPasskeyLoginResponse\"V\xbaGK2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-keyZ\x00\xd0\xf3\x18\x02\xe8\xf3\x18\x01\x12y\n" +
+	"\fListPasskeys\x12(.chronos.identity.v1.ListPasskeysRequest\x1a).chronos.identity.v1.ListPasskeysResponse\"\x14\xca\xf3\x18\f\n" +
+	"\x04self\x12\x04user\xd0\xf3\x18\x01\x12\xcc\x01\n" +
+	"\rRemovePasskey\x12).chronos.identity.v1.RemovePasskeyRequest\x1a*.chronos.identity.v1.RemovePasskeyResponse\"d\xbaGI2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-key\xca\xf3\x18\f\n" +
+	"\x04self\x12\x04user\xd0\xf3\x18\x02\xe0\xf3\x18\x02B\xde\x01\n" +
 	"\x17com.chronos.identity.v1B\rIdentityProtoP\x01ZFgithub.com/chronos/chronos-go/gen/proto/chronos/identity/v1;identityv1\xa2\x02\x03CIX\xaa\x02\x13Chronos.Identity.V1\xca\x02\x13Chronos\\Identity\\V1\xe2\x02\x1fChronos\\Identity\\V1\\GPBMetadata\xea\x02\x15Chronos::Identity::V1b\x06proto3"
 
 var (
@@ -4576,7 +5485,7 @@ func file_chronos_identity_v1_identity_proto_rawDescGZIP() []byte {
 }
 
 var file_chronos_identity_v1_identity_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_chronos_identity_v1_identity_proto_msgTypes = make([]protoimpl.MessageInfo, 51)
+var file_chronos_identity_v1_identity_proto_msgTypes = make([]protoimpl.MessageInfo, 64)
 var file_chronos_identity_v1_identity_proto_goTypes = []any{
 	(MethodKind)(0),                           // 0: chronos.identity.v1.MethodKind
 	(AccountState)(0),                         // 1: chronos.identity.v1.AccountState
@@ -4632,92 +5541,125 @@ var file_chronos_identity_v1_identity_proto_goTypes = []any{
 	(*CancelAccountDeletionRequest)(nil),      // 51: chronos.identity.v1.CancelAccountDeletionRequest
 	(*CancelAccountDeletionResponse)(nil),     // 52: chronos.identity.v1.CancelAccountDeletionResponse
 	(*RequestAccountDeletionResponse)(nil),    // 53: chronos.identity.v1.RequestAccountDeletionResponse
-	(v1.AssuranceLevel)(0),                    // 54: chronos.options.v1.AssuranceLevel
-	(*timestamppb.Timestamp)(nil),             // 55: google.protobuf.Timestamp
+	(*BeginPasskeyRegistrationRequest)(nil),   // 54: chronos.identity.v1.BeginPasskeyRegistrationRequest
+	(*BeginPasskeyRegistrationResponse)(nil),  // 55: chronos.identity.v1.BeginPasskeyRegistrationResponse
+	(*FinishPasskeyRegistrationRequest)(nil),  // 56: chronos.identity.v1.FinishPasskeyRegistrationRequest
+	(*FinishPasskeyRegistrationResponse)(nil), // 57: chronos.identity.v1.FinishPasskeyRegistrationResponse
+	(*BeginPasskeyLoginRequest)(nil),          // 58: chronos.identity.v1.BeginPasskeyLoginRequest
+	(*BeginPasskeyLoginResponse)(nil),         // 59: chronos.identity.v1.BeginPasskeyLoginResponse
+	(*FinishPasskeyLoginRequest)(nil),         // 60: chronos.identity.v1.FinishPasskeyLoginRequest
+	(*FinishPasskeyLoginResponse)(nil),        // 61: chronos.identity.v1.FinishPasskeyLoginResponse
+	(*ListPasskeysRequest)(nil),               // 62: chronos.identity.v1.ListPasskeysRequest
+	(*Passkey)(nil),                           // 63: chronos.identity.v1.Passkey
+	(*ListPasskeysResponse)(nil),              // 64: chronos.identity.v1.ListPasskeysResponse
+	(*RemovePasskeyRequest)(nil),              // 65: chronos.identity.v1.RemovePasskeyRequest
+	(*RemovePasskeyResponse)(nil),             // 66: chronos.identity.v1.RemovePasskeyResponse
+	(v1.AssuranceLevel)(0),                    // 67: chronos.options.v1.AssuranceLevel
+	(*timestamppb.Timestamp)(nil),             // 68: google.protobuf.Timestamp
 }
 var file_chronos_identity_v1_identity_proto_depIdxs = []int32{
 	0,  // 0: chronos.identity.v1.AuthenticateResponse.offered:type_name -> chronos.identity.v1.MethodKind
-	54, // 1: chronos.identity.v1.CreateSessionResponse.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
-	55, // 2: chronos.identity.v1.CreateSessionResponse.idle_expires_at:type_name -> google.protobuf.Timestamp
-	55, // 3: chronos.identity.v1.CreateSessionResponse.absolute_expires_at:type_name -> google.protobuf.Timestamp
+	67, // 1: chronos.identity.v1.CreateSessionResponse.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
+	68, // 2: chronos.identity.v1.CreateSessionResponse.idle_expires_at:type_name -> google.protobuf.Timestamp
+	68, // 3: chronos.identity.v1.CreateSessionResponse.absolute_expires_at:type_name -> google.protobuf.Timestamp
 	1,  // 4: chronos.identity.v1.GetUserResponse.state:type_name -> chronos.identity.v1.AccountState
-	55, // 5: chronos.identity.v1.GetUserResponse.registered_at:type_name -> google.protobuf.Timestamp
-	55, // 6: chronos.identity.v1.GetUserResponse.activated_at:type_name -> google.protobuf.Timestamp
-	55, // 7: chronos.identity.v1.GetUserResponse.deactivated_at:type_name -> google.protobuf.Timestamp
-	55, // 8: chronos.identity.v1.GetUserResponse.suspended_at:type_name -> google.protobuf.Timestamp
-	55, // 9: chronos.identity.v1.GetUserResponse.deletion_requested_at:type_name -> google.protobuf.Timestamp
-	55, // 10: chronos.identity.v1.GetUserResponse.deletion_scheduled_for:type_name -> google.protobuf.Timestamp
-	54, // 11: chronos.identity.v1.Session.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
-	55, // 12: chronos.identity.v1.Session.idle_expires_at:type_name -> google.protobuf.Timestamp
-	55, // 13: chronos.identity.v1.Session.absolute_expires_at:type_name -> google.protobuf.Timestamp
-	55, // 14: chronos.identity.v1.Session.created_at:type_name -> google.protobuf.Timestamp
-	55, // 15: chronos.identity.v1.Session.last_seen_at:type_name -> google.protobuf.Timestamp
+	68, // 5: chronos.identity.v1.GetUserResponse.registered_at:type_name -> google.protobuf.Timestamp
+	68, // 6: chronos.identity.v1.GetUserResponse.activated_at:type_name -> google.protobuf.Timestamp
+	68, // 7: chronos.identity.v1.GetUserResponse.deactivated_at:type_name -> google.protobuf.Timestamp
+	68, // 8: chronos.identity.v1.GetUserResponse.suspended_at:type_name -> google.protobuf.Timestamp
+	68, // 9: chronos.identity.v1.GetUserResponse.deletion_requested_at:type_name -> google.protobuf.Timestamp
+	68, // 10: chronos.identity.v1.GetUserResponse.deletion_scheduled_for:type_name -> google.protobuf.Timestamp
+	67, // 11: chronos.identity.v1.Session.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
+	68, // 12: chronos.identity.v1.Session.idle_expires_at:type_name -> google.protobuf.Timestamp
+	68, // 13: chronos.identity.v1.Session.absolute_expires_at:type_name -> google.protobuf.Timestamp
+	68, // 14: chronos.identity.v1.Session.created_at:type_name -> google.protobuf.Timestamp
+	68, // 15: chronos.identity.v1.Session.last_seen_at:type_name -> google.protobuf.Timestamp
 	30, // 16: chronos.identity.v1.ListSessionsResponse.sessions:type_name -> chronos.identity.v1.Session
 	0,  // 17: chronos.identity.v1.AuthMethod.kind:type_name -> chronos.identity.v1.MethodKind
-	55, // 18: chronos.identity.v1.AuthMethod.added_at:type_name -> google.protobuf.Timestamp
-	55, // 19: chronos.identity.v1.AuthMethod.enabled_at:type_name -> google.protobuf.Timestamp
-	55, // 20: chronos.identity.v1.AuthMethod.last_used_at:type_name -> google.protobuf.Timestamp
+	68, // 18: chronos.identity.v1.AuthMethod.added_at:type_name -> google.protobuf.Timestamp
+	68, // 19: chronos.identity.v1.AuthMethod.enabled_at:type_name -> google.protobuf.Timestamp
+	68, // 20: chronos.identity.v1.AuthMethod.last_used_at:type_name -> google.protobuf.Timestamp
 	33, // 21: chronos.identity.v1.ListMethodsResponse.methods:type_name -> chronos.identity.v1.AuthMethod
 	2,  // 22: chronos.identity.v1.LoginAttempt.reason:type_name -> chronos.identity.v1.FailureReason
 	0,  // 23: chronos.identity.v1.LoginAttempt.methods:type_name -> chronos.identity.v1.MethodKind
-	54, // 24: chronos.identity.v1.LoginAttempt.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
-	55, // 25: chronos.identity.v1.LoginAttempt.occurred_at:type_name -> google.protobuf.Timestamp
+	67, // 24: chronos.identity.v1.LoginAttempt.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
+	68, // 25: chronos.identity.v1.LoginAttempt.occurred_at:type_name -> google.protobuf.Timestamp
 	36, // 26: chronos.identity.v1.ListLoginHistoryResponse.attempts:type_name -> chronos.identity.v1.LoginAttempt
-	55, // 27: chronos.identity.v1.EnrollTotpResponse.expires_at:type_name -> google.protobuf.Timestamp
-	55, // 28: chronos.identity.v1.RequestAccountDeletionResponse.scheduled_for:type_name -> google.protobuf.Timestamp
-	3,  // 29: chronos.identity.v1.IdentityService.Register:input_type -> chronos.identity.v1.RegisterRequest
-	5,  // 30: chronos.identity.v1.IdentityService.VerifyEmail:input_type -> chronos.identity.v1.VerifyEmailRequest
-	7,  // 31: chronos.identity.v1.IdentityService.ResendEmailVerification:input_type -> chronos.identity.v1.ResendEmailVerificationRequest
-	27, // 32: chronos.identity.v1.IdentityService.CheckUsernameAvailability:input_type -> chronos.identity.v1.CheckUsernameAvailabilityRequest
-	9,  // 33: chronos.identity.v1.IdentityService.RequestPasswordReset:input_type -> chronos.identity.v1.RequestPasswordResetRequest
-	19, // 34: chronos.identity.v1.IdentityService.ResetPassword:input_type -> chronos.identity.v1.ResetPasswordRequest
-	21, // 35: chronos.identity.v1.IdentityService.Authenticate:input_type -> chronos.identity.v1.AuthenticateRequest
-	23, // 36: chronos.identity.v1.IdentityService.CreateSession:input_type -> chronos.identity.v1.CreateSessionRequest
-	25, // 37: chronos.identity.v1.IdentityService.GetUser:input_type -> chronos.identity.v1.GetUserRequest
-	29, // 38: chronos.identity.v1.IdentityService.ListSessions:input_type -> chronos.identity.v1.ListSessionsRequest
-	32, // 39: chronos.identity.v1.IdentityService.ListMethods:input_type -> chronos.identity.v1.ListMethodsRequest
-	35, // 40: chronos.identity.v1.IdentityService.ListLoginHistory:input_type -> chronos.identity.v1.ListLoginHistoryRequest
-	38, // 41: chronos.identity.v1.IdentityService.EnrollTotp:input_type -> chronos.identity.v1.EnrollTotpRequest
-	40, // 42: chronos.identity.v1.IdentityService.ConfirmTotp:input_type -> chronos.identity.v1.ConfirmTotpRequest
-	42, // 43: chronos.identity.v1.IdentityService.GenerateRecoveryCodes:input_type -> chronos.identity.v1.GenerateRecoveryCodesRequest
-	44, // 44: chronos.identity.v1.IdentityService.RevokeSession:input_type -> chronos.identity.v1.RevokeSessionRequest
-	46, // 45: chronos.identity.v1.IdentityService.RevokeAllSessions:input_type -> chronos.identity.v1.RevokeAllSessionsRequest
-	48, // 46: chronos.identity.v1.IdentityService.DeactivateAccount:input_type -> chronos.identity.v1.DeactivateAccountRequest
-	50, // 47: chronos.identity.v1.IdentityService.RequestAccountDeletion:input_type -> chronos.identity.v1.RequestAccountDeletionRequest
-	51, // 48: chronos.identity.v1.IdentityService.CancelAccountDeletion:input_type -> chronos.identity.v1.CancelAccountDeletionRequest
-	10, // 49: chronos.identity.v1.IdentityService.RequestEmailChange:input_type -> chronos.identity.v1.RequestEmailChangeRequest
-	12, // 50: chronos.identity.v1.IdentityService.CancelEmailChange:input_type -> chronos.identity.v1.CancelEmailChangeRequest
-	14, // 51: chronos.identity.v1.IdentityService.ConfirmEmailChange:input_type -> chronos.identity.v1.ConfirmEmailChangeRequest
-	16, // 52: chronos.identity.v1.IdentityService.RevertEmailChange:input_type -> chronos.identity.v1.RevertEmailChangeRequest
-	4,  // 53: chronos.identity.v1.IdentityService.Register:output_type -> chronos.identity.v1.RegisterResponse
-	6,  // 54: chronos.identity.v1.IdentityService.VerifyEmail:output_type -> chronos.identity.v1.VerifyEmailResponse
-	8,  // 55: chronos.identity.v1.IdentityService.ResendEmailVerification:output_type -> chronos.identity.v1.ResendEmailVerificationResponse
-	28, // 56: chronos.identity.v1.IdentityService.CheckUsernameAvailability:output_type -> chronos.identity.v1.CheckUsernameAvailabilityResponse
-	18, // 57: chronos.identity.v1.IdentityService.RequestPasswordReset:output_type -> chronos.identity.v1.RequestPasswordResetResponse
-	20, // 58: chronos.identity.v1.IdentityService.ResetPassword:output_type -> chronos.identity.v1.ResetPasswordResponse
-	22, // 59: chronos.identity.v1.IdentityService.Authenticate:output_type -> chronos.identity.v1.AuthenticateResponse
-	24, // 60: chronos.identity.v1.IdentityService.CreateSession:output_type -> chronos.identity.v1.CreateSessionResponse
-	26, // 61: chronos.identity.v1.IdentityService.GetUser:output_type -> chronos.identity.v1.GetUserResponse
-	31, // 62: chronos.identity.v1.IdentityService.ListSessions:output_type -> chronos.identity.v1.ListSessionsResponse
-	34, // 63: chronos.identity.v1.IdentityService.ListMethods:output_type -> chronos.identity.v1.ListMethodsResponse
-	37, // 64: chronos.identity.v1.IdentityService.ListLoginHistory:output_type -> chronos.identity.v1.ListLoginHistoryResponse
-	39, // 65: chronos.identity.v1.IdentityService.EnrollTotp:output_type -> chronos.identity.v1.EnrollTotpResponse
-	41, // 66: chronos.identity.v1.IdentityService.ConfirmTotp:output_type -> chronos.identity.v1.ConfirmTotpResponse
-	43, // 67: chronos.identity.v1.IdentityService.GenerateRecoveryCodes:output_type -> chronos.identity.v1.GenerateRecoveryCodesResponse
-	45, // 68: chronos.identity.v1.IdentityService.RevokeSession:output_type -> chronos.identity.v1.RevokeSessionResponse
-	47, // 69: chronos.identity.v1.IdentityService.RevokeAllSessions:output_type -> chronos.identity.v1.RevokeAllSessionsResponse
-	49, // 70: chronos.identity.v1.IdentityService.DeactivateAccount:output_type -> chronos.identity.v1.DeactivateAccountResponse
-	53, // 71: chronos.identity.v1.IdentityService.RequestAccountDeletion:output_type -> chronos.identity.v1.RequestAccountDeletionResponse
-	52, // 72: chronos.identity.v1.IdentityService.CancelAccountDeletion:output_type -> chronos.identity.v1.CancelAccountDeletionResponse
-	11, // 73: chronos.identity.v1.IdentityService.RequestEmailChange:output_type -> chronos.identity.v1.RequestEmailChangeResponse
-	13, // 74: chronos.identity.v1.IdentityService.CancelEmailChange:output_type -> chronos.identity.v1.CancelEmailChangeResponse
-	15, // 75: chronos.identity.v1.IdentityService.ConfirmEmailChange:output_type -> chronos.identity.v1.ConfirmEmailChangeResponse
-	17, // 76: chronos.identity.v1.IdentityService.RevertEmailChange:output_type -> chronos.identity.v1.RevertEmailChangeResponse
-	53, // [53:77] is the sub-list for method output_type
-	29, // [29:53] is the sub-list for method input_type
-	29, // [29:29] is the sub-list for extension type_name
-	29, // [29:29] is the sub-list for extension extendee
-	0,  // [0:29] is the sub-list for field type_name
+	68, // 27: chronos.identity.v1.EnrollTotpResponse.expires_at:type_name -> google.protobuf.Timestamp
+	68, // 28: chronos.identity.v1.RequestAccountDeletionResponse.scheduled_for:type_name -> google.protobuf.Timestamp
+	68, // 29: chronos.identity.v1.BeginPasskeyRegistrationResponse.expires_at:type_name -> google.protobuf.Timestamp
+	68, // 30: chronos.identity.v1.BeginPasskeyLoginResponse.expires_at:type_name -> google.protobuf.Timestamp
+	67, // 31: chronos.identity.v1.FinishPasskeyLoginResponse.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
+	68, // 32: chronos.identity.v1.FinishPasskeyLoginResponse.expires_at:type_name -> google.protobuf.Timestamp
+	68, // 33: chronos.identity.v1.Passkey.created_at:type_name -> google.protobuf.Timestamp
+	68, // 34: chronos.identity.v1.Passkey.last_used_at:type_name -> google.protobuf.Timestamp
+	68, // 35: chronos.identity.v1.Passkey.clone_warned_at:type_name -> google.protobuf.Timestamp
+	63, // 36: chronos.identity.v1.ListPasskeysResponse.passkeys:type_name -> chronos.identity.v1.Passkey
+	3,  // 37: chronos.identity.v1.IdentityService.Register:input_type -> chronos.identity.v1.RegisterRequest
+	5,  // 38: chronos.identity.v1.IdentityService.VerifyEmail:input_type -> chronos.identity.v1.VerifyEmailRequest
+	7,  // 39: chronos.identity.v1.IdentityService.ResendEmailVerification:input_type -> chronos.identity.v1.ResendEmailVerificationRequest
+	27, // 40: chronos.identity.v1.IdentityService.CheckUsernameAvailability:input_type -> chronos.identity.v1.CheckUsernameAvailabilityRequest
+	9,  // 41: chronos.identity.v1.IdentityService.RequestPasswordReset:input_type -> chronos.identity.v1.RequestPasswordResetRequest
+	19, // 42: chronos.identity.v1.IdentityService.ResetPassword:input_type -> chronos.identity.v1.ResetPasswordRequest
+	21, // 43: chronos.identity.v1.IdentityService.Authenticate:input_type -> chronos.identity.v1.AuthenticateRequest
+	23, // 44: chronos.identity.v1.IdentityService.CreateSession:input_type -> chronos.identity.v1.CreateSessionRequest
+	25, // 45: chronos.identity.v1.IdentityService.GetUser:input_type -> chronos.identity.v1.GetUserRequest
+	29, // 46: chronos.identity.v1.IdentityService.ListSessions:input_type -> chronos.identity.v1.ListSessionsRequest
+	32, // 47: chronos.identity.v1.IdentityService.ListMethods:input_type -> chronos.identity.v1.ListMethodsRequest
+	35, // 48: chronos.identity.v1.IdentityService.ListLoginHistory:input_type -> chronos.identity.v1.ListLoginHistoryRequest
+	38, // 49: chronos.identity.v1.IdentityService.EnrollTotp:input_type -> chronos.identity.v1.EnrollTotpRequest
+	40, // 50: chronos.identity.v1.IdentityService.ConfirmTotp:input_type -> chronos.identity.v1.ConfirmTotpRequest
+	42, // 51: chronos.identity.v1.IdentityService.GenerateRecoveryCodes:input_type -> chronos.identity.v1.GenerateRecoveryCodesRequest
+	44, // 52: chronos.identity.v1.IdentityService.RevokeSession:input_type -> chronos.identity.v1.RevokeSessionRequest
+	46, // 53: chronos.identity.v1.IdentityService.RevokeAllSessions:input_type -> chronos.identity.v1.RevokeAllSessionsRequest
+	48, // 54: chronos.identity.v1.IdentityService.DeactivateAccount:input_type -> chronos.identity.v1.DeactivateAccountRequest
+	50, // 55: chronos.identity.v1.IdentityService.RequestAccountDeletion:input_type -> chronos.identity.v1.RequestAccountDeletionRequest
+	51, // 56: chronos.identity.v1.IdentityService.CancelAccountDeletion:input_type -> chronos.identity.v1.CancelAccountDeletionRequest
+	10, // 57: chronos.identity.v1.IdentityService.RequestEmailChange:input_type -> chronos.identity.v1.RequestEmailChangeRequest
+	12, // 58: chronos.identity.v1.IdentityService.CancelEmailChange:input_type -> chronos.identity.v1.CancelEmailChangeRequest
+	14, // 59: chronos.identity.v1.IdentityService.ConfirmEmailChange:input_type -> chronos.identity.v1.ConfirmEmailChangeRequest
+	16, // 60: chronos.identity.v1.IdentityService.RevertEmailChange:input_type -> chronos.identity.v1.RevertEmailChangeRequest
+	54, // 61: chronos.identity.v1.IdentityService.BeginPasskeyRegistration:input_type -> chronos.identity.v1.BeginPasskeyRegistrationRequest
+	56, // 62: chronos.identity.v1.IdentityService.FinishPasskeyRegistration:input_type -> chronos.identity.v1.FinishPasskeyRegistrationRequest
+	58, // 63: chronos.identity.v1.IdentityService.BeginPasskeyLogin:input_type -> chronos.identity.v1.BeginPasskeyLoginRequest
+	60, // 64: chronos.identity.v1.IdentityService.FinishPasskeyLogin:input_type -> chronos.identity.v1.FinishPasskeyLoginRequest
+	62, // 65: chronos.identity.v1.IdentityService.ListPasskeys:input_type -> chronos.identity.v1.ListPasskeysRequest
+	65, // 66: chronos.identity.v1.IdentityService.RemovePasskey:input_type -> chronos.identity.v1.RemovePasskeyRequest
+	4,  // 67: chronos.identity.v1.IdentityService.Register:output_type -> chronos.identity.v1.RegisterResponse
+	6,  // 68: chronos.identity.v1.IdentityService.VerifyEmail:output_type -> chronos.identity.v1.VerifyEmailResponse
+	8,  // 69: chronos.identity.v1.IdentityService.ResendEmailVerification:output_type -> chronos.identity.v1.ResendEmailVerificationResponse
+	28, // 70: chronos.identity.v1.IdentityService.CheckUsernameAvailability:output_type -> chronos.identity.v1.CheckUsernameAvailabilityResponse
+	18, // 71: chronos.identity.v1.IdentityService.RequestPasswordReset:output_type -> chronos.identity.v1.RequestPasswordResetResponse
+	20, // 72: chronos.identity.v1.IdentityService.ResetPassword:output_type -> chronos.identity.v1.ResetPasswordResponse
+	22, // 73: chronos.identity.v1.IdentityService.Authenticate:output_type -> chronos.identity.v1.AuthenticateResponse
+	24, // 74: chronos.identity.v1.IdentityService.CreateSession:output_type -> chronos.identity.v1.CreateSessionResponse
+	26, // 75: chronos.identity.v1.IdentityService.GetUser:output_type -> chronos.identity.v1.GetUserResponse
+	31, // 76: chronos.identity.v1.IdentityService.ListSessions:output_type -> chronos.identity.v1.ListSessionsResponse
+	34, // 77: chronos.identity.v1.IdentityService.ListMethods:output_type -> chronos.identity.v1.ListMethodsResponse
+	37, // 78: chronos.identity.v1.IdentityService.ListLoginHistory:output_type -> chronos.identity.v1.ListLoginHistoryResponse
+	39, // 79: chronos.identity.v1.IdentityService.EnrollTotp:output_type -> chronos.identity.v1.EnrollTotpResponse
+	41, // 80: chronos.identity.v1.IdentityService.ConfirmTotp:output_type -> chronos.identity.v1.ConfirmTotpResponse
+	43, // 81: chronos.identity.v1.IdentityService.GenerateRecoveryCodes:output_type -> chronos.identity.v1.GenerateRecoveryCodesResponse
+	45, // 82: chronos.identity.v1.IdentityService.RevokeSession:output_type -> chronos.identity.v1.RevokeSessionResponse
+	47, // 83: chronos.identity.v1.IdentityService.RevokeAllSessions:output_type -> chronos.identity.v1.RevokeAllSessionsResponse
+	49, // 84: chronos.identity.v1.IdentityService.DeactivateAccount:output_type -> chronos.identity.v1.DeactivateAccountResponse
+	53, // 85: chronos.identity.v1.IdentityService.RequestAccountDeletion:output_type -> chronos.identity.v1.RequestAccountDeletionResponse
+	52, // 86: chronos.identity.v1.IdentityService.CancelAccountDeletion:output_type -> chronos.identity.v1.CancelAccountDeletionResponse
+	11, // 87: chronos.identity.v1.IdentityService.RequestEmailChange:output_type -> chronos.identity.v1.RequestEmailChangeResponse
+	13, // 88: chronos.identity.v1.IdentityService.CancelEmailChange:output_type -> chronos.identity.v1.CancelEmailChangeResponse
+	15, // 89: chronos.identity.v1.IdentityService.ConfirmEmailChange:output_type -> chronos.identity.v1.ConfirmEmailChangeResponse
+	17, // 90: chronos.identity.v1.IdentityService.RevertEmailChange:output_type -> chronos.identity.v1.RevertEmailChangeResponse
+	55, // 91: chronos.identity.v1.IdentityService.BeginPasskeyRegistration:output_type -> chronos.identity.v1.BeginPasskeyRegistrationResponse
+	57, // 92: chronos.identity.v1.IdentityService.FinishPasskeyRegistration:output_type -> chronos.identity.v1.FinishPasskeyRegistrationResponse
+	59, // 93: chronos.identity.v1.IdentityService.BeginPasskeyLogin:output_type -> chronos.identity.v1.BeginPasskeyLoginResponse
+	61, // 94: chronos.identity.v1.IdentityService.FinishPasskeyLogin:output_type -> chronos.identity.v1.FinishPasskeyLoginResponse
+	64, // 95: chronos.identity.v1.IdentityService.ListPasskeys:output_type -> chronos.identity.v1.ListPasskeysResponse
+	66, // 96: chronos.identity.v1.IdentityService.RemovePasskey:output_type -> chronos.identity.v1.RemovePasskeyResponse
+	67, // [67:97] is the sub-list for method output_type
+	37, // [37:67] is the sub-list for method input_type
+	37, // [37:37] is the sub-list for extension type_name
+	37, // [37:37] is the sub-list for extension extendee
+	0,  // [0:37] is the sub-list for field type_name
 }
 
 func init() { file_chronos_identity_v1_identity_proto_init() }
@@ -4731,7 +5673,7 @@ func file_chronos_identity_v1_identity_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chronos_identity_v1_identity_proto_rawDesc), len(file_chronos_identity_v1_identity_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   51,
+			NumMessages:   64,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

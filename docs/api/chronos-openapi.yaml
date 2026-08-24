@@ -1123,6 +1123,140 @@ components:
          error for every cause (ADR-036). What this distinguishes is only the two
          SUCCESSFUL shapes — the first factor passed and a second is owed, or every
          factor passed.
+    chronos.identity.v1.BeginPasskeyLoginRequest:
+      type: object
+      title: BeginPasskeyLoginRequest
+      additionalProperties: false
+      description: |-
+        BeginPasskeyLoginRequest carries NOTHING, and that is the point: the
+         authenticator names the account, so this endpoint cannot be asked whether an
+         address exists.
+    chronos.identity.v1.BeginPasskeyLoginResponse:
+      type: object
+      properties:
+        ceremonyId:
+          type: string
+          examples:
+            - cred_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: ceremony_id
+          maxLength: 31
+          pattern: ^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: The opaque ceremony id, returned with the assertion. Not a credential.
+        optionsJson:
+          type: string
+          examples:
+            - '{"publicKey":{"challenge":"..."}}'
+          title: options_json
+          maxLength: 16384
+          pattern: ^\{[\s\S]*\}$
+          description: |-
+            The JSON for `navigator.credentials.get`. It names no credentials, so the
+             authenticator offers whatever it holds for this relying party — which is
+             what makes the response identical whether or not any account exists.
+        expiresAt:
+          title: expires_at
+          description: When the ceremony stops being redeemable server-side.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: BeginPasskeyLoginResponse
+      required:
+        - ceremonyId
+      additionalProperties: false
+      description: BeginPasskeyLoginResponse is what the browser needs to sign.
+    chronos.identity.v1.BeginPasskeyRegistrationRequest:
+      type: object
+      title: BeginPasskeyRegistrationRequest
+      additionalProperties: false
+      description: |-
+        IdentityService is the account, its credentials and its sessions.
+
+         # The gates, and the one that is not honest yet
+
+         Every RPC declares its enforcement policy or the server refuses to boot
+         (ADR-021). Four of these are public because they run before any session
+         exists; the other nine act on the CALLER'S OWN account, which identity has no
+         established annotation for.
+
+         Identity is not organization-scoped — a person exists before any organization
+         does, so there is no org for the org-context gate to resolve and no
+         `workspace_id` for row-level security to scope by. The authz gate's two
+         shapes both assume otherwise: an empty `resource_id_field` means "the org
+         already resolved for this request", and a named one means "read the id from
+         this request field", which no message here carries because the account is
+         resolved from the session rather than named by the caller.
+
+         So `{relation: "self", resource_type: "user"}` below names a self-scoped
+         convention that the authz gate now implements: `selfCheck` answers gate 2
+         from the principal alone, substituting `principal.Subject.ID` as the resource
+         and skipping gates 1 and 3, which are both questions ABOUT an organization
+         that a self-scoped method has none of. The resource is read from the session
+         and from nowhere else — not from the request, not from a header — so a caller
+         cannot aim the check at somebody else's account.
+
+         The convention is keyed on the STRING "self", which is the weak part of it.
+         A method that declares a relation this gate does not recognise falls through
+         to the org-scoped shape and fails closed for want of an active organization,
+         so the failure direction is safe; a method that MISSPELLS "self" gets the same
+         treatment and is simply unreachable. Both are safe and neither is obvious.
+         Replacing the string with a declared marker is tracked separately.
+
+         # Assurance levels
+
+         A session is normally AAL2, but AAL1 SESSIONS EXIST: an account with a
+         verified address and no second factor may mint exactly one, for the sole
+         purpose of enrolling its first factor (the bootstrap carve-out). So an
+         unannotated method is NOT automatically two-factor any more — its floor is
+         AAL1 by declaration, and the four read methods here that declare no `min_aal`
+         are reachable from a bootstrap session.
+
+         That makes the explicit declarations on the credential- and session-changing
+         methods load-bearing rather than documentary: they are what stops a
+         password-only session from touching credentials or sessions. A method added
+         here without a `min_aal` is single-factor by default, and the enrolment
+         carve-out is what makes that reachable in practice.
+         BeginPasskeyRegistrationRequest starts an enrolment. It carries nothing: the
+         account is the authenticated caller and there is no other input.
+    chronos.identity.v1.BeginPasskeyRegistrationResponse:
+      type: object
+      properties:
+        ceremonyId:
+          type: string
+          examples:
+            - cred_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: ceremony_id
+          maxLength: 31
+          pattern: ^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            The opaque ceremony id, returned with the answer.
+
+             NOT a credential: holding one lets somebody complete a ceremony they must
+             still produce a valid signature for. It is unguessable so that a ceremony
+             cannot be answered by whoever wants to.
+        optionsJson:
+          type: string
+          examples:
+            - '{"publicKey":{"challenge":"..."}}'
+          title: options_json
+          maxLength: 16384
+          pattern: ^\{[\s\S]*\}$
+          description: |-
+            The JSON to hand to `navigator.credentials.create`, verbatim.
+
+             Passed through rather than modelled field by field. The shape is WebAuthn's
+             and it changes with the spec, so re-declaring it here would create a second
+             definition that drifts from the library actually producing it — and a
+             mismatch would be a ceremony the browser refuses for reasons nothing here
+             could explain.
+        expiresAt:
+          title: expires_at
+          description: When the ceremony stops being redeemable server-side.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: BeginPasskeyRegistrationResponse
+      required:
+        - ceremonyId
+      additionalProperties: false
+      description: BeginPasskeyRegistrationResponse is what the browser needs.
     chronos.identity.v1.CancelAccountDeletionRequest:
       type: object
       title: CancelAccountDeletionRequest
@@ -1639,6 +1773,166 @@ components:
          situation: it is the difference between "somebody guessed at my password" and
          "somebody already has my password and is stuck on my authenticator", and only
          the second is worth waking up for.
+    chronos.identity.v1.FinishPasskeyLoginRequest:
+      type: object
+      properties:
+        ceremonyId:
+          type: string
+          examples:
+            - cred_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: ceremony_id
+          maxLength: 31
+          pattern: ^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: The ceremony id from the begin call.
+        responseJson:
+          type: string
+          examples:
+            - '{"id":"...","response":{}}'
+          title: response_json
+          maxLength: 65536
+          pattern: ^\{[\s\S]*\}$
+          description: |-
+            The browser's assertion payload, verbatim. It names the credential, which
+             names the account.
+        deviceId:
+          type: string
+          examples:
+            - dev_9f2c1b7e
+          title: device_id
+          maxLength: 64
+          pattern: ^[\x20-\x7E]*$
+          description: The device this session is being created on, as on CreateSessionRequest.
+      title: FinishPasskeyLoginRequest
+      required:
+        - ceremonyId
+        - responseJson
+      additionalProperties: false
+      description: FinishPasskeyLoginRequest presents the assertion.
+    chronos.identity.v1.FinishPasskeyLoginResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          examples:
+            - PLACEHOLDER-not-a-real-token
+          title: token
+          maxLength: 43
+          pattern: ^[A-Za-z0-9_-]{43}$
+          description: The bearer token. Returned once and stored by nothing here.
+        sessionId:
+          type: string
+          examples:
+            - sess_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: session_id
+          maxLength: 31
+          pattern: ^sess_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: The session this ceremony created, a prefixed ULID (ADR-030).
+        assuranceLevel:
+          title: assurance_level
+          description: |-
+            The level this ceremony established. AAL2 for a user-verified passkey,
+             AAL1 without user verification or when a counter regression capped it.
+          allOf:
+            - $ref: '#/components/schemas/chronos.options.v1.AssuranceLevel'
+        cloneWarning:
+          type: boolean
+          title: clone_warning
+          description: |-
+            Whether the authenticator's signature counter went BACKWARDS.
+
+             Reported so a client can explain why the session is reduced. It is not the
+             enforcement — the assurance level already carries that — it is the reason.
+             A regression does not refuse the sign-in: most synced passkeys report a
+             counter of zero forever, and identity.md §5 is explicit that treating one as
+             fatal locks out legitimate users.
+        expiresAt:
+          title: expires_at
+          description: When the session's idle window runs out.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: FinishPasskeyLoginResponse
+      additionalProperties: false
+      description: FinishPasskeyLoginResponse carries the session.
+    chronos.identity.v1.FinishPasskeyRegistrationRequest:
+      type: object
+      properties:
+        ceremonyId:
+          type: string
+          examples:
+            - cred_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: ceremony_id
+          maxLength: 31
+          pattern: ^cred_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: The ceremony id from the begin call.
+        responseJson:
+          type: string
+          examples:
+            - '{"id":"...","response":{}}'
+          title: response_json
+          maxLength: 65536
+          pattern: ^\{[\s\S]*\}$
+          description: |-
+            The browser's attestation payload, verbatim. Passed through for
+             BeginPasskeyRegistrationResponse.options_json's reason.
+        label:
+          type: string
+          examples:
+            - MacBook Pro
+          title: label
+          maxLength: 64
+          pattern: ^[\x20-\x7E]*$
+          description: |-
+            What the person calls this device.
+
+             Free text they wrote about their own hardware, and the one caller-chosen
+             string that reaches an event — so it is bounded here rather than trusted. A
+             label is rendered on a security screen beside other entries, and an
+             unbounded one is a permanent row in a log nobody can edit.
+      title: FinishPasskeyRegistrationRequest
+      required:
+        - ceremonyId
+        - responseJson
+      additionalProperties: false
+      description: FinishPasskeyRegistrationRequest presents what the authenticator signed.
+    chronos.identity.v1.FinishPasskeyRegistrationResponse:
+      type: object
+      properties:
+        credentialId:
+          type: string
+          examples:
+            - AQIDBAUGBwgJCgsMDQ4PEA
+          title: credential_id
+          maxLength: 1024
+          pattern: ^[A-Za-z0-9_-]+$
+          description: |-
+            The credential id, as the authenticator produced it. Not secret: it travels
+             in every `allowCredentials` list the browser is handed.
+        recoveryCodes:
+          type: array
+          examples:
+            - - ABCD-EFGH-IJKL-MNOP
+          items:
+            type: string
+            examples:
+              - - ABCD-EFGH-IJKL-MNOP
+            maxLength: 19
+            minLength: 19
+            pattern: ^[A-Z2-7]{4}(-[A-Z2-7]{4}){3}$
+          title: recovery_codes
+          maxItems: 20
+          description: |-
+            Recovery codes, returned ONCE and only on the account's FIRST passkey.
+
+             Never recoverable afterwards — only digests are stored — so a client that
+             does not show them has lost them. identity.md §5: somebody whose only method
+             is a passkey on a lost device must still be able to get back in.
+        activated:
+          type: boolean
+          title: activated
+          description: Whether this registration completed the account's activation.
+      title: FinishPasskeyRegistrationResponse
+      additionalProperties: false
+      description: FinishPasskeyRegistrationResponse reports what was enrolled.
     chronos.identity.v1.GenerateRecoveryCodesRequest:
       type: object
       properties:
@@ -1905,6 +2199,24 @@ components:
 
          Unpaginated, and that is a bounded claim rather than an oversight: an account
          holds at most one usable credential per kind, and there are five kinds.
+    chronos.identity.v1.ListPasskeysRequest:
+      type: object
+      title: ListPasskeysRequest
+      additionalProperties: false
+      description: ListPasskeysRequest asks for the caller's own authenticators.
+    chronos.identity.v1.ListPasskeysResponse:
+      type: object
+      properties:
+        passkeys:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.identity.v1.Passkey'
+          title: passkeys
+          maxItems: 100
+          description: The caller's own authenticators, newest first. Never anybody else's.
+      title: ListPasskeysResponse
+      additionalProperties: false
+      description: ListPasskeysResponse is the caller's own authenticators, newest first.
     chronos.identity.v1.ListSessionsRequest:
       type: object
       properties:
@@ -2056,6 +2368,62 @@ components:
          in events forever. New kinds are added here as they become implementable, so a
          client must treat an unrecognised value as "some factor this build does not
          render" rather than as an error.
+    chronos.identity.v1.Passkey:
+      type: object
+      properties:
+        credentialId:
+          type: string
+          examples:
+            - AQIDBAUGBwgJCgsMDQ4PEA
+          title: credential_id
+          maxLength: 1024
+          pattern: ^[A-Za-z0-9_-]+$
+          description: The credential id, as the authenticator produced it. Not secret.
+        label:
+          type: string
+          examples:
+            - MacBook Pro
+          title: label
+          maxLength: 64
+          pattern: ^[\x20-\x7E]*$
+          description: What the person called it.
+        createdAt:
+          title: created_at
+          description: When it was enrolled.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+        lastUsedAt:
+          title: last_used_at
+          description: Zero when it has never been used to sign in.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+        backupEligible:
+          type: boolean
+          title: backup_eligible
+          description: |-
+            Whether the authenticator may sync this credential to other devices, and
+             whether it currently is.
+
+             Shown because they change what the credential MEANS: a synced passkey is
+             present on every device the person's account touches, which is why SP
+             800-63B-4 Appendix B forbids one at AAL3.
+        backupState:
+          type: boolean
+          title: backup_state
+          description: Whether the credential is currently backed up. See backup_eligible.
+        cloneWarnedAt:
+          title: clone_warned_at
+          description: |-
+            Set when this credential's signature counter has ever gone backwards.
+
+             Surfaced so somebody can see a credential worth removing. It is not proof of
+             a clone — an out-of-order race produces the same signal — which is why it is
+             shown rather than acted on automatically.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: Passkey
+      additionalProperties: false
+      description: Passkey is one enrolled authenticator, as a security screen shows it.
     chronos.identity.v1.RegisterRequest:
       type: object
       properties:
@@ -2124,6 +2492,29 @@ components:
 
          The client renders one sentence for both: "if that address can be registered,
          we have sent it a link".
+    chronos.identity.v1.RemovePasskeyRequest:
+      type: object
+      properties:
+        credentialId:
+          type: string
+          examples:
+            - AQIDBAUGBwgJCgsMDQ4PEA
+          title: credential_id
+          maxLength: 1024
+          pattern: ^[A-Za-z0-9_-]+$
+          description: |-
+            The credential to remove. Scoped to the caller: naming somebody else's does
+             not delete theirs.
+      title: RemovePasskeyRequest
+      required:
+        - credentialId
+      additionalProperties: false
+      description: RemovePasskeyRequest names one of the caller's own credentials.
+    chronos.identity.v1.RemovePasskeyResponse:
+      type: object
+      title: RemovePasskeyResponse
+      additionalProperties: false
+      description: RemovePasskeyResponse is empty. The credential is gone or the call failed.
     chronos.identity.v1.RequestAccountDeletionRequest:
       type: object
       properties:
@@ -5905,6 +6296,110 @@ paths:
                   - METHOD_KIND_TOTP
                   - METHOD_KIND_RECOVERY_CODE
       security: []
+  /chronos.identity.v1.IdentityService/BeginPasskeyLogin:
+    post:
+      tags:
+        - IdentityService
+      summary: BeginPasskeyLogin starts a usernameless sign-in.
+      description: |-
+        PUBLIC, and it carries NO identifier. That absence is the feature: the
+         authenticator names the account, so this endpoint cannot be asked whether an
+         address exists. A field for one would reintroduce the enumeration oracle
+         every other public surface in this module removes.
+
+         It looks up nothing and answers identically whether or not any account
+         exists.
+      operationId: IdentityService_BeginPasskeyLogin
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.BeginPasskeyLoginRequest'
+            example: {}
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.BeginPasskeyLoginResponse'
+      security: []
+  /chronos.identity.v1.IdentityService/BeginPasskeyRegistration:
+    post:
+      tags:
+        - IdentityService
+      summary: BeginPasskeyRegistration starts enrolling an authenticator.
+      description: |-
+        Returns the JSON for `navigator.credentials.create` and an opaque ceremony
+         id. Nothing is enrolled until FinishPasskeyRegistration verifies what the
+         authenticator signed.
+
+         AAL2: adding a credential that can sign in on its own is a credential
+         change, and identity.md §4.3 requires step-up for those.
+      operationId: IdentityService_BeginPasskeyRegistration
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.BeginPasskeyRegistrationRequest'
+            example: {}
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.BeginPasskeyRegistrationResponse'
   /chronos.identity.v1.IdentityService/CancelAccountDeletion:
     post:
       tags:
@@ -6502,6 +6997,121 @@ paths:
                 secret: PLACEHOLDERSECRETNOTREAL234567AB
                 provisioningUri: otpauth://totp/Chronos:ada@example.com?secret=PLACEHOLDERSECRETNOTREAL234567AB&issuer=Chronos&algorithm=SHA1&digits=6&period=30
                 expiresAt: '2026-08-14T11:19:55Z'
+  /chronos.identity.v1.IdentityService/FinishPasskeyLogin:
+    post:
+      tags:
+        - IdentityService
+      summary: FinishPasskeyLogin verifies an assertion and creates a session.
+      description: |-
+        Public: the assertion IS the authentication. A user-verified passkey reaches
+         AAL2 on its own (identity.md §2) — the authenticator is the possession
+         factor and the PIN or biometric that unlocked it is the second — so this can
+         mint a full session in one gesture. Without user verification it reaches
+         AAL1 and anything sensitive will ask for step-up.
+
+         A signature counter that went BACKWARDS does NOT refuse the sign-in. Most
+         synced passkeys report a counter of zero forever, and identity.md §5 is
+         explicit that treating a regression as fatal "locks out legitimate users".
+         The session is capped at AAL1 instead and the response says so.
+      operationId: IdentityService_FinishPasskeyLogin
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.FinishPasskeyLoginRequest'
+            example:
+              ceremonyId: cred_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              responseJson: '{"id":"...","response":{}}'
+              deviceId: dev_9f2c1b7e
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.FinishPasskeyLoginResponse'
+      security: []
+  /chronos.identity.v1.IdentityService/FinishPasskeyRegistration:
+    post:
+      tags:
+        - IdentityService
+      summary: FinishPasskeyRegistration verifies the authenticator's answer and enrols it.
+      description: |-
+        The ceremony is SINGLE-USE: replaying one is refused, because one signature
+         must not become two credentials.
+
+         On an account's FIRST passkey this returns recovery codes, once.
+         identity.md §5 calls lockout "the real design problem" — somebody whose only
+         method is a passkey on a lost device must still get back in — so the codes
+         are issued here rather than offered afterwards, because an afterthought is a
+         path most people never take.
+      operationId: IdentityService_FinishPasskeyRegistration
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.FinishPasskeyRegistrationRequest'
+            example:
+              ceremonyId: cred_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              responseJson: '{"id":"...","response":{}}'
+              label: MacBook Pro
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.FinishPasskeyRegistrationResponse'
   /chronos.identity.v1.IdentityService/GenerateRecoveryCodes:
     post:
       tags:
@@ -7089,6 +7699,48 @@ paths:
                     usable: true
                     addedAt: '2026-07-02T08:20:05Z'
                     enabledAt: '2026-07-02T08:20:05Z'
+  /chronos.identity.v1.IdentityService/ListPasskeys:
+    post:
+      tags:
+        - IdentityService
+      summary: ListPasskeys shows the caller their own enrolled authenticators.
+      description: |-
+        The security screen. It returns the label the person chose, when each was
+         added and last used, and whether one has ever produced a counter regression
+         — which is what lets somebody notice a credential they do not recognise.
+      operationId: IdentityService_ListPasskeys
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.ListPasskeysRequest'
+            example: {}
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.ListPasskeysResponse'
   /chronos.identity.v1.IdentityService/ListSessions:
     get:
       tags:
@@ -7312,6 +7964,59 @@ paths:
                 $ref: '#/components/schemas/chronos.identity.v1.RegisterResponse'
               example: {}
       security: []
+  /chronos.identity.v1.IdentityService/RemovePasskey:
+    post:
+      tags:
+        - IdentityService
+      summary: RemovePasskey deletes one of the caller's authenticators.
+      description: |-
+        Refused when it would leave the account with no way to sign in, which is the
+         same rule that stops the last second factor being removed. Somebody deleting
+         their only passkey from a device they no longer have is not helped by an
+         endpoint that lets them.
+
+         AAL2 with no bootstrap exemption: removing a credential is not a way to
+         enrol one.
+      operationId: IdentityService_RemovePasskey
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.RemovePasskeyRequest'
+            example:
+              credentialId: AQIDBAUGBwgJCgsMDQ4PEA
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.RemovePasskeyResponse'
   /chronos.identity.v1.IdentityService/RequestAccountDeletion:
     post:
       tags:

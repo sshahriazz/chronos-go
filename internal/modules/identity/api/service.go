@@ -181,6 +181,20 @@ type EmailChanges interface {
 	Revert(ctx context.Context, cmd app.RevertEmailChangeCommand) error
 }
 
+// PasskeyFlow is identity slice 2's WebAuthn surface (ADR-057).
+//
+// A port declared by its consumer (CONVENTIONS §2). Six methods because a
+// ceremony has two halves and there are three of them — enrol, sign in, and the
+// screen that lets somebody see and remove what they enrolled.
+type PasskeyFlow interface {
+	BeginRegistration(ctx context.Context, cmd app.BeginRegistrationCommand) (app.BeginRegistrationResult, error)
+	FinishRegistration(ctx context.Context, cmd app.FinishRegistrationCommand) (app.FinishRegistrationResult, error)
+	BeginLogin(ctx context.Context, cmd app.BeginLoginCommand) (app.BeginLoginResult, error)
+	FinishLogin(ctx context.Context, cmd app.FinishLoginCommand) (app.FinishLoginResult, error)
+	ListPasskeys(ctx context.Context, subjectID string) ([]app.StoredPasskey, error)
+	RemovePasskey(ctx context.Context, cmd app.RemovePasskeyCommand) error
+}
+
 // Queries is identity's read side.
 type Queries interface {
 	GetUser(ctx context.Context, subjectID string) (app.AccountView, error)
@@ -217,6 +231,20 @@ type Deps struct {
 	// Emails is the identifier-change flow. Required; see New.
 	Emails EmailChanges
 
+	// Passkeys is the WebAuthn surface, and it is the ONE optional collaborator
+	// on this service.
+	//
+	// Every other is refused as nil at construction, because a nil serves a panic
+	// to whoever reaches that screen. This one cannot be, because it cannot be
+	// given a default: the relying-party id is bound into every credential at
+	// registration and can never be changed afterwards, so a defaulted one is a
+	// value somebody deploys without noticing and discovers when every passkey in
+	// the installation stops working.
+	//
+	// Nil means the six passkey RPCs answer NOT_FOUND naming the variables to
+	// set, and the rest of identity serves normally.
+	Passkeys PasskeyFlow
+
 	Queries Queries
 
 	// Directory turns the caller's pseudonym into the account id the second-factor
@@ -247,6 +275,7 @@ type Service struct {
 	secondFactor SecondFactor
 	lifecycle    Lifecycle
 	emails       EmailChanges
+	passkeys     PasskeyFlow
 	queries      Queries
 	directory    app.UserDirectory
 	callerScope  clientip.Resolver
@@ -317,9 +346,12 @@ func New(deps Deps) (*Service, error) {
 		secondFactor: deps.SecondFactor,
 		lifecycle:    deps.Lifecycle,
 		emails:       deps.Emails,
-		queries:      deps.Queries,
-		directory:    deps.Directory,
-		callerScope:  deps.CallerScope,
+		// Optional by design — see Deps.Passkeys. A nil is carried through and
+		// each passkey RPC answers NOT_FOUND rather than panicking.
+		passkeys:    deps.Passkeys,
+		queries:     deps.Queries,
+		directory:   deps.Directory,
+		callerScope: deps.CallerScope,
 	}, nil
 }
 

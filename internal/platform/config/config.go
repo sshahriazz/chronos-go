@@ -162,6 +162,32 @@ type IdentityConfig struct {
 	// people delete the wrong credential.
 	TotpIssuer string `env:"IDENTITY_TOTP_ISSUER" envDefault:"Chronos"`
 
+	// WebauthnRPID is the relying-party id passkeys are bound to (ADR-057).
+	//
+	// The registrable domain, with no scheme and no port. It is BOUND INTO every
+	// credential at registration and cannot be changed afterwards: a passkey
+	// created for `chronos.example` will not authenticate against
+	// `app.chronos.example`, and every existing passkey stops working the day
+	// this value moves.
+	//
+	// So it has no default. A default here would be a value somebody deploys
+	// without noticing, and the cost of noticing later is every passkey in the
+	// installation.
+	WebauthnRPID string `env:"IDENTITY_WEBAUTHN_RP_ID"`
+
+	// WebauthnRPDisplayName is what the authenticator shows while somebody
+	// approves. Display-only, and free to change.
+	WebauthnRPDisplayName string `env:"IDENTITY_WEBAUTHN_RP_DISPLAY_NAME" envDefault:"Chronos"`
+
+	// WebauthnOrigins are the full origins a ceremony may come from, scheme and
+	// port included.
+	//
+	// The origin check is what makes a credential unusable from an attacker's
+	// page even if the person is fooled into visiting it. Empty is refused
+	// rather than defaulted: a permissive default would silently remove the
+	// phishing resistance that is the reason to prefer passkeys at all.
+	WebauthnOrigins []string `env:"IDENTITY_WEBAUTHN_ORIGINS" envSeparator:","`
+
 	// PasswordHashConcurrency bounds simultaneous Argon2id hashes. Each one holds
 	// 32 MiB for its whole duration, so this is the ceiling on how much memory
 	// password verification can consume no matter what arrives.
@@ -192,6 +218,16 @@ func (i IdentityConfig) Configured() bool {
 // EmailIndexKeyBytes, PasswordPepperKeyBytes and TotpSealKeyBytes decode the hex
 // forms. validate has already refused anything malformed, so a caller reaching
 // an error here is looking at a Config nobody validated.
+// PasskeysConfigured reports whether the WebAuthn half can be served.
+//
+// BOTH values, and neither has a usable default. Without an RP id nothing can be
+// bound; without an origin the ceremony would accept one from any page, which is
+// the phishing resistance that is the whole reason to prefer passkeys. A partial
+// configuration serves no passkey endpoints rather than serving weak ones.
+func (i IdentityConfig) PasskeysConfigured() bool {
+	return i.WebauthnRPID != "" && len(i.WebauthnOrigins) > 0
+}
+
 func (i IdentityConfig) EmailIndexKeyBytes() ([]byte, error) {
 	return decodeIdentityKey("IDENTITY_EMAIL_INDEX_KEY", i.EmailIndexKey)
 }

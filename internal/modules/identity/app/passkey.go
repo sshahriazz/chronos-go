@@ -810,3 +810,21 @@ func credentialIDFromAssertion(response []byte) (string, error) {
 	}
 	return parsed.ID, nil
 }
+
+// ListPasskeys returns the caller's own enrolled authenticators, newest first.
+//
+// Scoped to the subject and to nothing else. The store's Find is deliberately
+// unscoped — a ceremony asks whose a credential is — so every scoping decision
+// has to be made by the caller, and this is one of them.
+func (p *Passkeys) ListPasskeys(
+	ctx context.Context, subjectID string,
+) ([]StoredPasskey, error) {
+	if subjectID == "" {
+		return nil, errs.Internalf("no authenticated subject reached the passkey handler")
+	}
+	out, err := p.store.List(ctx, subjectID)
+	if err != nil {
+		return nil, fmt.Errorf("listing passkeys: %w", err)
+	}
+	return out, nil
+}

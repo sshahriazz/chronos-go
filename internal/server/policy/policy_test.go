@@ -546,7 +546,7 @@ func TestACoherentBootstrapFloorLoads(t *testing.T) {
 	}
 }
 
-// EXACTLY the two halves of a first enrolment carry the exemption, across every
+// EXACTLY the halves of a first enrolment carry the exemption, across every
 // service this server serves.
 //
 // A pinned list, unlike almost every other test here, and deliberately so. The
@@ -556,14 +556,31 @@ func TestACoherentBootstrapFloorLoads(t *testing.T) {
 // a lowered assurance floor. A method that removes one factor to get back to the
 // no-factor state, or that mints recovery codes, would be exactly such an RPC,
 // and copying the annotation from EnrollTotp is how it would acquire it.
+//
+// # Why the passkey pair is on it
+//
+// Added deliberately, not to make a failing test pass. A passkey with user
+// verification is AAL2 on its own (identity.md §2), so it is a legitimate FIRST
+// second factor — and without the exemption it could not be, because enrolling
+// one would require the AAL2 session that enrolling one is how you get. The
+// strongest method available would then be reachable only by people who already
+// have another, which is exactly backwards.
+//
+// The pair is the two halves of ONE enrolment, like ConfirmTotp and EnrollTotp.
+// RemovePasskey is deliberately NOT here: removing a credential is not a way to
+// enrol one, and an exemption there would let a single-factor session strip an
+// account back to no factors.
 func TestOnlyAFirstEnrolmentCarriesTheBootstrapExemption(t *testing.T) {
 	set, err := policy.Load(services...)
 	if err != nil {
 		t.Fatalf("policy.Load: %v", err)
 	}
+	// Sorted, as Set.BootstrapExempt returns them.
 	want := []string{
+		"/chronos.identity.v1.IdentityService/BeginPasskeyRegistration",
 		"/chronos.identity.v1.IdentityService/ConfirmTotp",
 		"/chronos.identity.v1.IdentityService/EnrollTotp",
+		"/chronos.identity.v1.IdentityService/FinishPasskeyRegistration",
 	}
 	got := set.BootstrapExempt()
 	if len(got) != len(want) {

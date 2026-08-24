@@ -11,6 +11,7 @@ import (
 	"github.com/chronos/chronos-go/internal/adapter/piivault"
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
 	valkeyadapter "github.com/chronos/chronos-go/internal/adapter/valkey"
+	"github.com/chronos/chronos-go/internal/adapter/webauthn"
 	"github.com/chronos/chronos-go/internal/modules/identity/adapter/argon2id"
 	"github.com/chronos/chronos-go/internal/modules/identity/adapter/blindindex"
 	"github.com/chronos/chronos-go/internal/modules/identity/adapter/hibp"
@@ -23,7 +24,9 @@ import (
 	"github.com/chronos/chronos-go/internal/modules/identity/domain"
 	"github.com/chronos/chronos-go/internal/platform/clientip"
 	"github.com/chronos/chronos-go/internal/platform/config"
+	"github.com/chronos/chronos-go/internal/platform/db"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
+	"github.com/chronos/chronos-go/internal/platform/ids"
 	"github.com/chronos/chronos-go/internal/platform/ratelimit"
 )
 
@@ -828,6 +831,15 @@ func (d *dependencies) buildIdentity(
 	// handler, which exposes none of its collaborators by design.
 	d.totpEnroller = enroller
 
+	// The WebAuthn half. It is the one collaborator that may legitimately be
+	// absent, so a failure to build it is reported and does not stop identity
+	// from being served — see buildPasskeys for why it cannot simply be
+	// defaulted into existence.
+	passkeys, err := buildPasskeys(cfg, d, tx, readModel, users, secondFactor, log)
+	if err != nil {
+		return nil, err
+	}
+
 	return identityapi.New(identityapi.Deps{
 		Registration:   registration,
 		Resender:       resend,
@@ -837,9 +849,13 @@ func (d *dependencies) buildIdentity(
 		SecondFactor:   secondFactor,
 		Lifecycle:      lifecycle,
 		Emails:         emailChanges,
-		Queries:        queries,
-		Directory:      readModel,
-		CallerScope:    callerScope,
+		// nil when this deployment has no WebAuthn configuration, which is a
+		// supported state — see buildPasskeys. The six passkey RPCs then answer
+		// NOT_FOUND naming what to set, and everything else serves normally.
+		Passkeys:    passkeys,
+		Queries:     queries,
+		Directory:   readModel,
+		CallerScope: callerScope,
 	})
 }
 
@@ -891,4 +907,114 @@ func vaultOrNil(v *piivault.Vault) app.SubjectVault {
 		return nil
 	}
 	return v
+}
+
+// buildPasskeys assembles identity's WebAuthn surface, or reports that it is not
+// configured.
+//
+// # Why this returns (nil, nil) rather than refusing
+//
+// Every other collaborator in this file is required, and a missing one stops the
+// service. Passkeys are the exception, and the reason is that they cannot be
+// defaulted: the relying-party id is BOUND INTO every credential at
+// registration and can never change afterwards. A default would be a value
+// somebody deploys without noticing, and the cost of noticing is every passkey
+// in the installation ceasing to work at once.
+//
+// So an unconfigured deployment gets nil, the six passkey RPCs answer NOT_FOUND
+// naming the variables to set, and the rest of identity is unaffected. A
+// deployment that IS configured and fails to build them gets an error, because
+// that is a wiring fault rather than a choice.
+//
+// # What its absence costs when it is meant to be there
+//
+// Nothing observable at startup, which is why cmd/api's wiring test asserts the
+// configured case. With passkeys unwired, a person adding one is told the
+// feature does not exist here — indistinguishable, from outside, from a
+// deployment that never wanted them.
+func buildPasskeys(
+	cfg *config.Config,
+	d *dependencies,
+	tx db.SystemTX,
+	readModel *identitypg.ReadModel,
+	users *eventsourcing.Repository[*domain.User],
+	secondFactor *app.SecondFactor,
+	log *slog.Logger,
+) (identityapi.PasskeyFlow, error) {
+	if !cfg.Identity.PasskeysConfigured() {
+		log.Warn("passkeys are NOT served: no WebAuthn configuration. Set " +
+			"IDENTITY_WEBAUTHN_RP_ID and IDENTITY_WEBAUTHN_ORIGINS to enable them")
+		// The INTERFACE type, returning an untyped nil — not a typed
+		// (*app.Passkeys)(nil).
+		//
+		// This function used to return the concrete pointer, and the difference is
+		// not stylistic: a nil pointer stored in an interface makes that interface
+		// NON-nil, so the handler's `s.passkeys == nil` guard never fired and every
+		// passkey RPC panicked on a nil receiver instead of refusing. It was caught
+		// on the wiring test's first run and would not have been caught anywhere
+		// else — an unconfigured deployment is exactly the case nobody exercises.
+		return nil, nil //nolint:nilnil // an absent optional collaborator, see the doc
+	}
+
+	ceremonies, err := webauthn.New(webauthn.Config{
+		RPID:          cfg.Identity.WebauthnRPID,
+		RPDisplayName: cfg.Identity.WebauthnRPDisplayName,
+		Origins:       cfg.Identity.WebauthnOrigins,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("webauthn ceremonies: %w", err)
+	}
+
+	store, err := identitypg.NewPasskeys(tx)
+	if err != nil {
+		return nil, fmt.Errorf("passkey store: %w", err)
+	}
+	challenges, err := identitypg.NewChallenges(tx)
+	if err != nil {
+		return nil, fmt.Errorf("webauthn challenge store: %w", err)
+	}
+
+	passkeys, err := app.NewPasskeys(app.PasskeysDeps{
+		Clock:      d.clock,
+		Entropy:    rand.Reader,
+		Users:      users,
+		Subjects:   readModel,
+		Appender:   d.store,
+		Schemas:    d.upcasters,
+		Ceremonies: ceremonyShim{inner: ceremonies},
+		Store:      store,
+		Challenges: challenges,
+		// identity.md §5 calls lockout "the real design problem": somebody whose
+		// only method is a passkey on a lost device must still get back in, so the
+		// codes are issued at the FIRST registration rather than offered
+		// afterwards.
+		Recovery: recoveryIssuer{codes: secondFactor},
+		Log:      log,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("passkeys: %w", err)
+	}
+	log.Info("passkeys are served",
+		"rp_id", cfg.Identity.WebauthnRPID, "origins", cfg.Identity.WebauthnOrigins)
+	return passkeys, nil
+}
+
+// recoveryIssuer narrows the second-factor service to the one call the passkey
+// flow may make.
+//
+// A whole SecondFactor would let the passkey flow enrol a TOTP secret, which is
+// not its business. The narrowing is the point of the port.
+type recoveryIssuer struct{ codes *app.SecondFactor }
+
+func (r recoveryIssuer) Issue(
+	ctx context.Context, userID ids.UserID, idempotencyKey string,
+) ([]string, error) {
+	got, err := r.codes.GenerateRecoveryCodes(ctx, app.GenerateRecoveryCodesCommand{
+		UserID:         userID,
+		IdempotencyKey: idempotencyKey,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return got.Codes, nil
 }
