@@ -271,7 +271,27 @@ type Assertion struct {
 
 // BeginLogin starts an authentication for a known account.
 func (c *Ceremony) BeginLogin(a Account, stored []StoredCredential) (Challenge, error) {
+	// NO CREDENTIALS AND NO SUBJECT IS THE USERNAMELESS CASE, not an error.
+	//
+	// identity.md §5 asks for discoverable login, and the point of it is that the
+	// server does not know who is signing in — so there is nobody to look
+	// credentials up for. The options name none, and the authenticator offers
+	// whatever it holds for this relying party.
+	//
+	// The first version of this refused an empty list outright, which made the
+	// usernameless path impossible: BeginPasskeyLogin answered `internal` for
+	// every caller, because the one thing it can never have is a credential list.
+	if len(stored) == 0 && a.SubjectID == "" {
+		assertion, session, err := c.w.BeginDiscoverableLogin()
+		if err != nil {
+			return Challenge{}, fmt.Errorf("webauthn: beginning a discoverable login: %w", err)
+		}
+		return marshalChallenge(assertion, session)
+	}
 	if len(stored) == 0 {
+		// A NAMED account with no credentials. Distinct from the case above and
+		// still an error: something asked to sign a specific person in and that
+		// person has nothing to sign with.
 		return Challenge{}, ErrNoCredentials
 	}
 	user := libUser{account: a, credentials: toLibCredentials(stored)}
@@ -301,9 +321,31 @@ func (c *Ceremony) FinishLogin(
 	}
 
 	user := libUser{account: a, credentials: toLibCredentials(stored)}
-	cred, err := c.w.ValidateLogin(user, *session, parsed)
-	if err != nil {
-		return Assertion{}, fmt.Errorf("%w: %w", ErrCeremonyRefused, err)
+
+	// TWO VALIDATORS, chosen by how the ceremony STARTED.
+	//
+	// A discoverable login's session carries no user id — nobody was named when
+	// it began — and ValidateLogin checks the session's user id against the
+	// user's, so it refuses every such ceremony. ValidateDiscoverableLogin is the
+	// library's path for it: the handler is asked to resolve the credential the
+	// authenticator actually produced.
+	//
+	// The caller has ALREADY resolved it — identity looks the credential up to
+	// learn whose it is, which is what makes usernameless login possible at all —
+	// so the handler returns that user rather than performing a second lookup
+	// this package has no way to do.
+	var (
+		cred *lib.Credential
+		err2 error
+	)
+	if len(session.UserID) == 0 {
+		cred, err2 = c.w.ValidateDiscoverableLogin(
+			func(_, _ []byte) (lib.User, error) { return user, nil }, *session, parsed)
+	} else {
+		cred, err2 = c.w.ValidateLogin(user, *session, parsed)
+	}
+	if err2 != nil {
+		return Assertion{}, fmt.Errorf("%w: %w", ErrCeremonyRefused, err2)
 	}
 
 	return Assertion{
