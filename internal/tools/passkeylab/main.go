@@ -48,6 +48,7 @@ import (
 var (
 	addr   = flag.String("addr", "localhost:3000", "address to serve the harness on")
 	target = flag.String("api", "http://localhost:8090", "the chronos API to proxy to")
+	mail   = flag.String("mailpit", "http://localhost:8025", "the Mailpit to read verification links from")
 )
 
 func main() {
@@ -74,7 +75,34 @@ func run() error {
 			"the API at "+api.String()+" is not answering: "+err.Error())
 	}
 
+	mailAPI, err := url.Parse(*mail)
+	if err != nil {
+		return fmt.Errorf("parsing -mailpit: %w", err)
+	}
+	mailProxy := httputil.NewSingleHostReverseProxy(mailAPI)
+	mailProxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = fmt.Fprintf(w, `{"message":%q}`,
+			"Mailpit at "+mailAPI.String()+" is not answering: "+err.Error())
+	}
+
 	mux := http.NewServeMux()
+
+	// Mailpit, proxied for the same reason the API is: one origin.
+	//
+	// # Why the harness reads mail at all
+	//
+	// Creating an account needs the verification token, and there is deliberately
+	// no RPC that hands one out — identity.md §12 is explicit that only the
+	// mailbox holder may complete a verification. So the harness does what a
+	// person does: it reads the mailbox. Mailpit IS the dev mailbox, and reading
+	// it is the honest way to get the token rather than minting one out of band.
+	//
+	// It follows that cmd/worker must be running: the verification mail is sent
+	// by a reactor, not by the API, so without the worker no message ever
+	// arrives and the page says so.
+	mux.Handle("/mailpit/", http.StripPrefix("/mailpit", mailProxy))
 
 	// Everything Connect serves lives under the fully-qualified service name, so
 	// one prefix covers every RPC and nothing else is forwarded.

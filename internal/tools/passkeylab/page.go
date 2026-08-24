@@ -76,6 +76,25 @@ const page = `<!doctype html>
   </header>
 
   <section>
+    <h2>0 · Create an account</h2>
+    <p class="lede">
+      Registers, reads the verification link out of Mailpit — the dev mailbox —
+      and completes it. There is deliberately no RPC that hands out a
+      verification token, so the harness does what a person does and reads the
+      mail. <strong>cmd/worker must be running</strong>: the mail is sent by a
+      reactor, not by the API.
+    </p>
+    <div class="row">
+      <div><label for="new-email">Email</label><input id="new-email"></div>
+      <div><label for="new-username">Username</label><input id="new-username"></div>
+      <div><label for="new-password">Password</label><input id="new-password" type="password"></div>
+    </div>
+    <button id="signup">Create account</button>
+    <button id="fill" class="ghost">Fill with a fresh test identity</button>
+    <pre id="out-signup">—</pre>
+  </section>
+
+  <section>
     <h2>1 · Bearer token</h2>
     <p class="lede">
       Registration needs an authenticated caller. Sign in with a password, or
@@ -176,6 +195,82 @@ async function rpc(method, body, bearer) {
 }
 
 const tokenBox = document.getElementById('token');
+
+// --- 0. create an account ---------------------------------------------------
+//
+// Register, then read the token out of the dev mailbox. Polling rather than a
+// single read because the mail is sent by a REACTOR: the API appends an event
+// and returns, and the worker picks it up a moment later. A single read would
+// race that and report a missing mailbox instead of a slow one.
+document.getElementById('fill').onclick = () => {
+  const tag = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  document.getElementById('new-email').value = 'lab-' + tag + '@example.test';
+  document.getElementById('new-username').value = 'lab_' + tag;
+  document.getElementById('new-password').value = 'correct-horse-battery-' + tag;
+};
+
+async function verificationToken(email, since) {
+  for (let i = 0; i < 40; i++) {
+    const res = await fetch('/mailpit/api/v1/search?query=' + encodeURIComponent('to:' + email));
+    if (res.ok) {
+      const found = await res.json();
+      for (const m of found.messages || []) {
+        if (new Date(m.Created).getTime() < since) continue;
+        const body = await fetch('/mailpit/api/v1/message/' + m.ID).then(r => r.json());
+        // The link is built by the template from the token, so the token is
+        // whatever follows the query parameter — read from the TEXT part,
+        // which carries the same URL as the HTML one without the markup.
+        const hit = /[?&]token=([A-Za-z0-9._~-]+)/.exec((body.Text || '') + (body.HTML || ''));
+        if (hit) return hit[1];
+      }
+    }
+    await new Promise(r => setTimeout(r, 500));
+  }
+  throw new Error(
+    'no verification mail arrived within 20s. The mail is sent by a REACTOR, so ' +
+    'cmd/worker has to be running — the API only appends the event.');
+}
+
+document.getElementById('signup').onclick = async () => {
+  const email = document.getElementById('new-email').value.trim();
+  const username = document.getElementById('new-username').value.trim();
+  const password = document.getElementById('new-password').value;
+  if (!email || !username || !password) {
+    show('out-signup', 'Email, username and password are all required.', true);
+    return;
+  }
+  const since = Date.now() - 5000;
+  try {
+    show('out-signup', 'registering…');
+    await rpc('Register', { email });
+
+    show('out-signup', 'waiting for the verification mail…');
+    const token = await verificationToken(email, since);
+
+    show('out-signup', 'verifying…');
+    await rpc('VerifyEmail', { token, password, username });
+
+    // Sign in immediately. With no second factor this is a BOOTSTRAP session at
+    // AAL1 — the one authentication that legitimately stops below AAL2, because
+    // it exists so somebody can enrol the factor they are required to have. It
+    // is enough to register a FIRST passkey and nothing else.
+    const session = await rpc('CreateSession', {
+      identifier: email, password, deviceId: 'passkeylab',
+    });
+    tokenBox.value = session.token || '';
+    document.getElementById('email').value = email;
+    document.getElementById('password').value = password;
+
+    show('out-signup', {
+      account: email,
+      username,
+      assuranceLevel: session.assuranceLevel,
+      note: 'Signed in. AAL1 is expected here — no second factor yet, and a ' +
+            'bootstrap session is exactly what lets you enrol the first one. ' +
+            'Go to step 2.',
+    });
+  } catch (e) { show('out-signup', e.detail || String(e), true); }
+};
 
 // --- 1. sign in -------------------------------------------------------------
 document.getElementById('signin').onclick = async () => {
