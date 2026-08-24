@@ -38,7 +38,31 @@ type Erasure struct {
 	users     *eventsourcing.Repository[*domain.User]
 	emails    *eventsourcing.Repository[*domain.EmailReservation]
 	usernames *eventsourcing.Repository[*domain.UsernameReservation]
+	passkeys  PasskeyEraser
 	now       func() time.Time
+}
+
+// PasskeyEraser removes a subject's WebAuthn material.
+//
+// # Why erasure has to reach it explicitly
+//
+// `passkey_credential` is the one erasure target with no key to destroy. Every
+// other piece of personal data in this system is readable only through a
+// subject key the vault shreds (ADR-002), and a passkey's public key is not
+// encrypted under one — it is verification material, not personal data, so the
+// vault never held it.
+//
+// That makes it the one table where erasure must DELETE ROWS. Nothing else does:
+// migration 00033 deliberately removed the foreign key that would have cascaded,
+// because `user_view` is a projection and a rebuild truncating it would have
+// taken every passkey in the installation with it.
+//
+// So without this call the credential id and public key of somebody who asked to
+// be forgotten stay in the database forever — readable material about an erased
+// person, which is precisely what erasure is for.
+type PasskeyEraser interface {
+	// Erase removes every credential a subject holds, returning how many.
+	Erase(ctx context.Context, subjectID string) (int, error)
 }
 
 // ErasureDeps is what Erasure needs.
@@ -52,7 +76,18 @@ type ErasureDeps struct {
 	Users     *eventsourcing.Repository[*domain.User]
 	Emails    *eventsourcing.Repository[*domain.EmailReservation]
 	Usernames *eventsourcing.Repository[*domain.UsernameReservation]
-	Now       func() time.Time
+
+	// Passkeys removes WebAuthn material. OPTIONAL, because a deployment may
+	// serve no passkeys at all — the relying-party id cannot be defaulted, so
+	// running without them is a supported state (cmd/api's buildPasskeys).
+	//
+	// Nil means there is nothing to erase, which is true on such a deployment.
+	// It is NOT an excuse for a deployment that DOES serve them: leaving it
+	// unwired there leaves a forgotten person's credentials in the database, so
+	// the composition root passes it whenever the store exists.
+	Passkeys PasskeyEraser
+
+	Now func() time.Time
 }
 
 func NewErasure(d ErasureDeps) (*Erasure, error) {
@@ -75,7 +110,8 @@ func NewErasure(d ErasureDeps) (*Erasure, error) {
 	return &Erasure{
 		directory: d.Directory,
 		users:     d.Users, emails: d.Emails, usernames: d.Usernames,
-		now: d.Now,
+		passkeys: d.Passkeys,
+		now:      d.Now,
 	}, nil
 }
 
@@ -84,6 +120,14 @@ type ErasureResult struct {
 	SessionsRevoked int
 	AddressReleased bool
 	UsernameBurned  bool
+
+	// PasskeysRemoved counts the WebAuthn credentials deleted.
+	//
+	// Reported because it is the one erasure step whose completion nothing else
+	// records: an address release and a username tombstone are EVENTS, visible in
+	// the log forever, while this is a DELETE against a table no projector
+	// rebuilds. If it did not happen, only this number says so.
+	PasskeysRemoved int
 
 	// AlreadyErased is true when the account was erased by an earlier attempt.
 	// Not a failure: the orchestration retries, and the whole operation is built
@@ -172,7 +216,27 @@ func (e *Erasure) Erase(ctx context.Context, subjectID string) (ErasureResult, e
 		result.UsernameBurned = burned
 	}
 
-	// 3. THE ACCOUNT. Last, so nothing claims completion until it is complete —
+	// 3. THE PASSKEYS. Deleted, not shredded, and this is the only erasure step
+	//    in the system that removes rows rather than destroying a key — because
+	//    there is no key: a public key is verification material and was never
+	//    encrypted under the subject's (ADR-057).
+	//
+	//    Before the account event rather than after, for the reason the address
+	//    and the username go first: every destructive step must have happened by
+	//    the time anything can observe the account as erased. A crash between
+	//    here and the append leaves credentials deleted for an account that still
+	//    reads as live — recoverable, because the person can enrol again — while
+	//    the reverse leaves an account marked erased whose credentials still
+	//    authenticate.
+	if e.passkeys != nil {
+		removed, err := e.passkeys.Erase(ctx, subjectID)
+		if err != nil {
+			return result, errs.Internalf("erasing the passkeys").Wrap(err)
+		}
+		result.PasskeysRemoved = removed
+	}
+
+	// 4. THE ACCOUNT. Last, so nothing claims completion until it is complete —
 	//    and it is what the session projection reacts to.
 	now := e.now().UTC()
 	if err := user.Erase(now); err != nil {

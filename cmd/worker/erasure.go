@@ -48,10 +48,28 @@ func newAccountErasure(d *dependencies) (*identityapp.Erasure, error) {
 		d.store, d.codec, nil,
 		identityapp.UsernameCategory, identitydomain.NewUsernameReservation)
 
+	// The passkey store, which erasure must reach EXPLICITLY.
+	//
+	// It is the one erasure target with no key to destroy: a WebAuthn public key
+	// is verification material, so the vault never held it and shredding a
+	// subject key leaves it untouched. Migration 00033 also removed the foreign
+	// key that would have cascaded, because `user_view` is a projection and a
+	// rebuild truncating it would have taken every passkey in the installation.
+	//
+	// So nothing else deletes these rows. Without this the credential id and
+	// public key of somebody who asked to be forgotten stay in the database
+	// forever — and the store's Erase was implemented, tested, and called by
+	// NOTHING until this line.
+	passkeys, err := identitypg.NewPasskeys(pgadapter.New(d.pool))
+	if err != nil {
+		return nil, fmt.Errorf("passkey store: %w", err)
+	}
+
 	return identityapp.NewErasure(identityapp.ErasureDeps{
 		Directory: reads,
 		Users:     users, Emails: emails, Usernames: usernames,
-		Now: clock.System{}.Now,
+		Passkeys: passkeys,
+		Now:      clock.System{}.Now,
 	})
 }
 
