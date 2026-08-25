@@ -155,6 +155,23 @@ const page = `<!doctype html>
   </section>
 
   <section>
+    <h2>3b · Federated sign-in (identity.md §7)</h2>
+    <p class="lede">
+      Redirects to the provider. The code is exchanged server-side with the PKCE
+      verifier the browser never saw.
+      <br><br>
+      <strong>A refused link is the flow working.</strong> Auto-linking on an
+      email match alone is the account takeover §7 exists to refuse, so unless
+      the provider is on the trusted list AND both sides verified the address,
+      the sign-in succeeds and creates no link — you then link explicitly below.
+    </p>
+    <div id="providers" class="lede">Loading providers…</div>
+    <button id="fed-signin">Sign in with provider</button>
+    <button id="fed-link" class="ghost">Link to my account</button>
+    <pre id="out-fed">—</pre>
+  </section>
+
+  <section>
     <h2>4 · Enrolled passkeys</h2>
     <button id="list" class="ghost">List</button>
     <div id="passkeys"></div>
@@ -495,6 +512,56 @@ document.getElementById('login').onclick = async () => {
     });
   } catch (e) { show('out-login', e.detail || String(e), true); }
 };
+
+// --- 3b. federated ----------------------------------------------------------
+//
+// The callback page needs three things this page knows and the query string
+// does not carry: which provider was used, whether this was a sign-in or a
+// link, and — for a link — the bearer. sessionStorage rather than the state
+// parameter, because state is the SERVER's CSRF binding and stuffing client
+// data into it would make a value the server compares also a value the client
+// authors.
+let federatedProviders = [];
+
+async function loadProviders() {
+  try {
+    const out = await rpc('ListFederatedProviders', {});
+    federatedProviders = out.providers || [];
+    document.getElementById('providers').textContent = federatedProviders.length
+      ? 'Configured: ' + federatedProviders.join(', ')
+      : 'No providers configured. Set IDENTITY_FEDERATION_PROVIDERS and the ' +
+        'client credentials, then restart cmd/api.';
+  } catch (e) {
+    document.getElementById('providers').textContent = 'Could not list providers.';
+  }
+}
+loadProviders();
+
+async function startFederated(mode) {
+  const provider = federatedProviders[0];
+  if (!provider) { show('out-fed', 'No provider is configured.', true); return; }
+
+  const bearer = tokenBox.value.trim();
+  if (mode === 'link' && !bearer) {
+    show('out-fed', 'Linking needs an authenticated session at AAL2 — §7 rule 3 ' +
+      'requires step-up, because a link the holder never proved survives every ' +
+      'later recovery. Sign in first.', true);
+    return;
+  }
+
+  try {
+    const method = mode === 'link' ? 'BeginFederatedLink' : 'BeginFederatedSignIn';
+    const out = await rpc(method, { provider }, mode === 'link' ? bearer : '');
+    sessionStorage.setItem('chronos_provider', provider);
+    sessionStorage.setItem('chronos_fed_mode', mode);
+    if (bearer) sessionStorage.setItem('chronos_bearer', bearer);
+    show('out-fed', { redirectingTo: out.authorizationUrl });
+    location.href = out.authorizationUrl;
+  } catch (e) { show('out-fed', e.detail || String(e), true); }
+}
+
+document.getElementById('fed-signin').onclick = () => startFederated('signin');
+document.getElementById('fed-link').onclick = () => startFederated('link');
 
 // --- 4. list ----------------------------------------------------------------
 document.getElementById('list').onclick = async () => {

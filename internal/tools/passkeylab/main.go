@@ -115,6 +115,26 @@ func run() error {
 	//
 	// The service names carry a dot and cannot end in "/", so a prefix check here
 	// is the honest way to express "everything Connect serves".
+	// The federated callback. Google redirects the BROWSER here after consent,
+	// with the code and state on the query string.
+	//
+	// It serves a page rather than completing the ceremony itself, and the
+	// difference matters: this tool holds no credentials and must not — the code
+	// exchange needs the client secret and the PKCE verifier, both of which live
+	// server-side in cmd/api. So the page reads the query string and posts it to
+	// FinishFederatedSignIn or FinishFederatedLink through the same proxy
+	// everything else uses.
+	//
+	// The path is registered because Google compares the redirect URI as a WHOLE
+	// STRING against its registration. A harness that served it anywhere else
+	// would produce a redirect_uri_mismatch that says nothing about which side
+	// is wrong.
+	mux.HandleFunc("/federated/callback", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write([]byte(callbackPage))
+	})
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/chronos.") {
 			proxy.ServeHTTP(w, r)
