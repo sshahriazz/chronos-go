@@ -81,8 +81,14 @@ const page = `<!doctype html>
       Registers, reads the verification link out of Mailpit — the dev mailbox —
       and completes it. There is deliberately no RPC that hands out a
       verification token, so the harness does what a person does and reads the
-      mail. <strong>cmd/worker must be running</strong>: the mail is sent by a
-      reactor, not by the API.
+      mail.
+      <br><br>
+      <strong>Three processes besides this one:</strong> <code>cmd/api</code>,
+      <code>cmd/worker</code> (sends the mail — the API only appends the event)
+      and <code>cmd/projector</code> (builds the account projection
+      <code>VerifyEmail</code> reads). Without the projector, verification fails
+      with &ldquo;this link is no longer valid&rdquo; while the token is
+      perfectly good — the lookup that failed is the account, not the token.
     </p>
     <div class="row">
       <div><label for="new-email">Email</label><input id="new-email"></div>
@@ -227,8 +233,14 @@ async function verificationToken(email, since) {
     await new Promise(r => setTimeout(r, 500));
   }
   throw new Error(
-    'no verification mail arrived within 20s. The mail is sent by a REACTOR, so ' +
-    'cmd/worker has to be running — the API only appends the event.');
+    'no verification mail arrived within 20s. Two processes have to be running ' +
+    'besides the API, and neither reports anything when it is absent:\n\n' +
+    '  cmd/worker     sends the mail. The API only appends the event.\n' +
+    '  cmd/projector  builds user_view, which VerifyEmail reads to resolve the\n' +
+    '                 account. Without it, verification fails with "this link is\n' +
+    '                 no longer valid" even though the token is perfectly good.\n\n' +
+    'Also check SMTP_HOST: "mailpit" only resolves inside the compose network, ' +
+    'so a worker on the host needs "localhost".');
 }
 
 document.getElementById('signup').onclick = async () => {

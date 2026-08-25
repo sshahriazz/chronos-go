@@ -106,9 +106,20 @@ func run() error {
 
 	// Everything Connect serves lives under the fully-qualified service name, so
 	// one prefix covers every RPC and nothing else is forwarded.
-	mux.Handle("/chronos.", proxy)
-
+	//
+	// Dispatched by PREFIX inside the root handler rather than registered as a
+	// mux pattern, and the distinction is not stylistic: `mux.Handle("/chronos.")`
+	// is an EXACT match, because Go's ServeMux only treats a pattern as a prefix
+	// when it ends in "/". Registering it that way silently 404s every RPC —
+	// which is what this harness did until a signup smoke test asked for one.
+	//
+	// The service names carry a dot and cannot end in "/", so a prefix check here
+	// is the honest way to express "everything Connect serves".
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/chronos.") {
+			proxy.ServeHTTP(w, r)
+			return
+		}
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
