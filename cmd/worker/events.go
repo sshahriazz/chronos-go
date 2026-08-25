@@ -320,6 +320,17 @@ func identityNotifications(cat *notify.Catalogue) {
 		}
 	})
 
+	cat.Silent[identityevents.FederatedIdentityClaimed](
+		"the uniqueness half of a link, on the provider identity's own stream. It rides " +
+			"the same append as FederatedIdentityLinked, which is the entry that mails " +
+			"the person — and that one carries the fact they care about. A second " +
+			"message about a claim record is noise, and noise in a security stream is " +
+			"what trains people to ignore the message that matters")
+	cat.Silent[identityevents.FederatedIdentityReleased](
+		"the mirror, riding the append that FederatedIdentityUnlinked already mails " +
+			"about. Notified there rather than here for the same reason: the person " +
+			"needs to know a way in was removed, not that a claim row was freed")
+
 	// ---- Passkeys (identity.md §5, ADR-057) ----------------------------------
 	cat.On[identityevents.PasskeyRegistered](notify.Spec{
 		Template: "identity.passkey_registered",
