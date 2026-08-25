@@ -679,3 +679,19 @@ func federatedClaimKey(issuer contract.Issuer, subject string) string {
 	sum := sha256.Sum256([]byte(string(issuer) + "\x00" + subject))
 	return hex.EncodeToString(sum[:])
 }
+
+// FederationFlowShim is the interface a composition root returns.
+//
+// Named so cmd/api can return a nil INTERFACE rather than a typed nil pointer —
+// the distinction that broke the passkey wiring on its first run, where a nil
+// pointer in an interface made the interface non-nil and every handler guard
+// silently stopped firing.
+type FederationFlowShim interface {
+	Providers() []string
+	Begin(ctx context.Context, cmd BeginFederatedCommand) (BeginFederatedResult, error)
+	FinishLogin(ctx context.Context, cmd FinishFederatedLoginCommand) (FinishFederatedLoginResult, error)
+	FinishLink(ctx context.Context, cmd FinishFederatedLinkCommand) error
+	Unlink(ctx context.Context, cmd UnlinkFederatedCommand) error
+}
+
+var _ FederationFlowShim = (*Federation)(nil)

@@ -179,6 +179,24 @@ const (
 	// IdentityServiceRemovePasskeyProcedure is the fully-qualified name of the IdentityService's
 	// RemovePasskey RPC.
 	IdentityServiceRemovePasskeyProcedure = "/chronos.identity.v1.IdentityService/RemovePasskey"
+	// IdentityServiceListFederatedProvidersProcedure is the fully-qualified name of the
+	// IdentityService's ListFederatedProviders RPC.
+	IdentityServiceListFederatedProvidersProcedure = "/chronos.identity.v1.IdentityService/ListFederatedProviders"
+	// IdentityServiceBeginFederatedSignInProcedure is the fully-qualified name of the IdentityService's
+	// BeginFederatedSignIn RPC.
+	IdentityServiceBeginFederatedSignInProcedure = "/chronos.identity.v1.IdentityService/BeginFederatedSignIn"
+	// IdentityServiceFinishFederatedSignInProcedure is the fully-qualified name of the
+	// IdentityService's FinishFederatedSignIn RPC.
+	IdentityServiceFinishFederatedSignInProcedure = "/chronos.identity.v1.IdentityService/FinishFederatedSignIn"
+	// IdentityServiceBeginFederatedLinkProcedure is the fully-qualified name of the IdentityService's
+	// BeginFederatedLink RPC.
+	IdentityServiceBeginFederatedLinkProcedure = "/chronos.identity.v1.IdentityService/BeginFederatedLink"
+	// IdentityServiceFinishFederatedLinkProcedure is the fully-qualified name of the IdentityService's
+	// FinishFederatedLink RPC.
+	IdentityServiceFinishFederatedLinkProcedure = "/chronos.identity.v1.IdentityService/FinishFederatedLink"
+	// IdentityServiceUnlinkFederatedIdentityProcedure is the fully-qualified name of the
+	// IdentityService's UnlinkFederatedIdentity RPC.
+	IdentityServiceUnlinkFederatedIdentityProcedure = "/chronos.identity.v1.IdentityService/UnlinkFederatedIdentity"
 )
 
 // IdentityServiceClient is a client for the chronos.identity.v1.IdentityService service.
@@ -624,6 +642,67 @@ type IdentityServiceClient interface {
 	// AAL2 with no bootstrap exemption: removing a credential is not a way to
 	// enrol one.
 	RemovePasskey(context.Context, *connect.Request[v1.RemovePasskeyRequest]) (*connect.Response[v1.RemovePasskeyResponse], error)
+	// ListFederatedProviders names the identity providers this deployment
+	// supports.
+	//
+	// PUBLIC and deliberately uninteresting: it says what the DEPLOYMENT
+	// supports, never what any account uses. A client needs it to render buttons,
+	// and it discloses nothing about anybody.
+	ListFederatedProviders(context.Context, *connect.Request[v1.ListFederatedProvidersRequest]) (*connect.Response[v1.ListFederatedProvidersResponse], error)
+	// BeginFederatedSignIn starts signing in with an identity provider.
+	//
+	// Public: the population reaching it has not authenticated, and by definition
+	// may have no account at all. It carries no identifier, so it cannot be asked
+	// whether an address exists.
+	//
+	// A WRITE, because it records a ceremony: PKCE, state and nonce are bound to
+	// this request and stored server-side, which is what makes the callback
+	// verifiable rather than merely plausible.
+	BeginFederatedSignIn(context.Context, *connect.Request[v1.BeginFederatedSignInRequest]) (*connect.Response[v1.BeginFederatedSignInResponse], error)
+	// FinishFederatedSignIn redeems the provider's callback.
+	//
+	// # It does NOT always produce a session, and that is the design
+	//
+	// identity.md §7 forbids auto-linking a federated identity to an existing
+	// account on an email match alone — the attacker registers at a provider using
+	// the victim's address, the provider does not verify it, and naive matching
+	// hands them the account. So a genuine sign-in whose conditions are not met
+	// answers `link_refused` with no session, and the person authenticates with an
+	// existing method and links explicitly from settings.
+	//
+	// `account_exists` rides with it so a client can say "you already have an
+	// account, sign in and link this" rather than the dead end §7.5 names, where a
+	// second account is created silently and one person owns two.
+	//
+	// The session it does create is AAL1: a provider may have required its own
+	// second factor and this system cannot know that it did.
+	FinishFederatedSignIn(context.Context, *connect.Request[v1.FinishFederatedSignInRequest]) (*connect.Response[v1.FinishFederatedSignInResponse], error)
+	// BeginFederatedLink starts attaching a provider to the caller's own account.
+	//
+	// AAL2. identity.md §7 rule 3 requires step-up for linking, and the reason is
+	// the whole of §7: a link attached to an account the linking party has not
+	// proven control of is a TROJAN IDENTIFIER that survives every later recovery,
+	// because a password reset changes a credential and leaves a link alone.
+	//
+	// No bootstrap exemption. Linking a provider is not a way to enrol a first
+	// second factor, and admitting one here would make the weakest session able to
+	// add a permanent way in.
+	BeginFederatedLink(context.Context, *connect.Request[v1.BeginFederatedLinkRequest]) (*connect.Response[v1.BeginFederatedLinkResponse], error)
+	// FinishFederatedLink completes the link.
+	//
+	// It consults NO auto-link rules, deliberately: the caller has already proven
+	// the account, and that proof is exactly what §7 rule 1's conditions
+	// substitute for when it is absent. Applying them again would refuse somebody
+	// permission to link their own provider to their own account.
+	FinishFederatedLink(context.Context, *connect.Request[v1.FinishFederatedLinkRequest]) (*connect.Response[v1.FinishFederatedLinkResponse], error)
+	// UnlinkFederatedIdentity removes a provider from the caller's account.
+	//
+	// Refused when it would leave the account with no way to sign in — identity.md
+	// §7's de-linking rule names the case exactly: removing the last federated
+	// link from a PASSWORDLESS account, whose holder would then have nothing at
+	// all. Somebody who signed up with Google has no password by design, so an
+	// endpoint that allowed it would be account loss dressed as a settings toggle.
+	UnlinkFederatedIdentity(context.Context, *connect.Request[v1.UnlinkFederatedIdentityRequest]) (*connect.Response[v1.UnlinkFederatedIdentityResponse], error)
 }
 
 // NewIdentityServiceClient constructs a client for the chronos.identity.v1.IdentityService service.
@@ -821,6 +900,42 @@ func NewIdentityServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(identityServiceMethods.ByName("RemovePasskey")),
 			connect.WithClientOptions(opts...),
 		),
+		listFederatedProviders: connect.NewClient[v1.ListFederatedProvidersRequest, v1.ListFederatedProvidersResponse](
+			httpClient,
+			baseURL+IdentityServiceListFederatedProvidersProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("ListFederatedProviders")),
+			connect.WithClientOptions(opts...),
+		),
+		beginFederatedSignIn: connect.NewClient[v1.BeginFederatedSignInRequest, v1.BeginFederatedSignInResponse](
+			httpClient,
+			baseURL+IdentityServiceBeginFederatedSignInProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("BeginFederatedSignIn")),
+			connect.WithClientOptions(opts...),
+		),
+		finishFederatedSignIn: connect.NewClient[v1.FinishFederatedSignInRequest, v1.FinishFederatedSignInResponse](
+			httpClient,
+			baseURL+IdentityServiceFinishFederatedSignInProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("FinishFederatedSignIn")),
+			connect.WithClientOptions(opts...),
+		),
+		beginFederatedLink: connect.NewClient[v1.BeginFederatedLinkRequest, v1.BeginFederatedLinkResponse](
+			httpClient,
+			baseURL+IdentityServiceBeginFederatedLinkProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("BeginFederatedLink")),
+			connect.WithClientOptions(opts...),
+		),
+		finishFederatedLink: connect.NewClient[v1.FinishFederatedLinkRequest, v1.FinishFederatedLinkResponse](
+			httpClient,
+			baseURL+IdentityServiceFinishFederatedLinkProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("FinishFederatedLink")),
+			connect.WithClientOptions(opts...),
+		),
+		unlinkFederatedIdentity: connect.NewClient[v1.UnlinkFederatedIdentityRequest, v1.UnlinkFederatedIdentityResponse](
+			httpClient,
+			baseURL+IdentityServiceUnlinkFederatedIdentityProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("UnlinkFederatedIdentity")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -856,6 +971,12 @@ type identityServiceClient struct {
 	finishPasskeyLogin        *connect.Client[v1.FinishPasskeyLoginRequest, v1.FinishPasskeyLoginResponse]
 	listPasskeys              *connect.Client[v1.ListPasskeysRequest, v1.ListPasskeysResponse]
 	removePasskey             *connect.Client[v1.RemovePasskeyRequest, v1.RemovePasskeyResponse]
+	listFederatedProviders    *connect.Client[v1.ListFederatedProvidersRequest, v1.ListFederatedProvidersResponse]
+	beginFederatedSignIn      *connect.Client[v1.BeginFederatedSignInRequest, v1.BeginFederatedSignInResponse]
+	finishFederatedSignIn     *connect.Client[v1.FinishFederatedSignInRequest, v1.FinishFederatedSignInResponse]
+	beginFederatedLink        *connect.Client[v1.BeginFederatedLinkRequest, v1.BeginFederatedLinkResponse]
+	finishFederatedLink       *connect.Client[v1.FinishFederatedLinkRequest, v1.FinishFederatedLinkResponse]
+	unlinkFederatedIdentity   *connect.Client[v1.UnlinkFederatedIdentityRequest, v1.UnlinkFederatedIdentityResponse]
 }
 
 // Register calls chronos.identity.v1.IdentityService.Register.
@@ -1006,6 +1127,36 @@ func (c *identityServiceClient) ListPasskeys(ctx context.Context, req *connect.R
 // RemovePasskey calls chronos.identity.v1.IdentityService.RemovePasskey.
 func (c *identityServiceClient) RemovePasskey(ctx context.Context, req *connect.Request[v1.RemovePasskeyRequest]) (*connect.Response[v1.RemovePasskeyResponse], error) {
 	return c.removePasskey.CallUnary(ctx, req)
+}
+
+// ListFederatedProviders calls chronos.identity.v1.IdentityService.ListFederatedProviders.
+func (c *identityServiceClient) ListFederatedProviders(ctx context.Context, req *connect.Request[v1.ListFederatedProvidersRequest]) (*connect.Response[v1.ListFederatedProvidersResponse], error) {
+	return c.listFederatedProviders.CallUnary(ctx, req)
+}
+
+// BeginFederatedSignIn calls chronos.identity.v1.IdentityService.BeginFederatedSignIn.
+func (c *identityServiceClient) BeginFederatedSignIn(ctx context.Context, req *connect.Request[v1.BeginFederatedSignInRequest]) (*connect.Response[v1.BeginFederatedSignInResponse], error) {
+	return c.beginFederatedSignIn.CallUnary(ctx, req)
+}
+
+// FinishFederatedSignIn calls chronos.identity.v1.IdentityService.FinishFederatedSignIn.
+func (c *identityServiceClient) FinishFederatedSignIn(ctx context.Context, req *connect.Request[v1.FinishFederatedSignInRequest]) (*connect.Response[v1.FinishFederatedSignInResponse], error) {
+	return c.finishFederatedSignIn.CallUnary(ctx, req)
+}
+
+// BeginFederatedLink calls chronos.identity.v1.IdentityService.BeginFederatedLink.
+func (c *identityServiceClient) BeginFederatedLink(ctx context.Context, req *connect.Request[v1.BeginFederatedLinkRequest]) (*connect.Response[v1.BeginFederatedLinkResponse], error) {
+	return c.beginFederatedLink.CallUnary(ctx, req)
+}
+
+// FinishFederatedLink calls chronos.identity.v1.IdentityService.FinishFederatedLink.
+func (c *identityServiceClient) FinishFederatedLink(ctx context.Context, req *connect.Request[v1.FinishFederatedLinkRequest]) (*connect.Response[v1.FinishFederatedLinkResponse], error) {
+	return c.finishFederatedLink.CallUnary(ctx, req)
+}
+
+// UnlinkFederatedIdentity calls chronos.identity.v1.IdentityService.UnlinkFederatedIdentity.
+func (c *identityServiceClient) UnlinkFederatedIdentity(ctx context.Context, req *connect.Request[v1.UnlinkFederatedIdentityRequest]) (*connect.Response[v1.UnlinkFederatedIdentityResponse], error) {
+	return c.unlinkFederatedIdentity.CallUnary(ctx, req)
 }
 
 // IdentityServiceHandler is an implementation of the chronos.identity.v1.IdentityService service.
@@ -1451,6 +1602,67 @@ type IdentityServiceHandler interface {
 	// AAL2 with no bootstrap exemption: removing a credential is not a way to
 	// enrol one.
 	RemovePasskey(context.Context, *connect.Request[v1.RemovePasskeyRequest]) (*connect.Response[v1.RemovePasskeyResponse], error)
+	// ListFederatedProviders names the identity providers this deployment
+	// supports.
+	//
+	// PUBLIC and deliberately uninteresting: it says what the DEPLOYMENT
+	// supports, never what any account uses. A client needs it to render buttons,
+	// and it discloses nothing about anybody.
+	ListFederatedProviders(context.Context, *connect.Request[v1.ListFederatedProvidersRequest]) (*connect.Response[v1.ListFederatedProvidersResponse], error)
+	// BeginFederatedSignIn starts signing in with an identity provider.
+	//
+	// Public: the population reaching it has not authenticated, and by definition
+	// may have no account at all. It carries no identifier, so it cannot be asked
+	// whether an address exists.
+	//
+	// A WRITE, because it records a ceremony: PKCE, state and nonce are bound to
+	// this request and stored server-side, which is what makes the callback
+	// verifiable rather than merely plausible.
+	BeginFederatedSignIn(context.Context, *connect.Request[v1.BeginFederatedSignInRequest]) (*connect.Response[v1.BeginFederatedSignInResponse], error)
+	// FinishFederatedSignIn redeems the provider's callback.
+	//
+	// # It does NOT always produce a session, and that is the design
+	//
+	// identity.md §7 forbids auto-linking a federated identity to an existing
+	// account on an email match alone — the attacker registers at a provider using
+	// the victim's address, the provider does not verify it, and naive matching
+	// hands them the account. So a genuine sign-in whose conditions are not met
+	// answers `link_refused` with no session, and the person authenticates with an
+	// existing method and links explicitly from settings.
+	//
+	// `account_exists` rides with it so a client can say "you already have an
+	// account, sign in and link this" rather than the dead end §7.5 names, where a
+	// second account is created silently and one person owns two.
+	//
+	// The session it does create is AAL1: a provider may have required its own
+	// second factor and this system cannot know that it did.
+	FinishFederatedSignIn(context.Context, *connect.Request[v1.FinishFederatedSignInRequest]) (*connect.Response[v1.FinishFederatedSignInResponse], error)
+	// BeginFederatedLink starts attaching a provider to the caller's own account.
+	//
+	// AAL2. identity.md §7 rule 3 requires step-up for linking, and the reason is
+	// the whole of §7: a link attached to an account the linking party has not
+	// proven control of is a TROJAN IDENTIFIER that survives every later recovery,
+	// because a password reset changes a credential and leaves a link alone.
+	//
+	// No bootstrap exemption. Linking a provider is not a way to enrol a first
+	// second factor, and admitting one here would make the weakest session able to
+	// add a permanent way in.
+	BeginFederatedLink(context.Context, *connect.Request[v1.BeginFederatedLinkRequest]) (*connect.Response[v1.BeginFederatedLinkResponse], error)
+	// FinishFederatedLink completes the link.
+	//
+	// It consults NO auto-link rules, deliberately: the caller has already proven
+	// the account, and that proof is exactly what §7 rule 1's conditions
+	// substitute for when it is absent. Applying them again would refuse somebody
+	// permission to link their own provider to their own account.
+	FinishFederatedLink(context.Context, *connect.Request[v1.FinishFederatedLinkRequest]) (*connect.Response[v1.FinishFederatedLinkResponse], error)
+	// UnlinkFederatedIdentity removes a provider from the caller's account.
+	//
+	// Refused when it would leave the account with no way to sign in — identity.md
+	// §7's de-linking rule names the case exactly: removing the last federated
+	// link from a PASSWORDLESS account, whose holder would then have nothing at
+	// all. Somebody who signed up with Google has no password by design, so an
+	// endpoint that allowed it would be account loss dressed as a settings toggle.
+	UnlinkFederatedIdentity(context.Context, *connect.Request[v1.UnlinkFederatedIdentityRequest]) (*connect.Response[v1.UnlinkFederatedIdentityResponse], error)
 }
 
 // NewIdentityServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -1644,6 +1856,42 @@ func NewIdentityServiceHandler(svc IdentityServiceHandler, opts ...connect.Handl
 		connect.WithSchema(identityServiceMethods.ByName("RemovePasskey")),
 		connect.WithHandlerOptions(opts...),
 	)
+	identityServiceListFederatedProvidersHandler := connect.NewUnaryHandler(
+		IdentityServiceListFederatedProvidersProcedure,
+		svc.ListFederatedProviders,
+		connect.WithSchema(identityServiceMethods.ByName("ListFederatedProviders")),
+		connect.WithHandlerOptions(opts...),
+	)
+	identityServiceBeginFederatedSignInHandler := connect.NewUnaryHandler(
+		IdentityServiceBeginFederatedSignInProcedure,
+		svc.BeginFederatedSignIn,
+		connect.WithSchema(identityServiceMethods.ByName("BeginFederatedSignIn")),
+		connect.WithHandlerOptions(opts...),
+	)
+	identityServiceFinishFederatedSignInHandler := connect.NewUnaryHandler(
+		IdentityServiceFinishFederatedSignInProcedure,
+		svc.FinishFederatedSignIn,
+		connect.WithSchema(identityServiceMethods.ByName("FinishFederatedSignIn")),
+		connect.WithHandlerOptions(opts...),
+	)
+	identityServiceBeginFederatedLinkHandler := connect.NewUnaryHandler(
+		IdentityServiceBeginFederatedLinkProcedure,
+		svc.BeginFederatedLink,
+		connect.WithSchema(identityServiceMethods.ByName("BeginFederatedLink")),
+		connect.WithHandlerOptions(opts...),
+	)
+	identityServiceFinishFederatedLinkHandler := connect.NewUnaryHandler(
+		IdentityServiceFinishFederatedLinkProcedure,
+		svc.FinishFederatedLink,
+		connect.WithSchema(identityServiceMethods.ByName("FinishFederatedLink")),
+		connect.WithHandlerOptions(opts...),
+	)
+	identityServiceUnlinkFederatedIdentityHandler := connect.NewUnaryHandler(
+		IdentityServiceUnlinkFederatedIdentityProcedure,
+		svc.UnlinkFederatedIdentity,
+		connect.WithSchema(identityServiceMethods.ByName("UnlinkFederatedIdentity")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/chronos.identity.v1.IdentityService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case IdentityServiceRegisterProcedure:
@@ -1706,6 +1954,18 @@ func NewIdentityServiceHandler(svc IdentityServiceHandler, opts ...connect.Handl
 			identityServiceListPasskeysHandler.ServeHTTP(w, r)
 		case IdentityServiceRemovePasskeyProcedure:
 			identityServiceRemovePasskeyHandler.ServeHTTP(w, r)
+		case IdentityServiceListFederatedProvidersProcedure:
+			identityServiceListFederatedProvidersHandler.ServeHTTP(w, r)
+		case IdentityServiceBeginFederatedSignInProcedure:
+			identityServiceBeginFederatedSignInHandler.ServeHTTP(w, r)
+		case IdentityServiceFinishFederatedSignInProcedure:
+			identityServiceFinishFederatedSignInHandler.ServeHTTP(w, r)
+		case IdentityServiceBeginFederatedLinkProcedure:
+			identityServiceBeginFederatedLinkHandler.ServeHTTP(w, r)
+		case IdentityServiceFinishFederatedLinkProcedure:
+			identityServiceFinishFederatedLinkHandler.ServeHTTP(w, r)
+		case IdentityServiceUnlinkFederatedIdentityProcedure:
+			identityServiceUnlinkFederatedIdentityHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1833,4 +2093,28 @@ func (UnimplementedIdentityServiceHandler) ListPasskeys(context.Context, *connec
 
 func (UnimplementedIdentityServiceHandler) RemovePasskey(context.Context, *connect.Request[v1.RemovePasskeyRequest]) (*connect.Response[v1.RemovePasskeyResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.RemovePasskey is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) ListFederatedProviders(context.Context, *connect.Request[v1.ListFederatedProvidersRequest]) (*connect.Response[v1.ListFederatedProvidersResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.ListFederatedProviders is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) BeginFederatedSignIn(context.Context, *connect.Request[v1.BeginFederatedSignInRequest]) (*connect.Response[v1.BeginFederatedSignInResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.BeginFederatedSignIn is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) FinishFederatedSignIn(context.Context, *connect.Request[v1.FinishFederatedSignInRequest]) (*connect.Response[v1.FinishFederatedSignInResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.FinishFederatedSignIn is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) BeginFederatedLink(context.Context, *connect.Request[v1.BeginFederatedLinkRequest]) (*connect.Response[v1.BeginFederatedLinkResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.BeginFederatedLink is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) FinishFederatedLink(context.Context, *connect.Request[v1.FinishFederatedLinkRequest]) (*connect.Response[v1.FinishFederatedLinkResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.FinishFederatedLink is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) UnlinkFederatedIdentity(context.Context, *connect.Request[v1.UnlinkFederatedIdentityRequest]) (*connect.Response[v1.UnlinkFederatedIdentityResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.UnlinkFederatedIdentity is not implemented"))
 }

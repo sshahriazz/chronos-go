@@ -188,6 +188,30 @@ type IdentityConfig struct {
 	// phishing resistance that is the reason to prefer passkeys at all.
 	WebauthnOrigins []string `env:"IDENTITY_WEBAUTHN_ORIGINS" envSeparator:","`
 
+	// FederationProviders names the identity providers to configure, comma
+	// separated (identity.md §7).
+	//
+	// Empty is a SUPPORTED state, not a broken one: federation needs client
+	// credentials that cannot be defaulted, so a deployment without them serves
+	// the federation RPCs as NOT_FOUND and everything else normally.
+	FederationProviders []string `env:"IDENTITY_FEDERATION_PROVIDERS" envSeparator:","`
+
+	// GoogleClientID and GoogleClientSecret are the OAuth client.
+	//
+	// Google is the only provider on §7's trusted-verification list, which is why
+	// it is the first one built: `email_verified` is reliable for consumer
+	// accounts, and for Workspace it means "the domain admin says so" — a real
+	// assertion by a party with authority over the domain.
+	GoogleClientID     string `env:"IDENTITY_GOOGLE_CLIENT_ID"`
+	GoogleClientSecret Secret `env:"IDENTITY_GOOGLE_CLIENT_SECRET"`
+
+	// GoogleRedirectURL must match the provider's registration EXACTLY.
+	//
+	// Compared by Google as a whole string, and declared rather than derived from
+	// the request: a redirect URI assembled from anything a caller controls is an
+	// open redirect with extra steps.
+	GoogleRedirectURL string `env:"IDENTITY_GOOGLE_REDIRECT_URL"`
+
 	// PasswordHashConcurrency bounds simultaneous Argon2id hashes. Each one holds
 	// 32 MiB for its whole duration, so this is the ceiling on how much memory
 	// password verification can consume no matter what arrives.
@@ -226,6 +250,16 @@ func (i IdentityConfig) Configured() bool {
 // configuration serves no passkey endpoints rather than serving weak ones.
 func (i IdentityConfig) PasskeysConfigured() bool {
 	return i.WebauthnRPID != "" && len(i.WebauthnOrigins) > 0
+}
+
+// GoogleConfigured reports whether the Google provider can be built.
+//
+// ALL THREE, and none has a usable default. Without a client id and secret there
+// is nothing to exchange a code with; without the exact redirect URL the
+// provider refuses the request outright. A partial configuration serves no
+// federation rather than serving a broken button.
+func (i IdentityConfig) GoogleConfigured() bool {
+	return i.GoogleClientID != "" && !i.GoogleClientSecret.IsZero() && i.GoogleRedirectURL != ""
 }
 
 func (i IdentityConfig) EmailIndexKeyBytes() ([]byte, error) {

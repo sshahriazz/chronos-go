@@ -1123,6 +1123,136 @@ components:
          error for every cause (ADR-036). What this distinguishes is only the two
          SUCCESSFUL shapes — the first factor passed and a second is owed, or every
          factor passed.
+    chronos.identity.v1.BeginFederatedLinkRequest:
+      type: object
+      properties:
+        provider:
+          type: string
+          examples:
+            - google
+          title: provider
+          maxLength: 32
+          pattern: ^[a-z0-9_-]+$
+          description: The configured provider to attach, e.g. "google".
+      title: BeginFederatedLinkRequest
+      required:
+        - provider
+      additionalProperties: false
+      description: BeginFederatedLinkRequest starts attaching a provider to the caller's account.
+    chronos.identity.v1.BeginFederatedLinkResponse:
+      type: object
+      properties:
+        authorizationUrl:
+          type: string
+          examples:
+            - https://accounts.google.com/o/oauth2/v2/auth?client_id=...
+          title: authorization_url
+          maxLength: 4096
+          pattern: ^https://.+
+          description: |-
+            The provider's authorization URL, with PKCE, state and nonce already bound.
+             Constrained to https, because a client is about to send somebody to it.
+        expiresAt:
+          title: expires_at
+          description: When the ceremony stops being redeemable server-side.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: BeginFederatedLinkResponse
+      additionalProperties: false
+      description: BeginFederatedLinkResponse is where to send the browser.
+    chronos.identity.v1.BeginFederatedSignInRequest:
+      type: object
+      properties:
+        provider:
+          type: string
+          examples:
+            - google
+          title: provider
+          maxLength: 32
+          pattern: ^[a-z0-9_-]+$
+          description: |-
+            The configured provider, e.g. "google". Names come from
+             ListFederatedProviders, so a client renders only what this deployment
+             supports.
+      title: BeginFederatedSignInRequest
+      required:
+        - provider
+      additionalProperties: false
+      description: |-
+        IdentityService is the account, its credentials and its sessions.
+
+         # The gates, and the one that is not honest yet
+
+         Every RPC declares its enforcement policy or the server refuses to boot
+         (ADR-021). Four of these are public because they run before any session
+         exists; the other nine act on the CALLER'S OWN account, which identity has no
+         established annotation for.
+
+         Identity is not organization-scoped — a person exists before any organization
+         does, so there is no org for the org-context gate to resolve and no
+         `workspace_id` for row-level security to scope by. The authz gate's two
+         shapes both assume otherwise: an empty `resource_id_field` means "the org
+         already resolved for this request", and a named one means "read the id from
+         this request field", which no message here carries because the account is
+         resolved from the session rather than named by the caller.
+
+         So `{relation: "self", resource_type: "user"}` below names a self-scoped
+         convention that the authz gate now implements: `selfCheck` answers gate 2
+         from the principal alone, substituting `principal.Subject.ID` as the resource
+         and skipping gates 1 and 3, which are both questions ABOUT an organization
+         that a self-scoped method has none of. The resource is read from the session
+         and from nowhere else — not from the request, not from a header — so a caller
+         cannot aim the check at somebody else's account.
+
+         The convention is keyed on the STRING "self", which is the weak part of it.
+         A method that declares a relation this gate does not recognise falls through
+         to the org-scoped shape and fails closed for want of an active organization,
+         so the failure direction is safe; a method that MISSPELLS "self" gets the same
+         treatment and is simply unreachable. Both are safe and neither is obvious.
+         Replacing the string with a declared marker is tracked separately.
+
+         # Assurance levels
+
+         A session is normally AAL2, but AAL1 SESSIONS EXIST: an account with a
+         verified address and no second factor may mint exactly one, for the sole
+         purpose of enrolling its first factor (the bootstrap carve-out). So an
+         unannotated method is NOT automatically two-factor any more — its floor is
+         AAL1 by declaration, and the four read methods here that declare no `min_aal`
+         are reachable from a bootstrap session.
+
+         That makes the explicit declarations on the credential- and session-changing
+         methods load-bearing rather than documentary: they are what stops a
+         password-only session from touching credentials or sessions. A method added
+         here without a `min_aal` is single-factor by default, and the enrolment
+         carve-out is what makes that reachable in practice.
+         BeginFederatedSignInRequest starts a provider ceremony.
+    chronos.identity.v1.BeginFederatedSignInResponse:
+      type: object
+      properties:
+        authorizationUrl:
+          type: string
+          examples:
+            - https://accounts.google.com/o/oauth2/v2/auth?client_id=...
+          title: authorization_url
+          maxLength: 4096
+          pattern: ^https://.+
+          description: |-
+            The provider's authorization URL, with PKCE, state and nonce already bound.
+
+             The browser is REDIRECTED here; nothing in it is a secret the client must
+             keep, and the two values that are secret — the PKCE verifier and the nonce —
+             never leave the server, which is what makes them a binding rather than a
+             claim.
+
+             Constrained to https, because a client is about to send somebody to it.
+        expiresAt:
+          title: expires_at
+          description: When the ceremony stops being redeemable server-side.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: BeginFederatedSignInResponse
+      additionalProperties: false
+      description: BeginFederatedSignInResponse is where to send the browser.
     chronos.identity.v1.BeginPasskeyLoginRequest:
       type: object
       title: BeginPasskeyLoginRequest
@@ -1773,6 +1903,177 @@ components:
          situation: it is the difference between "somebody guessed at my password" and
          "somebody already has my password and is stuck on my authenticator", and only
          the second is worth waking up for.
+    chronos.identity.v1.FinishFederatedLinkRequest:
+      type: object
+      properties:
+        provider:
+          type: string
+          examples:
+            - google
+          title: provider
+          maxLength: 32
+          pattern: ^[a-z0-9_-]+$
+          description: |-
+            The provider the ceremony was started for. Checked against the ceremony, so
+             a callback cannot be replayed against a different provider.
+        code:
+          type: string
+          examples:
+            - PLACEHOLDER-not-a-real-code
+          title: code
+          maxLength: 4096
+          pattern: ^\S+$
+          description: |-
+            The authorization code, exchanged once with the PKCE verifier the browser
+             never saw.
+        state:
+          type: string
+          examples:
+            - PLACEHOLDER-not-a-real-state
+          title: state
+          maxLength: 128
+          pattern: ^[A-Za-z0-9_-]+$
+          description: The state the provider echoed, which is also the ceremony's key.
+        iss:
+          type: string
+          examples:
+            - https://accounts.google.com
+          title: iss
+          maxLength: 512
+          pattern: ^https://.*
+          description: |-
+            RFC 9207's `iss`, when the provider sends one. See
+             FinishFederatedSignInRequest.iss.
+      title: FinishFederatedLinkRequest
+      required:
+        - provider
+        - code
+        - state
+      additionalProperties: false
+      description: FinishFederatedLinkRequest completes the link.
+    chronos.identity.v1.FinishFederatedLinkResponse:
+      type: object
+      title: FinishFederatedLinkResponse
+      additionalProperties: false
+      description: FinishFederatedLinkResponse is empty. The link exists or the call failed.
+    chronos.identity.v1.FinishFederatedSignInRequest:
+      type: object
+      properties:
+        provider:
+          type: string
+          examples:
+            - google
+          title: provider
+          maxLength: 32
+          pattern: ^[a-z0-9_-]+$
+          description: The provider the ceremony was started for.
+        code:
+          type: string
+          examples:
+            - PLACEHOLDER-not-a-real-code
+          title: code
+          maxLength: 4096
+          pattern: ^\S+$
+          description: |-
+            The authorization code. Exchanged once, server-side, with the PKCE verifier
+             the browser never saw.
+        state:
+          type: string
+          examples:
+            - PLACEHOLDER-not-a-real-state
+          title: state
+          maxLength: 128
+          pattern: ^[A-Za-z0-9_-]+$
+          description: |-
+            The state the provider echoed. It is also the ceremony's key, so a callback
+             whose state names no ceremony is refused before anything is exchanged.
+             The state the provider echoed, which is also the ceremony's key.
+        iss:
+          type: string
+          examples:
+            - https://accounts.google.com
+          title: iss
+          maxLength: 512
+          pattern: ^https://.*
+          description: |-
+            RFC 9207's `iss`, when the provider sends one.
+
+             Chronos federates to several authorization servers from one client, which is
+             the multi-AS condition RFC 9700 §4.4.2 addresses: without binding the
+             intended issuer per request, a mix-up attack redirects a code issued by one
+             provider into an exchange with another. Optional because the parameter is
+             not universally implemented; when present it must match.
+      title: FinishFederatedSignInRequest
+      required:
+        - provider
+        - code
+        - state
+      additionalProperties: false
+      description: FinishFederatedSignInRequest presents what the provider sent back.
+    chronos.identity.v1.FinishFederatedSignInResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          examples:
+            - PLACEHOLDER-not-a-real-token
+          title: token
+          maxLength: 43
+          pattern: ^[A-Za-z0-9_-]*$
+          description: |-
+            The bearer token, when an account was resolved. Empty when the sign-in was
+             genuine and no account could be attached without further proof.
+
+             The bounds are CreateSessionResponse.token's, minus the length rule: this
+             field is legitimately empty on the refused path, and a fixed length would
+             make the outcome §7 rule 2 requires unexpressible.
+        sessionId:
+          type: string
+          examples:
+            - sess_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: session_id
+          maxLength: 31
+          pattern: ^(sess_[0-7][0-9A-HJKMNP-TV-Z]{25})?$
+          description: |-
+            The session this sign-in created, when one was created. Empty otherwise,
+             which is why the pattern admits the empty string.
+        assuranceLevel:
+          title: assurance_level
+          description: |-
+            AAL1 for a federated sign-in, always.
+
+             identity.md §2 puts "federated link alone" on that row: the provider may
+             have required its own second factor, and this system has no way to know that
+             it did. Anything sensitive will ask for step-up.
+          allOf:
+            - $ref: '#/components/schemas/chronos.options.v1.AssuranceLevel'
+        linkRefused:
+          type: boolean
+          title: link_refused
+          description: |-
+            The sign-in was genuine and NO link was created (identity.md §7 rule 2).
+
+             Not an error. Auto-linking on an email match is the account-takeover this
+             whole flow exists to refuse, so the person authenticates with an existing
+             method and links explicitly from settings.
+        accountExists:
+          type: boolean
+          title: account_exists
+          description: |-
+            An account already claims the address the provider asserted.
+
+             Carried WITH link_refused so a client can say "you already have an account —
+             sign in and link this from settings" rather than the dead end identity.md
+             §7.5 names, where a second account is created silently and the person owns
+             two.
+        expiresAt:
+          title: expires_at
+          description: When the session expires. Zero when no session was created.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: FinishFederatedSignInResponse
+      additionalProperties: false
+      description: FinishFederatedSignInResponse is the outcome of a federated sign-in.
     chronos.identity.v1.FinishPasskeyLoginRequest:
       type: object
       properties:
@@ -2114,6 +2415,35 @@ components:
          holds a subject id and resolves it against the vault, which is what keeps
          erasure a key destruction rather than a sweep across every projection that
          ever copied an address (ADR-002).
+    chronos.identity.v1.ListFederatedProvidersRequest:
+      type: object
+      title: ListFederatedProvidersRequest
+      additionalProperties: false
+      description: ListFederatedProvidersRequest asks what this deployment supports.
+    chronos.identity.v1.ListFederatedProvidersResponse:
+      type: object
+      properties:
+        providers:
+          type: array
+          examples:
+            - - google
+          items:
+            type: string
+            examples:
+              - - google
+            maxLength: 32
+            pattern: ^[a-z0-9_-]+$
+          title: providers
+          maxItems: 16
+          description: The provider names this deployment has configured.
+      title: ListFederatedProvidersResponse
+      additionalProperties: false
+      description: |-
+        ListFederatedProvidersResponse names the configured providers.
+
+         PUBLIC and deliberately uninteresting: it says what this deployment supports,
+         not what any account uses. A client needs it to render buttons, and it
+         discloses nothing about anybody.
     chronos.identity.v1.ListLoginHistoryRequest:
       type: object
       properties:
@@ -3042,6 +3372,40 @@ components:
          idle deadline and last-seen time and never selects the secret from — a device
          list that returned anything derived from the bearer token would put a
          credential on the one screen whose entire purpose is to let a user revoke one.
+    chronos.identity.v1.UnlinkFederatedIdentityRequest:
+      type: object
+      properties:
+        issuer:
+          type: string
+          examples:
+            - https://accounts.google.com
+          title: issuer
+          maxLength: 512
+          pattern: ^https://.+
+          description: The provider's issuer, as recorded on the link.
+        providerSubject:
+          type: string
+          examples:
+            - "1234567890"
+          title: provider_subject
+          maxLength: 256
+          pattern: ^\S+$
+          description: |-
+            The provider's immutable identifier for the person.
+
+             Never an email address: matching on one is the takeover identity.md §7 rule
+             5 forbids, and an identifier that can change is not an identity.
+      title: UnlinkFederatedIdentityRequest
+      required:
+        - issuer
+        - providerSubject
+      additionalProperties: false
+      description: UnlinkFederatedIdentityRequest names one of the caller's own links.
+    chronos.identity.v1.UnlinkFederatedIdentityResponse:
+      type: object
+      title: UnlinkFederatedIdentityResponse
+      additionalProperties: false
+      description: UnlinkFederatedIdentityResponse is empty.
     chronos.identity.v1.VerifyEmailRequest:
       type: object
       properties:
@@ -6296,6 +6660,114 @@ paths:
                   - METHOD_KIND_TOTP
                   - METHOD_KIND_RECOVERY_CODE
       security: []
+  /chronos.identity.v1.IdentityService/BeginFederatedLink:
+    post:
+      tags:
+        - IdentityService
+      summary: BeginFederatedLink starts attaching a provider to the caller's own account.
+      description: |-
+        AAL2. identity.md §7 rule 3 requires step-up for linking, and the reason is
+         the whole of §7: a link attached to an account the linking party has not
+         proven control of is a TROJAN IDENTIFIER that survives every later recovery,
+         because a password reset changes a credential and leaves a link alone.
+
+         No bootstrap exemption. Linking a provider is not a way to enrol a first
+         second factor, and admitting one here would make the weakest session able to
+         add a permanent way in.
+      operationId: IdentityService_BeginFederatedLink
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.BeginFederatedLinkRequest'
+            example:
+              provider: google
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.BeginFederatedLinkResponse'
+  /chronos.identity.v1.IdentityService/BeginFederatedSignIn:
+    post:
+      tags:
+        - IdentityService
+      summary: BeginFederatedSignIn starts signing in with an identity provider.
+      description: |-
+        Public: the population reaching it has not authenticated, and by definition
+         may have no account at all. It carries no identifier, so it cannot be asked
+         whether an address exists.
+
+         A WRITE, because it records a ceremony: PKCE, state and nonce are bound to
+         this request and stored server-side, which is what makes the callback
+         verifiable rather than merely plausible.
+      operationId: IdentityService_BeginFederatedSignIn
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.BeginFederatedSignInRequest'
+            example:
+              provider: google
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.BeginFederatedSignInResponse'
+      security: []
   /chronos.identity.v1.IdentityService/BeginPasskeyLogin:
     post:
       tags:
@@ -6997,6 +7469,124 @@ paths:
                 secret: PLACEHOLDERSECRETNOTREAL234567AB
                 provisioningUri: otpauth://totp/Chronos:ada@example.com?secret=PLACEHOLDERSECRETNOTREAL234567AB&issuer=Chronos&algorithm=SHA1&digits=6&period=30
                 expiresAt: '2026-08-14T11:19:55Z'
+  /chronos.identity.v1.IdentityService/FinishFederatedLink:
+    post:
+      tags:
+        - IdentityService
+      summary: FinishFederatedLink completes the link.
+      description: |-
+        It consults NO auto-link rules, deliberately: the caller has already proven
+         the account, and that proof is exactly what §7 rule 1's conditions
+         substitute for when it is absent. Applying them again would refuse somebody
+         permission to link their own provider to their own account.
+      operationId: IdentityService_FinishFederatedLink
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.FinishFederatedLinkRequest'
+            example:
+              provider: google
+              code: PLACEHOLDER-not-a-real-code
+              state: PLACEHOLDER-not-a-real-state
+              iss: https://accounts.google.com
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.FinishFederatedLinkResponse'
+  /chronos.identity.v1.IdentityService/FinishFederatedSignIn:
+    post:
+      tags:
+        - IdentityService
+      summary: FinishFederatedSignIn redeems the provider's callback.
+      description: |-
+        # It does NOT always produce a session, and that is the design
+
+         identity.md §7 forbids auto-linking a federated identity to an existing
+         account on an email match alone — the attacker registers at a provider using
+         the victim's address, the provider does not verify it, and naive matching
+         hands them the account. So a genuine sign-in whose conditions are not met
+         answers `link_refused` with no session, and the person authenticates with an
+         existing method and links explicitly from settings.
+
+         `account_exists` rides with it so a client can say "you already have an
+         account, sign in and link this" rather than the dead end §7.5 names, where a
+         second account is created silently and one person owns two.
+
+         The session it does create is AAL1: a provider may have required its own
+         second factor and this system cannot know that it did.
+      operationId: IdentityService_FinishFederatedSignIn
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.FinishFederatedSignInRequest'
+            example:
+              provider: google
+              code: PLACEHOLDER-not-a-real-code
+              state: PLACEHOLDER-not-a-real-state
+              iss: https://accounts.google.com
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.FinishFederatedSignInResponse'
+      security: []
   /chronos.identity.v1.IdentityService/FinishPasskeyLogin:
     post:
       tags:
@@ -7341,6 +7931,51 @@ paths:
                 emailVerified: true
                 registeredAt: '2026-07-02T08:15:00Z'
                 activatedAt: '2026-07-02T08:19:41Z'
+  /chronos.identity.v1.IdentityService/ListFederatedProviders:
+    post:
+      tags:
+        - IdentityService
+      summary: |-
+        ListFederatedProviders names the identity providers this deployment
+         supports.
+      description: |-
+        PUBLIC and deliberately uninteresting: it says what the DEPLOYMENT
+         supports, never what any account uses. A client needs it to render buttons,
+         and it discloses nothing about anybody.
+      operationId: IdentityService_ListFederatedProviders
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.ListFederatedProvidersRequest'
+            example: {}
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.ListFederatedProvidersResponse'
+      security: []
   /chronos.identity.v1.IdentityService/ListLoginHistory:
     get:
       tags:
@@ -8567,6 +9202,58 @@ paths:
                 $ref: '#/components/schemas/chronos.identity.v1.RevokeSessionResponse'
               example:
                 changed: true
+  /chronos.identity.v1.IdentityService/UnlinkFederatedIdentity:
+    post:
+      tags:
+        - IdentityService
+      summary: UnlinkFederatedIdentity removes a provider from the caller's account.
+      description: |-
+        Refused when it would leave the account with no way to sign in — identity.md
+         §7's de-linking rule names the case exactly: removing the last federated
+         link from a PASSWORDLESS account, whose holder would then have nothing at
+         all. Somebody who signed up with Google has no password by design, so an
+         endpoint that allowed it would be account loss dressed as a settings toggle.
+      operationId: IdentityService_UnlinkFederatedIdentity
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.UnlinkFederatedIdentityRequest'
+            example:
+              issuer: https://accounts.google.com
+              providerSubject: "1234567890"
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.UnlinkFederatedIdentityResponse'
   /chronos.identity.v1.IdentityService/VerifyEmail:
     post:
       tags:
@@ -10666,53 +11353,7 @@ tags:
       ComplianceService is the data subject's own rights, exercised on their own
        data.
   - name: IdentityService
-    description: |-
-      IdentityService is the account, its credentials and its sessions.
-
-       # The gates, and the one that is not honest yet
-
-       Every RPC declares its enforcement policy or the server refuses to boot
-       (ADR-021). Four of these are public because they run before any session
-       exists; the other nine act on the CALLER'S OWN account, which identity has no
-       established annotation for.
-
-       Identity is not organization-scoped — a person exists before any organization
-       does, so there is no org for the org-context gate to resolve and no
-       `workspace_id` for row-level security to scope by. The authz gate's two
-       shapes both assume otherwise: an empty `resource_id_field` means "the org
-       already resolved for this request", and a named one means "read the id from
-       this request field", which no message here carries because the account is
-       resolved from the session rather than named by the caller.
-
-       So `{relation: "self", resource_type: "user"}` below names a self-scoped
-       convention that the authz gate now implements: `selfCheck` answers gate 2
-       from the principal alone, substituting `principal.Subject.ID` as the resource
-       and skipping gates 1 and 3, which are both questions ABOUT an organization
-       that a self-scoped method has none of. The resource is read from the session
-       and from nowhere else — not from the request, not from a header — so a caller
-       cannot aim the check at somebody else's account.
-
-       The convention is keyed on the STRING "self", which is the weak part of it.
-       A method that declares a relation this gate does not recognise falls through
-       to the org-scoped shape and fails closed for want of an active organization,
-       so the failure direction is safe; a method that MISSPELLS "self" gets the same
-       treatment and is simply unreachable. Both are safe and neither is obvious.
-       Replacing the string with a declared marker is tracked separately.
-
-       # Assurance levels
-
-       A session is normally AAL2, but AAL1 SESSIONS EXIST: an account with a
-       verified address and no second factor may mint exactly one, for the sole
-       purpose of enrolling its first factor (the bootstrap carve-out). So an
-       unannotated method is NOT automatically two-factor any more — its floor is
-       AAL1 by declaration, and the four read methods here that declare no `min_aal`
-       are reachable from a bootstrap session.
-
-       That makes the explicit declarations on the credential- and session-changing
-       methods load-bearing rather than documentary: they are what stops a
-       password-only session from touching credentials or sessions. A method added
-       here without a `min_aal` is single-factor by default, and the enrolment
-       carve-out is what makes that reachable in practice.
+    description: IdentityService is registration, authentication, sessions and credentials.
   - name: NotificationService
     description: |-
       NotificationService is a person's own notification surface.

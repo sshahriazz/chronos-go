@@ -44,3 +44,10 @@ bin/
 /gendashboards
 /gendocs
 /obsprobe
+
+# Google OAuth client secrets, as the Cloud Console exports them.
+#
+# The download carries a LIVE client secret. It is ignored by pattern rather
+# than by name so the next one somebody downloads is ignored too — a rule that
+# only covers the file you already noticed is a rule that fails the second time.
+client_secret_*.apps.googleusercontent.com.json

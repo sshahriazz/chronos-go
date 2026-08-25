@@ -195,6 +195,20 @@ type PasskeyFlow interface {
 	RemovePasskey(ctx context.Context, cmd app.RemovePasskeyCommand) error
 }
 
+// FederationFlow is identity.md §7's flow.
+//
+// OPTIONAL at the composition root, like PasskeyFlow: a deployment may configure
+// no providers at all, and one that has none serves these RPCs as unimplemented
+// rather than pretending. A nil here is a supported state; a nil that reaches a
+// handler is not, which is why every handler checks.
+type FederationFlow interface {
+	Providers() []string
+	Begin(ctx context.Context, cmd app.BeginFederatedCommand) (app.BeginFederatedResult, error)
+	FinishLogin(ctx context.Context, cmd app.FinishFederatedLoginCommand) (app.FinishFederatedLoginResult, error)
+	FinishLink(ctx context.Context, cmd app.FinishFederatedLinkCommand) error
+	Unlink(ctx context.Context, cmd app.UnlinkFederatedCommand) error
+}
+
 // Queries is identity's read side.
 type Queries interface {
 	GetUser(ctx context.Context, subjectID string) (app.AccountView, error)
@@ -245,6 +259,14 @@ type Deps struct {
 	// set, and the rest of identity serves normally.
 	Passkeys PasskeyFlow
 
+	// Federation is identity.md §7's flow, and is OPTIONAL for the same reason
+	// Passkeys is: a provider needs a client id and secret that cannot be
+	// defaulted, so a deployment configuring none is a supported state.
+	//
+	// Nil means the federation RPCs answer NOT_FOUND and the rest of identity
+	// serves normally — never that a sign-in silently succeeds without them.
+	Federation FederationFlow
+
 	Queries Queries
 
 	// Directory turns the caller's pseudonym into the account id the second-factor
@@ -276,6 +298,7 @@ type Service struct {
 	lifecycle    Lifecycle
 	emails       EmailChanges
 	passkeys     PasskeyFlow
+	federation   FederationFlow
 	queries      Queries
 	directory    app.UserDirectory
 	callerScope  clientip.Resolver
@@ -349,6 +372,7 @@ func New(deps Deps) (*Service, error) {
 		// Optional by design — see Deps.Passkeys. A nil is carried through and
 		// each passkey RPC answers NOT_FOUND rather than panicking.
 		passkeys:    deps.Passkeys,
+		federation:  deps.Federation,
 		queries:     deps.Queries,
 		directory:   deps.Directory,
 		callerScope: deps.CallerScope,

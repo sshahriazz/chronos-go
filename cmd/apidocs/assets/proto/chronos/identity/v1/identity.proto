@@ -2280,6 +2280,322 @@ message RemovePasskeyResponse {}
 // password-only session from touching credentials or sessions. A method added
 // here without a `min_aal` is single-factor by default, and the enrolment
 // carve-out is what makes that reachable in practice.
+// BeginFederatedSignInRequest starts a provider ceremony.
+message BeginFederatedSignInRequest {
+  // The configured provider, e.g. "google". Names come from
+  // ListFederatedProviders, so a client renders only what this deployment
+  // supports.
+  string provider = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "google"}
+      max_length: 32
+    },
+    (buf.validate.field) = {
+      required: true
+      string: {
+        max_len: 32
+        pattern: "^[a-z0-9_-]+$"
+      }
+    }
+  ];
+}
+
+// BeginFederatedSignInResponse is where to send the browser.
+message BeginFederatedSignInResponse {
+  // The provider's authorization URL, with PKCE, state and nonce already bound.
+  //
+  // The browser is REDIRECTED here; nothing in it is a secret the client must
+  // keep, and the two values that are secret — the PKCE verifier and the nonce —
+  // never leave the server, which is what makes them a binding rather than a
+  // claim.
+  //
+  // Constrained to https, because a client is about to send somebody to it.
+  string authorization_url = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "https://accounts.google.com/o/oauth2/v2/auth?client_id=..."}
+      max_length: 4096
+      pattern: "^https://.+"
+    },
+    (buf.validate.field).string = {max_len: 4096}
+  ];
+
+  // When the ceremony stops being redeemable server-side.
+  google.protobuf.Timestamp expires_at = 2;
+}
+
+// FinishFederatedSignInRequest presents what the provider sent back.
+message FinishFederatedSignInRequest {
+  // The provider the ceremony was started for.
+  string provider = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "google"}
+      max_length: 32
+    },
+    (buf.validate.field) = {
+      required: true
+      string: {
+        max_len: 32
+        pattern: "^[a-z0-9_-]+$"
+      }
+    }
+  ];
+
+  // The authorization code. Exchanged once, server-side, with the PKCE verifier
+  // the browser never saw.
+  string code = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "PLACEHOLDER-not-a-real-code"}
+      max_length: 4096
+      pattern: "^\\S+$"
+    },
+    (buf.validate.field) = {
+      required: true
+      string: {max_len: 4096}
+    }
+  ];
+
+  // The state the provider echoed. It is also the ceremony's key, so a callback
+  // whose state names no ceremony is refused before anything is exchanged.
+  // The state the provider echoed, which is also the ceremony's key.
+  string state = 3 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "PLACEHOLDER-not-a-real-state"}
+      max_length: 128
+      pattern: "^[A-Za-z0-9_-]+$"
+    },
+    (buf.validate.field) = {
+      required: true
+      string: {max_len: 128}
+    }
+  ];
+
+  // RFC 9207's `iss`, when the provider sends one.
+  //
+  // Chronos federates to several authorization servers from one client, which is
+  // the multi-AS condition RFC 9700 §4.4.2 addresses: without binding the
+  // intended issuer per request, a mix-up attack redirects a code issued by one
+  // provider into an exchange with another. Optional because the parameter is
+  // not universally implemented; when present it must match.
+  string iss = 4 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "https://accounts.google.com"}
+      max_length: 512
+      pattern: "^https://.*"
+    },
+    (buf.validate.field) = {string: {max_len: 512}}
+  ];
+}
+
+// FinishFederatedSignInResponse is the outcome of a federated sign-in.
+message FinishFederatedSignInResponse {
+  // The bearer token, when an account was resolved. Empty when the sign-in was
+  // genuine and no account could be attached without further proof.
+  //
+  // The bounds are CreateSessionResponse.token's, minus the length rule: this
+  // field is legitimately empty on the refused path, and a fixed length would
+  // make the outcome §7 rule 2 requires unexpressible.
+  string token = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "PLACEHOLDER-not-a-real-token"}
+      max_length: 43
+      pattern: "^[A-Za-z0-9_-]*$"
+    },
+    (buf.validate.field).string = {max_len: 43}
+  ];
+
+  // The session this sign-in created, when one was created. Empty otherwise,
+  // which is why the pattern admits the empty string.
+  string session_id = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "sess_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+      max_length: 31
+      pattern: "^(sess_[0-7][0-9A-HJKMNP-TV-Z]{25})?$"
+    },
+    (buf.validate.field).string = {max_len: 31}
+  ];
+
+  // AAL1 for a federated sign-in, always.
+  //
+  // identity.md §2 puts "federated link alone" on that row: the provider may
+  // have required its own second factor, and this system has no way to know that
+  // it did. Anything sensitive will ask for step-up.
+  chronos.options.v1.AssuranceLevel assurance_level = 3;
+
+  // The sign-in was genuine and NO link was created (identity.md §7 rule 2).
+  //
+  // Not an error. Auto-linking on an email match is the account-takeover this
+  // whole flow exists to refuse, so the person authenticates with an existing
+  // method and links explicitly from settings.
+  bool link_refused = 4;
+
+  // An account already claims the address the provider asserted.
+  //
+  // Carried WITH link_refused so a client can say "you already have an account —
+  // sign in and link this from settings" rather than the dead end identity.md
+  // §7.5 names, where a second account is created silently and the person owns
+  // two.
+  bool account_exists = 5;
+
+  // When the session expires. Zero when no session was created.
+  google.protobuf.Timestamp expires_at = 6;
+}
+
+// BeginFederatedLinkRequest starts attaching a provider to the caller's account.
+message BeginFederatedLinkRequest {
+  // The configured provider to attach, e.g. "google".
+  string provider = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "google"}
+      max_length: 32
+    },
+    (buf.validate.field) = {
+      required: true
+      string: {
+        max_len: 32
+        pattern: "^[a-z0-9_-]+$"
+      }
+    }
+  ];
+}
+
+// BeginFederatedLinkResponse is where to send the browser.
+message BeginFederatedLinkResponse {
+  // The provider's authorization URL, with PKCE, state and nonce already bound.
+  // Constrained to https, because a client is about to send somebody to it.
+  string authorization_url = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "https://accounts.google.com/o/oauth2/v2/auth?client_id=..."}
+      max_length: 4096
+      pattern: "^https://.+"
+    },
+    (buf.validate.field).string = {max_len: 4096}
+  ];
+
+  // When the ceremony stops being redeemable server-side.
+  google.protobuf.Timestamp expires_at = 2;
+}
+
+// FinishFederatedLinkRequest completes the link.
+message FinishFederatedLinkRequest {
+  // The provider the ceremony was started for. Checked against the ceremony, so
+  // a callback cannot be replayed against a different provider.
+  string provider = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "google"}
+      max_length: 32
+    },
+    (buf.validate.field) = {
+      required: true
+      string: {
+        max_len: 32
+        pattern: "^[a-z0-9_-]+$"
+      }
+    }
+  ];
+  // The authorization code, exchanged once with the PKCE verifier the browser
+  // never saw.
+  string code = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "PLACEHOLDER-not-a-real-code"}
+      max_length: 4096
+      pattern: "^\\S+$"
+    },
+    (buf.validate.field) = {
+      required: true
+      string: {max_len: 4096}
+    }
+  ];
+  // The state the provider echoed, which is also the ceremony's key.
+  string state = 3 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "PLACEHOLDER-not-a-real-state"}
+      max_length: 128
+      pattern: "^[A-Za-z0-9_-]+$"
+    },
+    (buf.validate.field) = {
+      required: true
+      string: {max_len: 128}
+    }
+  ];
+
+  // RFC 9207's `iss`, when the provider sends one. See
+  // FinishFederatedSignInRequest.iss.
+  string iss = 4 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "https://accounts.google.com"}
+      max_length: 512
+      pattern: "^https://.*"
+    },
+    (buf.validate.field) = {string: {max_len: 512}}
+  ];
+}
+
+// FinishFederatedLinkResponse is empty. The link exists or the call failed.
+message FinishFederatedLinkResponse {}
+
+// UnlinkFederatedIdentityRequest names one of the caller's own links.
+message UnlinkFederatedIdentityRequest {
+  // The provider's issuer, as recorded on the link.
+  string issuer = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "https://accounts.google.com"}
+      max_length: 512
+      pattern: "^https://.+"
+    },
+    (buf.validate.field) = {
+      required: true
+      string: {max_len: 512}
+    }
+  ];
+
+  // The provider's immutable identifier for the person.
+  //
+  // Never an email address: matching on one is the takeover identity.md §7 rule
+  // 5 forbids, and an identifier that can change is not an identity.
+  string provider_subject = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "1234567890"}
+      max_length: 256
+      pattern: "^\\S+$"
+    },
+    (buf.validate.field) = {
+      required: true
+      string: {max_len: 256}
+    }
+  ];
+}
+
+// UnlinkFederatedIdentityResponse is empty.
+message UnlinkFederatedIdentityResponse {}
+
+// ListFederatedProvidersRequest asks what this deployment supports.
+message ListFederatedProvidersRequest {}
+
+// ListFederatedProvidersResponse names the configured providers.
+//
+// PUBLIC and deliberately uninteresting: it says what this deployment supports,
+// not what any account uses. A client needs it to render buttons, and it
+// discloses nothing about anybody.
+message ListFederatedProvidersResponse {
+  // The provider names this deployment has configured.
+  repeated string providers = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "['google']"}
+      max_items: 16
+    },
+    (buf.validate.field).repeated = {
+      max_items: 16
+      items: {
+        string: {
+          max_len: 32
+          pattern: "^[a-z0-9_-]+$"
+        }
+      }
+    }
+  ];
+}
+
+// IdentityService is registration, authentication, sessions and credentials.
 service IdentityService {
   // Register claims an address and creates the account that claims it.
   //
@@ -4172,6 +4488,172 @@ service IdentityService {
   // AAL2 with no bootstrap exemption: removing a credential is not a way to
   // enrol one.
   rpc RemovePasskey(RemovePasskeyRequest) returns (RemovePasskeyResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+    option (chronos.options.v1.min_aal) = ASSURANCE_LEVEL_2;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // ListFederatedProviders names the identity providers this deployment
+  // supports.
+  //
+  // PUBLIC and deliberately uninteresting: it says what the DEPLOYMENT
+  // supports, never what any account uses. A client needs it to render buttons,
+  // and it discloses nothing about anybody.
+  rpc ListFederatedProviders(ListFederatedProvidersRequest) returns (ListFederatedProvidersResponse) {
+    option (chronos.options.v1.public) = true;
+    option (chronos.options.v1.operation) = OPERATION_CLASS_READ;
+
+    option (gnostic.openapi.v3.operation) = {security: [{}]};
+  }
+
+  // BeginFederatedSignIn starts signing in with an identity provider.
+  //
+  // Public: the population reaching it has not authenticated, and by definition
+  // may have no account at all. It carries no identifier, so it cannot be asked
+  // whether an address exists.
+  //
+  // A WRITE, because it records a ceremony: PKCE, state and nonce are bound to
+  // this request and stored server-side, which is what makes the callback
+  // verifiable rather than merely plausible.
+  rpc BeginFederatedSignIn(BeginFederatedSignInRequest) returns (BeginFederatedSignInResponse) {
+    option (chronos.options.v1.public) = true;
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    option (gnostic.openapi.v3.operation) = {
+      security: [{}]
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // FinishFederatedSignIn redeems the provider's callback.
+  //
+  // # It does NOT always produce a session, and that is the design
+  //
+  // identity.md §7 forbids auto-linking a federated identity to an existing
+  // account on an email match alone — the attacker registers at a provider using
+  // the victim's address, the provider does not verify it, and naive matching
+  // hands them the account. So a genuine sign-in whose conditions are not met
+  // answers `link_refused` with no session, and the person authenticates with an
+  // existing method and links explicitly from settings.
+  //
+  // `account_exists` rides with it so a client can say "you already have an
+  // account, sign in and link this" rather than the dead end §7.5 names, where a
+  // second account is created silently and one person owns two.
+  //
+  // The session it does create is AAL1: a provider may have required its own
+  // second factor and this system cannot know that it did.
+  rpc FinishFederatedSignIn(FinishFederatedSignInRequest) returns (FinishFederatedSignInResponse) {
+    option (chronos.options.v1.public) = true;
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    option (gnostic.openapi.v3.operation) = {
+      security: [{}]
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // BeginFederatedLink starts attaching a provider to the caller's own account.
+  //
+  // AAL2. identity.md §7 rule 3 requires step-up for linking, and the reason is
+  // the whole of §7: a link attached to an account the linking party has not
+  // proven control of is a TROJAN IDENTIFIER that survives every later recovery,
+  // because a password reset changes a credential and leaves a link alone.
+  //
+  // No bootstrap exemption. Linking a provider is not a way to enrol a first
+  // second factor, and admitting one here would make the weakest session able to
+  // add a permanent way in.
+  rpc BeginFederatedLink(BeginFederatedLinkRequest) returns (BeginFederatedLinkResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+    option (chronos.options.v1.min_aal) = ASSURANCE_LEVEL_2;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // FinishFederatedLink completes the link.
+  //
+  // It consults NO auto-link rules, deliberately: the caller has already proven
+  // the account, and that proof is exactly what §7 rule 1's conditions
+  // substitute for when it is absent. Applying them again would refuse somebody
+  // permission to link their own provider to their own account.
+  rpc FinishFederatedLink(FinishFederatedLinkRequest) returns (FinishFederatedLinkResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+    option (chronos.options.v1.min_aal) = ASSURANCE_LEVEL_2;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // UnlinkFederatedIdentity removes a provider from the caller's account.
+  //
+  // Refused when it would leave the account with no way to sign in — identity.md
+  // §7's de-linking rule names the case exactly: removing the last federated
+  // link from a PASSWORDLESS account, whose holder would then have nothing at
+  // all. Somebody who signed up with Google has no password by design, so an
+  // endpoint that allowed it would be account loss dressed as a settings toggle.
+  rpc UnlinkFederatedIdentity(UnlinkFederatedIdentityRequest) returns (UnlinkFederatedIdentityResponse) {
     option (chronos.options.v1.authz) = {
       relation: "self"
       resource_type: "user"

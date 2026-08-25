@@ -840,6 +840,16 @@ func (d *dependencies) buildIdentity(
 		return nil, err
 	}
 
+	// Federated identity (identity.md §7). Optional for the same reason passkeys
+	// are — a provider needs credentials that cannot be defaulted — and built
+	// with the SAME collaborators the rest of identity uses, so "which account
+	// claims this address" has one answer everywhere.
+	federation, err := d.buildFederation(context.Background(), cfg, log,
+		users, readModel, sessions, index, authentication)
+	if err != nil {
+		return nil, err
+	}
+
 	return identityapi.New(identityapi.Deps{
 		Registration:   registration,
 		Resender:       resend,
@@ -852,7 +862,12 @@ func (d *dependencies) buildIdentity(
 		// nil when this deployment has no WebAuthn configuration, which is a
 		// supported state — see buildPasskeys. The six passkey RPCs then answer
 		// NOT_FOUND naming what to set, and everything else serves normally.
-		Passkeys:    passkeys,
+		Passkeys: passkeys,
+		// nil when no provider is configured, which is a supported state — see
+		// buildFederation. The federation RPCs then answer NOT_FOUND naming what
+		// to set, except ListFederatedProviders, which answers an empty list
+		// because "nothing" is a valid thing for a client to render.
+		Federation:  federation,
 		Queries:     queries,
 		Directory:   readModel,
 		CallerScope: callerScope,
