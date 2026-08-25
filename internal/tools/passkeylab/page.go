@@ -131,6 +131,20 @@ const page = `<!doctype html>
   </section>
 
   <section>
+    <h2>2b · TOTP, the other second factor</h2>
+    <p class="lede">
+      Enrols an authenticator secret and proves it with a live code. The code is
+      computed here with Web Crypto — RFC 6238 over HMAC-SHA-1 — so this is the
+      real algorithm an authenticator app runs, not a stub the server would
+      accept either way.
+    </p>
+    <button id="totp-enrol">Enrol TOTP</button>
+    <button id="totp-confirm" class="ghost">Confirm with a live code</button>
+    <button id="totp-signin" class="ghost">Sign in with password + code</button>
+    <pre id="out-totp">—</pre>
+  </section>
+
+  <section>
     <h2>3 · Sign in with the passkey</h2>
     <p class="lede">
       Usernameless: nothing identifies the account, the authenticator does. This
@@ -343,6 +357,103 @@ document.getElementById('register').onclick = async () => {
         : '(none — this was not the first passkey on the account)',
     });
   } catch (e) { show('out-register', e.detail || String(e), true); }
+};
+
+// --- 2b. TOTP ---------------------------------------------------------------
+//
+// RFC 6238 in the browser. The secret arrives base32 in the provisioning URI —
+// which is what a phone camera scans — so it is decoded here rather than taken
+// from the response's raw field, to exercise the same string an authenticator
+// app would.
+const b32 = (s) => {
+  const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let bits = 0, value = 0;
+  const out = [];
+  for (const c of s.replace(/=+$/, '').toUpperCase()) {
+    const i = A.indexOf(c);
+    if (i < 0) continue;
+    value = (value << 5) | i; bits += 5;
+    if (bits >= 8) { out.push((value >>> (bits - 8)) & 255); bits -= 8; }
+  }
+  return new Uint8Array(out);
+};
+
+async function totpCode(secretB32, when) {
+  const key = await crypto.subtle.importKey(
+    'raw', b32(secretB32), { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']);
+  // The counter is a 64-bit big-endian step number. Thirty seconds is the
+  // period every authenticator app assumes and the server's own default.
+  const step = Math.floor(when / 30000);
+  const buf = new ArrayBuffer(8);
+  new DataView(buf).setUint32(4, step);
+  const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, buf));
+  // Dynamic truncation, RFC 4226 §5.4.
+  const off = mac[mac.length - 1] & 0x0f;
+  const bin = ((mac[off] & 0x7f) << 24) | (mac[off + 1] << 16) |
+              (mac[off + 2] << 8) | mac[off + 3];
+  return String(bin % 1000000).padStart(6, '0');
+}
+
+let totpSecret = '';
+
+document.getElementById('totp-enrol').onclick = async () => {
+  const bearer = tokenBox.value.trim();
+  if (!bearer) { show('out-totp', 'No bearer token. Create an account or sign in first.', true); return; }
+  try {
+    const out = await rpc('EnrollTotp', {}, bearer);
+    // From the URI, not the raw field: this is the string a phone scans.
+    const uri = out.provisioningUri || '';
+    const m = /[?&]secret=([A-Z2-7]+)/i.exec(uri);
+    totpSecret = m ? m[1] : (out.secret || '');
+    show('out-totp', {
+      credentialId: out.credentialId,
+      provisioningUri: uri,
+      note: totpSecret
+        ? 'Secret captured. Now confirm with a live code — the enrolment is NOT ' +
+          'a second factor until a code proves it.'
+        : 'No secret found in the provisioning URI.',
+    });
+  } catch (e) { show('out-totp', e.detail || String(e), true); }
+};
+
+document.getElementById('totp-confirm').onclick = async () => {
+  const bearer = tokenBox.value.trim();
+  if (!totpSecret) { show('out-totp', 'Enrol first — there is no secret to compute a code from.', true); return; }
+  try {
+    const code = await totpCode(totpSecret, Date.now());
+    const out = await rpc('ConfirmTotp', { code }, bearer);
+    show('out-totp', {
+      code,
+      activated: out.activated,
+      changed: out.changed,
+      note: out.activated
+        ? 'The account is ACTIVE: an address was proven and a real second factor ' +
+          'is enrolled. Both are required, and neither alone does it.'
+        : 'Confirmed. The account was already active.',
+    });
+  } catch (e) { show('out-totp', e.detail || String(e), true); }
+};
+
+document.getElementById('totp-signin').onclick = async () => {
+  if (!totpSecret) { show('out-totp', 'Enrol and confirm first.', true); return; }
+  try {
+    const code = await totpCode(totpSecret, Date.now());
+    const out = await rpc('CreateSession', {
+      identifier: document.getElementById('email').value.trim(),
+      password: document.getElementById('password').value,
+      code,
+      deviceId: 'passkeylab',
+    });
+    tokenBox.value = out.token || '';
+    show('out-totp', {
+      sessionId: out.sessionId,
+      assuranceLevel: out.assuranceLevel,
+      note: out.assuranceLevel === 'ASSURANCE_LEVEL_2'
+        ? 'AAL2 — password AND a second factor. Two independent things, which is ' +
+          'what the level means; a passkey reaches the same level in one gesture.'
+        : 'Below AAL2 — the code was not accepted as a second factor.',
+    });
+  } catch (e) { show('out-totp', e.detail || String(e), true); }
 };
 
 // --- 3. sign in with the passkey -------------------------------------------
