@@ -352,7 +352,10 @@ func (p *Passkeys) FinishRegistration(
 	}, challenge.State, cmd.Response)
 	if err != nil {
 		// ONE refusal for every cause. Which check failed is exactly what an
-		// attacker wants to know.
+		// attacker wants to know — and the operator still needs it, so it is
+		// logged rather than destroyed.
+		p.log.WarnContext(ctx, "a passkey registration was refused",
+			"module", "identity", "subject_id", cmd.SubjectID, "error", err)
 		return FinishRegistrationResult{}, errs.ValidationFailedf(
 			"this passkey could not be verified")
 	}
@@ -694,11 +697,20 @@ func (p *Passkeys) FinishLogin(
 
 	presented, err := credentialIDFromAssertion(cmd.Response)
 	if err != nil {
+		// Every refusal below answers the caller identically and is LOGGED
+		// distinctly. The two are not in tension: the response must not say which
+		// check failed — that is an oracle — while an operator has to be able to
+		// answer "why can nobody sign in with a passkey today", and four paths
+		// that share one message and record nothing make that unanswerable.
+		p.log.WarnContext(ctx, "a passkey assertion named no credential",
+			"module", "identity", "error", err)
 		return FinishLoginResult{}, errs.Unauthenticatedf("this passkey could not be verified")
 	}
 	stored, err := p.store.Find(ctx, presented)
 	if err != nil {
 		if errors.Is(err, ErrNoSuchPasskey) {
+			p.log.WarnContext(ctx, "a passkey assertion named an unknown credential",
+				"module", "identity", "credential_id", presented)
 			// An unknown credential answers exactly as a bad signature does.
 			// Distinguishing them would tell a caller which credential ids are
 			// registered, and a credential id is not secret — it travels in every
@@ -710,6 +722,13 @@ func (p *Passkeys) FinishLogin(
 
 	user, err := p.load(ctx, stored.SubjectID)
 	if err != nil {
+		// The credential exists and the ACCOUNT does not resolve. Almost always a
+		// projection that has not caught up or is not running: the subject is
+		// resolved through user_view, and a stopped projector makes every passkey
+		// login fail while the credential sits perfectly valid in the table.
+		p.log.WarnContext(ctx, "a passkey's account could not be resolved",
+			"module", "identity", "subject_id", stored.SubjectID,
+			"credential_id", stored.CredentialID, "error", err)
 		return FinishLoginResult{}, errs.Unauthenticatedf("this passkey could not be verified")
 	}
 	assertion, err := p.ceremonies.FinishLogin(
@@ -722,6 +741,18 @@ func (p *Passkeys) FinishLogin(
 		}},
 		challenge.State, cmd.Response)
 	if err != nil {
+		// LOGGED, and the caller is still told nothing. The two are not in
+		// tension: the response must not say WHICH check failed — that is an
+		// oracle — but an operator has to be able to answer "why can nobody sign
+		// in with a passkey today", and without this the reason is destroyed at
+		// the moment it is produced.
+		//
+		// It is the ceremony's own error, which names the actual cause: a blank
+		// user handle, an origin that does not match, a signature that does not
+		// verify, a relying-party id that moved.
+		p.log.WarnContext(ctx, "a passkey assertion was refused",
+			"module", "identity", "subject_id", stored.SubjectID,
+			"credential_id", stored.CredentialID, "error", err)
 		return FinishLoginResult{}, errs.Unauthenticatedf("this passkey could not be verified")
 	}
 
@@ -766,6 +797,8 @@ func (p *Passkeys) FinishLogin(
 
 	userID, err := p.subjects.UserBySubject(ctx, stored.SubjectID)
 	if err != nil {
+		p.log.WarnContext(ctx, "a verified passkey's account id could not be resolved",
+			"module", "identity", "subject_id", stored.SubjectID, "error", err)
 		return FinishLoginResult{}, errs.Unauthenticatedf("this passkey could not be verified")
 	}
 	result.Proof = Proof{
