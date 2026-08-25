@@ -367,12 +367,13 @@ type UserView struct {
 	Username *string
 }
 
-// One WebAuthn ceremony in flight. Single-use, enforced by DELETE … RETURNING rather than read-then-write. Expires; swept.
+// One ceremony in flight — WebAuthn or federated. Single-use, enforced by DELETE … RETURNING rather than read-then-write, with the purpose checked in the same statement so a ceremony issued for one flow cannot be answered as another. The name predates federation reusing it.
 type WebauthnChallenge struct {
 	ChallengeID string
 	// The subject a registration ceremony is for; NULL for a discoverable login. Deliberately NOT a foreign key to user_view: that table is a projection, and PostgreSQL refuses to TRUNCATE a table referenced by a foreign key — so the key would make a rebuild impossible rather than merely lossy.
 	SubjectID *string
 	Purpose   string
+	// The ceremony adapter's session data. For WebAuthn, the library's session. For a federated sign-in, the PKCE verifier and the nonce — both of which never leave this system, which is what makes them a binding rather than a claim.
 	State     []byte
 	CreatedAt pgtype.Timestamptz
 	ExpiresAt pgtype.Timestamptz
