@@ -30,6 +30,53 @@ const (
 	IssuerEntraPrefix = "https://login.microsoftonline.com/"
 )
 
+// LinkReason names WHY a link was refused.
+//
+// # Why the decision carries a reason at all
+//
+// The caller must not be told which condition failed — that is an oracle about
+// somebody else's account and about a third party's claims. The OPERATOR must,
+// because "why can nobody sign in with Google" is otherwise unanswerable, and a
+// refusal that records only "refused" is the same defect this repository has now
+// found three times: a check whose reason is destroyed at the moment it is
+// produced.
+//
+// So it is returned alongside the decision, logged, and never serialised onto
+// the wire.
+type LinkReason string
+
+const (
+	// ReasonLinked is not a refusal.
+	ReasonLinked LinkReason = "linked"
+
+	// ReasonNoAccount means nothing claims the address, so there was nothing to
+	// link to. The caller creates a new account instead.
+	ReasonNoAccount LinkReason = "no_account_claims_the_address"
+
+	// ReasonNoProviderEmail means the provider asserted no address at all.
+	ReasonNoProviderEmail LinkReason = "provider_asserted_no_address"
+
+	// ReasonLocalUnverified means the account never proved its own address, so
+	// linking would trust a provider's claim about something this system has
+	// itself never confirmed.
+	ReasonLocalUnverified LinkReason = "local_address_not_verified"
+
+	// ReasonProviderUnverified means the provider said it did not verify.
+	ReasonProviderUnverified LinkReason = "provider_says_unverified"
+
+	// ReasonProviderSilent means the provider asserted NOTHING, which is not the
+	// same as saying no (§7 rule 6).
+	ReasonProviderSilent LinkReason = "provider_asserted_nothing"
+
+	// ReasonUndeliverable means a GitHub noreply or an Apple private relay:
+	// verified by the provider and useless as a contact address.
+	ReasonUndeliverable LinkReason = "address_is_not_deliverable_mail"
+
+	// ReasonIssuerNotTrusted means the provider is not on §7's
+	// trusted-verification list — or is Entra without xms_edov, which is nOAuth.
+	ReasonIssuerNotTrusted LinkReason = "issuer_not_trusted_for_verification"
+)
+
 // LinkDecision is what a provider response permits.
 type LinkDecision int
 
@@ -139,36 +186,46 @@ type LocalAccount struct {
 // with an existing method and links explicitly from settings. That path is
 // always available, so refusing costs a few clicks and never an account.
 func DecideAutoLink(p ProviderIdentity, local LocalAccount) LinkDecision {
+	decision, _ := DecideAutoLinkWithReason(p, local)
+	return decision
+}
+
+// DecideAutoLinkWithReason is DecideAutoLink, saying which condition decided.
+//
+// The reason is for the OPERATOR and never for the caller. See LinkReason.
+func DecideAutoLinkWithReason(p ProviderIdentity, local LocalAccount) (LinkDecision, LinkReason) {
 	// No account claims the address, so there is nothing to link TO. The caller
 	// creates a new account instead, which is a different decision entirely.
 	if !local.Exists {
-		return LinkRefused
+		return LinkRefused, ReasonNoAccount
 	}
 
 	switch {
 	case p.EmailIndex == "":
 		// The provider asserted no address. Nothing to match on, and matching on
 		// anything else is what rule 5 forbids.
-		return LinkRefused
+		return LinkRefused, ReasonNoProviderEmail
 	case !local.EmailVerified:
 		// The local account never proved its own address. Linking here would
 		// trust a provider's claim about an address this system has itself never
 		// confirmed — two unverified claims do not make a verified one.
-		return LinkRefused
+		return LinkRefused, ReasonLocalUnverified
+	case p.EmailVerification == contract.VerificationUnverified:
+		return LinkRefused, ReasonProviderUnverified
 	case p.EmailVerification != contract.VerificationVerified:
-		// Unverified, or NOT ASSERTED. Both refuse, and keeping them distinct is
-		// rule 6: a provider staying silent is not a provider saying no, and only
-		// one of those could ever become a yes.
-		return LinkRefused
+		// NOT ASSERTED. Kept distinct from "said no" because rule 6 requires it:
+		// a provider staying silent is not a provider saying no, and only one of
+		// those could ever become a yes.
+		return LinkRefused, ReasonProviderSilent
 	case p.GitHubNoreply, p.AppleUsesPrivateRelay:
 		// Verified by the provider and useless as an address. See the doc.
-		return LinkRefused
+		return LinkRefused, ReasonUndeliverable
 	}
 
 	if !trustedForVerification(p) {
-		return LinkRefused
+		return LinkRefused, ReasonIssuerNotTrusted
 	}
-	return LinkAuto
+	return LinkAuto, ReasonLinked
 }
 
 // trustedForVerification implements the trusted list, and nothing else may.

@@ -101,6 +101,27 @@ const page = `<!doctype html>
   </section>
 
   <section>
+    <h2>0b · Recover an unverified account</h2>
+    <p class="lede">
+      For an address that is CLAIMED but never proven — a registration whose
+      verification link was lost. Such an account has no password at all, so a
+      password reset cannot help it: the first password is set by the
+      verification link itself.
+      <br><br>
+      identity.md §12.1 exists for exactly this: without a resend, somebody is
+      locked out of an account they cannot re-register, because the address is
+      claimed by the account they cannot reach.
+    </p>
+    <div class="row">
+      <div><label for="recover-email">Email</label><input id="recover-email" autocomplete="username"></div>
+      <div><label for="recover-username">Username to claim</label><input id="recover-username"></div>
+      <div><label for="recover-password">Password to set</label><input id="recover-password" type="password"></div>
+    </div>
+    <button id="recover">Resend and complete</button>
+    <pre id="out-recover">—</pre>
+  </section>
+
+  <section>
     <h2>1 · Bearer token</h2>
     <p class="lede">
       Registration needs an authenticated caller. Sign in with a password, or
@@ -313,6 +334,48 @@ document.getElementById('signup').onclick = async () => {
             'Go to step 2.',
     });
   } catch (e) { show('out-signup', e.detail || String(e), true); }
+};
+
+// --- 0b. recover an unverified account --------------------------------------
+//
+// ResendEmailVerification answers the SAME empty response for five outcomes —
+// no account, pending, already verified, deactivated, suspended — so this page
+// cannot tell which happened and does not pretend to. What it can do is wait for
+// the mail: if one arrives, the account was pending and a fresh link was issued.
+document.getElementById('recover').onclick = async () => {
+  const email = document.getElementById('recover-email').value.trim();
+  const username = document.getElementById('recover-username').value.trim();
+  const password = document.getElementById('recover-password').value;
+  if (!email || !username || !password) {
+    show('out-recover', 'Email, username and password are all required — the ' +
+      'verification link is what SETS the first password.', true);
+    return;
+  }
+  const since = Date.now() - 5000;
+  try {
+    show('out-recover', 'requesting a fresh link…');
+    await rpc('ResendEmailVerification', { email });
+
+    show('out-recover', 'waiting for the mail…');
+    const token = await verificationToken(email, since);
+
+    show('out-recover', 'verifying…');
+    await rpc('VerifyEmail', { token, password, username });
+
+    const session = await rpc('CreateSession', {
+      identifier: email, password, deviceId: 'passkeylab',
+    });
+    tokenBox.value = session.token || '';
+    document.getElementById('email').value = email;
+    document.getElementById('password').value = password;
+    show('out-recover', {
+      account: email,
+      assuranceLevel: session.assuranceLevel,
+      note: 'The address is now PROVEN. A federated sign-in with the same ' +
+            'address can auto-link from here, because both sides have verified ' +
+            'it — which is what rule 1 asks for.',
+    });
+  } catch (e) { show('out-recover', e.detail || String(e), true); }
 };
 
 // --- 1. sign in -------------------------------------------------------------

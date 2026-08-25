@@ -225,3 +225,76 @@ func TestTheEntraSubjectJoinsTenantAndObject(t *testing.T) {
 		}
 	}
 }
+
+// EVERY REFUSAL NAMES ITS OWN CONDITION.
+//
+// # Why the reason is tested as carefully as the decision
+//
+// A refusal that records only "refused" is the defect this repository has now
+// found three times — a check whose reason is destroyed at the moment it is
+// produced, leaving "why can nobody sign in with Google" unanswerable by
+// anyone. The reason exists for the operator and is never serialised onto the
+// wire, so nothing else would catch it drifting.
+//
+// The two provider states are kept DISTINCT here, which is rule 6's whole
+// point: "said no" and "said nothing" are different facts, and only one of them
+// could ever become a yes.
+func TestEachRefusalNamesItsCondition(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mutate func(*domain.ProviderIdentity, *domain.LocalAccount)
+		want   domain.LinkReason
+	}{
+		"no account": {
+			func(_ *domain.ProviderIdentity, l *domain.LocalAccount) { l.Exists = false },
+			domain.ReasonNoAccount,
+		},
+		"local unverified": {
+			func(_ *domain.ProviderIdentity, l *domain.LocalAccount) { l.EmailVerified = false },
+			domain.ReasonLocalUnverified,
+		},
+		"provider says no": {
+			func(p *domain.ProviderIdentity, _ *domain.LocalAccount) {
+				p.EmailVerification = contract.VerificationUnverified
+			},
+			domain.ReasonProviderUnverified,
+		},
+		"provider says nothing": {
+			func(p *domain.ProviderIdentity, _ *domain.LocalAccount) {
+				p.EmailVerification = contract.VerificationNotAsserted
+			},
+			domain.ReasonProviderSilent,
+		},
+		"no provider address": {
+			func(p *domain.ProviderIdentity, _ *domain.LocalAccount) { p.EmailIndex = "" },
+			domain.ReasonNoProviderEmail,
+		},
+		"undeliverable address": {
+			func(p *domain.ProviderIdentity, _ *domain.LocalAccount) { p.GitHubNoreply = true },
+			domain.ReasonUndeliverable,
+		},
+		"issuer not trusted": {
+			func(p *domain.ProviderIdentity, _ *domain.LocalAccount) { p.Issuer = domain.IssuerApple },
+			domain.ReasonIssuerNotTrusted,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, l := googleVerified(), verifiedLocal
+			tc.mutate(&p, &l)
+			decision, reason := domain.DecideAutoLinkWithReason(p, l)
+			if decision != domain.LinkRefused {
+				t.Fatalf("%s did not refuse", name)
+			}
+			if reason != tc.want {
+				t.Fatalf("%s reported %q, want %q — an operator asking why cannot tell "+
+					"which condition decided", name, reason, tc.want)
+			}
+		})
+	}
+
+	// And the success path names itself too, so "linked" is not the zero value
+	// of a string nobody set.
+	if d, r := domain.DecideAutoLinkWithReason(googleVerified(), verifiedLocal); d != domain.LinkAuto ||
+		r != domain.ReasonLinked {
+		t.Fatalf("the linked path reported %v/%q", d, r)
+	}
+}

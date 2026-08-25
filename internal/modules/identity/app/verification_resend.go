@@ -212,6 +212,28 @@ const (
 	ResendRaced
 )
 
+// String names the outcome for a log line.
+//
+// Written out rather than generated, so a value added to the enum without a name
+// here reads as "unknown" and not as a number an operator has to look up — and
+// so the names stay stable if the iota order ever moves.
+func (o ResendOutcome) String() string {
+	switch o {
+	case ResendNoAccount:
+		return "no_account_claims_the_address"
+	case ResendRequested:
+		return "requested"
+	case ResendAlreadyVerified:
+		return "already_verified"
+	case ResendNotPending:
+		return "not_pending"
+	case ResendRaced:
+		return "raced"
+	default:
+		return "unknown"
+	}
+}
+
 // ResendVerificationResult reports the outcome to the caller INSIDE the process.
 type ResendVerificationResult struct {
 	Outcome ResendOutcome
@@ -241,6 +263,28 @@ type ResendVerificationResult struct {
 // service against everyone on the list. Caller-first bounds the damage to the
 // attacker's own scope.
 func (v *ResendVerification) Resend(
+	ctx context.Context, cmd ResendVerificationCommand,
+) (ResendVerificationResult, error) {
+	result, err := v.resend(ctx, cmd)
+
+	// LOGGED for the operator, never returned to the caller.
+	//
+	// Five outcomes share one empty response by design — telling them apart
+	// would say whether an address has an account, and in what state — and that
+	// design leaves nobody able to answer "why did no mail arrive". The response
+	// stays identical; the reason stops being destroyed.
+	//
+	// The address is NOT logged, only the outcome: a log line is a durable
+	// record and ADR-002 applies to it exactly as it does to an event.
+	if err == nil {
+		v.log.InfoContext(ctx, "a verification resend was decided",
+			"module", "identity", "outcome", result.Outcome.String())
+	}
+	return result, err
+}
+
+// resend is the decision itself.
+func (v *ResendVerification) resend(
 	ctx context.Context, cmd ResendVerificationCommand,
 ) (ResendVerificationResult, error) {
 	if cmd.IdempotencyKey == "" {

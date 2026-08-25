@@ -340,7 +340,7 @@ func (f *Federation) FinishLogin(
 		local.EmailVerified = user.EmailVerified()
 	}
 
-	decision := domain.DecideAutoLink(domain.ProviderIdentity{
+	decision, reason := domain.DecideAutoLinkWithReason(domain.ProviderIdentity{
 		Issuer:                        identity.Issuer,
 		Subject:                       identity.Subject,
 		EmailIndex:                    index,
@@ -354,9 +354,15 @@ func (f *Federation) FinishLogin(
 		// §7 rule 2. Reported, not errored: the person authenticates with an
 		// existing method and links explicitly. Saying so is what stops the dead
 		// end §7.5 describes.
+		// The REASON is logged and never returned. The caller must not learn
+		// which condition failed — that is an oracle about somebody else's
+		// account and about a third party's claims — while an operator asking
+		// "why can nobody sign in with Google" has no other way to find out.
 		f.log.InfoContext(ctx, "a federated sign-in was not auto-linked",
 			"module", "identity", "issuer", string(identity.Issuer),
-			"account_exists", local.Exists)
+			"account_exists", local.Exists, "reason", string(reason),
+			"provider_says", string(identity.EmailVerification),
+			"local_verified", local.EmailVerified)
 		return FinishFederatedLoginResult{LinkRefused: true, AccountExists: local.Exists}, nil
 	}
 
