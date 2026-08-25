@@ -1267,3 +1267,47 @@ const (
 	// UnlinkErased is the account being erased.
 	UnlinkErased = "erased"
 )
+
+// FederatedIdentityClaimed records that a provider identity is spoken for.
+//
+// # Why this is a separate aggregate and not a field on the account
+//
+// identity.md §7 rule 4: a provider identity links to AT MOST ONE user. That is
+// a uniqueness constraint across accounts, and the only place this system can
+// enforce one at the moment of the write is a stream named from the thing being
+// claimed — exactly as `EmailReservation` does for an address (ADR-044).
+//
+// Two accounts linking one Google identity contend on the SAME STREAM, so
+// KurrentDB's expected-revision check refuses one of them. Checking a projection
+// first cannot work and fails in the way that is hardest to notice: the
+// projection is behind the log by construction, so under concurrency both reads
+// say "free", both succeed, and one provider identity signs into two accounts.
+type FederatedIdentityClaimed struct {
+	Issuer          Issuer
+	ProviderSubject string
+
+	SubjectID string
+	ClaimedAt time.Time
+}
+
+func (*FederatedIdentityClaimed) EventType() string {
+	return "identity.FederatedIdentityClaimed.v1"
+}
+
+// FederatedIdentityReleased frees a provider identity to be claimed again.
+//
+// Recorded when a link is removed or an account erased, so the same person can
+// re-link the same provider later — and so an identity is not held forever by an
+// account that no longer exists.
+type FederatedIdentityReleased struct {
+	Issuer          Issuer
+	ProviderSubject string
+
+	SubjectID  string
+	Reason     string
+	ReleasedAt time.Time
+}
+
+func (*FederatedIdentityReleased) EventType() string {
+	return "identity.FederatedIdentityReleased.v1"
+}
