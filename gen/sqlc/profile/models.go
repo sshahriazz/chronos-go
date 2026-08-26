@@ -5,6 +5,8 @@
 package profiledb
 
 import (
+	"net/netip"
+
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -151,6 +153,92 @@ type NotificationPreference struct {
 	UpdatedAt pgtype.Timestamptz
 }
 
+// Operators (ADR-024, operator.md §3). Projection of the operator- streams. No personal data: the employee address is in the vault under subject_id.
+type OperatorAccount struct {
+	OperatorID      string
+	SubjectID       string
+	Issuer          string
+	ProviderSubject string
+	Role            string
+	DisabledAt      pgtype.Timestamptz
+	ProvisionedAt   pgtype.Timestamptz
+	UpdatedAt       pgtype.Timestamptz
+}
+
+// Every operator action, reads included (operator.md §5). Under GDPR looking is processing. Stores SubjectID pseudonyms only, so entries survive erasure as non-identifying facts.
+type OperatorAuditLog struct {
+	EntryID           string
+	OperatorID        string
+	OperatorSubjectID string
+	Action            string
+	Method            string
+	OrgID             pgtype.Text
+	TargetSubjectID   pgtype.Text
+	Fields            []string
+	Reason            pgtype.Text
+	FromIp            *netip.Addr
+	OccurredAt        pgtype.Timestamptz
+}
+
+type OperatorCeremony struct {
+	CeremonyID string
+	Kind       string
+	OperatorID pgtype.Text
+	Payload    []byte
+	ExpiresAt  pgtype.Timestamptz
+	ConsumedAt pgtype.Timestamptz
+	CreatedAt  pgtype.Timestamptz
+}
+
+// WebAuthn credentials for operators. Authoritative, NOT rebuildable — a public key never enters an event. Intentionally no FK to operator_account: see migration 00033.
+type OperatorCredential struct {
+	CredentialID   string
+	OperatorID     string
+	PublicKey      []byte
+	SignCount      int64
+	Aaguid         []byte
+	Transports     []string
+	BackupEligible bool
+	BackupState    bool
+	Label          pgtype.Text
+	CreatedAt      pgtype.Timestamptz
+	LastUsedAt     pgtype.Timestamptz
+	CloneWarnedAt  pgtype.Timestamptz
+}
+
+// The customer directory (operator.md §9). Org-level columns only — minimisation is structural, and TestOperatorProjectionsHoldNoPersonalData asserts it against this schema.
+type OperatorCustomerList struct {
+	OrgID              string
+	Slug               string
+	OrgName            string
+	LifecycleState     string
+	PlanID             pgtype.Text
+	PlanVersionID      pgtype.Text
+	SubscriptionStatus pgtype.Text
+	TrialEndsAt        pgtype.Timestamptz
+	WorkspaceCount     int32
+	MemberCount        int32
+	LastActiveAt       pgtype.Timestamptz
+	SignupSource       pgtype.Text
+	SuspendedAt        pgtype.Timestamptz
+	SuspensionReason   pgtype.Text
+	OrgCreatedAt       pgtype.Timestamptz
+	UpdatedAt          pgtype.Timestamptz
+}
+
+type OperatorSession struct {
+	TokenDigest []byte
+	SessionID   string
+	OperatorID  string
+	Stage       string
+	// Absolute and never moved. Non-extendable by design (operator.md §3) — there is deliberately no idle deadline, because an idle timeout that renews on activity is extension.
+	ExpiresAt    pgtype.Timestamptz
+	EndedAt      pgtype.Timestamptz
+	FromIp       *netip.Addr
+	CredentialID pgtype.Text
+	CreatedAt    pgtype.Timestamptz
+}
+
 // Membership per (org, subject). Gate 1 verifies against it; seat counting will too.
 type OrgMemberIndex struct {
 	OrgID     string
@@ -196,7 +284,7 @@ type PiiKey struct {
 	ErasedAt   pgtype.Timestamptz
 }
 
-// Encrypted personal data. Unreadable without the subject key in pii_key.
+// The PII vault (ADR-002, ADR-013). The only mutable system of record. chronos_operator holds SELECT and nothing else — see migration 00038 for why that crossing exists and what bounds it.
 type PiiValue struct {
 	SubjectID  string
 	Field      string

@@ -1,0 +1,113 @@
+syntax = "proto3";
+
+// Package operator carries the operator plane's enforcement policy (ADR-024).
+//
+// # Why this is not chronos.options.v1
+//
+// The tenant plane's `Authz` option names an OpenFGA relation on a tenant
+// resource, and every gate behind it — org context, entitlement, payment class,
+// assurance level — is a question about one organization and one member of it.
+// None of those questions exist here. An operator is not in any organization;
+// what authorizes them is a role held across all of them, and the reason an
+// action is permitted is a capability rather than a relationship.
+//
+// Reusing `chronos.options.v1.authz` would therefore mean declaring a relation
+// that no OpenFGA model contains, evaluated by no gate, on the most dangerous
+// endpoints in the system. The declaration would be documentation that is
+// false, which is worse than none: a reader would take it for an enforced
+// permission, and the tooling that publishes those declarations would too.
+//
+// # Why the plane still declares SOMETHING on every method
+//
+// For exactly ADR-021's reason. A per-handler design fails in one way — the one
+// endpoint nobody remembered to guard — and that argument does not weaken when
+// the endpoints read every customer we have. So `internal/operator/policy`
+// walks this server's own descriptors at startup and refuses to serve a method
+// that declares no capability and no audit action.
+package chronos.operator.v1;
+
+import "google/protobuf/descriptor.proto";
+
+// AuditAction is what an RPC records about itself (operator.md §5).
+//
+// Every method declares one, INCLUDING the reads. That is the inversion this
+// plane is built around: under GDPR looking is processing, so an operator
+// opening a customer's page is a processing activity the tenant is entitled to
+// be shown.
+//
+// There is no "none" value, and the omission is the enforcement. A method that
+// wanted to record nothing would have to leave the option unset, and the policy
+// loader refuses an unset audit action on every method that reads a customer —
+// so "this endpoint does not need an audit entry" is not a thing anybody can
+// express where §5's rule applies.
+//
+// Two exemptions exist, and neither is a loophole:
+//
+//   - A method marked `unauthenticated` must leave `audit` UNSPECIFIED. An
+//     entry naming a caller nobody has identified says only that somebody
+//     loaded a page, and rows like that are how an audit log becomes something
+//     people scroll past.
+//   - A method marked `sso_only` MAY leave it unspecified. Those are the
+//     sign-in ceremony's own steps: they read no tenant data, and the step that
+//     completes the ceremony records AUDIT_ACTION_SIGNED_IN.
+//
+// The second is the one that looks abusable — mark a method `sso_only` and it
+// need record nothing — and it is closed by
+// TestOnlyTheWebAuthnPairIsReachableWithAPendingSession, which enumerates the
+// sso_only methods against a literal pair. A third one fails the suite whatever
+// it declares.
+enum AuditAction {
+  AUDIT_ACTION_UNSPECIFIED = 0;
+
+  // A completed sign-in — both factors. Recorded after the WebAuthn assertion,
+  // never after the SSO step.
+  AUDIT_ACTION_SIGNED_IN = 1;
+
+  // A deliberately ended session, as distinct from an expired one.
+  AUDIT_ACTION_SIGNED_OUT = 2;
+
+  // A read of the customer directory or of one customer's record.
+  AUDIT_ACTION_VIEWED_CUSTOMER = 3;
+
+  // A vault resolution for one named subject. The only action that carries a
+  // mandatory justification.
+  AUDIT_ACTION_VIEWED_PERSONAL_DATA = 4;
+}
+
+extend google.protobuf.MethodOptions {
+  // The capability an operator's role must hold, as a string matching a
+  // constant in internal/operator/domain.
+  //
+  // A string rather than an enum because the capability set is the ROLE TABLE's
+  // vocabulary, and that table lives in Go where it is tested. Mirroring it as
+  // a proto enum would create two lists that must agree, with no mechanism to
+  // make them; the policy loader instead refuses at startup any capability
+  // string the Go table does not know, which gives the same guarantee with one
+  // list.
+  //
+  // Empty means the method is reachable WITHOUT a capability — used only by
+  // the sign-in ceremony, which by definition runs before there is an operator
+  // to check. The loader requires such a method to also be marked
+  // `unauthenticated` or `sso_only`, so "no capability" cannot be a silent
+  // omission on an ordinary endpoint.
+  string capability = 52001;
+
+  // What this method records. Required on every method.
+  chronos.operator.v1.AuditAction audit = 52002;
+
+  // Reachable with no session at all. The two OIDC ceremony steps only.
+  //
+  // Mutually exclusive with `capability` and with `sso_only`, and the loader
+  // enforces the exclusion rather than resolving a conflict — a method that
+  // declared both would have two answers to "who may call this", and the
+  // permissive one is the one that would win at runtime.
+  bool unauthenticated = 52003;
+
+  // Reachable with a session that has passed SSO and NOT yet WebAuthn.
+  //
+  // The WebAuthn pair, and nothing else, ever. The whole value of the two-stage
+  // session is that the intermediate state authorizes exactly the step that
+  // ends it, so this option existing on a third method would be the bug it is
+  // designed to prevent.
+  bool sso_only = 52004;
+}

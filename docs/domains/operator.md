@@ -259,3 +259,51 @@ Separate, reduced projections — never a join onto tenant tables.
 - **Attribution**: operator-initiated domain changes carry operator attribution
   through to the tenant's own audit trail.
 - **Offboarding**: a disabled operator's sessions are invalid immediately.
+
+---
+
+## 12. What is built (slice 1)
+
+Slice 1 is **the plane**: the binary, its identity, its audit, and the customer
+directory. Everything below is running and gated.
+
+| §  | Requirement | Where it lives | What proves it |
+| -- | ----------- | -------------- | -------------- |
+| §1 | Separate binary; tenant API links no operator package | `cmd/operator`, depguard `api-excludes-operator` | `TestTheOperatorPlaneIsNotLinkedIntoTheTenantAPI` — asserts on the protobuf registry, which registers from `init()` and so reflects what was LINKED rather than what is imported |
+| §1 | Not on the public surface | `proto-operator/` is a second buf module; `make api-docs` generates from `proto` alone | `TestTheOperatorPlaneIsNotInThePublishedSpec` reads the shipped document |
+| §3 | SSO-only, mandatory WebAuthn, no password, no TOTP | `internal/operator/app/signin.go` | Two-stage session: the SSO step issues a token that authorizes only the WebAuthn pair, and `TestOnlyTheWebAuthnPairIsReachableWithAPendingSession` enumerates that pair |
+| §3 | Short, non-extendable sessions | `SessionTTL`, `operator_session.expires_at` | No refresh endpoint and no idle deadline exist — an idle timeout that renews on activity IS extension |
+| §3 | IP-restricted to internal ranges | `api.Guard.allow` | `OPERATOR_ALLOWED_NETWORKS`; an empty list needs `OPERATOR_ALLOW_ANY_IP` or the binary refuses to start |
+| §3 | Offboarding is immediate | `ResolveOperatorSession` JOINs `operator_account` | A disabled operator's live session stops working as the disable projects, in one statement rather than after two round trips |
+| §4 | Minimisation is structural | `operator_customer_list` has org-level columns only | `TestOperatorProjectionsHoldNoPersonalData` asserts the column list against the LIVE schema |
+| §4 | The operator role cannot reach tenant content | migration 00037 | `TestTheOperatorRoleCannotReachTenantTables` asserts the REFUSAL against a real database |
+| §4 | Personal data only on justified access | `RevealPersonalData`, migration 00038 | One subject, a bounded field list, a mandatory reason; the role holds SELECT on the vault and `TestTheOperatorRoleReadsTheVaultAndCannotWriteIt` proves it holds nothing more |
+| §5 | Reads are audited | `internal/operator/app/audit.go` | The audit is appended BEFORE the read and a failure to append fails the call; `TestEveryAuthenticatedMethodRecordsAnAuditAction` fails on an endpoint that declares none |
+| §5 | Audit survives erasure as a non-identifying fact | every event carries `SubjectID` only | `operator_audit_log` has no address column, in either direction — the operator's own or the tenant's |
+| §8 | Events published | `internal/operator/contract` | Eight of §8's thirteen, plus two §8 does not list — `OperatorCredentialEnrolled` and `OperatorSignedOut`, each with its argument written where it is declared |
+| §9 | Reduced projections | `operator_account`, `operator_audit_log`, `operator_customer_list` | Built by `cmd/operator`'s own catch-up subscriptions, as `chronos_operator` — not by `cmd/projector`, which connects as the tenant role |
+
+### Deferred, and why each is a slice and not an oversight
+
+- **Break-glass elevation (§5)** and **impersonation (§6)**. Both are additions
+  to a plane that now exists; neither is reachable without it.
+- **Every operator WRITE (§7)** — refunds, suspension, plan publication,
+  coupons, overrides, trial extension, dispute resolution. The capability table
+  in `internal/operator/domain` already declares all of them, so the role
+  question is settled and what remains is the command path.
+- **`operator_activity_summary` and `operator_incident_queue` (§9).** The first
+  needs activity events the tenant plane does not yet emit; the second needs the
+  dispute and drift signals billing §5 describes.
+- **Legal holds (compliance.md §4).** Unblocked by this slice — a hold has an
+  owner and a recorded justification, and both now have somewhere to come from.
+
+### One decision worth stating, because it is not in the spec above
+
+**Operator authorization is capabilities, not a role ladder.** §3 renders the
+four roles as a ladder with "+" rows, and reading that ladder as `>=` would
+silently grant a `catalogue_admin` the power to issue refunds — the roles are
+not a total order in the spec's own table. So the ladder is written out as an
+exhaustive table, once, in `internal/operator/domain/role.go`, and every check
+asks for a named capability. `Permits` returns false for an unknown role and for
+an unknown capability, so a role string from a future build and a deleted
+constant both deny.

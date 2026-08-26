@@ -25,6 +25,16 @@ order before touching anything:
    command handler, projector or reactor.
 8. [docs/REVIEW.md](docs/REVIEW.md) — design review, all findings resolved.
 
+The **operator plane** (`internal/operator`, `cmd/operator`, `proto-operator/`)
+is the one part of this system that deliberately breaks tenant isolation, and it
+is separated four ways rather than one (ADR-024): depguard denies
+`internal/operator` to `cmd/api`, `internal/server` and every module; its schema
+is a second buf module the OpenAPI generator is never handed; it connects as
+`chronos_operator`, which is granted six tables and REVOKED from every tenant
+one; and every RPC declares a capability and an audit action or the process
+refuses to start. Under GDPR looking is processing, so **its reads are events** —
+the only place in this codebase where that is true.
+
 `organization` and `workspace` are **separate** modules with a strictly
 one-directional dependency — `workspace → organization`, never the reverse
 (ADR-020). A cycle means the split has failed; merge rather than tolerate it.
@@ -137,6 +147,7 @@ make valkey-cli  # Valkey shell
 make config      # render the fully-resolved compose file
 make check-centrifugo  # validate infra/centrifugo/config.json before restarting
 
+make operator          # how to provision the first operator and run the back-office plane
 make dashboards        # regenerate Grafana dashboards from internal/tools/gendashboards
 make dashboards-check  # run every dashboard query against live Prometheus
 make targets           # Prometheus scrape target health

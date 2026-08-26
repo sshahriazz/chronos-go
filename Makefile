@@ -139,7 +139,12 @@ api-docs: ## Generate the REST/OpenAPI reference and the error catalogue
 	@# run below merges in as `override=`. Reversed, the spec publishes whatever
 	@# reason enum the previous build left behind.
 	@go run ./internal/tools/gendocs
-	@buf generate --template buf.gen.openapi.yaml
+	@# The INPUT is `proto`, not the workspace. The operator plane is a second buf
+	@# module (proto-operator/) and must never reach the published REST reference:
+	@# a document listing /chronos.operator.v1.OperatorService/… advertises the
+	@# shape of the cross-tenant surface to every reader of our public API docs.
+	@# TestTheOperatorPlaneIsNotInThePublishedSpec fails if this input is widened.
+	@buf generate --template buf.gen.openapi.yaml proto
 	@# fixopenapi LAST, and never by hand: it writes the properties protobuf
 	@# cannot express — additionalProperties, $$ref annotations hoisted into allOf,
 	@# the Connect protocol's own parameters, and the request-body examples it
@@ -285,6 +290,22 @@ proto-thirdparty: ## Regenerate clients for third-party protos (ADR-037)
 .PHONY: sqlc
 sqlc: ## Regenerate query code from db/query/**.sql
 	sqlc generate
+
+.PHONY: operator
+operator: ## Provision the FIRST operator, then run the back-office plane
+	@echo "The operator plane needs an operator before anybody can sign in, and the"
+	@echo "first one cannot be created through an RPC — every method on that plane"
+	@echo "needs a session, and there is nobody to sign in as (ADR-024)."
+	@echo ""
+	@echo "  go run ./internal/tools/provisionoperator \\"
+	@echo "      -email you@example.com \\"
+	@echo "      -provider-subject <the IdP's sub for you> \\"
+	@echo "      -role operator_admin"
+	@echo ""
+	@echo "Then start the plane. It REFUSES to start misconfigured rather than"
+	@echo "degrading: see OPERATOR_* in .env.example for what it needs."
+	@echo ""
+	@echo "  go run ./cmd/operator"
 
 .PHONY: sqlc-check
 sqlc-check: ## Fail if generated query code is stale, or a query no longer matches the schema
@@ -491,6 +512,7 @@ urls: ## Print every local endpoint
 	@echo "  API (grpc+http/json) http://localhost:$${API_PORT:-8090}"
 	@echo "  Liveness             http://localhost:$${API_PORT:-8090}/healthz"
 	@echo "  Readiness            http://localhost:$${API_PORT:-8090}/readyz"
+	@echo "  Operator plane       http://localhost:$${OPERATOR_PORT:-8095}   (cmd/operator; internal only)"
 	@echo "-- api documentation  (make docs-serve)"
 	@echo "  Reference (Scalar)   http://localhost:$${DOCS_PORT:-8091}/reference"
 	@echo "  Index                http://localhost:$${DOCS_PORT:-8091}/"

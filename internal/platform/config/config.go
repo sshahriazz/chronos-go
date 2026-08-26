@@ -74,6 +74,7 @@ type Config struct {
 	Profiling ProfilingConfig
 	API       APIConfig
 	Identity  IdentityConfig
+	Operator  OperatorConfig
 
 	// ClockControl is the movable clock. Local only, and the validation below
 	// is what makes that true rather than aspirational.
@@ -222,6 +223,62 @@ type IdentityConfig struct {
 	// the target hardware says otherwise; the measured saturation point is the
 	// core count, and beyond it throughput DECLINES while memory grows linearly.
 	PasswordHashConcurrency int `env:"IDENTITY_PASSWORD_HASH_CONCURRENCY" envDefault:"0"`
+}
+
+// OperatorConfig is the back-office plane (ADR-024, operator.md).
+//
+// Every field is read by cmd/operator alone. None is `required`, because every
+// OTHER binary must start without them — but cmd/operator validates its own
+// before it serves anything, and refuses rather than degrades.
+type OperatorConfig struct {
+	// Addr is the port the operator plane listens on. Deliberately not the
+	// tenant API's: operator.md §1 puts this binary on an internal network, and
+	// two planes sharing a port would make "not reachable from the public
+	// internet" a property of a reverse-proxy rule instead of a property of the
+	// process.
+	Addr string `env:"OPERATOR_ADDR" envDefault:":8095"`
+
+	// The IdP. SSO-only sign-in (operator.md §3), so an operator plane with no
+	// issuer configured has no way in at all — which is why cmd/operator
+	// refuses to start without one rather than serving an unauthenticated
+	// back office.
+	OIDCIssuer       string `env:"OPERATOR_OIDC_ISSUER"`
+	OIDCClientID     string `env:"OPERATOR_OIDC_CLIENT_ID"`
+	OIDCClientSecret Secret `env:"OPERATOR_OIDC_CLIENT_SECRET"`
+	OIDCRedirectURL  string `env:"OPERATOR_OIDC_REDIRECT_URL"`
+
+	// HostedDomain pins a Google Workspace domain, so an operator sign-in from
+	// a personal account at the same provider is refused before the account
+	// lookup. Belt and braces with `operator_account`, which is the actual
+	// authority — but the two fail differently, and this one fails earlier and
+	// cheaper.
+	HostedDomain string `env:"OPERATOR_HOSTED_DOMAIN"`
+
+	// WebAuthn. The relying party is the OPERATOR console's origin, never the
+	// tenant app's: a credential registered for one RP ID cannot be asserted
+	// for another, and sharing the RP ID would make a tenant's passkey
+	// presentable here.
+	WebauthnRPID    string   `env:"OPERATOR_WEBAUTHN_RP_ID"`
+	WebauthnRPName  string   `env:"OPERATOR_WEBAUTHN_RP_DISPLAY_NAME" envDefault:"Chronos Operations"`
+	WebauthnOrigins []string `env:"OPERATOR_WEBAUTHN_ORIGINS" envSeparator:","`
+
+	// AllowedNetworks is the internal-range restriction operator.md §3
+	// requires, as CIDRs.
+	AllowedNetworks []string `env:"OPERATOR_ALLOWED_NETWORKS" envSeparator:","`
+
+	// AllowAnyIP makes an EMPTY AllowedNetworks mean "anywhere".
+	//
+	// It exists so that the permissive case has to be asked for. Without it a
+	// missing OPERATOR_ALLOWED_NETWORKS would silently serve the cross-tenant
+	// plane to every network, and the difference between "configured to allow
+	// all" and "nobody configured it" would be invisible.
+	AllowAnyIP bool `env:"OPERATOR_ALLOW_ANY_IP" envDefault:"false"`
+}
+
+// Configured reports whether cmd/operator has what it needs to serve sign-in.
+func (o OperatorConfig) Configured() bool {
+	return o.OIDCIssuer != "" && o.OIDCClientID != "" && !o.OIDCClientSecret.IsZero() &&
+		o.OIDCRedirectURL != "" && o.WebauthnRPID != "" && len(o.WebauthnOrigins) > 0
 }
 
 // IdentityKeySize is the length every identity key must decode to. It matches
@@ -381,6 +438,18 @@ type PostgresConfig struct {
 	// layer 3 of ADR-015 while every test still passes.
 	AppUser     string `env:"POSTGRES_APP_USER"     envDefault:"chronos_app"`
 	AppPassword Secret `env:"POSTGRES_APP_PASSWORD,required,notEmpty"`
+
+	// OperatorUser and OperatorPassword are the OPERATOR plane's role
+	// (ADR-024). It is granted the six operator tables and is REVOKED from
+	// every tenant table, so a bug in operator code cannot reach customer
+	// content — the grant does not exist.
+	//
+	// Not `required`: only cmd/operator uses them, and every other binary must
+	// start without them. cmd/operator refuses to start without a password
+	// rather than falling back to the app role, because falling back would give
+	// the operator plane exactly the grants the separation exists to withhold.
+	OperatorUser     string `env:"POSTGRES_OPERATOR_USER"     envDefault:"chronos_operator"`
+	OperatorPassword Secret `env:"POSTGRES_OPERATOR_PASSWORD"`
 }
 
 // AppDSN is the connection string every binary uses. It is built here, once, so
@@ -388,6 +457,16 @@ type PostgresConfig struct {
 // that bypasses row-level security (see AppUser above).
 func (p PostgresConfig) AppDSN() string {
 	return p.dsn(p.AppUser, p.AppPassword.Expose())
+}
+
+// OperatorDSN is the operator plane's connection string.
+//
+// Built here beside the other two so that no binary assembles one from the app
+// or owner credentials. Using AppDSN in cmd/operator would compile, connect,
+// and hand the operator plane the tenant plane's grants — which is the failure
+// the separate role exists to prevent, arriving silently.
+func (p PostgresConfig) OperatorDSN() string {
+	return p.dsn(p.OperatorUser, p.OperatorPassword.Expose())
 }
 
 // OwnerDSN is for migrations only: creating tables, policies and grants needs

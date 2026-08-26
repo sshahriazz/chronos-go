@@ -728,7 +728,111 @@ already has a name for.
       order #10, "once there is something to operate". Large, and the gate for
       legal holds above.
 
-## In progress — identity slice 2 (passkeys), and the rest of identity's scope
+## Done — `operator`, slice 1: the plane
+
+The gate that held this closed is open (see the identity section below), so this
+is the next slice. It is the most dangerous domain in the system — the only one
+that deliberately breaks tenant isolation — so the slice is scoped around the
+structural guarantees rather than around the features.
+
+**Where it lives.** `internal/operator/**`, NOT `internal/modules/operator`. The
+depguard rule `api-excludes-operator` already denies
+`github.com/chronos/chronos-go/internal/operator` to `cmd/api`, `internal/server`
+and every module, and it has been sitting there since ADR-024 waiting for a
+package to deny. Putting the code anywhere else silently opts out of the one
+rule that makes the separation real.
+
+**Its own enforcement plane.** Operator methods do NOT carry
+`chronos.options.v1.authz`. That option names an OpenFGA relation on a tenant
+resource, and an operator is authorized by role and explicit scope instead —
+there is no tenant to resolve, no org context, no entitlement. So the operator
+proto declares its own method options and `cmd/operator` loads them with its own
+policy loader, refusing to serve an unannotated method exactly as the tenant
+plane does. Reusing the tenant option would not be reuse; it would be an
+operator endpoint whose declared permission is a lie.
+
+- [x] **Sign-in — SSO then WebAuthn, in that order** (§3). Both halves exist as
+      adapters already. The OIDC ceremony resolves the operator against
+      `operator_account` and issues a session that can call NOTHING except the
+      WebAuthn pair; the assertion, with user verification REQUIRED, is what
+      makes the session usable. An unknown or disabled operator is refused at
+      the first step, so a valid Workspace login is not itself access.
+- [x] **Audit on READ** (§5). Every RPC, reads included, appends an audit event
+      before it answers. The conformance test enumerates the service descriptor
+      and fails on a method with no audit — a new endpoint without one cannot
+      merge.
+- [x] **`operator_customer_list`** (§9). Org, status, plan, counts, last active.
+      Built from organization and billing events, with a REDUCED field set:
+      minimisation is structural, so the schema test asserts the projection has
+      no content column and no personal-data column, and a later migration that
+      adds one fails the suite.
+- [x] **`RevealPersonalData`** (§4, §5). The only path to a vault field, one
+      subject at a time, justification mandatory and recorded. Never joined into
+      a list.
+- [x] **The `chronos_operator` DB role** (§4, §11). Grants name operator tables
+      only. Asserted against a real database: the role's SELECT on a tenant
+      content table must be REFUSED, not merely unused.
+
+**Deferred to slice 2, named so they are not forgotten:** break-glass elevation
+(§5), impersonation/view-as (§6), and every operator WRITE (§7) — refunds,
+suspension, plan publication, coupons, overrides. Slice 2 is also what unblocks
+legal holds.
+
+### What the build found that the design did not predict
+
+1. **The tenant plane's `ALTER DEFAULT PRIVILEGES` would have handed
+   chronos_app the entire operator plane.** `infra/postgres/init/02-app-role.sql`
+   grants chronos_app every FUTURE table, which is right for ninety tenant
+   tables and exactly wrong for six operator ones — including the audit log that
+   records what operators did. Migration 00037 revokes all six explicitly, and
+   `TestTheTenantRoleCannotReachOperatorTables` is the half of the boundary that
+   is easy to omit. Both directions verified against the running database.
+
+2. **The minimisation test passed while inspecting nothing.**
+   `information_schema.columns` is filtered by PRIVILEGE: it shows a role only
+   the columns of tables that role can touch. Run as chronos_app — the obvious
+   choice — it returned ZERO columns for every operator table, found no
+   forbidden column among them, and reported PASS. The `len(columns) == 0`
+   guard is what turned that into a failure, and it is exactly the shape
+   WORKFLOW.md's rule names: ask what the test would do if the feature were
+   deleted.
+
+3. **The customer directory's member count would have been permanently zero.**
+   Membership events live on `membership-`, not on `workspace-` — a membership
+   is its own aggregate so that adding a person does not contend with every
+   other change to the workspace. A filter of organization and workspace alone
+   compiles, runs, and produces a directory that reads as "this customer has
+   nobody" rather than as a bug.
+
+4. **The policy loader caught its own first omission before any code ran.**
+   `BeginWebAuthn` declared `sso_only` and no audit action, which the loader
+   refused. The fix was not to annotate it but to decide the rule: the sign-in
+   ceremony's own steps read no tenant data, so they are exempt — and the
+   exemption is closed from the other side by
+   `TestOnlyTheWebAuthnPairIsReachableWithAPendingSession`, which enumerates the
+   `sso_only` methods against a literal pair.
+
+5. **A completeness guard had to be split rather than skipped.**
+   cmd/worker's `TestEveryEventHasANotificationDecision` walks `internal/` and
+   fails on any event with no decision — so eight operator events failed it.
+   Registering them in cmd/worker would have linked the operator schema into a
+   binary with no business holding it. The universe now skips
+   `internal/operator`, and `TestEveryOperatorEventIsRegistered` plus
+   `TestOperatorEventsNotifyNobody` apply the same two rules to the same events
+   against the codec that actually reads them. The skip names the test and the
+   test names the skip, because a skip in a completeness guard is otherwise how
+   a gap gets in.
+
+6. **`SELECT current_user` tripped the SQL-in-Go ban, and the ban was right.**
+   The role assertion belongs in `internal/adapter/postgres`, beside
+   `VerifyNotPrivileged`, which is the same check pointed at the opposite
+   failure. The carve-out exists for statements about the CONNECTION rather than
+   about data; writing a second one in `cmd/operator` would have started the
+   drift the ban prevents.
+
+---
+
+## Done — identity slice 2 (passkeys) and federation (identity.md §7)
 
 **Why this surfaced late, stated plainly.** Passkeys were scoped as slice 2 from
 the beginning — `contract.MethodPasskey`'s own comment says "arrives in slice 2"
@@ -737,18 +841,24 @@ plan catalogue, email change, export. None of it reached slice 2. What was wrong
 was reporting identity work as finished without ever publishing the inventory
 below, so the gap surfaced as an `operator` blocker instead of as a plan.
 
-**`operator` is HELD**, and it is blocked on this: operator.md §3 requires
-SSO-only sign-in with mandatory WebAuthn and explicitly no passwords and no TOTP
-fallback. A `cmd/operator` serving cross-tenant reads with no authentication is
-the most dangerous thing this codebase could ship.
+**`operator` is NO LONGER HELD.** It was blocked on this: operator.md §3
+requires SSO-only sign-in with mandatory WebAuthn and explicitly no passwords
+and no TOTP fallback. A `cmd/operator` serving cross-tenant reads with no
+authentication is the most dangerous thing this codebase could ship.
+
+Both halves of that sentence now exist. Federation shipped the SSO half
+(`internal/adapter/oidc`, verified against a real Google client), passkeys
+shipped the WebAuthn half (`internal/adapter/webauthn`, verified against real
+hardware including the discoverable path an operator sign-in needs). The gate is
+open, and `operator` is the next slice.
 
 **The inventory.** Every event identity.md §13 declares and the codec does not
 register:
 
 | Gap | Where it is specified | State |
 | --- | --- | --- |
-| `PasskeyRegistered`, `PasskeyRemoved` | §4, ADR-057, IDENTITY-SLICE-1 C3 | slice 2 — IN PROGRESS |
-| `FederatedIdentityLinked`, `FederatedIdentityUnlinked` | §7, and §4.4's last unbuilt flow | not started |
+| `PasskeyRegistered`, `PasskeyRemoved` | §4, ADR-057, IDENTITY-SLICE-1 C3 | **done** |
+| `FederatedIdentityLinked`, `FederatedIdentityUnlinked` | §7, and §4.4's last unbuilt flow | **done** |
 | `ApiKeyCreated`, `ApiKeyRotated`, `ApiKeyRevoked` | FEATURES.md, §8 | not started |
 | `ServiceAccountCreated` | FEATURES.md | not started |
 | `DeviceTrusted` | §9 | not started |

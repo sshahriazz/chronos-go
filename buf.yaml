@@ -1,6 +1,19 @@
 version: v2
 modules:
   - path: proto
+  # The operator plane's own module (ADR-024, operator.md §1).
+  #
+  # A SEPARATE module rather than another directory under proto/, and the reason
+  # is what gets generated from each. The OpenAPI document, the error catalogue
+  # and the embedded API reference are all produced from `proto/` alone, so no
+  # operator method can reach the published REST surface — not because a filter
+  # drops it, but because the generator is never handed the file. An exclusion
+  # rule inside the generator config would be one refactor away from being lost;
+  # this cannot be lost without somebody moving a directory.
+  #
+  # It is still linted, still breaking-checked and still generated into Go by
+  # buf.gen.yaml, because none of that publishes anything.
+  - path: proto-operator
 deps:
   # protovalidate's rule extensions (ADR-007). Constraints live in the .proto
   # and are enforced by an interceptor before a handler runs, so a documented

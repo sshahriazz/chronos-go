@@ -61,6 +61,24 @@ type (
 	// produced. One per REQUEST, because a person may exercise the right more
 	// than once and each answer is its own artefact.
 	DataExport struct{}
+
+	// Operator is an employee of ours, on the operator plane (ADR-024). It is a
+	// SEPARATE kind from User and that is the point: operators are "not tenant
+	// users and must never be modelled as one with a flag" (operator.md §3),
+	// and a distinct id type is what stops an operator id being accepted
+	// wherever a user id is expected.
+	Operator struct{}
+
+	// OperatorSession is one operator's sign-in. Separate from Session for the
+	// same reason Operator is separate from User — the two planes must not
+	// share a token space, because a tenant session presented to the operator
+	// binary has to be unparseable rather than merely unauthorized.
+	OperatorSession struct{}
+
+	// AuditEntry is one recorded operator action, reads included (operator.md
+	// §5). It is minted per ACTION rather than per subject or per tenant: the
+	// audit log's unit is the thing that happened.
+	AuditEntry struct{}
 )
 
 func (Org) Prefix() string       { return "org" }
@@ -100,6 +118,15 @@ func (PushSubscription) Prefix() string { return "push" }
 // request.
 func (DataExport) Prefix() string { return "export" }
 
+// Operator, OperatorSession and AuditEntry are the operator plane's three
+// identifiers. Their prefixes are deliberately unlike the tenant plane's — an
+// operator id must never be mistakable for a user id at a glance in a log line,
+// because the two say very different things about what a request was allowed to
+// see.
+func (Operator) Prefix() string        { return "opr" }
+func (OperatorSession) Prefix() string { return "opsess" }
+func (AuditEntry) Prefix() string      { return "audit" }
+
 // Registry reports every registered kind by name. Used by the conformance test
 // that asserts prefixes are unique — a duplicate would make Parse ambiguous.
 func Registry() map[string]string {
@@ -114,6 +141,9 @@ func Registry() map[string]string {
 		"Subject":          Subject{}.Prefix(),
 		"PushSubscription": PushSubscription{}.Prefix(),
 		"DataExport":       DataExport{}.Prefix(),
+		"Operator":         Operator{}.Prefix(),
+		"OperatorSession":  OperatorSession{}.Prefix(),
+		"AuditEntry":       AuditEntry{}.Prefix(),
 	}
 }
 

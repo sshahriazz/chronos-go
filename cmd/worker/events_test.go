@@ -144,6 +144,27 @@ func eventUniverse(t *testing.T) []string {
 			if d.Name() == "testdata" {
 				return fs.SkipDir
 			}
+			// The OPERATOR plane is a separate deployable with its own codec
+			// (ADR-024), and this universe is the TENANT plane's.
+			//
+			// This skip is the kind of exclusion that usually hides a gap, so
+			// it is worth being precise about why it does not. cmd/worker
+			// cannot decide about operator events: it neither registers them
+			// nor subscribes to their streams, and making it do so would link
+			// the operator schema into a binary that has no business holding
+			// it. And the events themselves notify nobody by design — they are
+			// audit records, and NOTIFICATIONS.md governs what we send to
+			// TENANTS.
+			//
+			// What replaces this coverage is not nothing:
+			// TestEveryOperatorEventIsRegistered in internal/operator applies
+			// the same completeness rule to the same events, against the codec
+			// that actually reads them. Deleting that test does not make this
+			// one start covering them — it makes them uncovered, which is why
+			// the test names this comment and this comment names the test.
+			if d.Name() == "operator" && filepath.Dir(path) == root {
+				return fs.SkipDir
+			}
 			return nil
 		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {

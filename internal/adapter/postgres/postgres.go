@@ -37,6 +37,34 @@ func NewPool(ctx context.Context, dsn string, maxConns int32) (*pgxpool.Pool, er
 //
 // Verified on this stack: as the owner a cross-tenant query returned 2 rows;
 // as chronos_app it returned 0.
+// VerifyRole asserts that a pool connected as the role it was meant to.
+//
+// # Why this exists beside VerifyNotPrivileged rather than in the caller
+//
+// The two are the same check pointed at different failures. That one catches a
+// connection made as the OWNER, which silently ignores row-level security. This
+// one catches a connection made as the WRONG NON-OWNER — specifically
+// cmd/operator connecting as chronos_app, which would compile, connect, and
+// hand the operator plane every tenant table (ADR-024, migration 00037).
+//
+// It lives here because this file is the SQL carve-out: CONVENTIONS §8 keeps
+// SQL out of Go source, and the exception is the handful of statements that
+// are about the CONNECTION rather than about data — there is no sqlc query for
+// "who am I", because it reads no table this schema owns.
+func VerifyRole(ctx context.Context, pool *pgxpool.Pool, want string) error {
+	var got string
+	if err := pool.QueryRow(ctx, `SELECT current_user`).Scan(&got); err != nil {
+		return fmt.Errorf("postgres: reading the connected role: %w", err)
+	}
+	if got != want {
+		return fmt.Errorf(
+			"postgres: connected as %q, not %q — the grants in effect are that role's, "+
+				"not the ones this process was designed against",
+			got, want)
+	}
+	return nil
+}
+
 func VerifyNotPrivileged(ctx context.Context, pool *pgxpool.Pool) error {
 	var role string
 	var superuser, bypassRLS bool

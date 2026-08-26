@@ -1,0 +1,522 @@
+syntax = "proto3";
+
+// Package operator is the back-office wire contract — where WE see our
+// customers (ADR-024, operator.md).
+//
+// # This surface is not published, and that is structural
+//
+// It lives in its own buf module, `proto-operator/`, rather than beside the
+// tenant protos in `proto/`. The OpenAPI document, the error catalogue and the
+// embedded reference are all generated from `proto/` alone, so no operator
+// method can appear in the public REST reference — not because a filter drops
+// it, but because the generator is never given the file.
+//
+// That matters more than it looks. A generated document listing
+// `/chronos.operator.v1.OperatorService/ListCustomers` would advertise the
+// existence and the exact shape of the cross-tenant surface to every reader of
+// our public API docs, and an exclusion rule inside the generator is one
+// refactor away from being dropped.
+//
+// # Every method here is dangerous by construction
+//
+// operator.md §1: this is "the only thing that deliberately breaks tenant
+// isolation". There is no org context to scope a request by, no RLS policy
+// behind the queries, and no OpenFGA object to check. What stands in their
+// place is: a two-stage session that requires SSO *and* WebAuthn, a capability
+// declared on every method and checked before the handler, an audit event
+// appended before every answer, and read models whose columns cannot express
+// customer content.
+package chronos.operator.v1;
+
+import "buf/validate/validate.proto";
+import "chronos/operator/v1/options.proto";
+import "google/protobuf/timestamp.proto";
+
+// ---------------------------------------------------------------------------
+// Sign-in — SSO, then WebAuthn, in that order (operator.md §3)
+// ---------------------------------------------------------------------------
+
+// BeginSignInRequest starts the OIDC ceremony. It names nobody.
+//
+// Deliberately empty. A request that carried an email or an operator id would
+// let an unauthenticated caller aim a ceremony at a chosen account, and would
+// turn this endpoint into an oracle for "is this person an operator" — which is
+// a question about our staff that the public internet should not be able to
+// ask, even though this port is not on it.
+message BeginSignInRequest {}
+
+// BeginSignInResponse carries where to send the browser.
+message BeginSignInResponse {
+  // The IdP's authorization endpoint with state, nonce and the PKCE challenge
+  // already attached.
+  string authorization_url = 1 [
+    (buf.validate.field).string = {
+      max_len: 2048
+      min_len: 1
+    }
+  ];
+
+  // The ceremony's own id, echoed back on completion so the server can find the
+  // state it stored. Single-use and short-lived.
+  string ceremony_id = 2 [
+    (buf.validate.field).string = {
+      max_len: 40
+      pattern: "^opsess_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // When the ceremony stops being usable. Minutes, not hours.
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+// CompleteSignInRequest carries the IdP's answer.
+message CompleteSignInRequest {
+  // The authorization code. Bounded generously because providers differ widely
+  // and a code refused for length is a sign-in that fails with no useful
+  // message.
+  string code = 1 [
+    (buf.validate.field).string = {
+      max_len: 4096
+      min_len: 1
+    }
+  ];
+
+  // The opaque `state` the ceremony was started with, returned by the IdP.
+  // Compared in constant time against what was stored.
+  string state = 2 [
+    (buf.validate.field).string = {
+      max_len: 512
+      min_len: 1
+    }
+  ];
+
+  // RFC 9207's `iss`, when the provider sends it. Verified against the issuer
+  // the ceremony was started for — the mix-up defence of RFC 9700 §4.4.2.
+  string iss = 3 [(buf.validate.field).string.max_len = 512];
+}
+
+// CompleteSignInResponse carries a session that authorizes ONE thing.
+//
+// # It is not a usable session, and the naming says so
+//
+// The field is `pending_token`, never `token`. A client that treats this as a
+// session will find every call refused, which is the intended lesson: SSO alone
+// is one factor, and operator.md §3 requires two.
+message CompleteSignInResponse {
+  // Presented as the bearer for BeginWebAuthn and FinishWebAuthn. Nothing else
+  // accepts it.
+  string pending_token = 1 [
+    (buf.validate.field).string = {
+      max_len: 128
+      min_len: 1
+    }
+  ];
+
+  // Whether this operator holds an authenticator yet. False sends the client to
+  // enrolment rather than to assertion — the bootstrap window a freshly
+  // provisioned operator passes through exactly once.
+  bool credential_enrolled = 2;
+
+  // When the pending token stops working. Short: it is the window between two
+  // steps of one sign-in, not a session.
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+// BeginWebAuthnRequest starts the second factor. It names nobody either.
+//
+// Who is signing in is already known — it came from the SSO step and is bound
+// to the pending token. A request field naming an operator would be a field the
+// caller could change.
+message BeginWebAuthnRequest {}
+
+// BeginWebAuthnResponse carries the ceremony options for the browser.
+message BeginWebAuthnResponse {
+  // `PublicKeyCredentialRequestOptions` or `PublicKeyCredentialCreationOptions`
+  // as JSON, depending on `enrolment`. One field rather than two because the
+  // browser passes whichever it received straight to `navigator.credentials`,
+  // and a client that had to pick between two fields is a client that can pick
+  // wrong.
+  string options_json = 1 [
+    (buf.validate.field).string = {
+      max_len: 16384
+      min_len: 1
+    }
+  ];
+
+  // True when this is a REGISTRATION rather than an assertion — the operator
+  // has no credential yet.
+  bool enrolment = 2;
+
+  // The ceremony this challenge belongs to, echoed back on finish.
+  string ceremony_id = 3 [
+    (buf.validate.field).string = {
+      max_len: 40
+      pattern: "^opsess_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
+// FinishWebAuthnRequest carries the authenticator's answer.
+message FinishWebAuthnRequest {
+  // The credential the browser produced, as JSON.
+  string credential_json = 1 [
+    (buf.validate.field).string = {
+      max_len: 16384
+      min_len: 1
+    }
+  ];
+
+  // The ceremony this answer belongs to, from BeginWebAuthn.
+  string ceremony_id = 2 [
+    (buf.validate.field).string = {
+      max_len: 40
+      pattern: "^opsess_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // A label for a newly enrolled authenticator, so a security screen can say
+  // "YubiKey 5" rather than a base64 blob. Ignored on assertion.
+  string label = 3 [(buf.validate.field).string.max_len = 64];
+}
+
+// FinishWebAuthnResponse carries the session that actually works.
+message FinishWebAuthnResponse {
+  // The bearer token. Returned once and never stored in plaintext.
+  string token = 1 [
+    (buf.validate.field).string = {
+      max_len: 128
+      min_len: 1
+    }
+  ];
+
+  // Who signed in.
+  string operator_id = 2 [
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^opr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // The role this session carries. Sent so the console can hide what the
+  // operator cannot do — a convenience, never the enforcement, which happens
+  // server-side on every call.
+  string role = 3 [(buf.validate.field).string.max_len = 32];
+
+  // ABSOLUTE, and never moved. There is no refresh endpoint, deliberately:
+  // operator.md §3 requires sessions to be non-extendable, and an extension
+  // path is what turns "thirty minutes" into a working day.
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+// SignOutRequest ends the caller's own session. It names no session.
+//
+// The session is the bearer being presented, and accepting an id would make
+// this "end a session" rather than "end my session" — a different, more
+// dangerous endpoint that needs a capability this one does not.
+message SignOutRequest {}
+
+// SignOutResponse reports the state after the call.
+message SignOutResponse {
+  // False means the session was already over, which is a success: the caller
+  // asked for a state that holds.
+  bool changed = 1;
+}
+
+// ---------------------------------------------------------------------------
+// The customer directory (operator.md §2, §9)
+// ---------------------------------------------------------------------------
+
+// ListCustomersRequest pages the directory.
+message ListCustomersRequest {
+  // A substring of the organization's name or slug. Matched
+  // case-insensitively.
+  string query = 1 [(buf.validate.field).string.max_len = 128];
+
+  // Restrict to one lifecycle state — "active", "past_due", "suspended",
+  // "closed". Empty means every state.
+  string lifecycle_state = 2 [
+    (buf.validate.field).string = {
+      max_len: 16
+      pattern: "^$|^(active|past_due|suspended|closed)$"
+    }
+  ];
+
+  // Page size. Bounded above because this endpoint reads across every tenant we
+  // have, and an unbounded page is a bulk export of the customer base — which
+  // operator.md §2 lists as explicitly out of scope.
+  int32 page_size = 3 [
+    (buf.validate.field).int32 = {
+      gte: 0
+      lte: 100
+    }
+  ];
+
+  // The opaque cursor from a previous response.
+  string page_token = 4 [(buf.validate.field).string.max_len = 512];
+}
+
+// Customer is one organization, as the operator plane sees it.
+//
+// Every field is org-level. There is no member list, no address, no workspace
+// name and no content — the projection behind this message has no such columns,
+// which is what makes minimisation structural rather than a promise about this
+// message's future (operator.md §4).
+message Customer {
+  // The organization.
+  string org_id = 1 [
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // The organization's own name and slug — tenant-provided business data, not
+  // vault data.
+  string org_name = 2 [(buf.validate.field).string.max_len = 200];
+
+  // The URL-safe handle the tenant chose.
+  string slug = 3 [(buf.validate.field).string.max_len = 64];
+
+  // "active", "past_due", "suspended" or "closed".
+  string lifecycle_state = 4 [(buf.validate.field).string.max_len = 16];
+
+  // The plan they are on, and the exact version of it. The version matters
+  // because a plan's allowances change between versions and a support question
+  // is nearly always about the one they actually hold.
+  string plan_id = 5 [(buf.validate.field).string.max_len = 64];
+
+  // The plan version, which is what entitlement actually reads.
+  string plan_version_id = 6 [(buf.validate.field).string.max_len = 30];
+
+  // Stripe's subscription status, mirrored. Empty for an org that has not
+  // reached a subscription yet.
+  string subscription_status = 7 [(buf.validate.field).string.max_len = 32];
+  // When a trial ends. Unset when there is no trial.
+  google.protobuf.Timestamp trial_ends_at = 8;
+
+  // Coarse aggregates only (operator.md §2: "minimal activity").
+  int32 workspace_count = 9 [(buf.validate.field).int32.gte = 0];
+  // Distinct people across the organization — a SEAT count, not a sum of
+  // memberships. Five workspaces and one person is one (workspace.md §2).
+  int32 member_count = 10 [(buf.validate.field).int32.gte = 0];
+
+  // The most recent activity anywhere in the organization. Coarse by design:
+  // per-user activity is out of scope (operator.md §2).
+  google.protobuf.Timestamp last_active_at = 11;
+
+  // Where they came from, when it was recorded.
+  string signup_source = 12 [(buf.validate.field).string.max_len = 64];
+
+  // Support context: "is this org suspended, why, and since when".
+  // When the suspension began. Unset when the org is not suspended.
+  google.protobuf.Timestamp suspended_at = 13;
+
+  // Why it was suspended, so a support answer does not begin with a guess.
+  string suspension_reason = 14 [(buf.validate.field).string.max_len = 256];
+
+  // When the organization was created.
+  google.protobuf.Timestamp created_at = 15;
+}
+
+// ListCustomersResponse is one page of the directory.
+message ListCustomersResponse {
+  // The page, in creation order, newest first.
+  repeated Customer customers = 1 [(buf.validate.field).repeated.max_items = 100];
+
+  // Empty on the last page.
+  string next_page_token = 2 [(buf.validate.field).string.max_len = 512];
+}
+
+// GetCustomerRequest names one organization.
+message GetCustomerRequest {
+  // The organization to read.
+  string org_id = 1 [
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
+// GetCustomerResponse is one organization's record.
+message GetCustomerResponse {
+  // The organization's record.
+  Customer customer = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Personal data (operator.md §4, §5)
+// ---------------------------------------------------------------------------
+
+// RevealPersonalDataRequest resolves ONE subject's vault fields.
+//
+// # Every field here exists to make the access narrow and attributable
+//
+// One subject, named fields, and a justification. The alternative shapes were
+// all rejected for the same reason: a request that could name several subjects,
+// or that defaulted to every field, or that had no reason, is a request whose
+// audit entry says less than the access did.
+message RevealPersonalDataRequest {
+  // The subject's pseudonym, as it appears in the operator plane's own records.
+  // Never an email: an endpoint that took an address would let an operator ask
+  // "does this person exist here", which is a different disclosure.
+  string subject_id = 1 [
+    (buf.validate.field).string = {
+      max_len: 32
+      pattern: "^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Which vault fields to resolve. Required and bounded — an empty list would
+  // have to mean "everything", and "everything" is the default that makes a
+  // justified-access rule meaningless.
+  repeated string fields = 2 [
+    (buf.validate.field).repeated = {
+      min_items: 1
+      max_items: 8
+      items: {
+        string: {
+          max_len: 32
+          pattern: "^[a-z][a-z0-9_]*$"
+        }
+      }
+    }
+  ];
+
+  // The tenant this access is performed in the context of, so the tenant can be
+  // shown their own operator-access history.
+  string org_id = 3 [
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Why. Mandatory, and stored verbatim in the audit log.
+  //
+  // The minimum length is 8 rather than 1 on purpose: a one-character
+  // justification is the shape a mandatory field takes when nobody means it,
+  // and a rule that can be satisfied by "x" is a rule that will be.
+  string reason = 4 [
+    (buf.validate.field).string = {
+      min_len: 8
+      max_len: 500
+    }
+  ];
+}
+
+// RevealPersonalDataResponse carries the resolved values.
+message RevealPersonalDataResponse {
+  // Field name to value, for the fields that resolved. A field the vault does
+  // not hold is ABSENT rather than empty — the two are different answers, and
+  // the notification path already depends on telling them apart.
+  map<string, string> fields = 1 [
+    (buf.validate.field).map = {
+      max_pairs: 8
+      values: {
+        string: {max_len: 512}
+      }
+    }
+  ];
+
+  // The audit entry this access produced. Returned so the operator can see that
+  // it happened, and quote it — an audit trail somebody can point at is one
+  // they believe in.
+  string audit_entry_id = 2 [
+    (buf.validate.field).string = {
+      max_len: 32
+      pattern: "^audit_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// The service
+// ---------------------------------------------------------------------------
+
+// OperatorService is the back office.
+//
+// Every method declares a capability and an audit action, and
+// `internal/operator/policy` refuses to serve one that does not.
+service OperatorService {
+  // BeginSignIn starts the OIDC ceremony (operator.md §3).
+  //
+  // Unauthenticated by necessity: there is nobody to authenticate yet. It
+  // records no audit entry for the same reason — an entry naming an
+  // unidentified caller is a row that says only that somebody loaded a page.
+  rpc BeginSignIn(BeginSignInRequest) returns (BeginSignInResponse) {
+    option (chronos.operator.v1.unauthenticated) = true;
+  }
+
+  // CompleteSignIn exchanges the IdP's code for a PENDING session.
+  //
+  // The operator is resolved against `operator_account` by issuer and provider
+  // subject. An unknown or disabled operator is refused HERE, at the first
+  // step, so a valid Workspace login is not itself access to this plane.
+  rpc CompleteSignIn(CompleteSignInRequest) returns (CompleteSignInResponse) {
+    option (chronos.operator.v1.unauthenticated) = true;
+  }
+
+  // BeginWebAuthn starts the second factor, or the first enrolment.
+  //
+  // Reachable only with a pending token. That is the whole two-stage design:
+  // the intermediate session authorizes exactly the step that ends it.
+  rpc BeginWebAuthn(BeginWebAuthnRequest) returns (BeginWebAuthnResponse) {
+    option (chronos.operator.v1.sso_only) = true;
+  }
+
+  // FinishWebAuthn verifies the assertion and issues the real session.
+  //
+  // User verification is REQUIRED, not preferred: operator.md §3 mandates
+  // hardware-backed MFA with no fallback, and an assertion that only proves
+  // possession is one factor wearing the shape of two.
+  //
+  // The token returned is a NEW secret, not a promotion of the pending one. A
+  // token whose privileges change during its life is one that a client, a
+  // proxy log or a browser extension may have captured before the change.
+  rpc FinishWebAuthn(FinishWebAuthnRequest) returns (FinishWebAuthnResponse) {
+    option (chronos.operator.v1.sso_only) = true;
+    option (chronos.operator.v1.audit) = AUDIT_ACTION_SIGNED_IN;
+  }
+
+  // SignOut ends the caller's own session.
+  //
+  // `self_session` is held by every role: ending your own session is not a
+  // privilege, and an operator who cannot sign out on a shared machine is an
+  // operator whose safest action is unavailable.
+  rpc SignOut(SignOutRequest) returns (SignOutResponse) {
+    option (chronos.operator.v1.capability) = "self_session";
+    option (chronos.operator.v1.audit) = AUDIT_ACTION_SIGNED_OUT;
+  }
+
+  // ListCustomers pages the customer directory.
+  //
+  // Audited, like every read here. The entry names no org, because a page is an
+  // aggregate over many tenants and naming one of them would be false.
+  rpc ListCustomers(ListCustomersRequest) returns (ListCustomersResponse) {
+    option (chronos.operator.v1.capability) = "view_customers";
+    option (chronos.operator.v1.audit) = AUDIT_ACTION_VIEWED_CUSTOMER;
+  }
+
+  // GetCustomer reads one organization's record.
+  rpc GetCustomer(GetCustomerRequest) returns (GetCustomerResponse) {
+    option (chronos.operator.v1.capability) = "view_customers";
+    option (chronos.operator.v1.audit) = AUDIT_ACTION_VIEWED_CUSTOMER;
+  }
+
+  // RevealPersonalData resolves one subject's vault fields, with a recorded
+  // justification (operator.md §4).
+  //
+  // The ONLY path from this plane to a person's data. Lists never join the
+  // vault, so there is no query that returns an address in bulk — the columns
+  // do not exist.
+  //
+  // The audit entry is appended BEFORE the vault is read, and a failure to
+  // append fails the call. The ordering is the point: an access that could not
+  // be recorded must not happen, and the reverse ordering would make "the
+  // audit write failed after we returned the data" a reachable state.
+  rpc RevealPersonalData(RevealPersonalDataRequest) returns (RevealPersonalDataResponse) {
+    option (chronos.operator.v1.capability) = "view_personal_data";
+    option (chronos.operator.v1.audit) = AUDIT_ACTION_VIEWED_PERSONAL_DATA;
+  }
+}
