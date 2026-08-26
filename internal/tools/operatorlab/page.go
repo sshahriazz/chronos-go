@@ -117,6 +117,28 @@ const page = `<!doctype html>
   <input id="org" placeholder="org_01ARZ3NDEKTSV4RRFFQ69G5FAV">
   <button id="b-get">GetCustomer</button>
   <pre id="o-get">waiting for a session</pre>
+
+  <p class="note" style="margin-top:1.4rem">
+    <strong>Suspending goes through the tenant's own domain command</strong> —
+    not a flag, not an operator row. The organization aggregate is loaded from
+    its own stream and <code>OrganizationSuspended</code> is appended there, so
+    every consequence follows identically to a failed payment: the projections
+    update, every member is mailed, and gate 3 begins refusing writes. The state
+    machine refuses a CLOSED organization from here exactly as it would from
+    anywhere.
+  </p>
+  <p class="note">
+    Your justification is stored in the audit log and is <strong>not</strong>
+    sent to the tenant. Their mail says the account was suspended by us and
+    nothing more: a suspension we decide on is usually about abuse or a legal
+    instruction, and broadcasting the specifics to every member tells people who
+    are not the subject of the decision something they should not be told.
+  </p>
+  <label for="suspreason">Justification (8 characters minimum)</label>
+  <input id="suspreason" placeholder="abuse report 4711, confirmed by legal">
+  <button id="b-suspend">SuspendCustomer</button>
+  <button id="b-reinstate">ReinstateCustomer</button>
+  <pre id="o-tenant">waiting for a session</pre>
 </section>
 
 <section id="s-reveal" data-locked="1">
@@ -286,7 +308,7 @@ function refresh() {
     show('o-wa', 'signed in as ' + sessionStorage.getItem('operator.id') +
                  ' (' + sessionStorage.getItem('operator.role') + ')\n' +
                  'session expires ' + sessionStorage.getItem('operator.expires'), 'ok');
-    ['o-list', 'o-get', 'o-reveal', 'o-ops', 'o-glass', 'o-out'].forEach((id) => {
+    ['o-list', 'o-get', 'o-reveal', 'o-tenant', 'o-ops', 'o-glass', 'o-out'].forEach((id) => {
       if ($(id).textContent.startsWith('waiting')) show(id, 'ready');
     });
   } else if (pending()) {
@@ -489,6 +511,27 @@ $('b-reveal').onclick = async () => {
       (e.detail && e.detail.details ? '\n\n' + JSON.stringify(e.detail.details, null, 2) : ''), 'bad');
   }
 };
+
+async function tenantWrite(method) {
+  show('o-tenant', method + '…');
+  try {
+    const res = await rpc(method, {
+      orgId: $('org').value.trim(),
+      reason: $('suspreason').value,
+    }, live());
+    show('o-tenant',
+      'changed: ' + res.changed + '\naudit:   ' + res.auditEntryId + '\n\n' +
+      (res.changed
+        ? 'A tenant event was appended to the ORGANIZATION\'s own stream.\n' +
+          'Re-run GetCustomer to see the directory catch up.'
+        : 'They were already in that state — a success that changed nothing.'), 'ok');
+  } catch (e) {
+    show('o-tenant', e.message + (e.code ? '\n\ncode: ' + e.code : ''), 'bad');
+  }
+}
+
+$('b-suspend').onclick   = () => tenantWrite('SuspendCustomer');
+$('b-reinstate').onclick = () => tenantWrite('ReinstateCustomer');
 
 $('b-ops').onclick = async () => {
   show('o-ops', 'reading…');

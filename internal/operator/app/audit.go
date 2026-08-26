@@ -150,6 +150,29 @@ func (a *Auditor) RecordOperatorManaged(
 	return entryID, a.append(ctx, entryID, entry)
 }
 
+// RecordTenantWrite records an operator change to a tenant.
+func (a *Auditor) RecordTenantWrite(
+	ctx context.Context, actor Actor, orgID, change, reason string,
+) (string, error) {
+	entryID, err := newAuditID(a.clock.Now())
+	if err != nil {
+		return "", err
+	}
+	entry := eventsourcing.NewAggregate(domain.NewAuditEntry)
+	if err := entry.RecordTenantWrite(contract.OperatorChangedTenant{
+		OperatorID: actor.OperatorID,
+		SubjectID:  actor.SubjectID,
+		OrgID:      orgID,
+		Change:     change,
+		Reason:     reason,
+		FromIP:     actor.FromIP,
+		ChangedAt:  a.clock.Now(),
+	}); err != nil {
+		return "", err
+	}
+	return entryID, a.append(ctx, entryID, entry)
+}
+
 // RecordView records a read of the directory or of one customer.
 //
 // orgID is empty on a list, and that is not an omission: a page is an aggregate

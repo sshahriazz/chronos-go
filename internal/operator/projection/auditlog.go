@@ -93,6 +93,15 @@ func NewAuditLog(codec eventsourcing.Codec) *AuditLog {
 		return nil
 	})
 
+	d.On[contract.OperatorChangedTenant](func(
+		_ context.Context, w db.Writer, env projection.Envelope, e *contract.OperatorChangedTenant,
+	) error {
+		w.Exec(operatordb.InsertAuditEntry,
+			entryID(env), e.OperatorID, e.SubjectID, "changed_tenant", e.Change,
+			nullText(e.OrgID), nil, nil, nullText(e.Reason), nullIP(e.FromIP), e.ChangedAt)
+		return nil
+	})
+
 	d.On[contract.OperatorViewedCustomer](func(
 		_ context.Context, w db.Writer, env projection.Envelope, e *contract.OperatorViewedCustomer,
 	) error {

@@ -478,3 +478,49 @@ type OperatorAccessManaged struct {
 }
 
 func (*OperatorAccessManaged) EventType() string { return "operator.OperatorAccessManaged.v1" }
+
+// OperatorChangedTenant records an operator write against a tenant
+// (operator.md §7).
+//
+// # It is the AUDIT record, not the change
+//
+// The change itself is a tenant event on the tenant's own stream, appended
+// through the tenant's own aggregate — §7 is explicit that "operator writes go
+// through the same domain commands as everything else" and that "there is no
+// privileged back-channel that skips domain rules".
+//
+// So this does not duplicate the change. It records WHO made it and WHY, which
+// the tenant's event deliberately does not carry: `OrganizationSuspended` names
+// a closed-enum reason because it is read by a template that mails every member
+// of the organization, and the operator's free-text justification has no
+// business in that mail.
+//
+// The split means "you have been suspended" and "why did we suspend them" are
+// answered in two places with two audiences and two access controls, which is
+// the correct shape for both.
+type OperatorChangedTenant struct {
+	OperatorID string
+	SubjectID  string
+
+	// OrgID is the tenant that was changed. Always present — unlike a list,
+	// every write here names exactly one.
+	OrgID string
+
+	// Change is what was done: "suspended", "reinstated". A closed vocabulary
+	// in practice, kept as a string for the same reason
+	// OperatorAccessManaged.Change is — the machine-readable form is the tenant
+	// event, and this exists to be read by a person.
+	Change string
+
+	// Reason is the operator's justification, verbatim and MANDATORY.
+	//
+	// It is the whole point of this event. The tenant's own event carries an
+	// enum; this carries the sentence somebody will be asked to defend.
+	Reason string
+
+	FromIP string
+
+	ChangedAt time.Time
+}
+
+func (*OperatorChangedTenant) EventType() string { return "operator.OperatorChangedTenant.v1" }

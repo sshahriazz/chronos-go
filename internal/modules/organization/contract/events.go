@@ -138,6 +138,22 @@ const (
 	TrialEnded SuspensionReason = "trial_ended"
 	// PaymentFailed is a paying customer whose retries were exhausted.
 	PaymentFailed SuspensionReason = "payment_failed"
+
+	// OperatorAction is a suspension WE decided on — abuse, a legal
+	// instruction, a fraud investigation (operator.md §7).
+	//
+	// # It carries no detail, and the omission is deliberate
+	//
+	// The other two reasons describe a billing state the customer can act on,
+	// and the mail says so. This one describes a decision, and the specifics
+	// belong in the conversation that follows rather than in a broadcast to
+	// every member of the organization — some of whom are not the person the
+	// decision is about.
+	//
+	// The operator's own justification IS recorded, verbatim, in
+	// operator_audit_log. That is where "why did we suspend them" is answered,
+	// under access controls, rather than in a tenant-facing template.
+	OperatorAction SuspensionReason = "operator_action"
 )
 
 // OrganizationClosed is the end of the commercial relationship.

@@ -714,6 +714,87 @@ message ListOperatorsResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Tenant writes (operator.md §7)
+// ---------------------------------------------------------------------------
+
+// SuspendCustomerRequest switches a tenant off.
+message SuspendCustomerRequest {
+  // The organization to suspend.
+  string org_id = 1 [
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Why. Mandatory, stored verbatim in the audit log, and NOT sent to the
+  // tenant.
+  //
+  // The mail they receive says the account was suspended by us and nothing
+  // more. A suspension we decide on is usually about abuse, a legal instruction
+  // or a fraud investigation, and broadcasting the specifics to every member of
+  // the organization tells people who are not the subject of the decision
+  // something they should not be told.
+  string reason = 2 [
+    (buf.validate.field).string = {
+      min_len: 8
+      max_len: 500
+    }
+  ];
+}
+
+// SuspendCustomerResponse reports the state after the call.
+message SuspendCustomerResponse {
+  // False means they were already suspended, which is a success: the caller
+  // asked for a state that holds.
+  bool changed = 1;
+
+  // The audit entry this produced.
+  string audit_entry_id = 2 [
+    (buf.validate.field).string = {
+      max_len: 32
+      pattern: "^audit_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
+// ReinstateCustomerRequest returns a suspended tenant to active.
+message ReinstateCustomerRequest {
+  // The organization to reinstate.
+  string org_id = 1 [
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Why. Mandatory here too — turning a customer back on is less dangerous than
+  // turning them off and equally worth being able to explain. An account
+  // reinstated with no recorded reason is one nobody can defend having
+  // reinstated.
+  string reason = 2 [
+    (buf.validate.field).string = {
+      min_len: 8
+      max_len: 500
+    }
+  ];
+}
+
+// ReinstateCustomerResponse reports the state after the call.
+message ReinstateCustomerResponse {
+  // False means they were not suspended.
+  bool changed = 1;
+
+  // The audit entry this produced.
+  string audit_entry_id = 2 [
+    (buf.validate.field).string = {
+      max_len: 32
+      pattern: "^audit_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
+// ---------------------------------------------------------------------------
 // The service
 // ---------------------------------------------------------------------------
 
@@ -874,6 +955,47 @@ service OperatorService {
   rpc GetCustomer(GetCustomerRequest) returns (GetCustomerResponse) {
     option (chronos.operator.v1.capability) = "view_customers";
     option (chronos.operator.v1.audit) = AUDIT_ACTION_VIEWED_CUSTOMER;
+  }
+
+  // SuspendCustomer switches a tenant off (operator.md §7).
+  //
+  // # It goes through the tenant's own domain command
+  //
+  // Not a flag, not an operator-plane row, not a privileged back-channel. The
+  // organization aggregate is loaded from its own stream, `Suspend` is called
+  // on it, and `OrganizationSuspended` is appended to the tenant's stream —
+  // so every downstream consequence follows identically to a suspension
+  // triggered by a failed payment: the projections update, `organization.
+  // suspended` mails every member, and gate 3 begins refusing writes.
+  //
+  // §7 is explicit about why: "there is no privileged back-channel that skips
+  // domain rules, because that back-channel is exactly what corrupts state that
+  // then cannot be replayed".
+  //
+  // # `suspend_organization` is reachable by nobody through break-glass
+  //
+  // operator_admin holds it and needs no elevation; nothing else may reach it,
+  // because this is the only operator action that stops a paying customer
+  // working and it is reversible only by another operator action while they are
+  // down.
+  //
+  // The state machine refuses what it would refuse from any caller — a CLOSED
+  // organization cannot be suspended, and the refusal carries the domain's own
+  // message so an operator stops rather than retries.
+  rpc SuspendCustomer(SuspendCustomerRequest) returns (SuspendCustomerResponse) {
+    option (chronos.operator.v1.capability) = "suspend_organization";
+    option (chronos.operator.v1.audit) = AUDIT_ACTION_CHANGED_TENANT;
+  }
+
+  // ReinstateCustomer returns a suspended tenant to active.
+  //
+  // It calls the organization's ordinary `Activate`, not a reinstate-specific
+  // command — a suspension lifted and a trial converting both land in Active,
+  // and the state machine already says so. An operator-only path would be a
+  // second way to reach one state, which is how two paths drift.
+  rpc ReinstateCustomer(ReinstateCustomerRequest) returns (ReinstateCustomerResponse) {
+    option (chronos.operator.v1.capability) = "suspend_organization";
+    option (chronos.operator.v1.audit) = AUDIT_ACTION_CHANGED_TENANT;
   }
 
   // RevealPersonalData resolves one subject's vault fields, with a recorded

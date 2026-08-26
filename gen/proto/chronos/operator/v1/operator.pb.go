@@ -1934,6 +1934,237 @@ func (x *ListOperatorsResponse) GetOperators() []*Operator {
 	return nil
 }
 
+// SuspendCustomerRequest switches a tenant off.
+type SuspendCustomerRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The organization to suspend.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// Why. Mandatory, stored verbatim in the audit log, and NOT sent to the
+	// tenant.
+	//
+	// The mail they receive says the account was suspended by us and nothing
+	// more. A suspension we decide on is usually about abuse, a legal instruction
+	// or a fraud investigation, and broadcasting the specifics to every member of
+	// the organization tells people who are not the subject of the decision
+	// something they should not be told.
+	Reason        string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SuspendCustomerRequest) Reset() {
+	*x = SuspendCustomerRequest{}
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SuspendCustomerRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SuspendCustomerRequest) ProtoMessage() {}
+
+func (x *SuspendCustomerRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SuspendCustomerRequest.ProtoReflect.Descriptor instead.
+func (*SuspendCustomerRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_operator_v1_operator_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *SuspendCustomerRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *SuspendCustomerRequest) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+// SuspendCustomerResponse reports the state after the call.
+type SuspendCustomerResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// False means they were already suspended, which is a success: the caller
+	// asked for a state that holds.
+	Changed bool `protobuf:"varint,1,opt,name=changed,proto3" json:"changed,omitempty"`
+	// The audit entry this produced.
+	AuditEntryId  string `protobuf:"bytes,2,opt,name=audit_entry_id,json=auditEntryId,proto3" json:"audit_entry_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SuspendCustomerResponse) Reset() {
+	*x = SuspendCustomerResponse{}
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SuspendCustomerResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SuspendCustomerResponse) ProtoMessage() {}
+
+func (x *SuspendCustomerResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SuspendCustomerResponse.ProtoReflect.Descriptor instead.
+func (*SuspendCustomerResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_operator_v1_operator_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *SuspendCustomerResponse) GetChanged() bool {
+	if x != nil {
+		return x.Changed
+	}
+	return false
+}
+
+func (x *SuspendCustomerResponse) GetAuditEntryId() string {
+	if x != nil {
+		return x.AuditEntryId
+	}
+	return ""
+}
+
+// ReinstateCustomerRequest returns a suspended tenant to active.
+type ReinstateCustomerRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The organization to reinstate.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// Why. Mandatory here too — turning a customer back on is less dangerous than
+	// turning them off and equally worth being able to explain. An account
+	// reinstated with no recorded reason is one nobody can defend having
+	// reinstated.
+	Reason        string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReinstateCustomerRequest) Reset() {
+	*x = ReinstateCustomerRequest{}
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReinstateCustomerRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReinstateCustomerRequest) ProtoMessage() {}
+
+func (x *ReinstateCustomerRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReinstateCustomerRequest.ProtoReflect.Descriptor instead.
+func (*ReinstateCustomerRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_operator_v1_operator_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *ReinstateCustomerRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *ReinstateCustomerRequest) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+// ReinstateCustomerResponse reports the state after the call.
+type ReinstateCustomerResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// False means they were not suspended.
+	Changed bool `protobuf:"varint,1,opt,name=changed,proto3" json:"changed,omitempty"`
+	// The audit entry this produced.
+	AuditEntryId  string `protobuf:"bytes,2,opt,name=audit_entry_id,json=auditEntryId,proto3" json:"audit_entry_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReinstateCustomerResponse) Reset() {
+	*x = ReinstateCustomerResponse{}
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReinstateCustomerResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReinstateCustomerResponse) ProtoMessage() {}
+
+func (x *ReinstateCustomerResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReinstateCustomerResponse.ProtoReflect.Descriptor instead.
+func (*ReinstateCustomerResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_operator_v1_operator_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *ReinstateCustomerResponse) GetChanged() bool {
+	if x != nil {
+		return x.Changed
+	}
+	return false
+}
+
+func (x *ReinstateCustomerResponse) GetAuditEntryId() string {
+	if x != nil {
+		return x.AuditEntryId
+	}
+	return ""
+}
+
 var File_chronos_operator_v1_operator_proto protoreflect.FileDescriptor
 
 const file_chronos_operator_v1_operator_proto_rawDesc = "" +
@@ -2079,7 +2310,21 @@ const file_chronos_operator_v1_operator_proto_rawDesc = "" +
 	"\x14ListOperatorsRequest\x12)\n" +
 	"\x10include_disabled\x18\x01 \x01(\bR\x0fincludeDisabled\"^\n" +
 	"\x15ListOperatorsResponse\x12E\n" +
-	"\toperators\x18\x01 \x03(\v2\x1d.chronos.operator.v1.OperatorB\b\xbaH\x05\x92\x01\x02\x10dR\toperators2\xfc\f\n" +
+	"\toperators\x18\x01 \x03(\v2\x1d.chronos.operator.v1.OperatorB\b\xbaH\x05\x92\x01\x02\x10dR\toperators\"\x7f\n" +
+	"\x16SuspendCustomerRequest\x12A\n" +
+	"\x06org_id\x18\x01 \x01(\tB*\xbaH'r%\x18\x1e2!^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\x05orgId\x12\"\n" +
+	"\x06reason\x18\x02 \x01(\tB\n" +
+	"\xbaH\ar\x05\x10\b\x18\xf4\x03R\x06reason\"\x87\x01\n" +
+	"\x17SuspendCustomerResponse\x12\x18\n" +
+	"\achanged\x18\x01 \x01(\bR\achanged\x12R\n" +
+	"\x0eaudit_entry_id\x18\x02 \x01(\tB,\xbaH)r'\x18 2#^audit_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\fauditEntryId\"\x81\x01\n" +
+	"\x18ReinstateCustomerRequest\x12A\n" +
+	"\x06org_id\x18\x01 \x01(\tB*\xbaH'r%\x18\x1e2!^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\x05orgId\x12\"\n" +
+	"\x06reason\x18\x02 \x01(\tB\n" +
+	"\xbaH\ar\x05\x10\b\x18\xf4\x03R\x06reason\"\x89\x01\n" +
+	"\x19ReinstateCustomerResponse\x12\x18\n" +
+	"\achanged\x18\x01 \x01(\bR\achanged\x12R\n" +
+	"\x0eaudit_entry_id\x18\x02 \x01(\tB,\xbaH)r'\x18 2#^audit_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\fauditEntryId2\x9c\x0f\n" +
 	"\x0fOperatorService\x12f\n" +
 	"\vBeginSignIn\x12'.chronos.operator.v1.BeginSignInRequest\x1a(.chronos.operator.v1.BeginSignInResponse\"\x04\x98\xb2\x19\x01\x12o\n" +
 	"\x0eCompleteSignIn\x12*.chronos.operator.v1.CompleteSignInRequest\x1a+.chronos.operator.v1.CompleteSignInResponse\"\x04\x98\xb2\x19\x01\x12l\n" +
@@ -2092,7 +2337,9 @@ const file_chronos_operator_v1_operator_proto_rawDesc = "" +
 	"\x0fDisableOperator\x12+.chronos.operator.v1.DisableOperatorRequest\x1a,.chronos.operator.v1.DisableOperatorResponse\"\x18\x8a\xb2\x19\x10manage_operators\x90\xb2\x19\x06\x12\x80\x01\n" +
 	"\rListOperators\x12).chronos.operator.v1.ListOperatorsRequest\x1a*.chronos.operator.v1.ListOperatorsResponse\"\x18\x8a\xb2\x19\x10manage_operators\x90\xb2\x19\x06\x12~\n" +
 	"\rListCustomers\x12).chronos.operator.v1.ListCustomersRequest\x1a*.chronos.operator.v1.ListCustomersResponse\"\x16\x8a\xb2\x19\x0eview_customers\x90\xb2\x19\x03\x12x\n" +
-	"\vGetCustomer\x12'.chronos.operator.v1.GetCustomerRequest\x1a(.chronos.operator.v1.GetCustomerResponse\"\x16\x8a\xb2\x19\x0eview_customers\x90\xb2\x19\x03\x12\x91\x01\n" +
+	"\vGetCustomer\x12'.chronos.operator.v1.GetCustomerRequest\x1a(.chronos.operator.v1.GetCustomerResponse\"\x16\x8a\xb2\x19\x0eview_customers\x90\xb2\x19\x03\x12\x8a\x01\n" +
+	"\x0fSuspendCustomer\x12+.chronos.operator.v1.SuspendCustomerRequest\x1a,.chronos.operator.v1.SuspendCustomerResponse\"\x1c\x8a\xb2\x19\x14suspend_organization\x90\xb2\x19\a\x12\x90\x01\n" +
+	"\x11ReinstateCustomer\x12-.chronos.operator.v1.ReinstateCustomerRequest\x1a..chronos.operator.v1.ReinstateCustomerResponse\"\x1c\x8a\xb2\x19\x14suspend_organization\x90\xb2\x19\a\x12\x91\x01\n" +
 	"\x12RevealPersonalData\x12..chronos.operator.v1.RevealPersonalDataRequest\x1a/.chronos.operator.v1.RevealPersonalDataResponse\"\x1a\x8a\xb2\x19\x12view_personal_data\x90\xb2\x19\x04B\xde\x01\n" +
 	"\x17com.chronos.operator.v1B\rOperatorProtoP\x01ZFgithub.com/chronos/chronos-go/gen/proto/chronos/operator/v1;operatorv1\xa2\x02\x03COX\xaa\x02\x13Chronos.Operator.V1\xca\x02\x13Chronos\\Operator\\V1\xe2\x02\x1fChronos\\Operator\\V1\\GPBMetadata\xea\x02\x15Chronos::Operator::V1b\x06proto3"
 
@@ -2108,7 +2355,7 @@ func file_chronos_operator_v1_operator_proto_rawDescGZIP() []byte {
 	return file_chronos_operator_v1_operator_proto_rawDescData
 }
 
-var file_chronos_operator_v1_operator_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
+var file_chronos_operator_v1_operator_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
 var file_chronos_operator_v1_operator_proto_goTypes = []any{
 	(*BeginSignInRequest)(nil),         // 0: chronos.operator.v1.BeginSignInRequest
 	(*BeginSignInResponse)(nil),        // 1: chronos.operator.v1.BeginSignInResponse
@@ -2138,23 +2385,27 @@ var file_chronos_operator_v1_operator_proto_goTypes = []any{
 	(*DisableOperatorResponse)(nil),    // 25: chronos.operator.v1.DisableOperatorResponse
 	(*ListOperatorsRequest)(nil),       // 26: chronos.operator.v1.ListOperatorsRequest
 	(*ListOperatorsResponse)(nil),      // 27: chronos.operator.v1.ListOperatorsResponse
-	nil,                                // 28: chronos.operator.v1.RevealPersonalDataResponse.FieldsEntry
-	(*timestamppb.Timestamp)(nil),      // 29: google.protobuf.Timestamp
+	(*SuspendCustomerRequest)(nil),     // 28: chronos.operator.v1.SuspendCustomerRequest
+	(*SuspendCustomerResponse)(nil),    // 29: chronos.operator.v1.SuspendCustomerResponse
+	(*ReinstateCustomerRequest)(nil),   // 30: chronos.operator.v1.ReinstateCustomerRequest
+	(*ReinstateCustomerResponse)(nil),  // 31: chronos.operator.v1.ReinstateCustomerResponse
+	nil,                                // 32: chronos.operator.v1.RevealPersonalDataResponse.FieldsEntry
+	(*timestamppb.Timestamp)(nil),      // 33: google.protobuf.Timestamp
 }
 var file_chronos_operator_v1_operator_proto_depIdxs = []int32{
-	29, // 0: chronos.operator.v1.BeginSignInResponse.expires_at:type_name -> google.protobuf.Timestamp
-	29, // 1: chronos.operator.v1.CompleteSignInResponse.expires_at:type_name -> google.protobuf.Timestamp
-	29, // 2: chronos.operator.v1.FinishWebAuthnResponse.expires_at:type_name -> google.protobuf.Timestamp
-	29, // 3: chronos.operator.v1.Customer.trial_ends_at:type_name -> google.protobuf.Timestamp
-	29, // 4: chronos.operator.v1.Customer.last_active_at:type_name -> google.protobuf.Timestamp
-	29, // 5: chronos.operator.v1.Customer.suspended_at:type_name -> google.protobuf.Timestamp
-	29, // 6: chronos.operator.v1.Customer.created_at:type_name -> google.protobuf.Timestamp
+	33, // 0: chronos.operator.v1.BeginSignInResponse.expires_at:type_name -> google.protobuf.Timestamp
+	33, // 1: chronos.operator.v1.CompleteSignInResponse.expires_at:type_name -> google.protobuf.Timestamp
+	33, // 2: chronos.operator.v1.FinishWebAuthnResponse.expires_at:type_name -> google.protobuf.Timestamp
+	33, // 3: chronos.operator.v1.Customer.trial_ends_at:type_name -> google.protobuf.Timestamp
+	33, // 4: chronos.operator.v1.Customer.last_active_at:type_name -> google.protobuf.Timestamp
+	33, // 5: chronos.operator.v1.Customer.suspended_at:type_name -> google.protobuf.Timestamp
+	33, // 6: chronos.operator.v1.Customer.created_at:type_name -> google.protobuf.Timestamp
 	11, // 7: chronos.operator.v1.ListCustomersResponse.customers:type_name -> chronos.operator.v1.Customer
 	11, // 8: chronos.operator.v1.GetCustomerResponse.customer:type_name -> chronos.operator.v1.Customer
-	28, // 9: chronos.operator.v1.RevealPersonalDataResponse.fields:type_name -> chronos.operator.v1.RevealPersonalDataResponse.FieldsEntry
-	29, // 10: chronos.operator.v1.RequestElevationResponse.expires_at:type_name -> google.protobuf.Timestamp
-	29, // 11: chronos.operator.v1.Operator.disabled_at:type_name -> google.protobuf.Timestamp
-	29, // 12: chronos.operator.v1.Operator.provisioned_at:type_name -> google.protobuf.Timestamp
+	32, // 9: chronos.operator.v1.RevealPersonalDataResponse.fields:type_name -> chronos.operator.v1.RevealPersonalDataResponse.FieldsEntry
+	33, // 10: chronos.operator.v1.RequestElevationResponse.expires_at:type_name -> google.protobuf.Timestamp
+	33, // 11: chronos.operator.v1.Operator.disabled_at:type_name -> google.protobuf.Timestamp
+	33, // 12: chronos.operator.v1.Operator.provisioned_at:type_name -> google.protobuf.Timestamp
 	19, // 13: chronos.operator.v1.ListOperatorsResponse.operators:type_name -> chronos.operator.v1.Operator
 	0,  // 14: chronos.operator.v1.OperatorService.BeginSignIn:input_type -> chronos.operator.v1.BeginSignInRequest
 	2,  // 15: chronos.operator.v1.OperatorService.CompleteSignIn:input_type -> chronos.operator.v1.CompleteSignInRequest
@@ -2168,22 +2419,26 @@ var file_chronos_operator_v1_operator_proto_depIdxs = []int32{
 	26, // 23: chronos.operator.v1.OperatorService.ListOperators:input_type -> chronos.operator.v1.ListOperatorsRequest
 	10, // 24: chronos.operator.v1.OperatorService.ListCustomers:input_type -> chronos.operator.v1.ListCustomersRequest
 	13, // 25: chronos.operator.v1.OperatorService.GetCustomer:input_type -> chronos.operator.v1.GetCustomerRequest
-	15, // 26: chronos.operator.v1.OperatorService.RevealPersonalData:input_type -> chronos.operator.v1.RevealPersonalDataRequest
-	1,  // 27: chronos.operator.v1.OperatorService.BeginSignIn:output_type -> chronos.operator.v1.BeginSignInResponse
-	3,  // 28: chronos.operator.v1.OperatorService.CompleteSignIn:output_type -> chronos.operator.v1.CompleteSignInResponse
-	5,  // 29: chronos.operator.v1.OperatorService.BeginWebAuthn:output_type -> chronos.operator.v1.BeginWebAuthnResponse
-	7,  // 30: chronos.operator.v1.OperatorService.FinishWebAuthn:output_type -> chronos.operator.v1.FinishWebAuthnResponse
-	9,  // 31: chronos.operator.v1.OperatorService.SignOut:output_type -> chronos.operator.v1.SignOutResponse
-	18, // 32: chronos.operator.v1.OperatorService.RequestElevation:output_type -> chronos.operator.v1.RequestElevationResponse
-	21, // 33: chronos.operator.v1.OperatorService.ProvisionOperator:output_type -> chronos.operator.v1.ProvisionOperatorResponse
-	23, // 34: chronos.operator.v1.OperatorService.ChangeOperatorRole:output_type -> chronos.operator.v1.ChangeOperatorRoleResponse
-	25, // 35: chronos.operator.v1.OperatorService.DisableOperator:output_type -> chronos.operator.v1.DisableOperatorResponse
-	27, // 36: chronos.operator.v1.OperatorService.ListOperators:output_type -> chronos.operator.v1.ListOperatorsResponse
-	12, // 37: chronos.operator.v1.OperatorService.ListCustomers:output_type -> chronos.operator.v1.ListCustomersResponse
-	14, // 38: chronos.operator.v1.OperatorService.GetCustomer:output_type -> chronos.operator.v1.GetCustomerResponse
-	16, // 39: chronos.operator.v1.OperatorService.RevealPersonalData:output_type -> chronos.operator.v1.RevealPersonalDataResponse
-	27, // [27:40] is the sub-list for method output_type
-	14, // [14:27] is the sub-list for method input_type
+	28, // 26: chronos.operator.v1.OperatorService.SuspendCustomer:input_type -> chronos.operator.v1.SuspendCustomerRequest
+	30, // 27: chronos.operator.v1.OperatorService.ReinstateCustomer:input_type -> chronos.operator.v1.ReinstateCustomerRequest
+	15, // 28: chronos.operator.v1.OperatorService.RevealPersonalData:input_type -> chronos.operator.v1.RevealPersonalDataRequest
+	1,  // 29: chronos.operator.v1.OperatorService.BeginSignIn:output_type -> chronos.operator.v1.BeginSignInResponse
+	3,  // 30: chronos.operator.v1.OperatorService.CompleteSignIn:output_type -> chronos.operator.v1.CompleteSignInResponse
+	5,  // 31: chronos.operator.v1.OperatorService.BeginWebAuthn:output_type -> chronos.operator.v1.BeginWebAuthnResponse
+	7,  // 32: chronos.operator.v1.OperatorService.FinishWebAuthn:output_type -> chronos.operator.v1.FinishWebAuthnResponse
+	9,  // 33: chronos.operator.v1.OperatorService.SignOut:output_type -> chronos.operator.v1.SignOutResponse
+	18, // 34: chronos.operator.v1.OperatorService.RequestElevation:output_type -> chronos.operator.v1.RequestElevationResponse
+	21, // 35: chronos.operator.v1.OperatorService.ProvisionOperator:output_type -> chronos.operator.v1.ProvisionOperatorResponse
+	23, // 36: chronos.operator.v1.OperatorService.ChangeOperatorRole:output_type -> chronos.operator.v1.ChangeOperatorRoleResponse
+	25, // 37: chronos.operator.v1.OperatorService.DisableOperator:output_type -> chronos.operator.v1.DisableOperatorResponse
+	27, // 38: chronos.operator.v1.OperatorService.ListOperators:output_type -> chronos.operator.v1.ListOperatorsResponse
+	12, // 39: chronos.operator.v1.OperatorService.ListCustomers:output_type -> chronos.operator.v1.ListCustomersResponse
+	14, // 40: chronos.operator.v1.OperatorService.GetCustomer:output_type -> chronos.operator.v1.GetCustomerResponse
+	29, // 41: chronos.operator.v1.OperatorService.SuspendCustomer:output_type -> chronos.operator.v1.SuspendCustomerResponse
+	31, // 42: chronos.operator.v1.OperatorService.ReinstateCustomer:output_type -> chronos.operator.v1.ReinstateCustomerResponse
+	16, // 43: chronos.operator.v1.OperatorService.RevealPersonalData:output_type -> chronos.operator.v1.RevealPersonalDataResponse
+	29, // [29:44] is the sub-list for method output_type
+	14, // [14:29] is the sub-list for method input_type
 	14, // [14:14] is the sub-list for extension type_name
 	14, // [14:14] is the sub-list for extension extendee
 	0,  // [0:14] is the sub-list for field type_name
@@ -2201,7 +2456,7 @@ func file_chronos_operator_v1_operator_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chronos_operator_v1_operator_proto_rawDesc), len(file_chronos_operator_v1_operator_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   29,
+			NumMessages:   33,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

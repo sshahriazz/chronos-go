@@ -123,7 +123,8 @@ func run() error {
 		return err
 	}
 
-	service, err := api.NewService(deps.signIn, deps.customers, deps.elevation, deps.operators)
+	service, err := api.NewService(deps.signIn, deps.customers, deps.elevation,
+		deps.operators, deps.tenants)
 	if err != nil {
 		return err
 	}

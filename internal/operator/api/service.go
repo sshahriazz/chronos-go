@@ -27,18 +27,20 @@ type Service struct {
 	customers *app.Customers
 	elevation *app.Elevation
 	operators *app.Operators
+	tenants   *app.Tenants
 }
 
 // NewService builds the handlers.
 func NewService(
 	signIn *app.SignIn, customers *app.Customers,
-	elevation *app.Elevation, operators *app.Operators,
+	elevation *app.Elevation, operators *app.Operators, tenants *app.Tenants,
 ) (*Service, error) {
-	if signIn == nil || customers == nil || elevation == nil || operators == nil {
-		return nil, errors.New("operator api: the service needs its four use cases")
+	if signIn == nil || customers == nil || elevation == nil ||
+		operators == nil || tenants == nil {
+		return nil, errors.New("operator api: the service needs its five use cases")
 	}
 	return &Service{signIn: signIn, customers: customers,
-		elevation: elevation, operators: operators}, nil
+		elevation: elevation, operators: operators, tenants: tenants}, nil
 }
 
 var _ operatorv1connect.OperatorServiceHandler = (*Service)(nil)
@@ -311,6 +313,40 @@ func (s *Service) GetCustomer(
 	return connect.NewResponse(&operatorv1.GetCustomerResponse{Customer: customerToWire(c)}), nil
 }
 
+// SuspendCustomer switches a tenant off, through the tenant's own aggregate.
+func (s *Service) SuspendCustomer(
+	ctx context.Context, req *connect.Request[operatorv1.SuspendCustomerRequest],
+) (*connect.Response[operatorv1.SuspendCustomerResponse], error) {
+	actor, ok := ActorFrom(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, app.ErrSessionRefused)
+	}
+	res, err := s.tenants.Suspend(ctx, actor, req.Msg.GetOrgId(), req.Msg.GetReason())
+	if err != nil {
+		return nil, wire(err)
+	}
+	return connect.NewResponse(&operatorv1.SuspendCustomerResponse{
+		Changed: res.Changed, AuditEntryId: res.AuditEntryID,
+	}), nil
+}
+
+// ReinstateCustomer returns a suspended tenant to active.
+func (s *Service) ReinstateCustomer(
+	ctx context.Context, req *connect.Request[operatorv1.ReinstateCustomerRequest],
+) (*connect.Response[operatorv1.ReinstateCustomerResponse], error) {
+	actor, ok := ActorFrom(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, app.ErrSessionRefused)
+	}
+	res, err := s.tenants.Reinstate(ctx, actor, req.Msg.GetOrgId(), req.Msg.GetReason())
+	if err != nil {
+		return nil, wire(err)
+	}
+	return connect.NewResponse(&operatorv1.ReinstateCustomerResponse{
+		Changed: res.Changed, AuditEntryId: res.AuditEntryID,
+	}), nil
+}
+
 // RevealPersonalData resolves one subject's vault fields.
 func (s *Service) RevealPersonalData(
 	ctx context.Context, req *connect.Request[operatorv1.RevealPersonalDataRequest],
@@ -418,8 +454,16 @@ func wire(err error) error {
 		// means — and a client can tell "wait for the window to close" from
 		// "you may never do this".
 		return connect.NewError(connect.CodeFailedPrecondition, err)
-	case errors.Is(err, app.ErrNoSuchCustomer), errors.Is(err, app.ErrNoSuchOperator):
+	case errors.Is(err, app.ErrNoSuchCustomer), errors.Is(err, app.ErrNoSuchOperator),
+		errors.Is(err, app.ErrNoSuchOrganization):
 		return connect.NewError(connect.CodeNotFound, err)
+
+	// FailedPrecondition, and it carries the state machine's own message. The
+	// caller is an authenticated operator acting deliberately, and "this org is
+	// closed" is what tells them to stop rather than retry — the same reasoning
+	// as a refused break-glass, and safe for the same reason.
+	case errors.Is(err, app.ErrIllegalTransition):
+		return connect.NewError(connect.CodeFailedPrecondition, err)
 
 	case errors.Is(err, app.ErrOperatorExists):
 		return connect.NewError(connect.CodeAlreadyExists, err)

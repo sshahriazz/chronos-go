@@ -59,6 +59,7 @@ func (a *AuditEntry) Apply(event eventsourcing.Event) {
 		*contract.OperatorElevated,
 		*contract.OperatorElevationExpired,
 		*contract.OperatorAccessManaged,
+		*contract.OperatorChangedTenant,
 		*contract.OperatorViewedCustomer,
 		*contract.OperatorViewedPersonalData:
 		a.recorded = true
@@ -157,6 +158,30 @@ func (a *AuditEntry) RecordOperatorManaged(ev contract.OperatorAccessManaged) er
 		return fmt.Errorf("operator: an access-management record needs to say what changed")
 	}
 	ev.ManagedAt = ev.ManagedAt.UTC()
+	eventsourcing.Record(a, &ev)
+	return nil
+}
+
+// RecordTenantWrite records an operator change to a tenant, and REFUSES one
+// with no justification.
+//
+// The third act on this plane whose lawfulness rests on the account of why it
+// was taken — beside a personal-data read and a break-glass — and enforced the
+// same three ways: protovalidate at the edge, here, and a CHECK constraint.
+func (a *AuditEntry) RecordTenantWrite(ev contract.OperatorChangedTenant) error {
+	switch {
+	case a.recorded:
+		return fmt.Errorf("operator: audit entry already recorded")
+	case ev.OperatorID == "":
+		return fmt.Errorf("operator: a tenant-change record needs an operator")
+	case ev.OrgID == "":
+		return fmt.Errorf("operator: a tenant-change record names exactly one organization")
+	case ev.Change == "":
+		return fmt.Errorf("operator: a tenant-change record needs to say what changed")
+	case ev.Reason == "":
+		return fmt.Errorf("operator: changing a tenant requires a recorded justification")
+	}
+	ev.ChangedAt = ev.ChangedAt.UTC()
 	eventsourcing.Record(a, &ev)
 	return nil
 }

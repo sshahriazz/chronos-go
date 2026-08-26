@@ -14,6 +14,7 @@ import (
 
 	operatorv1 "github.com/chronos/chronos-go/gen/proto/chronos/operator/v1"
 	"github.com/chronos/chronos-go/gen/proto/chronos/operator/v1/operatorv1connect"
+	orgcontract "github.com/chronos/chronos-go/internal/modules/organization/contract"
 	"github.com/chronos/chronos-go/internal/operator/api"
 	"github.com/chronos/chronos-go/internal/operator/app"
 	"github.com/chronos/chronos-go/internal/operator/policy"
@@ -85,7 +86,8 @@ func handler(t *testing.T, allowed []netip.Prefix) http.Handler {
 		t.Fatalf("building the guard: %v", err)
 	}
 
-	svc, err := api.NewService(stubSignIn(t), stubCustomers(t), stubElevation(t), stubOperators(t))
+	svc, err := api.NewService(stubSignIn(t), stubCustomers(t), stubElevation(t),
+		stubOperators(t), stubTenants(t))
 	if err != nil {
 		t.Fatalf("building the service: %v", err)
 	}
@@ -353,4 +355,23 @@ func stubOperators(t *testing.T) *app.Operators {
 		t.Fatalf("building the operators use case: %v", err)
 	}
 	return o
+}
+
+type stubOrgs struct{}
+
+func (stubOrgs) Suspend(context.Context, string, orgcontract.SuspensionReason, time.Time) (bool, error) {
+	return false, app.ErrNoSuchOrganization
+}
+
+func (stubOrgs) Reinstate(context.Context, string, time.Time) (bool, error) {
+	return false, app.ErrNoSuchOrganization
+}
+
+func stubTenants(t *testing.T) *app.Tenants {
+	t.Helper()
+	x, err := app.NewTenants(stubOrgs{}, app.NewAuditor(stubEvents{}, fixedClock{}), fixedClock{}, nil)
+	if err != nil {
+		t.Fatalf("building the tenants use case: %v", err)
+	}
+	return x
 }

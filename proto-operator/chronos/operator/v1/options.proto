@@ -84,6 +84,14 @@ enum AuditAction {
   // which change it was. Three actions would put the same question behind a
   // three-way OR in every query that asks it.
   AUDIT_ACTION_MANAGED_OPERATORS = 6;
+
+  // A write against a TENANT — suspending or reinstating an organization
+  // (operator.md §7). Carries a mandatory justification.
+  //
+  // The change itself is a tenant event on the tenant's own stream; this is the
+  // record of who made it and why, which the tenant's event deliberately does
+  // not carry.
+  AUDIT_ACTION_CHANGED_TENANT = 7;
 }
 
 extend google.protobuf.MethodOptions {

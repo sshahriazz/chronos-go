@@ -99,6 +99,13 @@ const (
 	// which change it was. Three actions would put the same question behind a
 	// three-way OR in every query that asks it.
 	AuditAction_AUDIT_ACTION_MANAGED_OPERATORS AuditAction = 6
+	// A write against a TENANT — suspending or reinstating an organization
+	// (operator.md §7). Carries a mandatory justification.
+	//
+	// The change itself is a tenant event on the tenant's own stream; this is the
+	// record of who made it and why, which the tenant's event deliberately does
+	// not carry.
+	AuditAction_AUDIT_ACTION_CHANGED_TENANT AuditAction = 7
 )
 
 // Enum value maps for AuditAction.
@@ -111,6 +118,7 @@ var (
 		4: "AUDIT_ACTION_VIEWED_PERSONAL_DATA",
 		5: "AUDIT_ACTION_ELEVATED",
 		6: "AUDIT_ACTION_MANAGED_OPERATORS",
+		7: "AUDIT_ACTION_CHANGED_TENANT",
 	}
 	AuditAction_value = map[string]int32{
 		"AUDIT_ACTION_UNSPECIFIED":          0,
@@ -120,6 +128,7 @@ var (
 		"AUDIT_ACTION_VIEWED_PERSONAL_DATA": 4,
 		"AUDIT_ACTION_ELEVATED":             5,
 		"AUDIT_ACTION_MANAGED_OPERATORS":    6,
+		"AUDIT_ACTION_CHANGED_TENANT":       7,
 	}
 )
 
@@ -233,7 +242,7 @@ var File_chronos_operator_v1_options_proto protoreflect.FileDescriptor
 
 const file_chronos_operator_v1_options_proto_rawDesc = "" +
 	"\n" +
-	"!chronos/operator/v1/options.proto\x12\x13chronos.operator.v1\x1a google/protobuf/descriptor.proto*\xec\x01\n" +
+	"!chronos/operator/v1/options.proto\x12\x13chronos.operator.v1\x1a google/protobuf/descriptor.proto*\x8d\x02\n" +
 	"\vAuditAction\x12\x1c\n" +
 	"\x18AUDIT_ACTION_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16AUDIT_ACTION_SIGNED_IN\x10\x01\x12\x1b\n" +
@@ -241,7 +250,8 @@ const file_chronos_operator_v1_options_proto_rawDesc = "" +
 	"\x1cAUDIT_ACTION_VIEWED_CUSTOMER\x10\x03\x12%\n" +
 	"!AUDIT_ACTION_VIEWED_PERSONAL_DATA\x10\x04\x12\x19\n" +
 	"\x15AUDIT_ACTION_ELEVATED\x10\x05\x12\"\n" +
-	"\x1eAUDIT_ACTION_MANAGED_OPERATORS\x10\x06:@\n" +
+	"\x1eAUDIT_ACTION_MANAGED_OPERATORS\x10\x06\x12\x1f\n" +
+	"\x1bAUDIT_ACTION_CHANGED_TENANT\x10\a:@\n" +
 	"\n" +
 	"capability\x12\x1e.google.protobuf.MethodOptions\x18\xa1\x96\x03 \x01(\tR\n" +
 	"capability:X\n" +

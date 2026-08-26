@@ -50,6 +50,7 @@ type dependencies struct {
 	customers *app.Customers
 	elevation *app.Elevation
 	operators *app.Operators
+	tenants   *app.Tenants
 
 	clock    app.Clock
 	resolver clientip.Resolver
@@ -230,6 +231,23 @@ func newDependencies(
 		return fail(err)
 	}
 	d.operators = operators
+
+	// The organization writer needs the TENANT's aggregate, so this binary's
+	// codec must decode organization events — which registerTenantEvents
+	// already does for the customer directory. The two needs coincide, and
+	// that is worth noticing rather than relying on: a future write against a
+	// module the directory does not project would need its events registered
+	// too, and the codec would refuse the read rather than fail silently.
+	orgWriter, err := operatorevents.NewOrganizations(eventStore, codec, upcasters, d.clock.Now)
+	if err != nil {
+		return fail(err)
+	}
+
+	tenants, err := app.NewTenants(orgWriter, auditor, d.clock, log)
+	if err != nil {
+		return fail(err)
+	}
+	d.tenants = tenants
 
 	return d, closeAll, nil
 }

@@ -94,6 +94,12 @@ const (
 	// OperatorServiceGetCustomerProcedure is the fully-qualified name of the OperatorService's
 	// GetCustomer RPC.
 	OperatorServiceGetCustomerProcedure = "/chronos.operator.v1.OperatorService/GetCustomer"
+	// OperatorServiceSuspendCustomerProcedure is the fully-qualified name of the OperatorService's
+	// SuspendCustomer RPC.
+	OperatorServiceSuspendCustomerProcedure = "/chronos.operator.v1.OperatorService/SuspendCustomer"
+	// OperatorServiceReinstateCustomerProcedure is the fully-qualified name of the OperatorService's
+	// ReinstateCustomer RPC.
+	OperatorServiceReinstateCustomerProcedure = "/chronos.operator.v1.OperatorService/ReinstateCustomer"
 	// OperatorServiceRevealPersonalDataProcedure is the fully-qualified name of the OperatorService's
 	// RevealPersonalData RPC.
 	OperatorServiceRevealPersonalDataProcedure = "/chronos.operator.v1.OperatorService/RevealPersonalData"
@@ -210,6 +216,39 @@ type OperatorServiceClient interface {
 	ListCustomers(context.Context, *connect.Request[v1.ListCustomersRequest]) (*connect.Response[v1.ListCustomersResponse], error)
 	// GetCustomer reads one organization's record.
 	GetCustomer(context.Context, *connect.Request[v1.GetCustomerRequest]) (*connect.Response[v1.GetCustomerResponse], error)
+	// SuspendCustomer switches a tenant off (operator.md §7).
+	//
+	// # It goes through the tenant's own domain command
+	//
+	// Not a flag, not an operator-plane row, not a privileged back-channel. The
+	// organization aggregate is loaded from its own stream, `Suspend` is called
+	// on it, and `OrganizationSuspended` is appended to the tenant's stream —
+	// so every downstream consequence follows identically to a suspension
+	// triggered by a failed payment: the projections update, `organization.
+	// suspended` mails every member, and gate 3 begins refusing writes.
+	//
+	// §7 is explicit about why: "there is no privileged back-channel that skips
+	// domain rules, because that back-channel is exactly what corrupts state that
+	// then cannot be replayed".
+	//
+	// # `suspend_organization` is reachable by nobody through break-glass
+	//
+	// operator_admin holds it and needs no elevation; nothing else may reach it,
+	// because this is the only operator action that stops a paying customer
+	// working and it is reversible only by another operator action while they are
+	// down.
+	//
+	// The state machine refuses what it would refuse from any caller — a CLOSED
+	// organization cannot be suspended, and the refusal carries the domain's own
+	// message so an operator stops rather than retries.
+	SuspendCustomer(context.Context, *connect.Request[v1.SuspendCustomerRequest]) (*connect.Response[v1.SuspendCustomerResponse], error)
+	// ReinstateCustomer returns a suspended tenant to active.
+	//
+	// It calls the organization's ordinary `Activate`, not a reinstate-specific
+	// command — a suspension lifted and a trial converting both land in Active,
+	// and the state machine already says so. An operator-only path would be a
+	// second way to reach one state, which is how two paths drift.
+	ReinstateCustomer(context.Context, *connect.Request[v1.ReinstateCustomerRequest]) (*connect.Response[v1.ReinstateCustomerResponse], error)
 	// RevealPersonalData resolves one subject's vault fields, with a recorded
 	// justification (operator.md §4).
 	//
@@ -307,6 +346,18 @@ func NewOperatorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(operatorServiceMethods.ByName("GetCustomer")),
 			connect.WithClientOptions(opts...),
 		),
+		suspendCustomer: connect.NewClient[v1.SuspendCustomerRequest, v1.SuspendCustomerResponse](
+			httpClient,
+			baseURL+OperatorServiceSuspendCustomerProcedure,
+			connect.WithSchema(operatorServiceMethods.ByName("SuspendCustomer")),
+			connect.WithClientOptions(opts...),
+		),
+		reinstateCustomer: connect.NewClient[v1.ReinstateCustomerRequest, v1.ReinstateCustomerResponse](
+			httpClient,
+			baseURL+OperatorServiceReinstateCustomerProcedure,
+			connect.WithSchema(operatorServiceMethods.ByName("ReinstateCustomer")),
+			connect.WithClientOptions(opts...),
+		),
 		revealPersonalData: connect.NewClient[v1.RevealPersonalDataRequest, v1.RevealPersonalDataResponse](
 			httpClient,
 			baseURL+OperatorServiceRevealPersonalDataProcedure,
@@ -330,6 +381,8 @@ type operatorServiceClient struct {
 	listOperators      *connect.Client[v1.ListOperatorsRequest, v1.ListOperatorsResponse]
 	listCustomers      *connect.Client[v1.ListCustomersRequest, v1.ListCustomersResponse]
 	getCustomer        *connect.Client[v1.GetCustomerRequest, v1.GetCustomerResponse]
+	suspendCustomer    *connect.Client[v1.SuspendCustomerRequest, v1.SuspendCustomerResponse]
+	reinstateCustomer  *connect.Client[v1.ReinstateCustomerRequest, v1.ReinstateCustomerResponse]
 	revealPersonalData *connect.Client[v1.RevealPersonalDataRequest, v1.RevealPersonalDataResponse]
 }
 
@@ -391,6 +444,16 @@ func (c *operatorServiceClient) ListCustomers(ctx context.Context, req *connect.
 // GetCustomer calls chronos.operator.v1.OperatorService.GetCustomer.
 func (c *operatorServiceClient) GetCustomer(ctx context.Context, req *connect.Request[v1.GetCustomerRequest]) (*connect.Response[v1.GetCustomerResponse], error) {
 	return c.getCustomer.CallUnary(ctx, req)
+}
+
+// SuspendCustomer calls chronos.operator.v1.OperatorService.SuspendCustomer.
+func (c *operatorServiceClient) SuspendCustomer(ctx context.Context, req *connect.Request[v1.SuspendCustomerRequest]) (*connect.Response[v1.SuspendCustomerResponse], error) {
+	return c.suspendCustomer.CallUnary(ctx, req)
+}
+
+// ReinstateCustomer calls chronos.operator.v1.OperatorService.ReinstateCustomer.
+func (c *operatorServiceClient) ReinstateCustomer(ctx context.Context, req *connect.Request[v1.ReinstateCustomerRequest]) (*connect.Response[v1.ReinstateCustomerResponse], error) {
+	return c.reinstateCustomer.CallUnary(ctx, req)
 }
 
 // RevealPersonalData calls chronos.operator.v1.OperatorService.RevealPersonalData.
@@ -509,6 +572,39 @@ type OperatorServiceHandler interface {
 	ListCustomers(context.Context, *connect.Request[v1.ListCustomersRequest]) (*connect.Response[v1.ListCustomersResponse], error)
 	// GetCustomer reads one organization's record.
 	GetCustomer(context.Context, *connect.Request[v1.GetCustomerRequest]) (*connect.Response[v1.GetCustomerResponse], error)
+	// SuspendCustomer switches a tenant off (operator.md §7).
+	//
+	// # It goes through the tenant's own domain command
+	//
+	// Not a flag, not an operator-plane row, not a privileged back-channel. The
+	// organization aggregate is loaded from its own stream, `Suspend` is called
+	// on it, and `OrganizationSuspended` is appended to the tenant's stream —
+	// so every downstream consequence follows identically to a suspension
+	// triggered by a failed payment: the projections update, `organization.
+	// suspended` mails every member, and gate 3 begins refusing writes.
+	//
+	// §7 is explicit about why: "there is no privileged back-channel that skips
+	// domain rules, because that back-channel is exactly what corrupts state that
+	// then cannot be replayed".
+	//
+	// # `suspend_organization` is reachable by nobody through break-glass
+	//
+	// operator_admin holds it and needs no elevation; nothing else may reach it,
+	// because this is the only operator action that stops a paying customer
+	// working and it is reversible only by another operator action while they are
+	// down.
+	//
+	// The state machine refuses what it would refuse from any caller — a CLOSED
+	// organization cannot be suspended, and the refusal carries the domain's own
+	// message so an operator stops rather than retries.
+	SuspendCustomer(context.Context, *connect.Request[v1.SuspendCustomerRequest]) (*connect.Response[v1.SuspendCustomerResponse], error)
+	// ReinstateCustomer returns a suspended tenant to active.
+	//
+	// It calls the organization's ordinary `Activate`, not a reinstate-specific
+	// command — a suspension lifted and a trial converting both land in Active,
+	// and the state machine already says so. An operator-only path would be a
+	// second way to reach one state, which is how two paths drift.
+	ReinstateCustomer(context.Context, *connect.Request[v1.ReinstateCustomerRequest]) (*connect.Response[v1.ReinstateCustomerResponse], error)
 	// RevealPersonalData resolves one subject's vault fields, with a recorded
 	// justification (operator.md §4).
 	//
@@ -602,6 +698,18 @@ func NewOperatorServiceHandler(svc OperatorServiceHandler, opts ...connect.Handl
 		connect.WithSchema(operatorServiceMethods.ByName("GetCustomer")),
 		connect.WithHandlerOptions(opts...),
 	)
+	operatorServiceSuspendCustomerHandler := connect.NewUnaryHandler(
+		OperatorServiceSuspendCustomerProcedure,
+		svc.SuspendCustomer,
+		connect.WithSchema(operatorServiceMethods.ByName("SuspendCustomer")),
+		connect.WithHandlerOptions(opts...),
+	)
+	operatorServiceReinstateCustomerHandler := connect.NewUnaryHandler(
+		OperatorServiceReinstateCustomerProcedure,
+		svc.ReinstateCustomer,
+		connect.WithSchema(operatorServiceMethods.ByName("ReinstateCustomer")),
+		connect.WithHandlerOptions(opts...),
+	)
 	operatorServiceRevealPersonalDataHandler := connect.NewUnaryHandler(
 		OperatorServiceRevealPersonalDataProcedure,
 		svc.RevealPersonalData,
@@ -634,6 +742,10 @@ func NewOperatorServiceHandler(svc OperatorServiceHandler, opts ...connect.Handl
 			operatorServiceListCustomersHandler.ServeHTTP(w, r)
 		case OperatorServiceGetCustomerProcedure:
 			operatorServiceGetCustomerHandler.ServeHTTP(w, r)
+		case OperatorServiceSuspendCustomerProcedure:
+			operatorServiceSuspendCustomerHandler.ServeHTTP(w, r)
+		case OperatorServiceReinstateCustomerProcedure:
+			operatorServiceReinstateCustomerHandler.ServeHTTP(w, r)
 		case OperatorServiceRevealPersonalDataProcedure:
 			operatorServiceRevealPersonalDataHandler.ServeHTTP(w, r)
 		default:
@@ -691,6 +803,14 @@ func (UnimplementedOperatorServiceHandler) ListCustomers(context.Context, *conne
 
 func (UnimplementedOperatorServiceHandler) GetCustomer(context.Context, *connect.Request[v1.GetCustomerRequest]) (*connect.Response[v1.GetCustomerResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.operator.v1.OperatorService.GetCustomer is not implemented"))
+}
+
+func (UnimplementedOperatorServiceHandler) SuspendCustomer(context.Context, *connect.Request[v1.SuspendCustomerRequest]) (*connect.Response[v1.SuspendCustomerResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.operator.v1.OperatorService.SuspendCustomer is not implemented"))
+}
+
+func (UnimplementedOperatorServiceHandler) ReinstateCustomer(context.Context, *connect.Request[v1.ReinstateCustomerRequest]) (*connect.Response[v1.ReinstateCustomerResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.operator.v1.OperatorService.ReinstateCustomer is not implemented"))
 }
 
 func (UnimplementedOperatorServiceHandler) RevealPersonalData(context.Context, *connect.Request[v1.RevealPersonalDataRequest]) (*connect.Response[v1.RevealPersonalDataResponse], error) {
