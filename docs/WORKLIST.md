@@ -360,9 +360,11 @@ what landed since is the part that turns a trial into revenue.
 
       Still environment-only: every other secret in the build. The mechanism is
       general and the remaining move is mechanical.
-- [ ] **§9.3** — does a trial convert automatically at trial end when a card was
-      added mid-trial? Stripe's default is yes. Worth confirming rather than
-      inheriting.
+- [x] **§9.3** — does a trial convert automatically at trial end when a card was
+      added mid-trial? CONFIRMED against the real test account with a test
+      clock, not inherited from the documentation. See the entry in "The
+      remaining work, analysed"; the thing worth verifying turned out not to be
+      the default but whether `missing_payment_method: pause` suppressed it.
 - [x] **§9.4 — annual plans: YES, from the start.** Decided before the catalogue
       exists, which is the whole reason it was worth asking: the catalogue
       carries `interval` as a dimension from day one rather than being reshaped
@@ -495,11 +497,10 @@ already has a name for.
       previously listed as premature because only identity held personal data;
       that was wrong, and this is the correction.
 
-- [ ] **No reconciliation sweep.** The erasure workflow is durable, so a lost
-      one is unlikely rather than impossible. Every other timer in this system
-      has a sweep behind it for exactly that reason (billing.md §5 case 15), and
-      erasure is the one where the backstop matters most because the failure is
-      a statutory deadline nobody notices passing.
+- [x] **The reconciliation sweep — BUILT.** The erasure workflow is durable, so
+      a lost one is unlikely rather than impossible; the sweep is the backstop
+      billing.md §5 case 15 uses for the same class of failure. Duplicated the
+      entry below for a while, which is how a worklist starts lying.
 
 ### P2 — small, and each closes a decision
 
@@ -724,9 +725,11 @@ already has a name for.
       separate deployable (ADR-024) that does not exist. A `LegalHold` aggregate
       with no way to create a hold is a check that can only ever pass.
 
-- [ ] **`operator` — the back-office (operator.md).** A separate binary, build
-      order #10, "once there is something to operate". Large, and the gate for
-      legal holds above.
+- [x] **`operator` — the back-office (operator.md). SLICE 1 SHIPPED.** The
+      binary, its identity, its audit, the customer directory, and the four
+      structural separations — see "Done — `operator`, slice 1: the plane"
+      above. Slice 2 (break-glass, view-as, writes) is what still gates legal
+      holds.
 
 ## Done — `operator`, slice 1: the plane
 
@@ -1060,7 +1063,13 @@ register:
 
 ## Parked
 
-- [ ] **The two deactivation flakes — NOT reproduced, and `-count=N` now works.**
+- [x] **The two deactivation flakes — CLOSED.** One was a real race found by
+      reading the test; the other survived seventy-two clean observations with
+      three hypotheses eliminated. Both are written up in "The remaining work,
+      analysed". The note below is the original entry, kept for the `-count=N`
+      finding it records.
+
+- [x] **`-count=N` now works, which it did not before this session.**
       Repeated-run hunting was itself broken until this session: three packages
       panicked under `go test -count=2` — `internal/server/policy` and
       `internal/server/interceptor` re-registered the same synthetic protobuf
