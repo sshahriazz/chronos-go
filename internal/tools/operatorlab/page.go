@@ -148,8 +148,42 @@ const page = `<!doctype html>
   <pre id="o-reveal">waiting for a session</pre>
 </section>
 
+<section id="s-ops" data-locked="1">
+  <h2>6 · Who may use this plane</h2>
+  <p class="note">
+    Needs <code>manage_operators</code>, which only <code>operator_admin</code>
+    holds and which <strong>nobody may break the glass to</strong> — it grants
+    capabilities, so a time box would bound nothing.
+  </p>
+  <p class="note">
+    Provisioning takes no address. An operator is a pseudonym here so the audit
+    trail survives their erasure (operator.md §5), and sign-in matches on the
+    IdP's immutable subject rather than on an email — the same rule
+    identity.md §7 draws for tenants, applied to our own staff.
+  </p>
+  <button id="b-ops">ListOperators</button>
+  <div id="opsrows"></div>
+  <details style="margin-top:1rem">
+    <summary style="cursor:pointer;opacity:.78;font-size:.85rem">Provision somebody new</summary>
+    <div class="row">
+      <div>
+        <label for="pissuer">Issuer</label>
+        <input id="pissuer" value="https://accounts.google.com">
+      </div>
+      <div>
+        <label for="psub">Provider subject (their IdP <code>sub</code>)</label>
+        <input id="psub" placeholder="internal/tools/oidcsubject prints it">
+      </div>
+    </div>
+    <label for="prole">Role</label>
+    <input id="prole" value="support">
+    <button id="b-provision">ProvisionOperator</button>
+  </details>
+  <pre id="o-ops">waiting for a session</pre>
+</section>
+
 <section id="s-glass" data-locked="1">
-  <h2>6 · Break the glass</h2>
+  <h2>7 · Break the glass</h2>
   <p class="note">
     Take a capability your role does <em>not</em> hold, for fifteen minutes,
     with a recorded reason (operator.md §5). It is <strong>scoped to this
@@ -180,7 +214,7 @@ const page = `<!doctype html>
 </section>
 
 <section id="s-out" data-locked="1">
-  <h2>7 · End the session</h2>
+  <h2>8 · End the session</h2>
   <p class="note">
     Distinct from expiry, which appends nothing: a sign-out is an action
     somebody took, and it belongs in the trail beside the sign-in it ends.
@@ -248,11 +282,11 @@ const pending = () => sessionStorage.getItem('operator.pending');
 
 function refresh() {
   if (live()) {
-    unlock('s-list', 's-get', 's-reveal', 's-glass', 's-out');
+    unlock('s-list', 's-get', 's-reveal', 's-ops', 's-glass', 's-out');
     show('o-wa', 'signed in as ' + sessionStorage.getItem('operator.id') +
                  ' (' + sessionStorage.getItem('operator.role') + ')\n' +
                  'session expires ' + sessionStorage.getItem('operator.expires'), 'ok');
-    ['o-list', 'o-get', 'o-reveal', 'o-glass', 'o-out'].forEach((id) => {
+    ['o-list', 'o-get', 'o-reveal', 'o-ops', 'o-glass', 'o-out'].forEach((id) => {
       if ($(id).textContent.startsWith('waiting')) show(id, 'ready');
     });
   } else if (pending()) {
@@ -455,6 +489,89 @@ $('b-reveal').onclick = async () => {
       (e.detail && e.detail.details ? '\n\n' + JSON.stringify(e.detail.details, null, 2) : ''), 'bad');
   }
 };
+
+$('b-ops').onclick = async () => {
+  show('o-ops', 'reading…');
+  $('opsrows').innerHTML = '';
+  try {
+    const res = await rpc('ListOperators', { includeDisabled: true }, live());
+    renderOperators(res.operators || []);
+    show('o-ops', res, 'ok');
+  } catch (e) { show('o-ops', e.message + (e.code ? '\ncode: ' + e.code : ''), 'bad'); }
+};
+
+const ROLES = ['support', 'billing_ops', 'catalogue_admin', 'operator_admin'];
+
+function renderOperators(ops) {
+  const box = $('opsrows');
+  box.innerHTML = '';
+  const me = sessionStorage.getItem('operator.id');
+
+  for (const o of ops) {
+    const row = document.createElement('div');
+    row.className = 'hit';
+
+    const who = document.createElement('span');
+    who.className = 'who';
+    who.textContent = o.operatorId + (o.operatorId === me ? '   (you)' : '') +
+      '\n' + o.role + (o.disabledAt ? '  ·  OFFBOARDED ' + o.disabledAt : '  ·  live');
+    row.appendChild(who);
+
+    const buttons = document.createElement('span');
+
+    if (!o.disabledAt) {
+      const sel = document.createElement('select');
+      sel.style.cssText = 'font:inherit;padding:.25rem;background:transparent;color:inherit;' +
+                          'border:1px solid var(--line);border-radius:5px';
+      for (const r of ROLES) {
+        const opt = document.createElement('option');
+        opt.value = r; opt.textContent = r; opt.selected = r === o.role;
+        sel.appendChild(opt);
+      }
+      buttons.appendChild(sel);
+
+      const change = document.createElement('button');
+      change.textContent = 'Set role';
+      // An operator may not change their OWN role. Disabled here so the
+      // refusal is visible before it is attempted — the aggregate refuses it
+      // regardless, which is what makes the rule hold for any other caller.
+      change.disabled = o.operatorId === me;
+      change.title = change.disabled
+        ? 'An operator may not change their own role — nothing in the capability ' +
+          'table would stop an operator_admin raising themselves, so the aggregate does'
+        : '';
+      change.onclick = () => manage('ChangeOperatorRole',
+        { operatorId: o.operatorId, role: sel.value });
+      buttons.appendChild(change);
+
+      const off = document.createElement('button');
+      off.textContent = 'Offboard';
+      // Self IS permitted, unlike a role change: locking yourself out is not an
+      // escalation, and a compromise path where you must first find an admin
+      // costs minutes at the worst possible time.
+      off.onclick = () => manage('DisableOperator', { operatorId: o.operatorId });
+      buttons.appendChild(off);
+    }
+
+    row.appendChild(buttons);
+    box.appendChild(row);
+  }
+}
+
+async function manage(method, body) {
+  show('o-ops', method + '…');
+  try {
+    const res = await rpc(method, body, live());
+    show('o-ops', res, 'ok');
+    $('b-ops').click();
+  } catch (e) { show('o-ops', e.message + (e.code ? '\ncode: ' + e.code : ''), 'bad'); }
+}
+
+$('b-provision').onclick = () => manage('ProvisionOperator', {
+  issuer: $('pissuer').value.trim(),
+  providerSubject: $('psub').value.trim(),
+  role: $('prole').value.trim(),
+});
 
 $('b-glass').onclick = async () => {
   show('o-glass', 'requesting…');

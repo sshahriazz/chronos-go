@@ -12,6 +12,7 @@ import (
 	operatorv1 "github.com/chronos/chronos-go/gen/proto/chronos/operator/v1"
 	"github.com/chronos/chronos-go/gen/proto/chronos/operator/v1/operatorv1connect"
 	"github.com/chronos/chronos-go/internal/operator/app"
+	"github.com/chronos/chronos-go/internal/operator/contract"
 )
 
 // Service serves OperatorService.
@@ -25,14 +26,19 @@ type Service struct {
 	signIn    *app.SignIn
 	customers *app.Customers
 	elevation *app.Elevation
+	operators *app.Operators
 }
 
 // NewService builds the handlers.
-func NewService(signIn *app.SignIn, customers *app.Customers, elevation *app.Elevation) (*Service, error) {
-	if signIn == nil || customers == nil || elevation == nil {
-		return nil, errors.New("operator api: the service needs its three use cases")
+func NewService(
+	signIn *app.SignIn, customers *app.Customers,
+	elevation *app.Elevation, operators *app.Operators,
+) (*Service, error) {
+	if signIn == nil || customers == nil || elevation == nil || operators == nil {
+		return nil, errors.New("operator api: the service needs its four use cases")
 	}
-	return &Service{signIn: signIn, customers: customers, elevation: elevation}, nil
+	return &Service{signIn: signIn, customers: customers,
+		elevation: elevation, operators: operators}, nil
 }
 
 var _ operatorv1connect.OperatorServiceHandler = (*Service)(nil)
@@ -177,6 +183,92 @@ func (s *Service) RequestElevation(
 		ExpiresAt:    timestamppb.New(res.ExpiresAt),
 		AuditEntryId: res.AuditEntryID,
 	}), nil
+}
+
+// ProvisionOperator grants an employee access to this plane.
+func (s *Service) ProvisionOperator(
+	ctx context.Context, req *connect.Request[operatorv1.ProvisionOperatorRequest],
+) (*connect.Response[operatorv1.ProvisionOperatorResponse], error) {
+	actor, ok := ActorFrom(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, app.ErrSessionRefused)
+	}
+	res, err := s.operators.Provision(ctx, actor,
+		req.Msg.GetIssuer(), req.Msg.GetProviderSubject(), contract.Role(req.Msg.GetRole()))
+	if err != nil {
+		return nil, wire(err)
+	}
+	return connect.NewResponse(&operatorv1.ProvisionOperatorResponse{
+		OperatorId:   res.OperatorID,
+		SubjectId:    res.SubjectID,
+		AuditEntryId: res.AuditEntryID,
+	}), nil
+}
+
+// ChangeOperatorRole moves an operator between roles.
+func (s *Service) ChangeOperatorRole(
+	ctx context.Context, req *connect.Request[operatorv1.ChangeOperatorRoleRequest],
+) (*connect.Response[operatorv1.ChangeOperatorRoleResponse], error) {
+	actor, ok := ActorFrom(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, app.ErrSessionRefused)
+	}
+	res, err := s.operators.ChangeRole(ctx, actor,
+		req.Msg.GetOperatorId(), contract.Role(req.Msg.GetRole()))
+	if err != nil {
+		return nil, wire(err)
+	}
+	return connect.NewResponse(&operatorv1.ChangeOperatorRoleResponse{
+		Changed:      res.Changed,
+		AuditEntryId: res.AuditEntryID,
+	}), nil
+}
+
+// DisableOperator offboards an operator and ends their live sessions.
+func (s *Service) DisableOperator(
+	ctx context.Context, req *connect.Request[operatorv1.DisableOperatorRequest],
+) (*connect.Response[operatorv1.DisableOperatorResponse], error) {
+	actor, ok := ActorFrom(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, app.ErrSessionRefused)
+	}
+	res, err := s.operators.Disable(ctx, actor, req.Msg.GetOperatorId())
+	if err != nil {
+		return nil, wire(err)
+	}
+	return connect.NewResponse(&operatorv1.DisableOperatorResponse{
+		Changed:       res.Changed,
+		SessionsEnded: res.SessionsEnded,
+		AuditEntryId:  res.AuditEntryID,
+	}), nil
+}
+
+// ListOperators reads the roster.
+func (s *Service) ListOperators(
+	ctx context.Context, req *connect.Request[operatorv1.ListOperatorsRequest],
+) (*connect.Response[operatorv1.ListOperatorsResponse], error) {
+	actor, ok := ActorFrom(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, app.ErrSessionRefused)
+	}
+	found, err := s.operators.List(ctx, actor, MethodName(req), req.Msg.GetIncludeDisabled())
+	if err != nil {
+		return nil, wire(err)
+	}
+
+	out := make([]*operatorv1.Operator, 0, len(found))
+	for _, o := range found {
+		out = append(out, &operatorv1.Operator{
+			OperatorId:      o.OperatorID,
+			SubjectId:       o.SubjectID,
+			Issuer:          o.Issuer,
+			ProviderSubject: o.ProviderSubject,
+			Role:            string(o.Role),
+			DisabledAt:      stamp(o.DisabledAt),
+			ProvisionedAt:   timestamppb.New(o.ProvisionedAt),
+		})
+	}
+	return connect.NewResponse(&operatorv1.ListOperatorsResponse{Operators: out}), nil
 }
 
 // ListCustomers pages the directory.
@@ -326,8 +418,14 @@ func wire(err error) error {
 		// means — and a client can tell "wait for the window to close" from
 		// "you may never do this".
 		return connect.NewError(connect.CodeFailedPrecondition, err)
-	case errors.Is(err, app.ErrNoSuchCustomer):
+	case errors.Is(err, app.ErrNoSuchCustomer), errors.Is(err, app.ErrNoSuchOperator):
 		return connect.NewError(connect.CodeNotFound, err)
+
+	case errors.Is(err, app.ErrOperatorExists):
+		return connect.NewError(connect.CodeAlreadyExists, err)
+
+	case errors.Is(err, app.ErrSelfRoleChange):
+		return connect.NewError(connect.CodePermissionDenied, err)
 	default:
 		return connect.NewError(connect.CodeInternal, err)
 	}

@@ -75,6 +75,15 @@ enum AuditAction {
   // A break-glass: an operator taking a capability their role does not hold
   // (operator.md §5). Carries a mandatory justification, like the one above.
   AUDIT_ACTION_ELEVATED = 5;
+
+  // A change to who may use this plane at all — provisioning, a role change,
+  // or offboarding (operator.md §3, §7).
+  //
+  // ONE action for all three rather than three, because what an audit review
+  // asks is "who changed access, and when", and the domain event already says
+  // which change it was. Three actions would put the same question behind a
+  // three-way OR in every query that asks it.
+  AUDIT_ACTION_MANAGED_OPERATORS = 6;
 }
 
 extend google.protobuf.MethodOptions {

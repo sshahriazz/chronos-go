@@ -1351,6 +1351,589 @@ func (x *RequestElevationResponse) GetAuditEntryId() string {
 	return ""
 }
 
+// Operator is one employee's access to this plane.
+//
+// # No address, and that is not an omission
+//
+// An operator is identified here by their id, their pseudonym and their IdP
+// binding. Their work address is personal data (§5's retention rule is why it
+// matters: audit records outlive employment), and this plane holds none — it
+// stores pseudonyms so the trail survives an erasure.
+//
+// A display name, if a console wants one, comes from RevealPersonalData like
+// any other — one subject, a justification, an audit entry. The same rule that
+// governs looking up a customer governs looking up a colleague.
+type Operator struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The operator's id.
+	OperatorId string `protobuf:"bytes,1,opt,name=operator_id,json=operatorId,proto3" json:"operator_id,omitempty"`
+	// Their vault pseudonym. What every audit entry about them carries, and what
+	// makes those entries non-identifying after an erasure.
+	SubjectId string `protobuf:"bytes,2,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
+	// The IdP that authenticates them.
+	Issuer string `protobuf:"bytes,3,opt,name=issuer,proto3" json:"issuer,omitempty"`
+	// The provider's immutable subject for them — what sign-in matches on, and
+	// never an address (identity.md §7 rule 5).
+	ProviderSubject string `protobuf:"bytes,4,opt,name=provider_subject,json=providerSubject,proto3" json:"provider_subject,omitempty"`
+	// One of support, billing_ops, catalogue_admin, operator_admin.
+	Role string `protobuf:"bytes,5,opt,name=role,proto3" json:"role,omitempty"`
+	// When they were offboarded. Unset means their access is live.
+	DisabledAt *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=disabled_at,json=disabledAt,proto3" json:"disabled_at,omitempty"`
+	// When they were granted access.
+	ProvisionedAt *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=provisioned_at,json=provisionedAt,proto3" json:"provisioned_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Operator) Reset() {
+	*x = Operator{}
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Operator) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Operator) ProtoMessage() {}
+
+func (x *Operator) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Operator.ProtoReflect.Descriptor instead.
+func (*Operator) Descriptor() ([]byte, []int) {
+	return file_chronos_operator_v1_operator_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *Operator) GetOperatorId() string {
+	if x != nil {
+		return x.OperatorId
+	}
+	return ""
+}
+
+func (x *Operator) GetSubjectId() string {
+	if x != nil {
+		return x.SubjectId
+	}
+	return ""
+}
+
+func (x *Operator) GetIssuer() string {
+	if x != nil {
+		return x.Issuer
+	}
+	return ""
+}
+
+func (x *Operator) GetProviderSubject() string {
+	if x != nil {
+		return x.ProviderSubject
+	}
+	return ""
+}
+
+func (x *Operator) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *Operator) GetDisabledAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.DisabledAt
+	}
+	return nil
+}
+
+func (x *Operator) GetProvisionedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ProvisionedAt
+	}
+	return nil
+}
+
+// ProvisionOperatorRequest grants an employee access to this plane.
+type ProvisionOperatorRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The IdP issuer. Named per operator rather than assumed global, because it
+	// is what a second IdP would vary.
+	Issuer string `protobuf:"bytes,1,opt,name=issuer,proto3" json:"issuer,omitempty"`
+	// The provider's immutable subject — Google's `sub`.
+	//
+	// NEVER an address. An identifier that can change is not an identity, and
+	// matching on the address is the takeover identity.md §7 rule 5 exists to
+	// prevent — which applies to our own staff exactly as it does to a tenant.
+	//
+	// Whoever provisions somebody reads this from the IdP's admin console; on a
+	// laptop, `internal/tools/oidcsubject` obtains it from the person themselves.
+	ProviderSubject string `protobuf:"bytes,2,opt,name=provider_subject,json=providerSubject,proto3" json:"provider_subject,omitempty"`
+	// The role to grant. Least privilege is the caller's job, not this field's —
+	// but the plane refuses a role it cannot evaluate rather than granting one
+	// that silently does nothing.
+	Role          string `protobuf:"bytes,3,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProvisionOperatorRequest) Reset() {
+	*x = ProvisionOperatorRequest{}
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProvisionOperatorRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProvisionOperatorRequest) ProtoMessage() {}
+
+func (x *ProvisionOperatorRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProvisionOperatorRequest.ProtoReflect.Descriptor instead.
+func (*ProvisionOperatorRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_operator_v1_operator_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *ProvisionOperatorRequest) GetIssuer() string {
+	if x != nil {
+		return x.Issuer
+	}
+	return ""
+}
+
+func (x *ProvisionOperatorRequest) GetProviderSubject() string {
+	if x != nil {
+		return x.ProviderSubject
+	}
+	return ""
+}
+
+func (x *ProvisionOperatorRequest) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+// ProvisionOperatorResponse names the operator that was created.
+type ProvisionOperatorResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Their new id.
+	OperatorId string `protobuf:"bytes,1,opt,name=operator_id,json=operatorId,proto3" json:"operator_id,omitempty"`
+	// Their new pseudonym.
+	SubjectId string `protobuf:"bytes,2,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
+	// The audit entry this grant produced.
+	AuditEntryId  string `protobuf:"bytes,3,opt,name=audit_entry_id,json=auditEntryId,proto3" json:"audit_entry_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProvisionOperatorResponse) Reset() {
+	*x = ProvisionOperatorResponse{}
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProvisionOperatorResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProvisionOperatorResponse) ProtoMessage() {}
+
+func (x *ProvisionOperatorResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProvisionOperatorResponse.ProtoReflect.Descriptor instead.
+func (*ProvisionOperatorResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_operator_v1_operator_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *ProvisionOperatorResponse) GetOperatorId() string {
+	if x != nil {
+		return x.OperatorId
+	}
+	return ""
+}
+
+func (x *ProvisionOperatorResponse) GetSubjectId() string {
+	if x != nil {
+		return x.SubjectId
+	}
+	return ""
+}
+
+func (x *ProvisionOperatorResponse) GetAuditEntryId() string {
+	if x != nil {
+		return x.AuditEntryId
+	}
+	return ""
+}
+
+// ChangeOperatorRoleRequest moves an operator to a different role.
+type ChangeOperatorRoleRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Who to change. An operator may not name THEMSELVES — the aggregate refuses
+	// it, because an operator_admin holds the capability to manage operators and
+	// nothing in the capability table would otherwise stop them raising
+	// themselves.
+	OperatorId string `protobuf:"bytes,1,opt,name=operator_id,json=operatorId,proto3" json:"operator_id,omitempty"`
+	// The role to move them to.
+	Role          string `protobuf:"bytes,2,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChangeOperatorRoleRequest) Reset() {
+	*x = ChangeOperatorRoleRequest{}
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChangeOperatorRoleRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChangeOperatorRoleRequest) ProtoMessage() {}
+
+func (x *ChangeOperatorRoleRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChangeOperatorRoleRequest.ProtoReflect.Descriptor instead.
+func (*ChangeOperatorRoleRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_operator_v1_operator_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *ChangeOperatorRoleRequest) GetOperatorId() string {
+	if x != nil {
+		return x.OperatorId
+	}
+	return ""
+}
+
+func (x *ChangeOperatorRoleRequest) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+// ChangeOperatorRoleResponse reports the state after the call.
+type ChangeOperatorRoleResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// False means they already held that role, which is a success: the caller
+	// asked for a state that holds, and an event saying "support became support"
+	// would be noise in the stream an escalation alert reads.
+	Changed bool `protobuf:"varint,1,opt,name=changed,proto3" json:"changed,omitempty"`
+	// The audit entry, when this call changed anything.
+	AuditEntryId  string `protobuf:"bytes,2,opt,name=audit_entry_id,json=auditEntryId,proto3" json:"audit_entry_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChangeOperatorRoleResponse) Reset() {
+	*x = ChangeOperatorRoleResponse{}
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChangeOperatorRoleResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChangeOperatorRoleResponse) ProtoMessage() {}
+
+func (x *ChangeOperatorRoleResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChangeOperatorRoleResponse.ProtoReflect.Descriptor instead.
+func (*ChangeOperatorRoleResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_operator_v1_operator_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *ChangeOperatorRoleResponse) GetChanged() bool {
+	if x != nil {
+		return x.Changed
+	}
+	return false
+}
+
+func (x *ChangeOperatorRoleResponse) GetAuditEntryId() string {
+	if x != nil {
+		return x.AuditEntryId
+	}
+	return ""
+}
+
+// DisableOperatorRequest offboards an operator.
+type DisableOperatorRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Who to offboard. SELF IS PERMITTED here, unlike a role change: an operator
+	// locking themselves out is not an escalation, and a suspected-compromise
+	// path where the person who noticed must first find an admin costs minutes at
+	// the worst possible time.
+	OperatorId    string `protobuf:"bytes,1,opt,name=operator_id,json=operatorId,proto3" json:"operator_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DisableOperatorRequest) Reset() {
+	*x = DisableOperatorRequest{}
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DisableOperatorRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DisableOperatorRequest) ProtoMessage() {}
+
+func (x *DisableOperatorRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DisableOperatorRequest.ProtoReflect.Descriptor instead.
+func (*DisableOperatorRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_operator_v1_operator_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *DisableOperatorRequest) GetOperatorId() string {
+	if x != nil {
+		return x.OperatorId
+	}
+	return ""
+}
+
+// DisableOperatorResponse reports the state after the call.
+type DisableOperatorResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// False means they were already offboarded.
+	Changed bool `protobuf:"varint,1,opt,name=changed,proto3" json:"changed,omitempty"`
+	// How many live sessions were ended by this call.
+	//
+	// Returned because "offboarding is immediate and verified" (operator.md §3),
+	// and this number is the verification — an offboarding that ended no sessions
+	// when the person was signed in is one that did not take effect.
+	SessionsEnded int32 `protobuf:"varint,2,opt,name=sessions_ended,json=sessionsEnded,proto3" json:"sessions_ended,omitempty"`
+	// The audit entry, when this call changed anything.
+	AuditEntryId  string `protobuf:"bytes,3,opt,name=audit_entry_id,json=auditEntryId,proto3" json:"audit_entry_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DisableOperatorResponse) Reset() {
+	*x = DisableOperatorResponse{}
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DisableOperatorResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DisableOperatorResponse) ProtoMessage() {}
+
+func (x *DisableOperatorResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DisableOperatorResponse.ProtoReflect.Descriptor instead.
+func (*DisableOperatorResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_operator_v1_operator_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *DisableOperatorResponse) GetChanged() bool {
+	if x != nil {
+		return x.Changed
+	}
+	return false
+}
+
+func (x *DisableOperatorResponse) GetSessionsEnded() int32 {
+	if x != nil {
+		return x.SessionsEnded
+	}
+	return 0
+}
+
+func (x *DisableOperatorResponse) GetAuditEntryId() string {
+	if x != nil {
+		return x.AuditEntryId
+	}
+	return ""
+}
+
+// ListOperatorsRequest asks who may use this plane.
+type ListOperatorsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Include operators who have been offboarded. False by default: the ordinary
+	// question is "who has access", and an offboarded operator is kept for the
+	// audit trail rather than for the roster.
+	IncludeDisabled bool `protobuf:"varint,1,opt,name=include_disabled,json=includeDisabled,proto3" json:"include_disabled,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *ListOperatorsRequest) Reset() {
+	*x = ListOperatorsRequest{}
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListOperatorsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListOperatorsRequest) ProtoMessage() {}
+
+func (x *ListOperatorsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListOperatorsRequest.ProtoReflect.Descriptor instead.
+func (*ListOperatorsRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_operator_v1_operator_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *ListOperatorsRequest) GetIncludeDisabled() bool {
+	if x != nil {
+		return x.IncludeDisabled
+	}
+	return false
+}
+
+// ListOperatorsResponse is everyone with access.
+type ListOperatorsResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The operators, oldest first.
+	//
+	// Unpaged, and bounded at a hundred. Operators are our own staff and there
+	// are tens of them, not thousands — a cursor here would be machinery for a
+	// scale this list does not reach. The ceiling is what stops that assumption
+	// failing silently: a hundredth operator is a signal that the assumption
+	// needs revisiting, not a page that quietly truncates.
+	Operators     []*Operator `protobuf:"bytes,1,rep,name=operators,proto3" json:"operators,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListOperatorsResponse) Reset() {
+	*x = ListOperatorsResponse{}
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListOperatorsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListOperatorsResponse) ProtoMessage() {}
+
+func (x *ListOperatorsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListOperatorsResponse.ProtoReflect.Descriptor instead.
+func (*ListOperatorsResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_operator_v1_operator_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *ListOperatorsResponse) GetOperators() []*Operator {
+	if x != nil {
+		return x.Operators
+	}
+	return nil
+}
+
 var File_chronos_operator_v1_operator_proto protoreflect.FileDescriptor
 
 const file_chronos_operator_v1_operator_proto_rawDesc = "" +
@@ -1455,14 +2038,59 @@ const file_chronos_operator_v1_operator_proto_rawDesc = "" +
 	"capability\x129\n" +
 	"\n" +
 	"expires_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12R\n" +
-	"\x0eaudit_entry_id\x18\x03 \x01(\tB,\xbaH)r'\x18 2#^audit_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\fauditEntryId2\xcf\b\n" +
+	"\x0eaudit_entry_id\x18\x03 \x01(\tB,\xbaH)r'\x18 2#^audit_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\fauditEntryId\"\x97\x03\n" +
+	"\bOperator\x12K\n" +
+	"\voperator_id\x18\x01 \x01(\tB*\xbaH'r%\x18\x1e2!^opr_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\n" +
+	"operatorId\x12J\n" +
+	"\n" +
+	"subject_id\x18\x02 \x01(\tB+\xbaH(r&\x18 2\"^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\tsubjectId\x12 \n" +
+	"\x06issuer\x18\x03 \x01(\tB\b\xbaH\x05r\x03\x18\x80\x04R\x06issuer\x123\n" +
+	"\x10provider_subject\x18\x04 \x01(\tB\b\xbaH\x05r\x03\x18\xff\x01R\x0fproviderSubject\x12\x1b\n" +
+	"\x04role\x18\x05 \x01(\tB\a\xbaH\x04r\x02\x18 R\x04role\x12;\n" +
+	"\vdisabled_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"disabledAt\x12A\n" +
+	"\x0eprovisioned_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\rprovisionedAt\"\xca\x01\n" +
+	"\x18ProvisionOperatorRequest\x12\"\n" +
+	"\x06issuer\x18\x01 \x01(\tB\n" +
+	"\xbaH\ar\x05\x10\x01\x18\x80\x04R\x06issuer\x125\n" +
+	"\x10provider_subject\x18\x02 \x01(\tB\n" +
+	"\xbaH\ar\x05\x10\x01\x18\xff\x01R\x0fproviderSubject\x12S\n" +
+	"\x04role\x18\x03 \x01(\tB?\xbaH<r:\x18 26^(support|billing_ops|catalogue_admin|operator_admin)$R\x04role\"\x88\x02\n" +
+	"\x19ProvisionOperatorResponse\x12K\n" +
+	"\voperator_id\x18\x01 \x01(\tB*\xbaH'r%\x18\x1e2!^opr_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\n" +
+	"operatorId\x12J\n" +
+	"\n" +
+	"subject_id\x18\x02 \x01(\tB+\xbaH(r&\x18 2\"^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\tsubjectId\x12R\n" +
+	"\x0eaudit_entry_id\x18\x03 \x01(\tB,\xbaH)r'\x18 2#^audit_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\fauditEntryId\"\xbd\x01\n" +
+	"\x19ChangeOperatorRoleRequest\x12K\n" +
+	"\voperator_id\x18\x01 \x01(\tB*\xbaH'r%\x18\x1e2!^opr_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\n" +
+	"operatorId\x12S\n" +
+	"\x04role\x18\x02 \x01(\tB?\xbaH<r:\x18 26^(support|billing_ops|catalogue_admin|operator_admin)$R\x04role\"\x8d\x01\n" +
+	"\x1aChangeOperatorRoleResponse\x12\x18\n" +
+	"\achanged\x18\x01 \x01(\bR\achanged\x12U\n" +
+	"\x0eaudit_entry_id\x18\x02 \x01(\tB/\xbaH,r*\x18 2&^$|^audit_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\fauditEntryId\"e\n" +
+	"\x16DisableOperatorRequest\x12K\n" +
+	"\voperator_id\x18\x01 \x01(\tB*\xbaH'r%\x18\x1e2!^opr_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\n" +
+	"operatorId\"\xba\x01\n" +
+	"\x17DisableOperatorResponse\x12\x18\n" +
+	"\achanged\x18\x01 \x01(\bR\achanged\x12.\n" +
+	"\x0esessions_ended\x18\x02 \x01(\x05B\a\xbaH\x04\x1a\x02(\x00R\rsessionsEnded\x12U\n" +
+	"\x0eaudit_entry_id\x18\x03 \x01(\tB/\xbaH,r*\x18 2&^$|^audit_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\fauditEntryId\"A\n" +
+	"\x14ListOperatorsRequest\x12)\n" +
+	"\x10include_disabled\x18\x01 \x01(\bR\x0fincludeDisabled\"^\n" +
+	"\x15ListOperatorsResponse\x12E\n" +
+	"\toperators\x18\x01 \x03(\v2\x1d.chronos.operator.v1.OperatorB\b\xbaH\x05\x92\x01\x02\x10dR\toperators2\xfc\f\n" +
 	"\x0fOperatorService\x12f\n" +
 	"\vBeginSignIn\x12'.chronos.operator.v1.BeginSignInRequest\x1a(.chronos.operator.v1.BeginSignInResponse\"\x04\x98\xb2\x19\x01\x12o\n" +
 	"\x0eCompleteSignIn\x12*.chronos.operator.v1.CompleteSignInRequest\x1a+.chronos.operator.v1.CompleteSignInResponse\"\x04\x98\xb2\x19\x01\x12l\n" +
 	"\rBeginWebAuthn\x12).chronos.operator.v1.BeginWebAuthnRequest\x1a*.chronos.operator.v1.BeginWebAuthnResponse\"\x04\xa0\xb2\x19\x01\x12s\n" +
 	"\x0eFinishWebAuthn\x12*.chronos.operator.v1.FinishWebAuthnRequest\x1a+.chronos.operator.v1.FinishWebAuthnResponse\"\b\x90\xb2\x19\x01\xa0\xb2\x19\x01\x12j\n" +
 	"\aSignOut\x12#.chronos.operator.v1.SignOutRequest\x1a$.chronos.operator.v1.SignOutResponse\"\x14\x8a\xb2\x19\fself_session\x90\xb2\x19\x02\x12\x85\x01\n" +
-	"\x10RequestElevation\x12,.chronos.operator.v1.RequestElevationRequest\x1a-.chronos.operator.v1.RequestElevationResponse\"\x14\x8a\xb2\x19\fself_session\x90\xb2\x19\x05\x12~\n" +
+	"\x10RequestElevation\x12,.chronos.operator.v1.RequestElevationRequest\x1a-.chronos.operator.v1.RequestElevationResponse\"\x14\x8a\xb2\x19\fself_session\x90\xb2\x19\x05\x12\x8c\x01\n" +
+	"\x11ProvisionOperator\x12-.chronos.operator.v1.ProvisionOperatorRequest\x1a..chronos.operator.v1.ProvisionOperatorResponse\"\x18\x8a\xb2\x19\x10manage_operators\x90\xb2\x19\x06\x12\x8f\x01\n" +
+	"\x12ChangeOperatorRole\x12..chronos.operator.v1.ChangeOperatorRoleRequest\x1a/.chronos.operator.v1.ChangeOperatorRoleResponse\"\x18\x8a\xb2\x19\x10manage_operators\x90\xb2\x19\x06\x12\x86\x01\n" +
+	"\x0fDisableOperator\x12+.chronos.operator.v1.DisableOperatorRequest\x1a,.chronos.operator.v1.DisableOperatorResponse\"\x18\x8a\xb2\x19\x10manage_operators\x90\xb2\x19\x06\x12\x80\x01\n" +
+	"\rListOperators\x12).chronos.operator.v1.ListOperatorsRequest\x1a*.chronos.operator.v1.ListOperatorsResponse\"\x18\x8a\xb2\x19\x10manage_operators\x90\xb2\x19\x06\x12~\n" +
 	"\rListCustomers\x12).chronos.operator.v1.ListCustomersRequest\x1a*.chronos.operator.v1.ListCustomersResponse\"\x16\x8a\xb2\x19\x0eview_customers\x90\xb2\x19\x03\x12x\n" +
 	"\vGetCustomer\x12'.chronos.operator.v1.GetCustomerRequest\x1a(.chronos.operator.v1.GetCustomerResponse\"\x16\x8a\xb2\x19\x0eview_customers\x90\xb2\x19\x03\x12\x91\x01\n" +
 	"\x12RevealPersonalData\x12..chronos.operator.v1.RevealPersonalDataRequest\x1a/.chronos.operator.v1.RevealPersonalDataResponse\"\x1a\x8a\xb2\x19\x12view_personal_data\x90\xb2\x19\x04B\xde\x01\n" +
@@ -1480,7 +2108,7 @@ func file_chronos_operator_v1_operator_proto_rawDescGZIP() []byte {
 	return file_chronos_operator_v1_operator_proto_rawDescData
 }
 
-var file_chronos_operator_v1_operator_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_chronos_operator_v1_operator_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
 var file_chronos_operator_v1_operator_proto_goTypes = []any{
 	(*BeginSignInRequest)(nil),         // 0: chronos.operator.v1.BeginSignInRequest
 	(*BeginSignInResponse)(nil),        // 1: chronos.operator.v1.BeginSignInResponse
@@ -1501,44 +2129,64 @@ var file_chronos_operator_v1_operator_proto_goTypes = []any{
 	(*RevealPersonalDataResponse)(nil), // 16: chronos.operator.v1.RevealPersonalDataResponse
 	(*RequestElevationRequest)(nil),    // 17: chronos.operator.v1.RequestElevationRequest
 	(*RequestElevationResponse)(nil),   // 18: chronos.operator.v1.RequestElevationResponse
-	nil,                                // 19: chronos.operator.v1.RevealPersonalDataResponse.FieldsEntry
-	(*timestamppb.Timestamp)(nil),      // 20: google.protobuf.Timestamp
+	(*Operator)(nil),                   // 19: chronos.operator.v1.Operator
+	(*ProvisionOperatorRequest)(nil),   // 20: chronos.operator.v1.ProvisionOperatorRequest
+	(*ProvisionOperatorResponse)(nil),  // 21: chronos.operator.v1.ProvisionOperatorResponse
+	(*ChangeOperatorRoleRequest)(nil),  // 22: chronos.operator.v1.ChangeOperatorRoleRequest
+	(*ChangeOperatorRoleResponse)(nil), // 23: chronos.operator.v1.ChangeOperatorRoleResponse
+	(*DisableOperatorRequest)(nil),     // 24: chronos.operator.v1.DisableOperatorRequest
+	(*DisableOperatorResponse)(nil),    // 25: chronos.operator.v1.DisableOperatorResponse
+	(*ListOperatorsRequest)(nil),       // 26: chronos.operator.v1.ListOperatorsRequest
+	(*ListOperatorsResponse)(nil),      // 27: chronos.operator.v1.ListOperatorsResponse
+	nil,                                // 28: chronos.operator.v1.RevealPersonalDataResponse.FieldsEntry
+	(*timestamppb.Timestamp)(nil),      // 29: google.protobuf.Timestamp
 }
 var file_chronos_operator_v1_operator_proto_depIdxs = []int32{
-	20, // 0: chronos.operator.v1.BeginSignInResponse.expires_at:type_name -> google.protobuf.Timestamp
-	20, // 1: chronos.operator.v1.CompleteSignInResponse.expires_at:type_name -> google.protobuf.Timestamp
-	20, // 2: chronos.operator.v1.FinishWebAuthnResponse.expires_at:type_name -> google.protobuf.Timestamp
-	20, // 3: chronos.operator.v1.Customer.trial_ends_at:type_name -> google.protobuf.Timestamp
-	20, // 4: chronos.operator.v1.Customer.last_active_at:type_name -> google.protobuf.Timestamp
-	20, // 5: chronos.operator.v1.Customer.suspended_at:type_name -> google.protobuf.Timestamp
-	20, // 6: chronos.operator.v1.Customer.created_at:type_name -> google.protobuf.Timestamp
+	29, // 0: chronos.operator.v1.BeginSignInResponse.expires_at:type_name -> google.protobuf.Timestamp
+	29, // 1: chronos.operator.v1.CompleteSignInResponse.expires_at:type_name -> google.protobuf.Timestamp
+	29, // 2: chronos.operator.v1.FinishWebAuthnResponse.expires_at:type_name -> google.protobuf.Timestamp
+	29, // 3: chronos.operator.v1.Customer.trial_ends_at:type_name -> google.protobuf.Timestamp
+	29, // 4: chronos.operator.v1.Customer.last_active_at:type_name -> google.protobuf.Timestamp
+	29, // 5: chronos.operator.v1.Customer.suspended_at:type_name -> google.protobuf.Timestamp
+	29, // 6: chronos.operator.v1.Customer.created_at:type_name -> google.protobuf.Timestamp
 	11, // 7: chronos.operator.v1.ListCustomersResponse.customers:type_name -> chronos.operator.v1.Customer
 	11, // 8: chronos.operator.v1.GetCustomerResponse.customer:type_name -> chronos.operator.v1.Customer
-	19, // 9: chronos.operator.v1.RevealPersonalDataResponse.fields:type_name -> chronos.operator.v1.RevealPersonalDataResponse.FieldsEntry
-	20, // 10: chronos.operator.v1.RequestElevationResponse.expires_at:type_name -> google.protobuf.Timestamp
-	0,  // 11: chronos.operator.v1.OperatorService.BeginSignIn:input_type -> chronos.operator.v1.BeginSignInRequest
-	2,  // 12: chronos.operator.v1.OperatorService.CompleteSignIn:input_type -> chronos.operator.v1.CompleteSignInRequest
-	4,  // 13: chronos.operator.v1.OperatorService.BeginWebAuthn:input_type -> chronos.operator.v1.BeginWebAuthnRequest
-	6,  // 14: chronos.operator.v1.OperatorService.FinishWebAuthn:input_type -> chronos.operator.v1.FinishWebAuthnRequest
-	8,  // 15: chronos.operator.v1.OperatorService.SignOut:input_type -> chronos.operator.v1.SignOutRequest
-	17, // 16: chronos.operator.v1.OperatorService.RequestElevation:input_type -> chronos.operator.v1.RequestElevationRequest
-	10, // 17: chronos.operator.v1.OperatorService.ListCustomers:input_type -> chronos.operator.v1.ListCustomersRequest
-	13, // 18: chronos.operator.v1.OperatorService.GetCustomer:input_type -> chronos.operator.v1.GetCustomerRequest
-	15, // 19: chronos.operator.v1.OperatorService.RevealPersonalData:input_type -> chronos.operator.v1.RevealPersonalDataRequest
-	1,  // 20: chronos.operator.v1.OperatorService.BeginSignIn:output_type -> chronos.operator.v1.BeginSignInResponse
-	3,  // 21: chronos.operator.v1.OperatorService.CompleteSignIn:output_type -> chronos.operator.v1.CompleteSignInResponse
-	5,  // 22: chronos.operator.v1.OperatorService.BeginWebAuthn:output_type -> chronos.operator.v1.BeginWebAuthnResponse
-	7,  // 23: chronos.operator.v1.OperatorService.FinishWebAuthn:output_type -> chronos.operator.v1.FinishWebAuthnResponse
-	9,  // 24: chronos.operator.v1.OperatorService.SignOut:output_type -> chronos.operator.v1.SignOutResponse
-	18, // 25: chronos.operator.v1.OperatorService.RequestElevation:output_type -> chronos.operator.v1.RequestElevationResponse
-	12, // 26: chronos.operator.v1.OperatorService.ListCustomers:output_type -> chronos.operator.v1.ListCustomersResponse
-	14, // 27: chronos.operator.v1.OperatorService.GetCustomer:output_type -> chronos.operator.v1.GetCustomerResponse
-	16, // 28: chronos.operator.v1.OperatorService.RevealPersonalData:output_type -> chronos.operator.v1.RevealPersonalDataResponse
-	20, // [20:29] is the sub-list for method output_type
-	11, // [11:20] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	28, // 9: chronos.operator.v1.RevealPersonalDataResponse.fields:type_name -> chronos.operator.v1.RevealPersonalDataResponse.FieldsEntry
+	29, // 10: chronos.operator.v1.RequestElevationResponse.expires_at:type_name -> google.protobuf.Timestamp
+	29, // 11: chronos.operator.v1.Operator.disabled_at:type_name -> google.protobuf.Timestamp
+	29, // 12: chronos.operator.v1.Operator.provisioned_at:type_name -> google.protobuf.Timestamp
+	19, // 13: chronos.operator.v1.ListOperatorsResponse.operators:type_name -> chronos.operator.v1.Operator
+	0,  // 14: chronos.operator.v1.OperatorService.BeginSignIn:input_type -> chronos.operator.v1.BeginSignInRequest
+	2,  // 15: chronos.operator.v1.OperatorService.CompleteSignIn:input_type -> chronos.operator.v1.CompleteSignInRequest
+	4,  // 16: chronos.operator.v1.OperatorService.BeginWebAuthn:input_type -> chronos.operator.v1.BeginWebAuthnRequest
+	6,  // 17: chronos.operator.v1.OperatorService.FinishWebAuthn:input_type -> chronos.operator.v1.FinishWebAuthnRequest
+	8,  // 18: chronos.operator.v1.OperatorService.SignOut:input_type -> chronos.operator.v1.SignOutRequest
+	17, // 19: chronos.operator.v1.OperatorService.RequestElevation:input_type -> chronos.operator.v1.RequestElevationRequest
+	20, // 20: chronos.operator.v1.OperatorService.ProvisionOperator:input_type -> chronos.operator.v1.ProvisionOperatorRequest
+	22, // 21: chronos.operator.v1.OperatorService.ChangeOperatorRole:input_type -> chronos.operator.v1.ChangeOperatorRoleRequest
+	24, // 22: chronos.operator.v1.OperatorService.DisableOperator:input_type -> chronos.operator.v1.DisableOperatorRequest
+	26, // 23: chronos.operator.v1.OperatorService.ListOperators:input_type -> chronos.operator.v1.ListOperatorsRequest
+	10, // 24: chronos.operator.v1.OperatorService.ListCustomers:input_type -> chronos.operator.v1.ListCustomersRequest
+	13, // 25: chronos.operator.v1.OperatorService.GetCustomer:input_type -> chronos.operator.v1.GetCustomerRequest
+	15, // 26: chronos.operator.v1.OperatorService.RevealPersonalData:input_type -> chronos.operator.v1.RevealPersonalDataRequest
+	1,  // 27: chronos.operator.v1.OperatorService.BeginSignIn:output_type -> chronos.operator.v1.BeginSignInResponse
+	3,  // 28: chronos.operator.v1.OperatorService.CompleteSignIn:output_type -> chronos.operator.v1.CompleteSignInResponse
+	5,  // 29: chronos.operator.v1.OperatorService.BeginWebAuthn:output_type -> chronos.operator.v1.BeginWebAuthnResponse
+	7,  // 30: chronos.operator.v1.OperatorService.FinishWebAuthn:output_type -> chronos.operator.v1.FinishWebAuthnResponse
+	9,  // 31: chronos.operator.v1.OperatorService.SignOut:output_type -> chronos.operator.v1.SignOutResponse
+	18, // 32: chronos.operator.v1.OperatorService.RequestElevation:output_type -> chronos.operator.v1.RequestElevationResponse
+	21, // 33: chronos.operator.v1.OperatorService.ProvisionOperator:output_type -> chronos.operator.v1.ProvisionOperatorResponse
+	23, // 34: chronos.operator.v1.OperatorService.ChangeOperatorRole:output_type -> chronos.operator.v1.ChangeOperatorRoleResponse
+	25, // 35: chronos.operator.v1.OperatorService.DisableOperator:output_type -> chronos.operator.v1.DisableOperatorResponse
+	27, // 36: chronos.operator.v1.OperatorService.ListOperators:output_type -> chronos.operator.v1.ListOperatorsResponse
+	12, // 37: chronos.operator.v1.OperatorService.ListCustomers:output_type -> chronos.operator.v1.ListCustomersResponse
+	14, // 38: chronos.operator.v1.OperatorService.GetCustomer:output_type -> chronos.operator.v1.GetCustomerResponse
+	16, // 39: chronos.operator.v1.OperatorService.RevealPersonalData:output_type -> chronos.operator.v1.RevealPersonalDataResponse
+	27, // [27:40] is the sub-list for method output_type
+	14, // [14:27] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_chronos_operator_v1_operator_proto_init() }
@@ -1553,7 +2201,7 @@ func file_chronos_operator_v1_operator_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chronos_operator_v1_operator_proto_rawDesc), len(file_chronos_operator_v1_operator_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   20,
+			NumMessages:   29,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

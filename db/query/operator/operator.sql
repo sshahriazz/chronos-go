@@ -30,6 +30,16 @@ ON CONFLICT (operator_id) DO UPDATE SET
     disabled_at = EXCLUDED.disabled_at,
     updated_at  = now();
 
+-- name: ListOperators :many
+-- Who may use this plane. Unpaged and bounded — operators are our own staff and
+-- there are tens of them; a cursor would be machinery for a scale this does not
+-- reach, and the ceiling is what stops that assumption failing silently.
+SELECT operator_id, subject_id, issuer, provider_subject, role, disabled_at, provisioned_at
+FROM operator_account
+WHERE sqlc.arg('include_disabled')::boolean OR disabled_at IS NULL
+ORDER BY provisioned_at
+LIMIT 100;
+
 -- name: SetOperatorRole :exec
 -- A plain UPDATE rather than an upsert, and it is safe because a catch-up
 -- subscription preserves order WITHIN a stream: an operator's provisioning is
@@ -182,8 +192,13 @@ UPDATE operator_session
 SET ended_at = $2
 WHERE token_digest = $1 AND ended_at IS NULL;
 
--- name: EndOperatorSessionsFor :exec
+-- name: EndOperatorSessionsFor :execrows
 -- Offboarding's fan-out: end every live session an operator holds.
+--
+-- The COUNT is returned because "offboarding is immediate and verified"
+-- (operator.md §3) and this number is the verification — an offboarding that
+-- ended no sessions while the person was signed in is one that did not take
+-- effect, and the difference is invisible without it.
 UPDATE operator_session
 SET ended_at = $2
 WHERE operator_id = $1 AND ended_at IS NULL;

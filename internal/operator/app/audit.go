@@ -128,6 +128,28 @@ func (a *Auditor) RecordElevationExpiry(ctx context.Context, e ExpiredElevation)
 	return entryID, a.append(ctx, entryID, entry)
 }
 
+// RecordOperatorManaged records a change to who may use this plane.
+func (a *Auditor) RecordOperatorManaged(
+	ctx context.Context, actor Actor, targetOperatorID, change string,
+) (string, error) {
+	entryID, err := newAuditID(a.clock.Now())
+	if err != nil {
+		return "", err
+	}
+	entry := eventsourcing.NewAggregate(domain.NewAuditEntry)
+	if err := entry.RecordOperatorManaged(contract.OperatorAccessManaged{
+		OperatorID:       actor.OperatorID,
+		SubjectID:        actor.SubjectID,
+		TargetOperatorID: targetOperatorID,
+		Change:           change,
+		FromIP:           actor.FromIP,
+		ManagedAt:        a.clock.Now(),
+	}); err != nil {
+		return "", err
+	}
+	return entryID, a.append(ctx, entryID, entry)
+}
+
 // RecordView records a read of the directory or of one customer.
 //
 // orgID is empty on a list, and that is not an omission: a page is an aggregate

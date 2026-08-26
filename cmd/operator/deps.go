@@ -49,6 +49,7 @@ type dependencies struct {
 	signIn    *app.SignIn
 	customers *app.Customers
 	elevation *app.Elevation
+	operators *app.Operators
 
 	clock    app.Clock
 	resolver clientip.Resolver
@@ -220,6 +221,15 @@ func newDependencies(
 		return fail(err)
 	}
 	d.elevation = elevation
+
+	operators, err := app.NewOperators(app.OperatorsDeps{
+		Accounts: store, Sessions: store, Events: appender,
+		Auditor: auditor, Clock: d.clock, Log: log,
+	})
+	if err != nil {
+		return fail(err)
+	}
+	d.operators = operators
 
 	return d, closeAll, nil
 }

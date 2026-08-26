@@ -81,6 +81,18 @@ func NewAuditLog(codec eventsourcing.Codec) *AuditLog {
 		return nil
 	})
 
+	// The CHANGE rides in the fields array, for the reason usedLabel does: the
+	// array already means "what this entry is about", and a dedicated column
+	// would be a nullable that one action out of seven populates.
+	d.On[contract.OperatorAccessManaged](func(
+		_ context.Context, w db.Writer, env projection.Envelope, e *contract.OperatorAccessManaged,
+	) error {
+		w.Exec(operatordb.InsertAuditEntry,
+			entryID(env), e.OperatorID, e.SubjectID, "managed_operators", e.Change,
+			nil, nullText(e.TargetOperatorID), nil, nil, nullIP(e.FromIP), e.ManagedAt)
+		return nil
+	})
+
 	d.On[contract.OperatorViewedCustomer](func(
 		_ context.Context, w db.Writer, env projection.Envelope, e *contract.OperatorViewedCustomer,
 	) error {

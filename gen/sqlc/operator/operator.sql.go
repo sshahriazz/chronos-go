@@ -209,7 +209,7 @@ func (q *Queries) EndOperatorSession(ctx context.Context, arg EndOperatorSession
 	return result.RowsAffected(), nil
 }
 
-const EndOperatorSessionsFor = `-- name: EndOperatorSessionsFor :exec
+const EndOperatorSessionsFor = `-- name: EndOperatorSessionsFor :execrows
 UPDATE operator_session
 SET ended_at = $2
 WHERE operator_id = $1 AND ended_at IS NULL
@@ -221,9 +221,17 @@ type EndOperatorSessionsForParams struct {
 }
 
 // Offboarding's fan-out: end every live session an operator holds.
-func (q *Queries) EndOperatorSessionsFor(ctx context.Context, arg EndOperatorSessionsForParams) error {
-	_, err := q.db.Exec(ctx, EndOperatorSessionsFor, arg.OperatorID, arg.EndedAt)
-	return err
+//
+// The COUNT is returned because "offboarding is immediate and verified"
+// (operator.md §3) and this number is the verification — an offboarding that
+// ended no sessions while the person was signed in is one that did not take
+// effect, and the difference is invisible without it.
+func (q *Queries) EndOperatorSessionsFor(ctx context.Context, arg EndOperatorSessionsForParams) (int64, error) {
+	result, err := q.db.Exec(ctx, EndOperatorSessionsFor, arg.OperatorID, arg.EndedAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const FlagOperatorCredentialClone = `-- name: FlagOperatorCredentialClone :exec
@@ -809,6 +817,55 @@ func (q *Queries) ListOperatorCredentials(ctx context.Context, operatorID string
 			&i.CreatedAt,
 			&i.LastUsedAt,
 			&i.CloneWarnedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const ListOperators = `-- name: ListOperators :many
+SELECT operator_id, subject_id, issuer, provider_subject, role, disabled_at, provisioned_at
+FROM operator_account
+WHERE $1::boolean OR disabled_at IS NULL
+ORDER BY provisioned_at
+LIMIT 100
+`
+
+type ListOperatorsRow struct {
+	OperatorID      string
+	SubjectID       string
+	Issuer          string
+	ProviderSubject string
+	Role            string
+	DisabledAt      pgtype.Timestamptz
+	ProvisionedAt   pgtype.Timestamptz
+}
+
+// Who may use this plane. Unpaged and bounded — operators are our own staff and
+// there are tens of them; a cursor would be machinery for a scale this does not
+// reach, and the ceiling is what stops that assumption failing silently.
+func (q *Queries) ListOperators(ctx context.Context, includeDisabled bool) ([]ListOperatorsRow, error) {
+	rows, err := q.db.Query(ctx, ListOperators, includeDisabled)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListOperatorsRow{}
+	for rows.Next() {
+		var i ListOperatorsRow
+		if err := rows.Scan(
+			&i.OperatorID,
+			&i.SubjectID,
+			&i.Issuer,
+			&i.ProviderSubject,
+			&i.Role,
+			&i.DisabledAt,
+			&i.ProvisionedAt,
 		); err != nil {
 			return nil, err
 		}

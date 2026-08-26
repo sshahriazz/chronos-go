@@ -145,6 +145,7 @@ func TestOperatorEventsNotifyNobody(t *testing.T) {
 		"operator.OperatorSignedIn.v1":           "an audit record; per-sign-in mail would be ignored within a week",
 		"operator.OperatorSignedOut.v1":          "an audit record",
 		"operator.OperatorElevationExpired.v1":   "the closing half of a window whose opening already alerted",
+		"operator.OperatorAccessManaged.v1":      "an audited access change to our own staff; the alert on escalation reads the log",
 		"operator.OperatorViewedCustomer.v1":     "the tenant sees this in their operator-access history (operator.md §5)",
 		"operator.OperatorViewedPersonalData.v1": "same, with the justification attached",
 	}

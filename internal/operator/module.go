@@ -23,6 +23,7 @@ func RegisterEvents(codec *eventcodec.JSON) {
 	eventcodec.Register[contract.OperatorSignedOut](codec)
 	eventcodec.Register[contract.OperatorElevated](codec)
 	eventcodec.Register[contract.OperatorElevationExpired](codec)
+	eventcodec.Register[contract.OperatorAccessManaged](codec)
 	eventcodec.Register[contract.OperatorViewedCustomer](codec)
 	eventcodec.Register[contract.OperatorViewedPersonalData](codec)
 }
@@ -53,6 +54,7 @@ func eventTypes() []string {
 		(&contract.OperatorSignedOut{}).EventType(),
 		(&contract.OperatorElevated{}).EventType(),
 		(&contract.OperatorElevationExpired{}).EventType(),
+		(&contract.OperatorAccessManaged{}).EventType(),
 		(&contract.OperatorViewedCustomer{}).EventType(),
 		(&contract.OperatorViewedPersonalData{}).EventType(),
 	}

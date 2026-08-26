@@ -47,7 +47,12 @@ type Querier interface {
 	ElevateOperatorSession(ctx context.Context, arg ElevateOperatorSessionParams) (int64, error)
 	EndOperatorSession(ctx context.Context, arg EndOperatorSessionParams) (int64, error)
 	// Offboarding's fan-out: end every live session an operator holds.
-	EndOperatorSessionsFor(ctx context.Context, arg EndOperatorSessionsForParams) error
+	//
+	// The COUNT is returned because "offboarding is immediate and verified"
+	// (operator.md §3) and this number is the verification — an offboarding that
+	// ended no sessions while the person was signed in is one that did not take
+	// effect, and the difference is invisible without it.
+	EndOperatorSessionsFor(ctx context.Context, arg EndOperatorSessionsForParams) (int64, error)
 	FlagOperatorCredentialClone(ctx context.Context, credentialID string) error
 	GetCustomer(ctx context.Context, orgID string) (GetCustomerRow, error)
 	GetOperator(ctx context.Context, operatorID string) (GetOperatorRow, error)
@@ -96,6 +101,10 @@ type Querier interface {
 	// Credentials
 	// ---------------------------------------------------------------------------
 	ListOperatorCredentials(ctx context.Context, operatorID string) ([]OperatorCredential, error)
+	// Who may use this plane. Unpaged and bounded — operators are our own staff and
+	// there are tens of them; a cursor would be machinery for a scale this does not
+	// reach, and the ceiling is what stops that assumption failing silently.
+	ListOperators(ctx context.Context, includeDisabled bool) ([]ListOperatorsRow, error)
 	// Separate from the window closing, which is what makes the grant stop working.
 	// This is about the AUDIT RECORD, and keeping the two apart is what stops a
 	// sweep outage from either double-recording or silently extending anything.

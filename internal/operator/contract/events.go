@@ -435,3 +435,46 @@ type OperatorElevationExpired struct {
 func (*OperatorElevationExpired) EventType() string {
 	return "operator.OperatorElevationExpired.v1"
 }
+
+// OperatorAccessManaged records a change to who may use this plane.
+//
+// # It is an AUDIT event, and it duplicates a domain event on purpose
+//
+// Provisioning, a role change and an offboarding each already append their own
+// event to the operator's stream. This adds a fourth, on the audit stream,
+// naming the same act.
+//
+// The duplication earns its place because the two answer different questions.
+// The operator's stream answers "what happened to this person's access", folded
+// per operator. The audit log answers "who changed access, and when", indexed
+// by ACTOR and by time — and the actor is what the domain events carry as a
+// field rather than as a key, so answering it from them means scanning every
+// operator's stream.
+//
+// It is also what keeps the audit rule absolute. Every method on this plane
+// records an entry; a management RPC that recorded only a domain event would be
+// the exception, and an audit trail with one exception has as many as somebody
+// later argues for.
+type OperatorAccessManaged struct {
+	OperatorID string
+	SubjectID  string
+
+	// TargetOperatorID is whose access changed. EMPTY on a list, which changes
+	// nobody's — the same shape OperatorViewedCustomer uses for a page.
+	TargetOperatorID string
+
+	// Change is what was done, in words: "provisioned support", "role changed
+	// to billing_ops", "offboarded", "listed operators".
+	//
+	// A rendered string rather than a discriminated union, because this record
+	// exists to be READ by a person reviewing access changes — and the
+	// machine-readable form is the domain event on the operator's own stream,
+	// which is where anything computing on it should look.
+	Change string
+
+	FromIP string
+
+	ManagedAt time.Time
+}
+
+func (*OperatorAccessManaged) EventType() string { return "operator.OperatorAccessManaged.v1" }

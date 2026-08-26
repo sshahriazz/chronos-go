@@ -58,6 +58,7 @@ func (a *AuditEntry) Apply(event eventsourcing.Event) {
 		*contract.OperatorSignedOut,
 		*contract.OperatorElevated,
 		*contract.OperatorElevationExpired,
+		*contract.OperatorAccessManaged,
 		*contract.OperatorViewedCustomer,
 		*contract.OperatorViewedPersonalData:
 		a.recorded = true
@@ -141,6 +142,21 @@ func (a *AuditEntry) RecordElevationExpiry(ev contract.OperatorElevationExpired)
 		return fmt.Errorf("operator: an expiry record needs the capability that lapsed")
 	}
 	ev.ExpiredAt = ev.ExpiredAt.UTC()
+	eventsourcing.Record(a, &ev)
+	return nil
+}
+
+// RecordOperatorManaged records a change to who may use this plane.
+func (a *AuditEntry) RecordOperatorManaged(ev contract.OperatorAccessManaged) error {
+	switch {
+	case a.recorded:
+		return fmt.Errorf("operator: audit entry already recorded")
+	case ev.OperatorID == "":
+		return fmt.Errorf("operator: an access-management record needs an actor")
+	case ev.Change == "":
+		return fmt.Errorf("operator: an access-management record needs to say what changed")
+	}
+	ev.ManagedAt = ev.ManagedAt.UTC()
 	eventsourcing.Record(a, &ev)
 	return nil
 }

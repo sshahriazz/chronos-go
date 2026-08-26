@@ -506,6 +506,214 @@ message RequestElevationResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Operator account management (operator.md §3, §7)
+// ---------------------------------------------------------------------------
+
+// Operator is one employee's access to this plane.
+//
+// # No address, and that is not an omission
+//
+// An operator is identified here by their id, their pseudonym and their IdP
+// binding. Their work address is personal data (§5's retention rule is why it
+// matters: audit records outlive employment), and this plane holds none — it
+// stores pseudonyms so the trail survives an erasure.
+//
+// A display name, if a console wants one, comes from RevealPersonalData like
+// any other — one subject, a justification, an audit entry. The same rule that
+// governs looking up a customer governs looking up a colleague.
+message Operator {
+  // The operator's id.
+  string operator_id = 1 [
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^opr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Their vault pseudonym. What every audit entry about them carries, and what
+  // makes those entries non-identifying after an erasure.
+  string subject_id = 2 [
+    (buf.validate.field).string = {
+      max_len: 32
+      pattern: "^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // The IdP that authenticates them.
+  string issuer = 3 [(buf.validate.field).string.max_len = 512];
+
+  // The provider's immutable subject for them — what sign-in matches on, and
+  // never an address (identity.md §7 rule 5).
+  string provider_subject = 4 [(buf.validate.field).string.max_len = 255];
+
+  // One of support, billing_ops, catalogue_admin, operator_admin.
+  string role = 5 [(buf.validate.field).string.max_len = 32];
+
+  // When they were offboarded. Unset means their access is live.
+  google.protobuf.Timestamp disabled_at = 6;
+
+  // When they were granted access.
+  google.protobuf.Timestamp provisioned_at = 7;
+}
+
+// ProvisionOperatorRequest grants an employee access to this plane.
+message ProvisionOperatorRequest {
+  // The IdP issuer. Named per operator rather than assumed global, because it
+  // is what a second IdP would vary.
+  string issuer = 1 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_len: 512
+    }
+  ];
+
+  // The provider's immutable subject — Google's `sub`.
+  //
+  // NEVER an address. An identifier that can change is not an identity, and
+  // matching on the address is the takeover identity.md §7 rule 5 exists to
+  // prevent — which applies to our own staff exactly as it does to a tenant.
+  //
+  // Whoever provisions somebody reads this from the IdP's admin console; on a
+  // laptop, `internal/tools/oidcsubject` obtains it from the person themselves.
+  string provider_subject = 2 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_len: 255
+    }
+  ];
+
+  // The role to grant. Least privilege is the caller's job, not this field's —
+  // but the plane refuses a role it cannot evaluate rather than granting one
+  // that silently does nothing.
+  string role = 3 [
+    (buf.validate.field).string = {
+      max_len: 32
+      pattern: "^(support|billing_ops|catalogue_admin|operator_admin)$"
+    }
+  ];
+}
+
+// ProvisionOperatorResponse names the operator that was created.
+message ProvisionOperatorResponse {
+  // Their new id.
+  string operator_id = 1 [
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^opr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Their new pseudonym.
+  string subject_id = 2 [
+    (buf.validate.field).string = {
+      max_len: 32
+      pattern: "^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // The audit entry this grant produced.
+  string audit_entry_id = 3 [
+    (buf.validate.field).string = {
+      max_len: 32
+      pattern: "^audit_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
+// ChangeOperatorRoleRequest moves an operator to a different role.
+message ChangeOperatorRoleRequest {
+  // Who to change. An operator may not name THEMSELVES — the aggregate refuses
+  // it, because an operator_admin holds the capability to manage operators and
+  // nothing in the capability table would otherwise stop them raising
+  // themselves.
+  string operator_id = 1 [
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^opr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // The role to move them to.
+  string role = 2 [
+    (buf.validate.field).string = {
+      max_len: 32
+      pattern: "^(support|billing_ops|catalogue_admin|operator_admin)$"
+    }
+  ];
+}
+
+// ChangeOperatorRoleResponse reports the state after the call.
+message ChangeOperatorRoleResponse {
+  // False means they already held that role, which is a success: the caller
+  // asked for a state that holds, and an event saying "support became support"
+  // would be noise in the stream an escalation alert reads.
+  bool changed = 1;
+
+  // The audit entry, when this call changed anything.
+  string audit_entry_id = 2 [
+    (buf.validate.field).string = {
+      max_len: 32
+      pattern: "^$|^audit_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
+// DisableOperatorRequest offboards an operator.
+message DisableOperatorRequest {
+  // Who to offboard. SELF IS PERMITTED here, unlike a role change: an operator
+  // locking themselves out is not an escalation, and a suspected-compromise
+  // path where the person who noticed must first find an admin costs minutes at
+  // the worst possible time.
+  string operator_id = 1 [
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^opr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
+// DisableOperatorResponse reports the state after the call.
+message DisableOperatorResponse {
+  // False means they were already offboarded.
+  bool changed = 1;
+
+  // How many live sessions were ended by this call.
+  //
+  // Returned because "offboarding is immediate and verified" (operator.md §3),
+  // and this number is the verification — an offboarding that ended no sessions
+  // when the person was signed in is one that did not take effect.
+  int32 sessions_ended = 2 [(buf.validate.field).int32.gte = 0];
+
+  // The audit entry, when this call changed anything.
+  string audit_entry_id = 3 [
+    (buf.validate.field).string = {
+      max_len: 32
+      pattern: "^$|^audit_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
+// ListOperatorsRequest asks who may use this plane.
+message ListOperatorsRequest {
+  // Include operators who have been offboarded. False by default: the ordinary
+  // question is "who has access", and an offboarded operator is kept for the
+  // audit trail rather than for the roster.
+  bool include_disabled = 1;
+}
+
+// ListOperatorsResponse is everyone with access.
+message ListOperatorsResponse {
+  // The operators, oldest first.
+  //
+  // Unpaged, and bounded at a hundred. Operators are our own staff and there
+  // are tens of them, not thousands — a cursor here would be machinery for a
+  // scale this list does not reach. The ceiling is what stops that assumption
+  // failing silently: a hundredth operator is a signal that the assumption
+  // needs revisiting, not a page that quietly truncates.
+  repeated Operator operators = 1 [(buf.validate.field).repeated.max_items = 100];
+}
+
+// ---------------------------------------------------------------------------
 // The service
 // ---------------------------------------------------------------------------
 
@@ -592,6 +800,65 @@ service OperatorService {
   rpc RequestElevation(RequestElevationRequest) returns (RequestElevationResponse) {
     option (chronos.operator.v1.capability) = "self_session";
     option (chronos.operator.v1.audit) = AUDIT_ACTION_ELEVATED;
+  }
+
+  // ProvisionOperator grants an employee access to this plane (operator.md §3).
+  //
+  // # The first operator cannot come through here
+  //
+  // Every method on this plane needs a session, and a session needs an
+  // operator, so the first one is a bootstrap no RPC can perform. That is
+  // `internal/tools/provisionoperator`, which runs where the credentials
+  // already are — the honest resolution, rather than an endpoint that is
+  // exempt from authentication and therefore the most dangerous thing here.
+  //
+  // Both write through the SAME aggregate, so they cannot diverge: the event is
+  // identical and the projection is identical. What differs is who may call
+  // them.
+  rpc ProvisionOperator(ProvisionOperatorRequest) returns (ProvisionOperatorResponse) {
+    option (chronos.operator.v1.capability) = "manage_operators";
+    option (chronos.operator.v1.audit) = AUDIT_ACTION_MANAGED_OPERATORS;
+  }
+
+  // ChangeOperatorRole moves an operator between roles.
+  //
+  // Refused when the caller names themselves. An operator_admin holds
+  // `manage_operators`, so nothing in the capability table stops them raising
+  // their own role — the aggregate is the only place that knows the actor and
+  // the target are the same person, and that is where the refusal lives.
+  //
+  // Refused for a DISABLED operator too: re-granting access is a new
+  // provisioning by a second person, and a role change that quietly revived an
+  // offboarded account would make offboarding a toggle.
+  rpc ChangeOperatorRole(ChangeOperatorRoleRequest) returns (ChangeOperatorRoleResponse) {
+    option (chronos.operator.v1.capability) = "manage_operators";
+    option (chronos.operator.v1.audit) = AUDIT_ACTION_MANAGED_OPERATORS;
+  }
+
+  // DisableOperator offboards an operator, and ends their live sessions.
+  //
+  // "Offboarding is immediate and verified — an operator account outliving
+  // employment is a breach waiting to happen" (operator.md §3). Immediate means
+  // the sessions are ended by THIS call rather than left to the projection: the
+  // projection is what stops future sign-ins, and it is seconds behind, which
+  // is seconds too many for a compromised account.
+  //
+  // Both paths exist because they fail differently. The direct end handles the
+  // sessions that exist now; the projection handles every session created
+  // between the append and the row landing. Neither alone closes the window.
+  rpc DisableOperator(DisableOperatorRequest) returns (DisableOperatorResponse) {
+    option (chronos.operator.v1.capability) = "manage_operators";
+    option (chronos.operator.v1.audit) = AUDIT_ACTION_MANAGED_OPERATORS;
+  }
+
+  // ListOperators reads who may use this plane.
+  //
+  // Audited like every read here, and for a reason that is easy to miss: the
+  // roster is a list of our staff and their privileges, which is exactly what
+  // somebody who had reached this plane would want first.
+  rpc ListOperators(ListOperatorsRequest) returns (ListOperatorsResponse) {
+    option (chronos.operator.v1.capability) = "manage_operators";
+    option (chronos.operator.v1.audit) = AUDIT_ACTION_MANAGED_OPERATORS;
   }
 
   // ListCustomers pages the customer directory.

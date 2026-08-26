@@ -80,6 +80,9 @@ type Accounts interface {
 
 	// ByID resolves an operator by their own id.
 	ByID(ctx context.Context, operatorID string) (OperatorRecord, error)
+
+	// All lists every operator, oldest first.
+	All(ctx context.Context, includeDisabled bool) ([]OperatorRecord, error)
 }
 
 // StoredCredential is one operator authenticator, as the database holds it.
@@ -208,8 +211,11 @@ type Sessions interface {
 	// End marks a session over and reports whether this call changed anything.
 	End(ctx context.Context, digest []byte, now time.Time) (bool, error)
 
-	// EndAllFor ends every live session an operator holds.
-	EndAllFor(ctx context.Context, operatorID string, now time.Time) error
+	// EndAllFor ends every live session an operator holds and reports how many.
+	//
+	// The count is the verification operator.md §3 asks for: an offboarding that
+	// ended no sessions while the person was signed in did not take effect.
+	EndAllFor(ctx context.Context, operatorID string, now time.Time) (int64, error)
 }
 
 // CeremonyKind separates the three ceremonies a sign-in can be in.

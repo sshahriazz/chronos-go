@@ -85,7 +85,7 @@ func handler(t *testing.T, allowed []netip.Prefix) http.Handler {
 		t.Fatalf("building the guard: %v", err)
 	}
 
-	svc, err := api.NewService(stubSignIn(t), stubCustomers(t), stubElevation(t))
+	svc, err := api.NewService(stubSignIn(t), stubCustomers(t), stubElevation(t), stubOperators(t))
 	if err != nil {
 		t.Fatalf("building the service: %v", err)
 	}
@@ -250,6 +250,8 @@ func (stubAccounts) ByID(context.Context, string) (app.OperatorRecord, error) {
 	return app.OperatorRecord{}, app.ErrNotAnOperator
 }
 
+func (stubAccounts) All(context.Context, bool) ([]app.OperatorRecord, error) { return nil, nil }
+
 type stubCredentials struct{ app.Credentials }
 
 type stubCeremonies struct{}
@@ -339,4 +341,16 @@ func TestElevationRefusesToBuildWithoutAnAlerter(t *testing.T) {
 	if !strings.Contains(err.Error(), "alerter") {
 		t.Errorf("refused for the wrong reason: %v", err)
 	}
+}
+
+func stubOperators(t *testing.T) *app.Operators {
+	t.Helper()
+	o, err := app.NewOperators(app.OperatorsDeps{
+		Accounts: stubAccounts{}, Sessions: stubSessions{}, Events: stubEvents{},
+		Auditor: app.NewAuditor(stubEvents{}, fixedClock{}), Clock: fixedClock{},
+	})
+	if err != nil {
+		t.Fatalf("building the operators use case: %v", err)
+	}
+	return o
 }

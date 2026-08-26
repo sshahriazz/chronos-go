@@ -90,7 +90,7 @@ func (s *Store) ByID(ctx context.Context, operatorID string) (app.OperatorRecord
 	return rec, nil
 }
 
-func scanOperator(row db.Row, rec *app.OperatorRecord) error {
+func scanOperator(row scanner, rec *app.OperatorRecord) error {
 	var role string
 	if err := row.Scan(&rec.OperatorID, &rec.SubjectID, &rec.Issuer, &rec.ProviderSubject,
 		&role, &rec.DisabledAt, &rec.ProvisionedAt); err != nil {
@@ -395,10 +395,45 @@ func (s *Store) End(ctx context.Context, digest []byte, now time.Time) (bool, er
 	return changed, nil
 }
 
-// EndAllFor ends every live session an operator holds.
-func (s *Store) EndAllFor(ctx context.Context, operatorID string, now time.Time) error {
-	return s.exec(ctx, "ending an operator's sessions", operatordb.EndOperatorSessionsFor,
-		operatorID, now.UTC())
+// EndAllFor ends every live session an operator holds and reports how many.
+func (s *Store) EndAllFor(ctx context.Context, operatorID string, now time.Time) (int64, error) {
+	var n int64
+	err := s.tx.InSystemTx(ctx, func(ctx context.Context, q db.Querier) error {
+		affected, err := q.Exec(ctx, operatordb.EndOperatorSessionsFor, operatorID, now.UTC())
+		if err != nil {
+			return err
+		}
+		n = affected
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("operator postgres: ending an operator's sessions: %w", err)
+	}
+	return n, nil
+}
+
+// All lists every operator.
+func (s *Store) All(ctx context.Context, includeDisabled bool) ([]app.OperatorRecord, error) {
+	out := make([]app.OperatorRecord, 0, 16)
+	err := s.tx.InSystemTx(ctx, func(ctx context.Context, q db.Querier) error {
+		rows, err := q.Query(ctx, operatordb.ListOperators, includeDisabled)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var rec app.OperatorRecord
+			if err := scanOperator(rows, &rec); err != nil {
+				return err
+			}
+			out = append(out, rec)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("operator postgres: listing operators: %w", err)
+	}
+	return out, nil
 }
 
 // SweepSessions removes sessions past their deadline.

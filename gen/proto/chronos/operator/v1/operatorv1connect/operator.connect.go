@@ -76,6 +76,18 @@ const (
 	// OperatorServiceRequestElevationProcedure is the fully-qualified name of the OperatorService's
 	// RequestElevation RPC.
 	OperatorServiceRequestElevationProcedure = "/chronos.operator.v1.OperatorService/RequestElevation"
+	// OperatorServiceProvisionOperatorProcedure is the fully-qualified name of the OperatorService's
+	// ProvisionOperator RPC.
+	OperatorServiceProvisionOperatorProcedure = "/chronos.operator.v1.OperatorService/ProvisionOperator"
+	// OperatorServiceChangeOperatorRoleProcedure is the fully-qualified name of the OperatorService's
+	// ChangeOperatorRole RPC.
+	OperatorServiceChangeOperatorRoleProcedure = "/chronos.operator.v1.OperatorService/ChangeOperatorRole"
+	// OperatorServiceDisableOperatorProcedure is the fully-qualified name of the OperatorService's
+	// DisableOperator RPC.
+	OperatorServiceDisableOperatorProcedure = "/chronos.operator.v1.OperatorService/DisableOperator"
+	// OperatorServiceListOperatorsProcedure is the fully-qualified name of the OperatorService's
+	// ListOperators RPC.
+	OperatorServiceListOperatorsProcedure = "/chronos.operator.v1.OperatorService/ListOperators"
 	// OperatorServiceListCustomersProcedure is the fully-qualified name of the OperatorService's
 	// ListCustomers RPC.
 	OperatorServiceListCustomersProcedure = "/chronos.operator.v1.OperatorService/ListCustomers"
@@ -148,6 +160,49 @@ type OperatorServiceClient interface {
 	// The elevation is scoped to the SESSION, so signing out ends it and a second
 	// session of the same operator is unaffected.
 	RequestElevation(context.Context, *connect.Request[v1.RequestElevationRequest]) (*connect.Response[v1.RequestElevationResponse], error)
+	// ProvisionOperator grants an employee access to this plane (operator.md §3).
+	//
+	// # The first operator cannot come through here
+	//
+	// Every method on this plane needs a session, and a session needs an
+	// operator, so the first one is a bootstrap no RPC can perform. That is
+	// `internal/tools/provisionoperator`, which runs where the credentials
+	// already are — the honest resolution, rather than an endpoint that is
+	// exempt from authentication and therefore the most dangerous thing here.
+	//
+	// Both write through the SAME aggregate, so they cannot diverge: the event is
+	// identical and the projection is identical. What differs is who may call
+	// them.
+	ProvisionOperator(context.Context, *connect.Request[v1.ProvisionOperatorRequest]) (*connect.Response[v1.ProvisionOperatorResponse], error)
+	// ChangeOperatorRole moves an operator between roles.
+	//
+	// Refused when the caller names themselves. An operator_admin holds
+	// `manage_operators`, so nothing in the capability table stops them raising
+	// their own role — the aggregate is the only place that knows the actor and
+	// the target are the same person, and that is where the refusal lives.
+	//
+	// Refused for a DISABLED operator too: re-granting access is a new
+	// provisioning by a second person, and a role change that quietly revived an
+	// offboarded account would make offboarding a toggle.
+	ChangeOperatorRole(context.Context, *connect.Request[v1.ChangeOperatorRoleRequest]) (*connect.Response[v1.ChangeOperatorRoleResponse], error)
+	// DisableOperator offboards an operator, and ends their live sessions.
+	//
+	// "Offboarding is immediate and verified — an operator account outliving
+	// employment is a breach waiting to happen" (operator.md §3). Immediate means
+	// the sessions are ended by THIS call rather than left to the projection: the
+	// projection is what stops future sign-ins, and it is seconds behind, which
+	// is seconds too many for a compromised account.
+	//
+	// Both paths exist because they fail differently. The direct end handles the
+	// sessions that exist now; the projection handles every session created
+	// between the append and the row landing. Neither alone closes the window.
+	DisableOperator(context.Context, *connect.Request[v1.DisableOperatorRequest]) (*connect.Response[v1.DisableOperatorResponse], error)
+	// ListOperators reads who may use this plane.
+	//
+	// Audited like every read here, and for a reason that is easy to miss: the
+	// roster is a list of our staff and their privileges, which is exactly what
+	// somebody who had reached this plane would want first.
+	ListOperators(context.Context, *connect.Request[v1.ListOperatorsRequest]) (*connect.Response[v1.ListOperatorsResponse], error)
 	// ListCustomers pages the customer directory.
 	//
 	// Audited, like every read here. The entry names no org, because a page is an
@@ -216,6 +271,30 @@ func NewOperatorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(operatorServiceMethods.ByName("RequestElevation")),
 			connect.WithClientOptions(opts...),
 		),
+		provisionOperator: connect.NewClient[v1.ProvisionOperatorRequest, v1.ProvisionOperatorResponse](
+			httpClient,
+			baseURL+OperatorServiceProvisionOperatorProcedure,
+			connect.WithSchema(operatorServiceMethods.ByName("ProvisionOperator")),
+			connect.WithClientOptions(opts...),
+		),
+		changeOperatorRole: connect.NewClient[v1.ChangeOperatorRoleRequest, v1.ChangeOperatorRoleResponse](
+			httpClient,
+			baseURL+OperatorServiceChangeOperatorRoleProcedure,
+			connect.WithSchema(operatorServiceMethods.ByName("ChangeOperatorRole")),
+			connect.WithClientOptions(opts...),
+		),
+		disableOperator: connect.NewClient[v1.DisableOperatorRequest, v1.DisableOperatorResponse](
+			httpClient,
+			baseURL+OperatorServiceDisableOperatorProcedure,
+			connect.WithSchema(operatorServiceMethods.ByName("DisableOperator")),
+			connect.WithClientOptions(opts...),
+		),
+		listOperators: connect.NewClient[v1.ListOperatorsRequest, v1.ListOperatorsResponse](
+			httpClient,
+			baseURL+OperatorServiceListOperatorsProcedure,
+			connect.WithSchema(operatorServiceMethods.ByName("ListOperators")),
+			connect.WithClientOptions(opts...),
+		),
 		listCustomers: connect.NewClient[v1.ListCustomersRequest, v1.ListCustomersResponse](
 			httpClient,
 			baseURL+OperatorServiceListCustomersProcedure,
@@ -245,6 +324,10 @@ type operatorServiceClient struct {
 	finishWebAuthn     *connect.Client[v1.FinishWebAuthnRequest, v1.FinishWebAuthnResponse]
 	signOut            *connect.Client[v1.SignOutRequest, v1.SignOutResponse]
 	requestElevation   *connect.Client[v1.RequestElevationRequest, v1.RequestElevationResponse]
+	provisionOperator  *connect.Client[v1.ProvisionOperatorRequest, v1.ProvisionOperatorResponse]
+	changeOperatorRole *connect.Client[v1.ChangeOperatorRoleRequest, v1.ChangeOperatorRoleResponse]
+	disableOperator    *connect.Client[v1.DisableOperatorRequest, v1.DisableOperatorResponse]
+	listOperators      *connect.Client[v1.ListOperatorsRequest, v1.ListOperatorsResponse]
 	listCustomers      *connect.Client[v1.ListCustomersRequest, v1.ListCustomersResponse]
 	getCustomer        *connect.Client[v1.GetCustomerRequest, v1.GetCustomerResponse]
 	revealPersonalData *connect.Client[v1.RevealPersonalDataRequest, v1.RevealPersonalDataResponse]
@@ -278,6 +361,26 @@ func (c *operatorServiceClient) SignOut(ctx context.Context, req *connect.Reques
 // RequestElevation calls chronos.operator.v1.OperatorService.RequestElevation.
 func (c *operatorServiceClient) RequestElevation(ctx context.Context, req *connect.Request[v1.RequestElevationRequest]) (*connect.Response[v1.RequestElevationResponse], error) {
 	return c.requestElevation.CallUnary(ctx, req)
+}
+
+// ProvisionOperator calls chronos.operator.v1.OperatorService.ProvisionOperator.
+func (c *operatorServiceClient) ProvisionOperator(ctx context.Context, req *connect.Request[v1.ProvisionOperatorRequest]) (*connect.Response[v1.ProvisionOperatorResponse], error) {
+	return c.provisionOperator.CallUnary(ctx, req)
+}
+
+// ChangeOperatorRole calls chronos.operator.v1.OperatorService.ChangeOperatorRole.
+func (c *operatorServiceClient) ChangeOperatorRole(ctx context.Context, req *connect.Request[v1.ChangeOperatorRoleRequest]) (*connect.Response[v1.ChangeOperatorRoleResponse], error) {
+	return c.changeOperatorRole.CallUnary(ctx, req)
+}
+
+// DisableOperator calls chronos.operator.v1.OperatorService.DisableOperator.
+func (c *operatorServiceClient) DisableOperator(ctx context.Context, req *connect.Request[v1.DisableOperatorRequest]) (*connect.Response[v1.DisableOperatorResponse], error) {
+	return c.disableOperator.CallUnary(ctx, req)
+}
+
+// ListOperators calls chronos.operator.v1.OperatorService.ListOperators.
+func (c *operatorServiceClient) ListOperators(ctx context.Context, req *connect.Request[v1.ListOperatorsRequest]) (*connect.Response[v1.ListOperatorsResponse], error) {
+	return c.listOperators.CallUnary(ctx, req)
 }
 
 // ListCustomers calls chronos.operator.v1.OperatorService.ListCustomers.
@@ -356,6 +459,49 @@ type OperatorServiceHandler interface {
 	// The elevation is scoped to the SESSION, so signing out ends it and a second
 	// session of the same operator is unaffected.
 	RequestElevation(context.Context, *connect.Request[v1.RequestElevationRequest]) (*connect.Response[v1.RequestElevationResponse], error)
+	// ProvisionOperator grants an employee access to this plane (operator.md §3).
+	//
+	// # The first operator cannot come through here
+	//
+	// Every method on this plane needs a session, and a session needs an
+	// operator, so the first one is a bootstrap no RPC can perform. That is
+	// `internal/tools/provisionoperator`, which runs where the credentials
+	// already are — the honest resolution, rather than an endpoint that is
+	// exempt from authentication and therefore the most dangerous thing here.
+	//
+	// Both write through the SAME aggregate, so they cannot diverge: the event is
+	// identical and the projection is identical. What differs is who may call
+	// them.
+	ProvisionOperator(context.Context, *connect.Request[v1.ProvisionOperatorRequest]) (*connect.Response[v1.ProvisionOperatorResponse], error)
+	// ChangeOperatorRole moves an operator between roles.
+	//
+	// Refused when the caller names themselves. An operator_admin holds
+	// `manage_operators`, so nothing in the capability table stops them raising
+	// their own role — the aggregate is the only place that knows the actor and
+	// the target are the same person, and that is where the refusal lives.
+	//
+	// Refused for a DISABLED operator too: re-granting access is a new
+	// provisioning by a second person, and a role change that quietly revived an
+	// offboarded account would make offboarding a toggle.
+	ChangeOperatorRole(context.Context, *connect.Request[v1.ChangeOperatorRoleRequest]) (*connect.Response[v1.ChangeOperatorRoleResponse], error)
+	// DisableOperator offboards an operator, and ends their live sessions.
+	//
+	// "Offboarding is immediate and verified — an operator account outliving
+	// employment is a breach waiting to happen" (operator.md §3). Immediate means
+	// the sessions are ended by THIS call rather than left to the projection: the
+	// projection is what stops future sign-ins, and it is seconds behind, which
+	// is seconds too many for a compromised account.
+	//
+	// Both paths exist because they fail differently. The direct end handles the
+	// sessions that exist now; the projection handles every session created
+	// between the append and the row landing. Neither alone closes the window.
+	DisableOperator(context.Context, *connect.Request[v1.DisableOperatorRequest]) (*connect.Response[v1.DisableOperatorResponse], error)
+	// ListOperators reads who may use this plane.
+	//
+	// Audited like every read here, and for a reason that is easy to miss: the
+	// roster is a list of our staff and their privileges, which is exactly what
+	// somebody who had reached this plane would want first.
+	ListOperators(context.Context, *connect.Request[v1.ListOperatorsRequest]) (*connect.Response[v1.ListOperatorsResponse], error)
 	// ListCustomers pages the customer directory.
 	//
 	// Audited, like every read here. The entry names no org, because a page is an
@@ -420,6 +566,30 @@ func NewOperatorServiceHandler(svc OperatorServiceHandler, opts ...connect.Handl
 		connect.WithSchema(operatorServiceMethods.ByName("RequestElevation")),
 		connect.WithHandlerOptions(opts...),
 	)
+	operatorServiceProvisionOperatorHandler := connect.NewUnaryHandler(
+		OperatorServiceProvisionOperatorProcedure,
+		svc.ProvisionOperator,
+		connect.WithSchema(operatorServiceMethods.ByName("ProvisionOperator")),
+		connect.WithHandlerOptions(opts...),
+	)
+	operatorServiceChangeOperatorRoleHandler := connect.NewUnaryHandler(
+		OperatorServiceChangeOperatorRoleProcedure,
+		svc.ChangeOperatorRole,
+		connect.WithSchema(operatorServiceMethods.ByName("ChangeOperatorRole")),
+		connect.WithHandlerOptions(opts...),
+	)
+	operatorServiceDisableOperatorHandler := connect.NewUnaryHandler(
+		OperatorServiceDisableOperatorProcedure,
+		svc.DisableOperator,
+		connect.WithSchema(operatorServiceMethods.ByName("DisableOperator")),
+		connect.WithHandlerOptions(opts...),
+	)
+	operatorServiceListOperatorsHandler := connect.NewUnaryHandler(
+		OperatorServiceListOperatorsProcedure,
+		svc.ListOperators,
+		connect.WithSchema(operatorServiceMethods.ByName("ListOperators")),
+		connect.WithHandlerOptions(opts...),
+	)
 	operatorServiceListCustomersHandler := connect.NewUnaryHandler(
 		OperatorServiceListCustomersProcedure,
 		svc.ListCustomers,
@@ -452,6 +622,14 @@ func NewOperatorServiceHandler(svc OperatorServiceHandler, opts ...connect.Handl
 			operatorServiceSignOutHandler.ServeHTTP(w, r)
 		case OperatorServiceRequestElevationProcedure:
 			operatorServiceRequestElevationHandler.ServeHTTP(w, r)
+		case OperatorServiceProvisionOperatorProcedure:
+			operatorServiceProvisionOperatorHandler.ServeHTTP(w, r)
+		case OperatorServiceChangeOperatorRoleProcedure:
+			operatorServiceChangeOperatorRoleHandler.ServeHTTP(w, r)
+		case OperatorServiceDisableOperatorProcedure:
+			operatorServiceDisableOperatorHandler.ServeHTTP(w, r)
+		case OperatorServiceListOperatorsProcedure:
+			operatorServiceListOperatorsHandler.ServeHTTP(w, r)
 		case OperatorServiceListCustomersProcedure:
 			operatorServiceListCustomersHandler.ServeHTTP(w, r)
 		case OperatorServiceGetCustomerProcedure:
@@ -489,6 +667,22 @@ func (UnimplementedOperatorServiceHandler) SignOut(context.Context, *connect.Req
 
 func (UnimplementedOperatorServiceHandler) RequestElevation(context.Context, *connect.Request[v1.RequestElevationRequest]) (*connect.Response[v1.RequestElevationResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.operator.v1.OperatorService.RequestElevation is not implemented"))
+}
+
+func (UnimplementedOperatorServiceHandler) ProvisionOperator(context.Context, *connect.Request[v1.ProvisionOperatorRequest]) (*connect.Response[v1.ProvisionOperatorResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.operator.v1.OperatorService.ProvisionOperator is not implemented"))
+}
+
+func (UnimplementedOperatorServiceHandler) ChangeOperatorRole(context.Context, *connect.Request[v1.ChangeOperatorRoleRequest]) (*connect.Response[v1.ChangeOperatorRoleResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.operator.v1.OperatorService.ChangeOperatorRole is not implemented"))
+}
+
+func (UnimplementedOperatorServiceHandler) DisableOperator(context.Context, *connect.Request[v1.DisableOperatorRequest]) (*connect.Response[v1.DisableOperatorResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.operator.v1.OperatorService.DisableOperator is not implemented"))
+}
+
+func (UnimplementedOperatorServiceHandler) ListOperators(context.Context, *connect.Request[v1.ListOperatorsRequest]) (*connect.Response[v1.ListOperatorsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.operator.v1.OperatorService.ListOperators is not implemented"))
 }
 
 func (UnimplementedOperatorServiceHandler) ListCustomers(context.Context, *connect.Request[v1.ListCustomersRequest]) (*connect.Response[v1.ListCustomersResponse], error) {
