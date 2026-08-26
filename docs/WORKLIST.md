@@ -471,9 +471,25 @@ nothing ever ran.
 - [x] **The reconciliation sweep.** The workflow is durable, so a lost one is
       unlikely rather than impossible; a sweep over overdue requests is the
       backstop billing.md §5 case 15 uses for the same class of failure.
-- [ ] **The other five DSAR rights** — access, portability, rectification,
-      restriction, objection (compliance.md §3). Erasure was the one with a
-      hollow guarantee; the rest are unbuilt features.
+- [ ] **The remaining DSAR rights — TWO, not five, and the count was stale.**
+      Compliance §3 lists six. Erasure is built; RESTRICTION is built
+      (`RestrictProcessing`, `Lift`, `Get`); ACCESS and PORTABILITY are both
+      served by the asynchronous export. What is genuinely unbuilt is
+      **rectification (Article 16)** and **objection (Article 21)**.
+
+- [ ] **Article 12(4): a deferred erasure must SAY it was deferred — and this
+      slice created the gap.** Legal holds made deferral reachable for the first
+      time. `Execute` now returns `ErrHeld` and the workflow waits, and nobody
+      tells the requester anything.
+
+      12(4) requires a controller that does not act on a request to say so, and
+      on what ground, within a month. The ground exists — 17(3)(e), processing
+      necessary for legal claims — and the answer is a RESPONSE TO THEIR
+      REQUEST rather than a broadcast about our decision, which is exactly what
+      keeps it from being tipping off.
+
+      Small, and it closes a live legal obligation on a code path that shipped
+      this session. It is the reason this block sits above the rest.
 
 ## The remaining work, analysed
 
