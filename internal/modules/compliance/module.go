@@ -18,6 +18,9 @@ func RegisterEvents(codec *eventcodec.JSON) {
 	eventcodec.Register[contract.DataExportRequested](codec)
 	eventcodec.Register[contract.DataExportCompleted](codec)
 	eventcodec.Register[contract.DataExportFailed](codec)
+	eventcodec.Register[contract.PersonalDataCorrected](codec)
+	eventcodec.Register[contract.ProcessingObjected](codec)
+	eventcodec.Register[contract.ProcessingObjectionWithdrawn](codec)
 }
 
 // RegisterSchemas declares the current schema version of every compliance event
@@ -47,5 +50,8 @@ func eventTypes() []string {
 		(&contract.DataExportRequested{}).EventType(),
 		(&contract.DataExportCompleted{}).EventType(),
 		(&contract.DataExportFailed{}).EventType(),
+		(&contract.PersonalDataCorrected{}).EventType(),
+		(&contract.ProcessingObjected{}).EventType(),
+		(&contract.ProcessingObjectionWithdrawn{}).EventType(),
 	}
 }

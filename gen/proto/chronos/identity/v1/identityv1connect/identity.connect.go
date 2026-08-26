@@ -197,6 +197,24 @@ const (
 	// IdentityServiceUnlinkFederatedIdentityProcedure is the fully-qualified name of the
 	// IdentityService's UnlinkFederatedIdentity RPC.
 	IdentityServiceUnlinkFederatedIdentityProcedure = "/chronos.identity.v1.IdentityService/UnlinkFederatedIdentity"
+	// IdentityServiceCreateServiceAccountProcedure is the fully-qualified name of the IdentityService's
+	// CreateServiceAccount RPC.
+	IdentityServiceCreateServiceAccountProcedure = "/chronos.identity.v1.IdentityService/CreateServiceAccount"
+	// IdentityServiceListServiceAccountsProcedure is the fully-qualified name of the IdentityService's
+	// ListServiceAccounts RPC.
+	IdentityServiceListServiceAccountsProcedure = "/chronos.identity.v1.IdentityService/ListServiceAccounts"
+	// IdentityServiceCreateApiKeyProcedure is the fully-qualified name of the IdentityService's
+	// CreateApiKey RPC.
+	IdentityServiceCreateApiKeyProcedure = "/chronos.identity.v1.IdentityService/CreateApiKey"
+	// IdentityServiceRotateApiKeyProcedure is the fully-qualified name of the IdentityService's
+	// RotateApiKey RPC.
+	IdentityServiceRotateApiKeyProcedure = "/chronos.identity.v1.IdentityService/RotateApiKey"
+	// IdentityServiceRevokeApiKeyProcedure is the fully-qualified name of the IdentityService's
+	// RevokeApiKey RPC.
+	IdentityServiceRevokeApiKeyProcedure = "/chronos.identity.v1.IdentityService/RevokeApiKey"
+	// IdentityServiceListApiKeysProcedure is the fully-qualified name of the IdentityService's
+	// ListApiKeys RPC.
+	IdentityServiceListApiKeysProcedure = "/chronos.identity.v1.IdentityService/ListApiKeys"
 )
 
 // IdentityServiceClient is a client for the chronos.identity.v1.IdentityService service.
@@ -703,6 +721,65 @@ type IdentityServiceClient interface {
 	// all. Somebody who signed up with Google has no password by design, so an
 	// endpoint that allowed it would be account loss dressed as a settings toggle.
 	UnlinkFederatedIdentity(context.Context, *connect.Request[v1.UnlinkFederatedIdentityRequest]) (*connect.Response[v1.UnlinkFederatedIdentityResponse], error)
+	// CreateServiceAccount opens a non-human principal in the caller's
+	// organization.
+	//
+	// It mints NO credential. A service account that has just been created can
+	// authenticate nothing at all; CreateApiKey is a separate decision that
+	// separately notifies, and keeping them apart is what lets an incident
+	// timeline distinguish "somebody created a principal" from "somebody gave a
+	// principal a way in".
+	CreateServiceAccount(context.Context, *connect.Request[v1.CreateServiceAccountRequest]) (*connect.Response[v1.CreateServiceAccountResponse], error)
+	// ListServiceAccounts shows the organization's non-human principals.
+	//
+	// READ, so it is permitted in every organization state including Suspended
+	// and Closed — a tenant that has stopped paying may still see what
+	// authenticates against it.
+	ListServiceAccounts(context.Context, *connect.Request[v1.ListServiceAccountsRequest]) (*connect.Response[v1.ListServiceAccountsResponse], error)
+	// CreateApiKey mints a machine credential and returns it exactly once.
+	//
+	// The token is in the response and nowhere else: only its digest is stored,
+	// so this is the only moment it exists anywhere this system can reach. A
+	// caller that loses it rotates the key.
+	//
+	// The key is bound to the caller's organization IMMUTABLY. Without that
+	// binding a key silently inherits every organization its owner belongs to,
+	// and a token leaked from one customer's CI reaches another customer's data —
+	// a cross-tenant breach originating in a feature nobody thought was
+	// tenant-scoped (identity.md §10, review D2).
+	CreateApiKey(context.Context, *connect.Request[v1.CreateApiKeyRequest]) (*connect.Response[v1.CreateApiKeyResponse], error)
+	// RotateApiKey replaces a key's secret without replacing the key.
+	//
+	// The key id, the scopes, the organization binding and every grant that names
+	// the owner are unchanged, so no consumer has to be reconfigured beyond the
+	// secret itself — which is what makes rotation something anybody actually
+	// performs.
+	//
+	// The superseded secret keeps working for a bounded, RECORDED window, so
+	// there is no instant in which neither secret resolves and no path by which
+	// the old one lives forever. `immediate` collapses the window to nothing,
+	// which is the leak response.
+	RotateApiKey(context.Context, *connect.Request[v1.RotateApiKeyRequest]) (*connect.Response[v1.RotateApiKeyResponse], error)
+	// RevokeApiKey ends a key and destroys every secret it ever had.
+	//
+	// IMMEDIATE, and not eventually: the stored digests are deleted in the same
+	// request, and the event is what makes the projection and the audit trail
+	// agree. Neither half is enough alone — the event alone leaves the credential
+	// usable until the projector catches up, and the delete alone leaves nothing
+	// in the log saying why the key stopped working, so a rebuild would show it
+	// as live while it resolved nothing.
+	//
+	// Idempotent: revoking an already-revoked key appends nothing, reports
+	// `changed = false`, and STILL sweeps secrets — a second call is what
+	// somebody makes when they are not sure the first took.
+	RevokeApiKey(context.Context, *connect.Request[v1.RevokeApiKeyRequest]) (*connect.Response[v1.RevokeApiKeyResponse], error)
+	// ListApiKeys shows the organization's machine credentials, revoked ones
+	// included.
+	//
+	// No token and no digest comes back, and no field of the response could hold
+	// one. Revoked keys are listed on purpose: the evidence that a revocation
+	// took effect is what somebody checks immediately after performing one.
+	ListApiKeys(context.Context, *connect.Request[v1.ListApiKeysRequest]) (*connect.Response[v1.ListApiKeysResponse], error)
 }
 
 // NewIdentityServiceClient constructs a client for the chronos.identity.v1.IdentityService service.
@@ -936,6 +1013,42 @@ func NewIdentityServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(identityServiceMethods.ByName("UnlinkFederatedIdentity")),
 			connect.WithClientOptions(opts...),
 		),
+		createServiceAccount: connect.NewClient[v1.CreateServiceAccountRequest, v1.CreateServiceAccountResponse](
+			httpClient,
+			baseURL+IdentityServiceCreateServiceAccountProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("CreateServiceAccount")),
+			connect.WithClientOptions(opts...),
+		),
+		listServiceAccounts: connect.NewClient[v1.ListServiceAccountsRequest, v1.ListServiceAccountsResponse](
+			httpClient,
+			baseURL+IdentityServiceListServiceAccountsProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("ListServiceAccounts")),
+			connect.WithClientOptions(opts...),
+		),
+		createApiKey: connect.NewClient[v1.CreateApiKeyRequest, v1.CreateApiKeyResponse](
+			httpClient,
+			baseURL+IdentityServiceCreateApiKeyProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("CreateApiKey")),
+			connect.WithClientOptions(opts...),
+		),
+		rotateApiKey: connect.NewClient[v1.RotateApiKeyRequest, v1.RotateApiKeyResponse](
+			httpClient,
+			baseURL+IdentityServiceRotateApiKeyProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("RotateApiKey")),
+			connect.WithClientOptions(opts...),
+		),
+		revokeApiKey: connect.NewClient[v1.RevokeApiKeyRequest, v1.RevokeApiKeyResponse](
+			httpClient,
+			baseURL+IdentityServiceRevokeApiKeyProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("RevokeApiKey")),
+			connect.WithClientOptions(opts...),
+		),
+		listApiKeys: connect.NewClient[v1.ListApiKeysRequest, v1.ListApiKeysResponse](
+			httpClient,
+			baseURL+IdentityServiceListApiKeysProcedure,
+			connect.WithSchema(identityServiceMethods.ByName("ListApiKeys")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -977,6 +1090,12 @@ type identityServiceClient struct {
 	beginFederatedLink        *connect.Client[v1.BeginFederatedLinkRequest, v1.BeginFederatedLinkResponse]
 	finishFederatedLink       *connect.Client[v1.FinishFederatedLinkRequest, v1.FinishFederatedLinkResponse]
 	unlinkFederatedIdentity   *connect.Client[v1.UnlinkFederatedIdentityRequest, v1.UnlinkFederatedIdentityResponse]
+	createServiceAccount      *connect.Client[v1.CreateServiceAccountRequest, v1.CreateServiceAccountResponse]
+	listServiceAccounts       *connect.Client[v1.ListServiceAccountsRequest, v1.ListServiceAccountsResponse]
+	createApiKey              *connect.Client[v1.CreateApiKeyRequest, v1.CreateApiKeyResponse]
+	rotateApiKey              *connect.Client[v1.RotateApiKeyRequest, v1.RotateApiKeyResponse]
+	revokeApiKey              *connect.Client[v1.RevokeApiKeyRequest, v1.RevokeApiKeyResponse]
+	listApiKeys               *connect.Client[v1.ListApiKeysRequest, v1.ListApiKeysResponse]
 }
 
 // Register calls chronos.identity.v1.IdentityService.Register.
@@ -1157,6 +1276,36 @@ func (c *identityServiceClient) FinishFederatedLink(ctx context.Context, req *co
 // UnlinkFederatedIdentity calls chronos.identity.v1.IdentityService.UnlinkFederatedIdentity.
 func (c *identityServiceClient) UnlinkFederatedIdentity(ctx context.Context, req *connect.Request[v1.UnlinkFederatedIdentityRequest]) (*connect.Response[v1.UnlinkFederatedIdentityResponse], error) {
 	return c.unlinkFederatedIdentity.CallUnary(ctx, req)
+}
+
+// CreateServiceAccount calls chronos.identity.v1.IdentityService.CreateServiceAccount.
+func (c *identityServiceClient) CreateServiceAccount(ctx context.Context, req *connect.Request[v1.CreateServiceAccountRequest]) (*connect.Response[v1.CreateServiceAccountResponse], error) {
+	return c.createServiceAccount.CallUnary(ctx, req)
+}
+
+// ListServiceAccounts calls chronos.identity.v1.IdentityService.ListServiceAccounts.
+func (c *identityServiceClient) ListServiceAccounts(ctx context.Context, req *connect.Request[v1.ListServiceAccountsRequest]) (*connect.Response[v1.ListServiceAccountsResponse], error) {
+	return c.listServiceAccounts.CallUnary(ctx, req)
+}
+
+// CreateApiKey calls chronos.identity.v1.IdentityService.CreateApiKey.
+func (c *identityServiceClient) CreateApiKey(ctx context.Context, req *connect.Request[v1.CreateApiKeyRequest]) (*connect.Response[v1.CreateApiKeyResponse], error) {
+	return c.createApiKey.CallUnary(ctx, req)
+}
+
+// RotateApiKey calls chronos.identity.v1.IdentityService.RotateApiKey.
+func (c *identityServiceClient) RotateApiKey(ctx context.Context, req *connect.Request[v1.RotateApiKeyRequest]) (*connect.Response[v1.RotateApiKeyResponse], error) {
+	return c.rotateApiKey.CallUnary(ctx, req)
+}
+
+// RevokeApiKey calls chronos.identity.v1.IdentityService.RevokeApiKey.
+func (c *identityServiceClient) RevokeApiKey(ctx context.Context, req *connect.Request[v1.RevokeApiKeyRequest]) (*connect.Response[v1.RevokeApiKeyResponse], error) {
+	return c.revokeApiKey.CallUnary(ctx, req)
+}
+
+// ListApiKeys calls chronos.identity.v1.IdentityService.ListApiKeys.
+func (c *identityServiceClient) ListApiKeys(ctx context.Context, req *connect.Request[v1.ListApiKeysRequest]) (*connect.Response[v1.ListApiKeysResponse], error) {
+	return c.listApiKeys.CallUnary(ctx, req)
 }
 
 // IdentityServiceHandler is an implementation of the chronos.identity.v1.IdentityService service.
@@ -1663,6 +1812,65 @@ type IdentityServiceHandler interface {
 	// all. Somebody who signed up with Google has no password by design, so an
 	// endpoint that allowed it would be account loss dressed as a settings toggle.
 	UnlinkFederatedIdentity(context.Context, *connect.Request[v1.UnlinkFederatedIdentityRequest]) (*connect.Response[v1.UnlinkFederatedIdentityResponse], error)
+	// CreateServiceAccount opens a non-human principal in the caller's
+	// organization.
+	//
+	// It mints NO credential. A service account that has just been created can
+	// authenticate nothing at all; CreateApiKey is a separate decision that
+	// separately notifies, and keeping them apart is what lets an incident
+	// timeline distinguish "somebody created a principal" from "somebody gave a
+	// principal a way in".
+	CreateServiceAccount(context.Context, *connect.Request[v1.CreateServiceAccountRequest]) (*connect.Response[v1.CreateServiceAccountResponse], error)
+	// ListServiceAccounts shows the organization's non-human principals.
+	//
+	// READ, so it is permitted in every organization state including Suspended
+	// and Closed — a tenant that has stopped paying may still see what
+	// authenticates against it.
+	ListServiceAccounts(context.Context, *connect.Request[v1.ListServiceAccountsRequest]) (*connect.Response[v1.ListServiceAccountsResponse], error)
+	// CreateApiKey mints a machine credential and returns it exactly once.
+	//
+	// The token is in the response and nowhere else: only its digest is stored,
+	// so this is the only moment it exists anywhere this system can reach. A
+	// caller that loses it rotates the key.
+	//
+	// The key is bound to the caller's organization IMMUTABLY. Without that
+	// binding a key silently inherits every organization its owner belongs to,
+	// and a token leaked from one customer's CI reaches another customer's data —
+	// a cross-tenant breach originating in a feature nobody thought was
+	// tenant-scoped (identity.md §10, review D2).
+	CreateApiKey(context.Context, *connect.Request[v1.CreateApiKeyRequest]) (*connect.Response[v1.CreateApiKeyResponse], error)
+	// RotateApiKey replaces a key's secret without replacing the key.
+	//
+	// The key id, the scopes, the organization binding and every grant that names
+	// the owner are unchanged, so no consumer has to be reconfigured beyond the
+	// secret itself — which is what makes rotation something anybody actually
+	// performs.
+	//
+	// The superseded secret keeps working for a bounded, RECORDED window, so
+	// there is no instant in which neither secret resolves and no path by which
+	// the old one lives forever. `immediate` collapses the window to nothing,
+	// which is the leak response.
+	RotateApiKey(context.Context, *connect.Request[v1.RotateApiKeyRequest]) (*connect.Response[v1.RotateApiKeyResponse], error)
+	// RevokeApiKey ends a key and destroys every secret it ever had.
+	//
+	// IMMEDIATE, and not eventually: the stored digests are deleted in the same
+	// request, and the event is what makes the projection and the audit trail
+	// agree. Neither half is enough alone — the event alone leaves the credential
+	// usable until the projector catches up, and the delete alone leaves nothing
+	// in the log saying why the key stopped working, so a rebuild would show it
+	// as live while it resolved nothing.
+	//
+	// Idempotent: revoking an already-revoked key appends nothing, reports
+	// `changed = false`, and STILL sweeps secrets — a second call is what
+	// somebody makes when they are not sure the first took.
+	RevokeApiKey(context.Context, *connect.Request[v1.RevokeApiKeyRequest]) (*connect.Response[v1.RevokeApiKeyResponse], error)
+	// ListApiKeys shows the organization's machine credentials, revoked ones
+	// included.
+	//
+	// No token and no digest comes back, and no field of the response could hold
+	// one. Revoked keys are listed on purpose: the evidence that a revocation
+	// took effect is what somebody checks immediately after performing one.
+	ListApiKeys(context.Context, *connect.Request[v1.ListApiKeysRequest]) (*connect.Response[v1.ListApiKeysResponse], error)
 }
 
 // NewIdentityServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -1892,6 +2100,42 @@ func NewIdentityServiceHandler(svc IdentityServiceHandler, opts ...connect.Handl
 		connect.WithSchema(identityServiceMethods.ByName("UnlinkFederatedIdentity")),
 		connect.WithHandlerOptions(opts...),
 	)
+	identityServiceCreateServiceAccountHandler := connect.NewUnaryHandler(
+		IdentityServiceCreateServiceAccountProcedure,
+		svc.CreateServiceAccount,
+		connect.WithSchema(identityServiceMethods.ByName("CreateServiceAccount")),
+		connect.WithHandlerOptions(opts...),
+	)
+	identityServiceListServiceAccountsHandler := connect.NewUnaryHandler(
+		IdentityServiceListServiceAccountsProcedure,
+		svc.ListServiceAccounts,
+		connect.WithSchema(identityServiceMethods.ByName("ListServiceAccounts")),
+		connect.WithHandlerOptions(opts...),
+	)
+	identityServiceCreateApiKeyHandler := connect.NewUnaryHandler(
+		IdentityServiceCreateApiKeyProcedure,
+		svc.CreateApiKey,
+		connect.WithSchema(identityServiceMethods.ByName("CreateApiKey")),
+		connect.WithHandlerOptions(opts...),
+	)
+	identityServiceRotateApiKeyHandler := connect.NewUnaryHandler(
+		IdentityServiceRotateApiKeyProcedure,
+		svc.RotateApiKey,
+		connect.WithSchema(identityServiceMethods.ByName("RotateApiKey")),
+		connect.WithHandlerOptions(opts...),
+	)
+	identityServiceRevokeApiKeyHandler := connect.NewUnaryHandler(
+		IdentityServiceRevokeApiKeyProcedure,
+		svc.RevokeApiKey,
+		connect.WithSchema(identityServiceMethods.ByName("RevokeApiKey")),
+		connect.WithHandlerOptions(opts...),
+	)
+	identityServiceListApiKeysHandler := connect.NewUnaryHandler(
+		IdentityServiceListApiKeysProcedure,
+		svc.ListApiKeys,
+		connect.WithSchema(identityServiceMethods.ByName("ListApiKeys")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/chronos.identity.v1.IdentityService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case IdentityServiceRegisterProcedure:
@@ -1966,6 +2210,18 @@ func NewIdentityServiceHandler(svc IdentityServiceHandler, opts ...connect.Handl
 			identityServiceFinishFederatedLinkHandler.ServeHTTP(w, r)
 		case IdentityServiceUnlinkFederatedIdentityProcedure:
 			identityServiceUnlinkFederatedIdentityHandler.ServeHTTP(w, r)
+		case IdentityServiceCreateServiceAccountProcedure:
+			identityServiceCreateServiceAccountHandler.ServeHTTP(w, r)
+		case IdentityServiceListServiceAccountsProcedure:
+			identityServiceListServiceAccountsHandler.ServeHTTP(w, r)
+		case IdentityServiceCreateApiKeyProcedure:
+			identityServiceCreateApiKeyHandler.ServeHTTP(w, r)
+		case IdentityServiceRotateApiKeyProcedure:
+			identityServiceRotateApiKeyHandler.ServeHTTP(w, r)
+		case IdentityServiceRevokeApiKeyProcedure:
+			identityServiceRevokeApiKeyHandler.ServeHTTP(w, r)
+		case IdentityServiceListApiKeysProcedure:
+			identityServiceListApiKeysHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -2117,4 +2373,28 @@ func (UnimplementedIdentityServiceHandler) FinishFederatedLink(context.Context, 
 
 func (UnimplementedIdentityServiceHandler) UnlinkFederatedIdentity(context.Context, *connect.Request[v1.UnlinkFederatedIdentityRequest]) (*connect.Response[v1.UnlinkFederatedIdentityResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.UnlinkFederatedIdentity is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) CreateServiceAccount(context.Context, *connect.Request[v1.CreateServiceAccountRequest]) (*connect.Response[v1.CreateServiceAccountResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.CreateServiceAccount is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) ListServiceAccounts(context.Context, *connect.Request[v1.ListServiceAccountsRequest]) (*connect.Response[v1.ListServiceAccountsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.ListServiceAccounts is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) CreateApiKey(context.Context, *connect.Request[v1.CreateApiKeyRequest]) (*connect.Response[v1.CreateApiKeyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.CreateApiKey is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) RotateApiKey(context.Context, *connect.Request[v1.RotateApiKeyRequest]) (*connect.Response[v1.RotateApiKeyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.RotateApiKey is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) RevokeApiKey(context.Context, *connect.Request[v1.RevokeApiKeyRequest]) (*connect.Response[v1.RevokeApiKeyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.RevokeApiKey is not implemented"))
+}
+
+func (UnimplementedIdentityServiceHandler) ListApiKeys(context.Context, *connect.Request[v1.ListApiKeysRequest]) (*connect.Response[v1.ListApiKeysResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.identity.v1.IdentityService.ListApiKeys is not implemented"))
 }

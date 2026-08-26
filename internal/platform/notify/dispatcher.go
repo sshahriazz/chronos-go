@@ -36,6 +36,10 @@ type Dispatcher struct {
 	// wired sends normally, which is correct — there is nothing to restrict when
 	// nothing can record a restriction.
 	restrictions Restrictions
+
+	// objections answers Article 21, per purpose. Optional for restrictions'
+	// reason.
+	objections Objections
 }
 
 // Restrictions answers "has this subject halted processing" (Article 18).
@@ -51,6 +55,30 @@ type Dispatcher struct {
 // recorded.
 type Restrictions interface {
 	Restricted(ctx context.Context, subjectID string) (bool, error)
+}
+
+// Objections answers "has this subject objected to this purpose" (Article 21).
+//
+// # A separate port from Restrictions, and a separate lookup
+//
+// The two rights are not the same shape and merging them would lose the
+// difference. A restriction halts everything but storage while a dispute runs;
+// an objection stops ONE purpose that rests on legitimate interests, until its
+// author withdraws it. A restricted subject receives no transactional receipt;
+// an objecting subject does.
+//
+// So this is consulted only for the classes Article 21 can reach — see
+// Class.ObjectionablePurpose — and Restrictions is consulted for everything. The
+// difference in scope IS the difference in the rights.
+//
+// # Why it is a purpose STRING and not a typed value
+//
+// The kernel may not import a module (depguard: platform-is-pure), and the
+// purpose vocabulary belongs to compliance's domain. A string keeps the
+// dependency pointing the right way, and the pairing is held by
+// TestEveryObjectionablePurposeIsADomainPurpose rather than by the type system.
+type Objections interface {
+	Objected(ctx context.Context, subjectID, purpose string) (bool, error)
 }
 
 // Observer records what was delivered, suppressed and skipped. Optional.
@@ -84,6 +112,9 @@ type Deps struct {
 	// record a restriction, so there is none to honour.
 	Restrictions Restrictions
 
+	// Objections answers Article 21. Optional, for Restrictions' reason.
+	Objections Objections
+
 	// Window overrides the arbitration window. Zero takes the default.
 	Window time.Duration
 }
@@ -115,6 +146,7 @@ func NewDispatcher(d Deps) *Dispatcher {
 		vault: d.Vault, prefs: d.Prefs, readState: d.ReadState,
 		transports: transports, log: d.Log, window: d.Window,
 		obs: d.Observer, defaultChan: order, restrictions: d.Restrictions,
+		objections: d.Objections,
 	}
 }
 
@@ -138,6 +170,16 @@ func (d *Dispatcher) HasPreferences() bool { return d.prefs != nil }
 
 // HasReadState reports whether alert arbitration can happen (ADR-026).
 func (d *Dispatcher) HasReadState() bool { return d.readState != nil }
+
+// HasRestrictions reports whether Article 18 is honoured on this path.
+//
+// Exposed so a composition-root test can assert it, for the reason Channels is:
+// a nil port is permissive and therefore invisible at runtime — every unit test
+// below it passes while a legal obligation is not enforced by any binary.
+func (d *Dispatcher) HasRestrictions() bool { return d.restrictions != nil }
+
+// HasObjections reports whether Article 21 is honoured on this path.
+func (d *Dispatcher) HasObjections() bool { return d.objections != nil }
 
 // Dispatch resolves the recipient, applies policy, and delivers.
 //
@@ -194,6 +236,52 @@ func (d *Dispatcher) Dispatch(ctx context.Context, n Notification) error {
 				d.obs.Suppressed(n.Template, n.Class.String(), "", "processing_restricted")
 				d.log.Info("notification skipped: processing restricted (Article 18)",
 					"template", n.Template, "class", n.Class.String())
+				return nil
+			}
+		}
+
+		// ARTICLE 21, and it is a NARROWER gate than Article 18 above rather
+		// than a second copy of it.
+		//
+		// # Only the classes the article reaches are asked about
+		//
+		// Objection applies to processing grounded in legitimate interests.
+		// Security and transactional mail rest on contract and on our own legal
+		// obligations, so `ObjectionablePurpose` reports nothing for them and
+		// this whole block is skipped — which is also why the extra lookup costs
+		// nothing on the common path: most of what this system sends is one of
+		// those two.
+		//
+		// # The difference from a restriction, stated where it is enforced
+		//
+		// A restricted subject loses their receipts. An objecting subject keeps
+		// them and loses one purpose. If those two ever suppress the same set,
+		// one of the rights has absorbed the other and the narrower one should be
+		// deleted rather than kept as a synonym.
+		//
+		// # It is NOT a preference, even though it lands in the same decision
+		//
+		// A preference is checked in allowed(), per channel, and a person may set
+		// one and unset it as a product control. An objection is a legal
+		// instruction about a PURPOSE, so it stops that processing on every
+		// channel at once and no product control may clear it. Putting it here,
+		// beside the restriction and above the channel loop, is what makes the
+		// second property true by construction.
+		if purpose, objectionable := n.Class.ObjectionablePurpose(); objectionable &&
+			d.objections != nil {
+			objected, err := d.objections.Objected(ctx, n.Recipient.SubjectID, purpose)
+			if err != nil {
+				// REFUSES rather than sends, exactly as the restriction lookup
+				// does. A rebuild that has not yet replayed an objection leaves
+				// the table empty, so an unreadable lookup treated as permission
+				// would resume processing for precisely the people who stopped
+				// it — the wrong direction to fail in.
+				return fmt.Errorf("notify: reading processing objections: %w", err)
+			}
+			if objected {
+				d.obs.Suppressed(n.Template, n.Class.String(), "", "processing_objected")
+				d.log.Info("notification skipped: processing objected to (Article 21)",
+					"template", n.Template, "class", n.Class.String(), "purpose", purpose)
 				return nil
 			}
 		}

@@ -235,6 +235,23 @@ func TestRevocationsNeverTakeTheirSubjectFromTheRequest(t *testing.T) {
 // A principal that is not a person carries a KEY's identifier rather than a
 // pseudonym, so reading it as a subject would answer for whatever account that
 // string happened to name. It is refused, and no command runs.
+//
+// # The code is PermissionDenied, and it used to be Unauthenticated
+//
+// API keys changed this deliberately. A machine credential presented here is
+// perfectly valid — we know exactly who it is — so `Unauthenticated` said
+// something untrue, and an integrator reading it would go looking for a
+// credential problem that does not exist. What is actually wrong is that this
+// endpoint acts on a person's own account and the caller has none.
+//
+// The refusal ALSO moved. `identity/api.callerSubject` still refuses a non-user
+// principal and remains a real backstop, but the enforcement is now in gate 1's
+// machine-credential check — one module's handler could only ever guard one
+// module's methods, and a self-scoped method added anywhere else would have been
+// unguarded until somebody remembered.
+//
+// So this test asserts the code AND that nothing ran. The second half is what it
+// was always for: whichever layer refuses, the read side must not have answered.
 func TestANonHumanPrincipalIsRefused(t *testing.T) {
 	t.Parallel()
 
@@ -243,7 +260,7 @@ func TestANonHumanPrincipalIsRefused(t *testing.T) {
 	h := newHarness(t, options{principal: &principal})
 
 	_, err := h.client.GetUser(t.Context(), connect.NewRequest(&identityv1.GetUserRequest{}))
-	requireCode(t, err, connect.CodeUnauthenticated)
+	requireCode(t, err, connect.CodePermissionDenied)
 
 	if calls := h.queries.recorded(); len(calls) != 0 {
 		t.Fatalf("the read side answered for a non-human principal: %+v", calls)

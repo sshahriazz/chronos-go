@@ -41,3 +41,62 @@ func TestComplianceServiceIsRegistered(t *testing.T) {
 			"every unit test below it passes", compliancev1connect.ComplianceServiceName)
 	}
 }
+
+// RECTIFICATION CORRECTS THROUGH PROFILE, NOT BESIDE IT.
+//
+// # The failure this guards is a SECOND writer to the vault
+//
+// Article 16 corrects the display name, the locale and the timezone — fields
+// `profile` owns. The obvious implementation calls `vault.PutAll` from inside
+// compliance, and it would work: the value changes, the endpoint returns, every
+// unit test passes.
+//
+// What it would leave behind is a vault write that no `profile.ProfileUpdated.v1`
+// accounts for. profile's own history would then disagree with the vault about
+// when somebody's name changed — and that history is what a support conversation
+// about an impersonation report is settled from. profile's own use case
+// documents the identical hazard from the other side, which is why its write
+// puts the vault first.
+//
+// So compliance declares a port and this composition root satisfies it with
+// profile's use case. The assertion is that the root actually HAS one to satisfy
+// it with: the field is set by buildProfile, and buildProfile runs first — an
+// ordering nothing else enforces, so reversing the two calls would leave
+// rectification unbuilt with the rest of compliance still working.
+func TestRectificationIsWiredToProfilesOwnWriteUseCase(t *testing.T) {
+	cfg := testConfig(t)
+	d, closeAll := newDependencies(cfg, slog.New(slog.DiscardHandler))
+	defer closeAll()
+
+	if d.profileUpdates == nil {
+		t.Fatal("profile's update use case was not held on the composition root, so " +
+			"compliance's Article 16 port has nothing to satisfy it. Either buildProfile " +
+			"failed — in which case the whole compliance service is unbuilt — or the two " +
+			"build calls have been reordered")
+	}
+	if d.compliance == nil {
+		t.Fatal("the compliance service is unbuilt, so RectifyMyData answers " +
+			"'unimplemented' and the only record of a correction is a profile save — " +
+			"which cannot be told apart from somebody editing a preference")
+	}
+}
+
+// AND THE COMPLIANCE SERVICE REFUSES TO BUILD WITHOUT IT.
+//
+// Not a duplicate of the assertion above: that one says the root holds the use
+// case, this one says the root would NOTICE if it did not. A buildCompliance
+// that quietly skipped rectification when profile was unavailable would produce
+// a working service missing one right, which is precisely the outcome the
+// per-right refusal in complianceapi.New exists to prevent.
+func TestComplianceRefusesToBuildWithoutProfilesWriteUseCase(t *testing.T) {
+	cfg := testConfig(t)
+	d, closeAll := newDependencies(cfg, slog.New(slog.DiscardHandler))
+	defer closeAll()
+
+	d.profileUpdates = nil
+	if _, err := d.buildCompliance(slog.New(slog.DiscardHandler)); err == nil {
+		t.Fatal("compliance was built with no way to apply a correction. RectifyMyData " +
+			"would then record that a statutory right was exercised and change nothing, " +
+			"which makes the log evidence for a request we did not act on")
+	}
+}

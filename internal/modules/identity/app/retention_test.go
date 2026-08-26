@@ -62,6 +62,13 @@ func (f *fakeRetentionStore) DeleteReleasedReservations(
 	return f.record(StatementReleasedReservations)
 }
 
+// SweepAPIKeySecrets is the sixth statement. It takes no cutoff, like the other
+// three that measure against now() in SQL: an API key secret past its own expiry
+// or its rotation retirement protects nothing, so there is no horizon to choose.
+func (f *fakeRetentionStore) SweepAPIKeySecrets(_ context.Context) (int64, error) {
+	return f.record(StatementAPIKeySecrets)
+}
+
 func newTestRetention(t *testing.T, store RetentionStore) *Retention {
 	t.Helper()
 	r, err := NewRetention(store, slog.New(slog.DiscardHandler))
@@ -85,7 +92,7 @@ func TestRetentionRunsEveryStatement(t *testing.T) {
 
 	for _, want := range []string{
 		StatementTOTPReplay, StatementTokens, StatementSessionTokens,
-		StatementSessionViews, StatementReleasedReservations,
+		StatementSessionViews, StatementReleasedReservations, StatementAPIKeySecrets,
 	} {
 		if !slices.Contains(store.order, want) {
 			t.Errorf("%s never ran, so its table grows unbounded and nothing reports it. "+
@@ -98,8 +105,8 @@ func TestRetentionRunsEveryStatement(t *testing.T) {
 				"to a run with nothing to delete", want)
 		}
 	}
-	if len(store.order) != 5 {
-		t.Errorf("ran %d statements, want 5: %v", len(store.order), store.order)
+	if len(store.order) != 6 {
+		t.Errorf("ran %d statements, want 6: %v", len(store.order), store.order)
 	}
 }
 
@@ -197,7 +204,7 @@ func TestRetentionLogsEveryStatementsCount(t *testing.T) {
 	logged := buf.String()
 	for _, want := range []string{
 		StatementTOTPReplay, StatementTokens, StatementSessionTokens,
-		StatementSessionViews, StatementReleasedReservations,
+		StatementSessionViews, StatementReleasedReservations, StatementAPIKeySecrets,
 	} {
 		if !strings.Contains(logged, want) {
 			t.Errorf("%s does not appear in the log, so an operator cannot tell whether it "+
@@ -233,9 +240,14 @@ func TestTheRetentionHorizonsAreWhatWasDecided(t *testing.T) {
 	}
 }
 
-// One broken statement must not stop the other four. These five tables are
-// unrelated; letting one failure abort the pass turns a single broken DELETE into
-// four tables that grow forever.
+// One broken statement must not stop the others. These tables are unrelated;
+// letting one failure abort the pass turns a single broken DELETE into every
+// later table growing forever.
+//
+// It counts against RetentionStatements() rather than a literal, so adding a
+// table is not a test edit — and a test edit is a place to get the number wrong
+// rather than a place to think. The count moved from five to six when API key
+// secrets joined the sweep, and this assertion should not have noticed.
 func TestOneFailingStatementDoesNotStopTheOthers(t *testing.T) {
 	store := newFakeRetentionStore()
 	store.fail[StatementTOTPReplay] = errors.New("relation totp_replay does not exist")
@@ -246,8 +258,8 @@ func TestOneFailingStatementDoesNotStopTheOthers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a per-statement failure must not fail the pass: %v", err)
 	}
-	if len(store.order) != 5 {
-		t.Fatalf("a failing statement aborted the pass; ran %v", store.order)
+	if want := len(RetentionStatements()); len(store.order) != want {
+		t.Fatalf("a failing statement aborted the pass; ran %v of %d", store.order, want)
 	}
 	if res.Failed != 1 {
 		t.Errorf("Failed = %d, want 1", res.Failed)

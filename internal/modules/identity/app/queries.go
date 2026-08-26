@@ -421,6 +421,17 @@ type Queries struct {
 	sessions SessionReader
 	methods  MethodReader
 	history  LoginHistoryReader
+
+	// keys is the org-scoped half of the read side: API keys and service
+	// accounts (identity.md §10, §14).
+	//
+	// It is the one port here whose tables carry ROW-LEVEL SECURITY, and that
+	// changes what "scoped to one subject" means for the two methods that use
+	// it: they are scoped to one ORGANIZATION, supplied by gate 1 rather than
+	// by the caller, and enforced by the policy rather than by a predicate this
+	// package writes. Everything else here is scoped by a subject the caller
+	// passes, because identity's account tables have no tenant to scope by.
+	keys APIKeyDirectory
 }
 
 // QueriesDeps is what the read side needs.
@@ -429,6 +440,11 @@ type QueriesDeps struct {
 	Sessions SessionReader
 	Methods  MethodReader
 	History  LoginHistoryReader
+
+	// Keys reads api_key_view and service_account_view. REQUIRED, like every
+	// other port here: a nil would panic on the first request to the key
+	// management screen, after the composition root reported a healthy start.
+	Keys APIKeyDirectory
 }
 
 // NewQueries builds the read side, refusing a partial one.
@@ -449,12 +465,15 @@ func NewQueries(deps QueriesDeps) (*Queries, error) {
 		return nil, missing("a method reader")
 	case deps.History == nil:
 		return nil, missing("a login-history reader")
+	case deps.Keys == nil:
+		return nil, missing("an API key directory")
 	}
 	return &Queries{
 		accounts: deps.Accounts,
 		sessions: deps.Sessions,
 		methods:  deps.Methods,
 		history:  deps.History,
+		keys:     deps.Keys,
 	}, nil
 }
 

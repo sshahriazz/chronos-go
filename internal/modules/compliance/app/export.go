@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/chronos/chronos-go/internal/modules/compliance/domain"
 	"github.com/chronos/chronos-go/internal/platform/blob"
 	"github.com/chronos/chronos-go/internal/platform/codec"
 )
@@ -15,7 +16,21 @@ import (
 // outlives this code: somebody opens a download six months from now with a tool
 // written against whatever the shape was then. A version they can branch on is
 // the difference between a portable file and a snapshot of one deployment.
-const ExportFormatVersion = 1
+//
+// # Version 2: `retained` became objects
+//
+// It was an array of English sentences. A reader could display them and could do
+// nothing else with them — not tell which data class a statement was about, not
+// read the legal basis out of it, not translate it. Article 15(1)(d) asks for
+// "the envisaged period for which the personal data will be stored", which is a
+// value rather than a clause inside a sentence, so it is now its own field. See
+// RetainedRecord.
+//
+// The break is safe to take here for the reason ExportMyDataResponse's was: no
+// release has been cut, and the alternative is a permanently unparseable field
+// in the one file this system produces specifically so that a machine can read
+// it.
+const ExportFormatVersion = 2
 
 // SubjectProfile is every personal-data field held for a subject.
 //
@@ -86,13 +101,67 @@ type Bundle struct {
 	Objects []ExportedObject `json:"objects"`
 
 	// Retained explains what this system keeps that is NOT in the bundle and
-	// why — the same list the erasure confirmation carries.
+	// why — the same resolved set the erasure confirmation carries, produced by
+	// the same resolver against the same schedule.
 	//
 	// Article 15(1) requires telling the subject about the processing, not only
 	// handing over the values. A bundle that listed a name and an address and
 	// said nothing about invoices retained under a statutory obligation would be
 	// an accurate file and a misleading answer.
-	Retained []string `json:"retained"`
+	Retained []RetainedRecord `json:"retained"`
+}
+
+// RetainedRecord is one retention exemption, as the manifest states it.
+//
+// # A separate type from domain.RetentionPolicy, on purpose
+//
+// The domain type is the policy; this is the wire shape of a statement about it.
+// Serialising the domain type directly would put json tags in `domain`, which no
+// aggregate in this repository carries, and would publish every field it ever
+// grows — the first internal one to be added would appear in a file a data
+// subject downloads, with nobody having decided that it should.
+//
+// So the fields a person is entitled to read are named here, once. The same
+// four the erasure confirmation renders.
+type RetainedRecord struct {
+	// DataClass is which category of record this is about.
+	DataClass string `json:"dataClass"`
+
+	// Period is how long that category is kept.
+	Period string `json:"period"`
+
+	// Disposition is what an erasure would do to it: `retained` means readable
+	// records survive, `pseudonymised` means they survive unreadable.
+	//
+	// In the manifest and not in the mail, and that asymmetry is deliberate. It
+	// is the field a machine branches on, which is what this file is for; in a
+	// message to a person it would be a word of art beside a sentence that
+	// already says the same thing in plain language.
+	Disposition string `json:"disposition"`
+
+	// LegalBasis is the article permitting it. Empty is not possible here —
+	// every entry in this list survives an erasure, and a retention with no
+	// basis is one that should not be happening.
+	LegalBasis string `json:"legalBasis"`
+
+	// Reason is the plain-language sentence, so the bundle is readable by the
+	// person as well as by a tool.
+	Reason string `json:"reason"`
+}
+
+// retainedRecords maps the resolved policies onto the manifest's shape.
+func retainedRecords(policies []domain.RetentionPolicy) []RetainedRecord {
+	out := make([]RetainedRecord, 0, len(policies))
+	for _, p := range policies {
+		out = append(out, RetainedRecord{
+			DataClass:   string(p.Class),
+			Period:      p.Period,
+			Disposition: string(p.Disposition),
+			LegalBasis:  p.LegalBasis,
+			Reason:      p.Reason,
+		})
+	}
+	return out
 }
 
 // ExportedObject is one stored file, as the manifest records it.
@@ -115,17 +184,27 @@ type ExportedObject struct {
 
 // Exports produces a data subject's portability bundle.
 type Exports struct {
-	profile SubjectProfile
-	store   ExportStore
-	prefix  func(subjectID string) string
-	expiry  time.Duration
-	now     func() time.Time
+	profile    SubjectProfile
+	store      ExportStore
+	exemptions RetentionExemptions
+	prefix     func(subjectID string) string
+	expiry     time.Duration
+	now        func() time.Time
 }
 
 // ExportsDeps is what Exports needs.
 type ExportsDeps struct {
 	Profile SubjectProfile
 	Store   ExportStore
+
+	// Exemptions states what this system keeps that is NOT in the bundle.
+	//
+	// Required, and for Article 15(1) rather than for symmetry with the erasure:
+	// the right of access is a right to know about the PROCESSING, not only to
+	// receive the values. A bundle handed over with no retention statement is a
+	// file that answers half the article and reads as though it answered all of
+	// it.
+	Exemptions RetentionExemptions
 
 	// Prefix is the object-store namespace the bundle is written under.
 	//
@@ -174,6 +253,10 @@ func NewExports(d ExportsDeps) (*Exports, error) {
 	case d.Prefix == nil:
 		return nil, fmt.Errorf("compliance: a subject prefix is required; a bundle written " +
 			"outside the subject's own namespace is personal data that survives their erasure")
+	case d.Exemptions == nil:
+		return nil, fmt.Errorf("compliance: a retention-exemption resolver is required; a " +
+			"bundle that lists a name and an address and says nothing about invoices " +
+			"retained under Article 17(3)(b) is an accurate file and a misleading answer")
 	case d.Now == nil:
 		return nil, fmt.Errorf("compliance: a clock is required")
 	}
@@ -181,8 +264,8 @@ func NewExports(d ExportsDeps) (*Exports, error) {
 		d.Expiry = DefaultExportExpiry
 	}
 	return &Exports{
-		profile: d.Profile, store: d.Store, prefix: d.Prefix,
-		expiry: d.Expiry, now: d.Now,
+		profile: d.Profile, store: d.Store, exemptions: d.Exemptions,
+		prefix: d.Prefix, expiry: d.Expiry, now: d.Now,
 	}, nil
 }
 
@@ -225,7 +308,7 @@ func (e *Exports) Produce(ctx context.Context, subjectID string) (ExportResult, 
 		SubjectID:     subjectID,
 		GeneratedAt:   now,
 		PersonalData:  fields,
-		Retained:      Retained,
+		Retained:      retainedRecords(e.exemptions.For(ctx, subjectID)),
 	}
 	body, err := codec.Marshal(bundle)
 	if err != nil {

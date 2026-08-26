@@ -120,3 +120,34 @@ func (r *Retention) DeleteReleasedReservations(ctx context.Context, cutoff time.
 	})
 	return n, err
 }
+
+// SweepAPIKeySecrets reclaims API key digests past their expiry or their
+// rotation retirement.
+//
+// It measures against now() in SQL and takes no cutoff, exactly as SweepTokens
+// and SweepTOTPReplay do — a secret past its own deadline protects nothing, so
+// there is no horizon to choose and no parameter for a caller to get wrong.
+//
+// GARBAGE COLLECTION, not enforcement, and the distinction decides how a failure
+// here is read. GetApiKeySecret already refuses an expired or retired row, so a
+// row that outlives its deadline is dead storage rather than live access: this
+// statement failing costs disk, never access to a credential that should have
+// died.
+//
+// It is deliberately NOT paired with a projection sweep the way sessions are.
+// api_key_view keeps revoked and expired keys forever on purpose — "which
+// credentials existed against this organization, and what happened to them" is
+// the question a key management screen exists to answer, and it is asked hardest
+// immediately after an incident.
+func (r *Retention) SweepAPIKeySecrets(ctx context.Context) (int64, error) {
+	var n int64
+	err := r.tx.InSystemTx(ctx, func(ctx context.Context, q db.Querier) error {
+		rows, err := q.Exec(ctx, identitydb.SweepApiKeySecrets)
+		if err != nil {
+			return fmt.Errorf("identity/postgres: sweeping API key secrets: %w", err)
+		}
+		n = rows
+		return nil
+	})
+	return n, err
+}

@@ -1,0 +1,17 @@
+Hello{{if .Name}} {{.Name}}{{end}},
+
+An API key was created in your Chronos organization{{if .KeyID}} ({{.KeyID}}){{end}}.
+{{if .Scopes}}
+It can do the following, and nothing more:
+{{range .Scopes}}  - {{.}}
+{{end}}{{end}}{{if .ExpiresAt}}It stops working on {{.ExpiresAt.Format "2 January 2006"}}.
+{{end}}{{if .Durable}}
+This key belongs to a SERVICE ACCOUNT, so it keeps working after anybody leaves
+the organization. Only revoking it stops it.
+{{else}}
+This key acts as you, so it can reach what you can reach and nothing more. It
+stops working if your account is closed.
+{{end}}
+IF YOU DID NOT CREATE IT, revoke it now from the API keys screen. A key survives
+a password change and a sign-out-everywhere, so revoking it is the only thing
+that stops it.

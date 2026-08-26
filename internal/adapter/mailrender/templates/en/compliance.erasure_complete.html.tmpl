@@ -11,7 +11,9 @@
   address.</p>
 <p style="margin:0 0 8px;"><strong>What is retained, and why:</strong></p>
 <ul style="margin:0 0 20px;padding-left:20px;">
-{{range .Retained}}  <li style="margin:0 0 6px;">{{.}}</li>
+{{range .Retained}}  <li style="margin:0 0 10px;">{{.Reason}}.<br />
+    <span style="color:#666;">Kept for: {{.Period}}.{{if .LegalBasis}} Legal basis:
+    {{.LegalBasis}}.{{end}}</span></li>
 {{end}}</ul>
 <p style="margin:0 0 20px;">If you believe this was done without your permission, contact
   support — though please note we can no longer look you up by name or address.</p>

@@ -64,14 +64,15 @@ type ObjectLister interface {
 // cursor the fourth returned. Nothing is re-read from the store and nothing is
 // re-decrypted.
 type ExportRuns struct {
-	exports  *eventsourcing.Repository[*domain.Export]
-	profile  SubjectProfile
-	objects  ObjectLister
-	prefixes SubjectPrefixes
-	store    ExportStore
-	prefix   func(subjectID string) string
-	blocked  RestrictionReader
-	now      func() time.Time
+	exports    *eventsourcing.Repository[*domain.Export]
+	profile    SubjectProfile
+	objects    ObjectLister
+	prefixes   SubjectPrefixes
+	store      ExportStore
+	prefix     func(subjectID string) string
+	blocked    RestrictionReader
+	exemptions RetentionExemptions
+	now        func() time.Time
 }
 
 // RestrictionReader answers whether a subject is under Article 18 restriction.
@@ -99,6 +100,11 @@ type ExportRunsDeps struct {
 	// Restrictions blocks a run for a subject under Article 18.
 	Restrictions RestrictionReader
 
+	// Exemptions states what this system keeps that is NOT in the bundle, and on
+	// what legal basis. Article 15(1) asks about the processing, not only the
+	// values.
+	Exemptions RetentionExemptions
+
 	Now func() time.Time
 }
 
@@ -123,13 +129,17 @@ func NewExportRuns(d ExportRunsDeps) (*ExportRuns, error) {
 	case d.Restrictions == nil:
 		return nil, errors.New("compliance: a restriction reader is required; building an " +
 			"export for a restricted subject is exactly the processing Article 18 halts")
+	case d.Exemptions == nil:
+		return nil, errors.New("compliance: a retention-exemption resolver is required; a " +
+			"bundle that lists a name and an address and says nothing about invoices " +
+			"retained under Article 17(3)(b) is an accurate file and a misleading answer")
 	case d.Now == nil:
 		return nil, errors.New("compliance: a clock is required")
 	}
 	return &ExportRuns{
 		exports: d.Exports, profile: d.Profile, objects: d.Objects,
 		prefixes: d.Prefixes, store: d.Store, prefix: d.Prefix,
-		blocked: d.Restrictions, now: d.Now,
+		blocked: d.Restrictions, exemptions: d.Exemptions, now: d.Now,
 	}, nil
 }
 
@@ -318,7 +328,14 @@ func (e *ExportRuns) WriteManifest(
 		GeneratedAt:   now,
 		PersonalData:  fields,
 		Objects:       objects,
-		Retained:      Retained,
+		// Resolved for THIS subject, in the same activity as the vault read, so
+		// the manifest's statement about what is retained is as current as the
+		// values it sits beside. A set resolved at request time and carried
+		// through the workflow would also have to travel in workflow history,
+		// which is durable and replicated — and while a retention policy is not
+		// personal data, "which classes apply to this person" edges towards
+		// being a fact about them.
+		Retained: retainedRecords(e.exemptions.For(ctx, subjectID)),
 	})
 	if err != nil {
 		return "", fmt.Errorf("encoding the bundle for %s: %w", subjectID, err)

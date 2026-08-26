@@ -80,9 +80,54 @@ type Principal struct {
 	// OnBehalfOf is the principal an API key or service account acts for. It
 	// bounds the key: the key can never exceed it.
 	OnBehalfOf string
+
+	// OnBehalfOfKind is what sort of principal OnBehalfOf names.
+	//
+	// It exists because OnBehalfOf on its own is an id with no type, and this
+	// system has two owners a key can have — a person and a service account —
+	// whose tuples name different object types. Rendering `user:svc_…` because
+	// the kind was assumed rather than carried is not a denial: OpenFGA would be
+	// asked a well-formed question about an object that does not exist, answer
+	// no, and the key would fail closed for a reason nothing in the log
+	// explains.
+	//
+	// Set together with OnBehalfOf or not at all. Acting refuses the half-set
+	// combination rather than defaulting the kind, because the default that
+	// would be reached for is `user`, and a service account silently checked as
+	// a user is the one substitution that could pick up a real person's grants.
+	OnBehalfOfKind PrincipalKind
 }
 
 func (p Principal) String() string { return string(p.Kind) + ":" + p.ID }
+
+// Acting is the principal an authorization check must actually name.
+//
+// A machine credential is a PRINCIPAL in its own right — access.md §5 puts
+// `api_key` in the kind list, and that is what the audit trail, the rate limiter
+// and every log line should see. It is NOT what the graph holds a tuple for:
+// nothing in the OpenFGA model grants a relation to `api_key:key_…`, and
+// nothing should, because a key's authority is defined as its owner's narrowed
+// by its scopes (access.md §4) rather than as a second set of grants that could
+// drift from the owner's.
+//
+// So the identity a request is ATTRIBUTED to and the identity it is AUTHORIZED
+// as are two different answers, and this function is the one place that turns
+// the first into the second. The gate calls it; nothing else re-derives it.
+//
+// A principal with no OnBehalfOf is returned unchanged, so every existing caller
+// — every session, which never sets the field — keeps exactly the behaviour it
+// had.
+//
+// A principal whose OnBehalfOf is set with no kind returns a Principal with an
+// empty kind, which valid() refuses and the Guard turns into a denial. That is
+// the intended direction: the alternative is guessing, and the guess would be
+// `user`.
+func (p Principal) Acting() Principal {
+	if p.OnBehalfOf == "" {
+		return p
+	}
+	return Principal{Kind: p.OnBehalfOfKind, ID: p.OnBehalfOf}
+}
 
 func (p Principal) valid() error {
 	switch p.Kind {
@@ -95,6 +140,21 @@ func (p Principal) valid() error {
 	}
 	if strings.ContainsAny(p.ID, ":#") {
 		return fmt.Errorf("%w: principal id %q contains a reserved character", ErrInvalid, p.ID)
+	}
+	// The delegation half is checked with the same rules as the principal
+	// itself. It is rendered into a tuple by Acting, so a ':' or a '#' in it is
+	// the same injection the id check above refuses — and an id with no kind
+	// would produce a reference to an untyped object.
+	if p.OnBehalfOf != "" {
+		if strings.ContainsAny(p.OnBehalfOf, ":#") {
+			return fmt.Errorf("%w: delegated principal id %q contains a reserved character",
+				ErrInvalid, p.OnBehalfOf)
+		}
+		if p.OnBehalfOfKind == "" {
+			return fmt.Errorf("%w: principal %s acts for %q with no kind; the object type "+
+				"would have to be guessed, and the guess is the one that picks up a person's "+
+				"grants", ErrInvalid, p.String(), p.OnBehalfOf)
+		}
 	}
 	return nil
 }

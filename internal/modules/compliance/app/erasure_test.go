@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/chronos/chronos-go/internal/modules/compliance/app"
+	"github.com/chronos/chronos-go/internal/modules/compliance/domain"
 )
 
 // These test compliance.md §4 step 2 — "check LegalHold → held ⇒ defer +
@@ -43,13 +44,38 @@ func (o *recordingObjects) ErasePrefixes(_ context.Context, subjectID string) (i
 	return 0, nil
 }
 
-type recordingConfirm struct{ sent []string }
+type recordingConfirm struct {
+	sent []string
+
+	// retained is what the LAST confirmation was asked to state. Kept so a test
+	// can assert the person was told what survives — the field that used to be a
+	// package-level []string nothing checked.
+	retained []domain.RetentionPolicy
+}
 
 func (c *recordingConfirm) SendErasureComplete(
-	_ context.Context, subjectID string, _ []string,
+	_ context.Context, subjectID string, retained []domain.RetentionPolicy,
 ) error {
 	c.sent = append(c.sent, subjectID)
+	c.retained = retained
 	return nil
+}
+
+// fixedExemptions is a resolver whose answer a test chooses.
+//
+// `nil` is a legitimate answer here and is the case that matters: it is what a
+// broken resolver produces, and the erasure must refuse rather than confirm.
+type fixedExemptions struct{ policies []domain.RetentionPolicy }
+
+func (f fixedExemptions) For(context.Context, string) []domain.RetentionPolicy {
+	return f.policies
+}
+
+// realExemptions is the schedule the running system uses. Tests that are not
+// about retention take this, so they exercise the real set rather than a
+// convenient stub.
+func realExemptions() fixedExemptions {
+	return fixedExemptions{policies: domain.RetentionExemptions()}
 }
 
 // holds answers the gate. `err` takes precedence, so a test can assert what
@@ -111,7 +137,8 @@ func newFixture(t *testing.T, h app.LegalHolds) *fixture {
 	e, err := app.NewErasure(app.ErasureDeps{
 		Vault: f.vault, Accounts: f.accounts, Objects: f.objects,
 		Confirm: f.confirm, Holds: h, Deferrals: f.deferrals,
-		Now: func() time.Time { return time.Date(2026, 8, 26, 9, 0, 0, 0, time.UTC) },
+		Exemptions: realExemptions(),
+		Now:        func() time.Time { return time.Date(2026, 8, 26, 9, 0, 0, 0, time.UTC) },
 	})
 	if err != nil {
 		t.Fatalf("building the eraser: %v", err)
@@ -242,7 +269,7 @@ func TestTheEraserRefusesToBuildWithoutAHoldChecker(t *testing.T) {
 	_, err := app.NewErasure(app.ErasureDeps{
 		Vault: &recordingVault{}, Accounts: &recordingAccounts{},
 		Objects: &recordingObjects{}, Confirm: &recordingConfirm{},
-		Holds: nil, Deferrals: &deferrals{},
+		Holds: nil, Deferrals: &deferrals{}, Exemptions: realExemptions(),
 		Now: time.Now,
 	})
 	if err == nil {
@@ -388,7 +415,7 @@ func TestTheEraserRefusesToBuildWithoutADeferralRecorder(t *testing.T) {
 	_, err := app.NewErasure(app.ErasureDeps{
 		Vault: &recordingVault{}, Accounts: &recordingAccounts{},
 		Objects: &recordingObjects{}, Confirm: &recordingConfirm{},
-		Holds: holds{}, Deferrals: nil,
+		Holds: holds{}, Deferrals: nil, Exemptions: realExemptions(),
 		Now: time.Now,
 	})
 	if err == nil {
@@ -396,6 +423,135 @@ func TestTheEraserRefusesToBuildWithoutADeferralRecorder(t *testing.T) {
 			"wait silently for as long as a matter runs and Article 12(4) would go unmet")
 	}
 	if !strings.Contains(err.Error(), "deferral") {
+		t.Errorf("refused for the wrong reason: %v", err)
+	}
+}
+
+// --------------------------------------------------------------------------
+// Retention exemptions (compliance.md §4 step 3, §7)
+// --------------------------------------------------------------------------
+
+// TestTheConfirmationStatesWhatSurvivesTheErasure.
+//
+// compliance.md §7: erasure "does not delete [an invoice], and the DSAR response
+// says so explicitly rather than implying total deletion". The confirmation is
+// that response, and until the exemptions were resolved per subject it carried a
+// package-level []string that nothing compared against the published schedule.
+//
+// The assertion is on the LEGAL BASIS as much as on the class. "We keep some
+// things" is not what §7 asks for; "we keep invoices, for 7–10 years, under
+// Article 17(3)(b)" is.
+func TestTheConfirmationStatesWhatSurvivesTheErasure(t *testing.T) {
+	f := newFixture(t, holds{})
+
+	if err := f.erasure.Execute(t.Context(), "subj_1"); err != nil {
+		t.Fatalf("erasing: %v", err)
+	}
+	if len(f.confirm.retained) == 0 {
+		t.Fatal("the person was told their account was erased and told nothing about what " +
+			"survives, which implies total deletion while tax records are retained")
+	}
+
+	var invoices domain.RetentionPolicy
+	for _, p := range f.confirm.retained {
+		if p.Class == domain.ClassInvoices {
+			invoices = p
+		}
+	}
+	if invoices.Class == "" {
+		t.Fatalf("the confirmation names %v and not invoices", f.confirm.retained)
+	}
+	if !strings.Contains(invoices.LegalBasis, "17(3)(b)") {
+		t.Errorf("the invoice exemption cites %q; §7 requires the ground to be stated, "+
+			"and the ground for keeping data past an erasure request is an article",
+			invoices.LegalBasis)
+	}
+	if invoices.Period == "" {
+		t.Error("the invoice exemption states no period, so 'we keep it' has no end")
+	}
+}
+
+// TestTheConfirmationNeverStatesWhatIsErased.
+//
+// The same misleading-statement failure pointing the other way. Two of the six
+// classes in the schedule go with the subject; telling somebody we keep their
+// sign-in history for 90 days after they asked to be forgotten would be false.
+func TestTheConfirmationNeverStatesWhatIsErased(t *testing.T) {
+	f := newFixture(t, holds{})
+
+	if err := f.erasure.Execute(t.Context(), "subj_1"); err != nil {
+		t.Fatalf("erasing: %v", err)
+	}
+	for _, p := range f.confirm.retained {
+		if p.Disposition == domain.DispositionErased {
+			t.Errorf("the confirmation states %q as surviving, and it is erased with the "+
+				"subject", p.Class)
+		}
+	}
+}
+
+// TestAnEmptyExemptionSetSTOPSTheErasure.
+//
+// Two exemptions are unconditional — the event log and the operator audit trail
+// apply to everybody who ever used this system — so an empty set is not a
+// subject with unusually little data. It is a resolver that is not doing its
+// job, and the confirmation it would produce says everything about the person is
+// gone.
+//
+// It stops BEFORE the destroy, which is the property worth asserting: the key
+// survives, so the erasure can run again once the resolver is fixed. A version
+// that destroyed first and refused to confirm would have sent nobody a message
+// about an irreversible act.
+func TestAnEmptyExemptionSetStopsTheErasure(t *testing.T) {
+	f := &fixture{
+		vault:     &recordingVault{},
+		accounts:  &recordingAccounts{},
+		objects:   &recordingObjects{},
+		confirm:   &recordingConfirm{},
+		deferrals: &deferrals{},
+	}
+	e, err := app.NewErasure(app.ErasureDeps{
+		Vault: f.vault, Accounts: f.accounts, Objects: f.objects,
+		Confirm: f.confirm, Holds: holds{}, Deferrals: f.deferrals,
+		Exemptions: fixedExemptions{},
+		Now:        func() time.Time { return time.Date(2026, 8, 26, 9, 0, 0, 0, time.UTC) },
+	})
+	if err != nil {
+		t.Fatalf("building the eraser: %v", err)
+	}
+
+	if err := e.Execute(t.Context(), "subj_1"); err == nil {
+		t.Fatal("an erasure ran with no exemptions resolved, so the person was told " +
+			"everything about them is gone while the event log and the operator audit " +
+			"trail survive")
+	}
+	if len(f.vault.erased) != 0 {
+		t.Error("the SUBJECT KEY was destroyed anyway; nothing recovers from this, and " +
+			"the reason to refuse was a broken resolver rather than anything about the " +
+			"subject")
+	}
+	if len(f.confirm.sent) != 0 {
+		t.Error("a confirmation was sent implying total deletion")
+	}
+}
+
+// TestTheEraserRefusesToBuildWithoutAnExemptionResolver.
+//
+// The same silent shape as the hold checker's and the deferral recorder's: every
+// other step would succeed, and the only symptom is a confirmation that implies
+// total deletion while invoices are retained under Article 17(3)(b).
+func TestTheEraserRefusesToBuildWithoutAnExemptionResolver(t *testing.T) {
+	_, err := app.NewErasure(app.ErasureDeps{
+		Vault: &recordingVault{}, Accounts: &recordingAccounts{},
+		Objects: &recordingObjects{}, Confirm: &recordingConfirm{},
+		Holds: holds{}, Deferrals: &deferrals{}, Exemptions: nil,
+		Now: time.Now,
+	})
+	if err == nil {
+		t.Fatal("an eraser was built with no exemption resolver, so every confirmation " +
+			"would imply total deletion")
+	}
+	if !strings.Contains(err.Error(), "retention-exemption") {
 		t.Errorf("refused for the wrong reason: %v", err)
 	}
 }

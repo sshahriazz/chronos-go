@@ -1311,3 +1311,229 @@ type FederatedIdentityReleased struct {
 func (*FederatedIdentityReleased) EventType() string {
 	return "identity.FederatedIdentityReleased.v1"
 }
+
+// ---------------------------------------------------------------------------
+// Service accounts and API keys (identity.md §10)
+//
+// Four events, and the shape of the group is the design decision. There is a
+// SERVICE ACCOUNT, which is a principal and holds no secret, and there are API
+// KEYS, which are secrets and hold no authority of their own. Neither is
+// expressible as a flag on the other:
+//
+//   - A key that carried its own grants would be a second answer to "what may
+//     this principal do", and the two answers would drift the moment somebody
+//     narrowed the owner and forgot the keys (access.md §4).
+//   - A service account modelled as an account row with `is_service_account =
+//     true` would make every human account one flipped bit away from being a
+//     machine principal that survives its owner's departure. The operator plane
+//     refused exactly that shape for exactly that reason (operator.md §3), and
+//     the reason generalises: a boolean that grants something is the field an
+//     injection bug sets.
+//
+// Nothing here carries a digest, and that is the same rule SessionCreated
+// follows: a secret in the log outlives every mechanism that could revoke it,
+// permanently, because the log is append-only (ADR-013).
+//
+// There is deliberately no `ApiKeyUsed`. identity.md §13 explains it at length:
+// an event per REQUEST makes the log grow with traffic rather than with state,
+// and the cost is paid at rebuild time — the recovery procedure for every
+// projection — rather than at write time where it would be noticed.
+// ---------------------------------------------------------------------------
+
+// OwnerKind names the sort of principal that owns an API key.
+//
+// A tagged pair (OwnerKind, OwnerID) rather than two nullable columns, one per
+// owner sort. Two nullable columns admit the row with both set and the row with
+// neither, and both of those have to be interpreted by whoever reads them —
+// which means the interpretation lives in every reader rather than in the
+// schema. Here "exactly one owner, of a known kind" is the only representable
+// shape, and the id's own prefix (`usr_` or `svc_`) is a second, independent
+// check on the kind: a value that claimed the wrong one would not parse.
+//
+// A string constant rather than an integer, because it is wire-visible and
+// permanent: it appears in stored events forever, and an integer's meaning
+// depends on the order of a Go source file (see MethodKind).
+type OwnerKind string
+
+const (
+	// OwnerUser is a personal access token: it acts as the person who created
+	// it, narrowed by its scopes, and it dies with them. Its OwnerID is a
+	// SubjectID pseudonym, because that is what every projection and every
+	// OpenFGA tuple in this system names a person by (ADR-002).
+	OwnerUser OwnerKind = "user"
+
+	// OwnerServiceAccount is an integration credential: it acts as a principal
+	// that belongs to the organization rather than to any person, so it survives
+	// the departure of whoever created it. Its OwnerID is a `svc_` identifier,
+	// which is BOTH the aggregate id and the principal id — a service account
+	// has no personal data, so it needs no pseudonym to stand in for any
+	// (ids.ServiceAccount).
+	OwnerServiceAccount OwnerKind = "service_account"
+)
+
+// ServiceAccountCreated brings a non-human principal into existence.
+//
+// It holds NO credential. A service account that has just been created can
+// authenticate nothing at all — an API key is a separate event on a separate
+// stream — and that separation is deliberate: creating the principal and giving
+// it a way in are two decisions, and the second is the one that changes what can
+// happen.
+type ServiceAccountCreated struct {
+	// ServiceAccountID is the `svc_` identifier. It is the principal id too:
+	// there is no pseudonym, because there is no personal data for one to stand
+	// in for.
+	ServiceAccountID string
+
+	// OrgID is the organization that owns it, chosen at creation and never
+	// changed. A service account belongs to exactly one tenant for the same
+	// reason a key does (identity.md §10, review D2) — a principal that floated
+	// between organizations would carry one customer's automation into another
+	// customer's data.
+	OrgID string
+
+	// Name is a machine-readable label: lower-case snake, bounded, chosen by an
+	// admin.
+	//
+	// It is in the event in CLEARTEXT, and the pattern is what makes that
+	// lawful rather than merely convenient. Free text is where personal data
+	// arrives in a field like this — "alice's deploy bot" — and the log is
+	// append-only, so a name that reached it could never be erased (ADR-002).
+	// `deploy_bot` cannot carry a sentence, so it cannot carry a person. The
+	// same argument the `reason` fields already make.
+	Name string
+
+	// CreatedBy is the pseudonym of the admin who created it. A person, always:
+	// an API key cannot reach the creating RPC, which requires AAL2 and no
+	// machine credential can reach AAL2.
+	CreatedBy string
+
+	CreatedAt time.Time
+}
+
+func (*ServiceAccountCreated) EventType() string { return "identity.ServiceAccountCreated.v1" }
+
+// ApiKeyCreated issues a machine credential.
+//
+// The secret is NOT here and neither is its digest — the same rule SessionCreated
+// follows, and for the same reason: a digest in an append-only log outlives every
+// mechanism that could remove it. The digest goes to `api_key_secret`, which is
+// authoritative and never rebuilt from the log (migration 00051).
+type ApiKeyCreated struct {
+	KeyID string
+
+	// OrgID is the organization the key is bound to, IMMUTABLY (identity.md §10,
+	// review D2). A person may belong to several organizations; without this
+	// binding a key silently inherits all of them, and a token leaked from one
+	// customer's CI reaches another customer's data. There is no rotation, no
+	// rebinding and no command that changes it — moving scope means a new key.
+	OrgID string
+
+	// OwnerKind and OwnerID are the principal this key acts as. Together, always:
+	// see OwnerKind.
+	OwnerKind OwnerKind
+	OwnerID   string
+
+	// Scopes is the coarse capability list, `<resource type>:<read|write>`.
+	//
+	// The key's effective permission is the INTERSECTION of these and the owner's
+	// access (access.md §4), so a scope can only ever narrow. Storing them in the
+	// event rather than only in a table is what makes the narrowing replayable:
+	// the projection the gate reads is rebuilt from here, so a rebuild cannot
+	// silently widen a key.
+	//
+	// Empty is representable in the type and refused by the aggregate. A key with
+	// no scopes would intersect to nothing and could do nothing, which is a
+	// useless credential rather than a dangerous one — but it is also
+	// indistinguishable from a key whose scopes were dropped in transit, and the
+	// second reading is the one worth refusing at the write.
+	Scopes []string
+
+	// ExpiresAt is mandatory. identity.md §10 makes expiry a requirement rather
+	// than an option, and the aggregate caps it: a credential with no deadline is
+	// one that outlives the integration it was minted for, the person who minted
+	// it, and any memory of why it exists.
+	ExpiresAt time.Time
+
+	// CreatedBy is the pseudonym of the admin who minted it — a person, for the
+	// reason ServiceAccountCreated.CreatedBy gives.
+	CreatedBy string
+
+	CreatedAt time.Time
+}
+
+func (*ApiKeyCreated) EventType() string { return "identity.ApiKeyCreated.v1" }
+
+// ApiKeyRotated replaces a key's secret without replacing the key.
+//
+// # What rotation is for, and the two ways of getting it wrong
+//
+// The identifier, the scopes, the org binding and every grant that names the
+// owner stay exactly as they were; only the secret changes. That is the whole
+// point — a rotation that produced a new key id would require every consumer to
+// be reconfigured, which is the cost rotation exists to avoid, and a system whose
+// rotation is expensive is a system whose secrets are never rotated.
+//
+// The two failures are opposite and both real:
+//
+//   - NO OVERLAP. Revoke-then-issue leaves a window in which neither secret
+//     works. Every consumer of the key fails during it, so rotation becomes an
+//     outage that has to be scheduled, which again means it does not happen.
+//   - UNBOUNDED OVERLAP. Leaving the old secret live until somebody remembers to
+//     remove it means the old secret is live forever, because nobody remembers.
+//     A rotation performed BECAUSE a secret leaked would then not have removed
+//     the leaked secret.
+//
+// So both secrets are live, and the old one has a DEADLINE recorded at the moment
+// of the rotation. PreviousRetiresAt is that deadline, and it is in the event
+// rather than derived from RotatedAt plus a policy constant for the reason
+// EmailReserved.ExpiresAt is: the constant will change, and every rotation
+// already written would silently change with it — including retroactively
+// extending a window that had already closed.
+type ApiKeyRotated struct {
+	KeyID string
+	OrgID string
+
+	// PreviousRetiresAt is when the superseded secret stops resolving. Equal to
+	// RotatedAt for an immediate rotation, which is what a leak response asks
+	// for; never zero, because a zero timestamp reads as "no deadline" to
+	// anything that compares it.
+	PreviousRetiresAt time.Time
+
+	// ExpiresAt is the NEW secret's own deadline. Rotation re-arms the expiry
+	// clock rather than inheriting the old one: a key rotated on its last day
+	// that kept the old deadline would expire hours after everybody reconfigured
+	// for it.
+	ExpiresAt time.Time
+
+	RotatedBy string
+	RotatedAt time.Time
+}
+
+func (*ApiKeyRotated) EventType() string { return "identity.ApiKeyRotated.v1" }
+
+// ApiKeyRevoked ends a key, and every secret it ever had, at once.
+//
+// Revocation is IMMEDIATE and is not waited on: the use case deletes the secret
+// rows in the same request, and this event is what makes the projection agree.
+// Neither half is sufficient alone — the delete leaves nothing in the log saying
+// why the key stopped working, and the event alone leaves the key usable for as
+// long as the projector is behind. This is the shape operator offboarding
+// settled on for the same question (operator/app/operators.go, Disable).
+type ApiKeyRevoked struct {
+	KeyID string
+	OrgID string
+
+	// ActorID is who revoked it, as a pseudonym. Differs from the key's owner
+	// when an admin revokes somebody else's key, or when a reactor does it
+	// because the owner lost their membership of the bound organization.
+	ActorID string
+
+	// Reason is a short machine-readable label — `leaked`, `owner_left`,
+	// `no_longer_needed`. Bounded to lower-case snake at the boundary, so a
+	// sentence somebody typed cannot reach an append-only log (ADR-002).
+	Reason string
+
+	RevokedAt time.Time
+}
+
+func (*ApiKeyRevoked) EventType() string { return "identity.ApiKeyRevoked.v1" }

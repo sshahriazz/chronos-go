@@ -25,6 +25,7 @@ import (
 	entitlementapp "github.com/chronos/chronos-go/internal/modules/entitlement/app"
 	"github.com/chronos/chronos-go/internal/modules/identity"
 	"github.com/chronos/chronos-go/internal/modules/identity/adapter/argon2id"
+	identitypg "github.com/chronos/chronos-go/internal/modules/identity/adapter/postgres"
 	identityapi "github.com/chronos/chronos-go/internal/modules/identity/api"
 	"github.com/chronos/chronos-go/internal/modules/identity/app"
 	"github.com/chronos/chronos-go/internal/modules/notification"
@@ -33,6 +34,7 @@ import (
 	orgapi "github.com/chronos/chronos-go/internal/modules/organization/api"
 	"github.com/chronos/chronos-go/internal/modules/profile"
 	profileapi "github.com/chronos/chronos-go/internal/modules/profile/api"
+	profileapp "github.com/chronos/chronos-go/internal/modules/profile/app"
 	profiledomain "github.com/chronos/chronos-go/internal/modules/profile/domain"
 	"github.com/chronos/chronos-go/internal/modules/workspace"
 	workspaceapi "github.com/chronos/chronos-go/internal/modules/workspace/api"
@@ -193,6 +195,18 @@ type dependencies struct {
 	organization *orgapi.Service
 	workspace    *workspaceapi.Service
 
+	// profileUpdates is profile's WRITE use case, held because TWO surfaces need
+	// it: profile's own settings screen, and compliance's Article 16
+	// rectification.
+	//
+	// The same instance, deliberately. Rectification corrects the fields profile
+	// owns, and a second writer to the vault would leave a value that no
+	// `profile.ProfileUpdated.v1` accounts for — the vault saying one thing and
+	// profile's own history another. Compliance reaches it through a port
+	// (CONVENTIONS §2 forbids importing another module's app package), and this
+	// field is what the adapter closes over.
+	profileUpdates *profileapp.Updates
+
 	// billing is the commercial self-service surface: one RPC, which mints a
 	// signed link into Stripe's hosted Customer Portal. Everything a customer
 	// can change about their subscription happens there and arrives back as a
@@ -289,6 +303,17 @@ type dependencies struct {
 	totpEnroller app.TotpEnroller
 	authObserver app.AuthObserver
 
+	// apiKeyStore is identity.md §10.s digest store and org-scoped read side.
+	//
+	// Held on the dependencies rather than only inside buildIdentity because the
+	// AUTHENTICATOR needs it too, and it is built in a different function: the
+	// API key resolver runs before gate 1, so it is assembled with the rest of
+	// the pipeline in startGates while the store is assembled with the rest of
+	// identity. Two constructions would be two adapters over one table, and the
+	// failure of that is the one this repository has already paid for — a
+	// component built, tested and wired into nothing.
+	apiKeyStore *identitypg.APIKeys
+
 	// ---- the enforcement pipeline (ADR-021) -------------------------------
 
 	// policies is every method this server will serve, with its declared gates.
@@ -296,7 +321,11 @@ type dependencies struct {
 
 	// authn resolves the bearer token. Nil means every authenticated RPC is
 	// refused, which is the correct direction and must still be logged.
-	authn *interceptor.SessionAuthenticator
+	// It is the COMPOSITE resolver: a bearer starting `chr_` is an API key and
+	// anything else is a session, routed on the token.s own shape rather than on
+	// a header a caller could choose. One authn step, two credential kinds, the
+	// same gates 1 to 5 afterwards.
+	authn interceptor.Authenticator
 
 	// idempotencyGate is gate 5, over the same cqrs.Once as `once`.
 	idempotencyGate *interceptor.Idempotency
@@ -703,7 +732,7 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 		d.organization = svc
 	}
 
-	if svc, err := d.buildCompliance(); err != nil {
+	if svc, err := d.buildCompliance(log); err != nil {
 		log.Error("the compliance service is NOT constructed; a person cannot halt "+
 			"processing of their own data, and Article 18 is reachable only by an "+
 			"operator editing a table", "error", err)
@@ -742,7 +771,7 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 // the only way to halt processing is an operator editing a table by hand. That
 // is the shape the erasure path had before its cancel endpoint landed, and it is
 // worth failing loudly rather than discovering from a data subject.
-func (d *dependencies) buildCompliance() (*complianceapi.Service, error) {
+func (d *dependencies) buildCompliance(log *slog.Logger) (*complianceapi.Service, error) {
 	if d.store == nil {
 		return nil, errors.New("no event store: a restriction is recorded as events")
 	}
@@ -760,12 +789,35 @@ func (d *dependencies) buildCompliance() (*complianceapi.Service, error) {
 			"out whether it is ready")
 	}
 
+	if d.profileUpdates == nil {
+		return nil, errors.New("profile's update use case was not constructed: Article 16 " +
+			"rectification corrects the fields profile owns, and it corrects them through " +
+			"that use case rather than beside it — a second writer to the vault would " +
+			"leave a value no profile.ProfileUpdated.v1 accounts for")
+	}
+
 	// Article 18's own reader, shared by the export runner below. The SAME
 	// component the notification dispatcher consults, so "is this subject
 	// restricted" has one answer everywhere rather than one per caller.
 	restrictionReader, err := compliancepg.NewRestrictions(pgadapter.New(d.pool))
 	if err != nil {
 		return nil, fmt.Errorf("restriction reader: %w", err)
+	}
+
+	// compliance.md §4 step 3 and §7. The SAME resolver the erasure uses in
+	// cmd/worker, against the same schedule, so an export's statement about what
+	// is retained and an erasure confirmation's cannot disagree.
+	//
+	// AssumeRecordsExist is the honest placeholder and it is wired HERE rather
+	// than defaulted inside the resolver — see its own doc. Replacing it when
+	// billing can answer "does this subject appear on an invoice" is a one-line
+	// change at this line and its twin in cmd/worker.
+	exemptions, err := complianceapp.NewExemptions(complianceapp.ExemptionsDeps{
+		Records: complianceapp.AssumeRecordsExist{},
+		Log:     log,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("retention exemptions: %w", err)
 	}
 
 	// The REQUEST half. It records that somebody asked and returns the id they
@@ -792,7 +844,11 @@ func (d *dependencies) buildCompliance() (*complianceapi.Service, error) {
 		// Article 18 stands in front of Article 15: building an export is
 		// processing, and a restricted subject is not processed (compliance.md §6).
 		Restrictions: restrictionReader,
-		Now:          d.clock.Now,
+		// Article 15(1) asks about the PROCESSING, not only the values: a bundle
+		// that says nothing about what is retained is an accurate file and a
+		// misleading answer.
+		Exemptions: exemptions,
+		Now:        d.clock.Now,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("exports: %w", err)
@@ -823,9 +879,85 @@ func (d *dependencies) buildCompliance() (*complianceapi.Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("restrictions: %w", err)
 	}
+
+	// ARTICLE 16. The correction itself goes through PROFILE's use case — see
+	// profileCorrections — so there is one writer to the vault and one
+	// `profile.ProfileUpdated.v1` per change. What compliance adds is the record
+	// that a statutory right was exercised, which a list of profile saves cannot
+	// be told apart from.
+	rectifications, err := complianceapp.NewRectifications(complianceapp.RectificationsDeps{
+		Repo: eventsourcing.NewRepository[*compliancedomain.Rectification](
+			d.store, d.codec, d.upcasters,
+			compliancedomain.RectificationCategory, compliancedomain.NewRectification),
+		Applier: profileCorrections{updates: d.profileUpdates},
+		Now:     d.clock.Now,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("rectifications: %w", err)
+	}
+
+	// ARTICLE 21. Enforced by the notification dispatcher through
+	// compliancepg.Objections — see newNotifier. This half only RECORDS, and a
+	// deployment that wired one without the other would either take instructions
+	// it never honours or honour instructions nobody can give.
+	objections, err := complianceapp.NewObjections(complianceapp.ObjectionsDeps{
+		Repo: eventsourcing.NewRepository[*compliancedomain.Objection](
+			d.store, d.codec, d.upcasters,
+			compliancedomain.ObjectionCategory, compliancedomain.NewObjection),
+		Now: d.clock.Now,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("objections: %w", err)
+	}
+
 	return complianceapi.New(complianceapi.Deps{
 		Restrictions: restrictions, Exports: exports, ExportViews: exportViews,
+		Rectifications: rectifications, Objections: objections,
 	})
+}
+
+// profileCorrections satisfies compliance's Article 16 port with profile's own
+// write use case.
+//
+// # This adapter is the whole reason rectification is not a second vault writer
+//
+// compliance may not import `profile/app` (CONVENTIONS §2), and that constraint
+// points at the right design rather than obstructing it: the module that owns a
+// field owns the write to it, so a correction and a settings save take the same
+// path, append the same `profile.ProfileUpdated.v1`, and are serialised by the
+// same aggregate revision. A second writer would leave the vault and profile's
+// own history disagreeing about when a name changed — and that history is what a
+// support conversation about impersonation is settled from.
+//
+// It lives in this composition root because a composition root is the only place
+// permitted to know both sides, exactly as accountEraser does in cmd/worker.
+type profileCorrections struct{ updates *profileapp.Updates }
+
+var _ complianceapp.PersonalDataCorrections = profileCorrections{}
+
+// Correct forwards the sparse correction, pointers intact.
+//
+// The idempotency key travels UNCHANGED. Deriving a second one would make a
+// client's retry idempotent in compliance and duplicated in profile, which is
+// the worst of the two: the log would record one correction and the vault would
+// have been written twice.
+//
+// The result is DISCARDED. profile returns the whole profile so a settings
+// screen can render it without a second call; a rectification response carries
+// no values at all, because echoing a corrected name would put personal data
+// into proxy logs and support screenshots for no gain — the caller already knows
+// what they sent.
+func (p profileCorrections) Correct(
+	ctx context.Context, c complianceapp.PersonalDataCorrection,
+) error {
+	_, err := p.updates.Update(ctx, profileapp.UpdateCommand{
+		SubjectID:      c.SubjectID,
+		DisplayName:    c.DisplayName,
+		Locale:         c.Locale,
+		Timezone:       c.Timezone,
+		IdempotencyKey: c.IdempotencyKey,
+	})
+	return err
 }
 
 // vaultProfile narrows the vault to the one method an export may call.

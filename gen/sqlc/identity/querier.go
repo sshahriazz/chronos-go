@@ -155,6 +155,17 @@ type Querier interface {
 	// credential-stuffing signal.
 	CountRecentFailures(ctx context.Context, arg CountRecentFailuresParams) (int64, error)
 	CountUnusedRecoveryCodes(ctx context.Context, subjectID string) (int64, error)
+	// Revocation, and the leak response: remove every secret the key ever had.
+	//
+	// Immediate and unconditional. identity.md §10 requires revocation to take
+	// effect at once — an API key has no cached-token equivalent to wait out — and
+	// the projection catching up is far too late for a credential somebody has
+	// published. The event is appended too; neither half is sufficient alone, which
+	// is the shape operator offboarding settled on (operator/app/operators.go,
+	// Disable): the delete alone leaves nothing in the log saying why the key
+	// stopped working, and the event alone leaves it usable until the projector
+	// catches up.
+	DeleteApiKeySecrets(ctx context.Context, keyID string) (int64, error)
 	DeleteCredential(ctx context.Context, credentialID string) error
 	// Remove a password row that the event log does not account for.
 	//
@@ -253,6 +264,35 @@ type Querier interface {
 	// count then answers exactly one question — does this credential still exist and
 	// is it still usable — which is what the caller needs to know.
 	EnableCredential(ctx context.Context, credentialID string) (int64, error)
+	// Resolve a presented API key. This is the authenticator's query, and it runs on
+	// EVERY request a machine credential makes.
+	//
+	// By DIGEST, never by the token: the token is not stored, so a database dump
+	// yields digests that cannot be presented. The digest covers the WHOLE token —
+	// environment, key id and secret — so a token pairing one key's id with
+	// another's secret, or a staging token replayed against production, resolves to
+	// nothing without any comparison a reader has to trust.
+	//
+	// # It touches no projection, and that is deliberate
+	//
+	// `GetSessionByToken` joins `session_view`, so a session stops resolving while
+	// that projection is rebuilt. This one does not, because the equivalent
+	// behaviour for machines is an outage with no human in the loop: routine
+	// maintenance on an unrelated projection would break every integration a
+	// customer has built. Migration 00051's header states the trade in full.
+	//
+	// Revocation is therefore structural rather than a flag checked here: revoking
+	// DELETES every secret row for the key, so a revoked key has nothing to resolve.
+	//
+	// Both deadlines are checked HERE rather than by the caller, so there is no
+	// window in which the authenticator holds a row it then has to remember to
+	// validate:
+	//
+	//   expires_at  the key's own mandatory, policy-capped lifetime;
+	//   retires_at  the rotation overlap. NULL for the current secret; set on a
+	//               superseded one at the instant of the rotation, so the old
+	//               secret dies on schedule whether or not the sweep has run.
+	GetApiKeySecret(ctx context.Context, arg GetApiKeySecretParams) (GetApiKeySecretRow, error)
 	// The credential of a kind for an account, ENABLED OR NOT.
 	//
 	// Deliberately not GetUsableCredential, and the difference is the whole reason
@@ -275,6 +315,13 @@ type Querier interface {
 	// supplied would mean trusting the caller's claim about their own identity,
 	// which is what the ceremony exists to establish.
 	GetPasskey(ctx context.Context, credentialID string) (PasskeyCredential, error)
+	// Resolve one service account inside the caller's organization.
+	//
+	// Used to check that a key's named owner EXISTS and is this tenant's before the
+	// key is minted. Row-level security is what makes "is this tenant's" true: a
+	// service account in another organization is not visible here, so the answer to
+	// a caller naming one is identical to the answer for one that does not exist.
+	GetServiceAccount(ctx context.Context, serviceAccountID string) (GetServiceAccountRow, error)
 	// Resolve a bearer token to a session. This is the authenticator's query, and it
 	// runs on EVERY authenticated request.
 	//
@@ -399,6 +446,18 @@ type Querier interface {
 	// cannot share an id, and if they somehow did, overwriting one would let a
 	// second Begin invalidate a first that is mid-flight in another tab.
 	InsertWebauthnChallenge(ctx context.Context, arg InsertWebauthnChallengeParams) error
+	// ---------------------------------------------------------------------------
+	// Authoritative: the secrets
+	// ---------------------------------------------------------------------------
+	// Record the digest of a freshly minted secret.
+	//
+	// A plain INSERT, not an upsert. A digest is 256 bits of fresh randomness, so a
+	// conflict is not a retry — it is either the same secret being issued twice,
+	// which no correct caller does, or a collision that is not going to happen.
+	// Absorbing it with ON CONFLICT DO NOTHING would silently point one digest at
+	// whichever key wrote it first, and the second caller would hold a credential
+	// for somebody else's key.
+	IssueApiKeySecret(ctx context.Context, arg IssueApiKeySecretParams) error
 	// The AUTHORITATIVE half, written by the login handler.
 	//
 	// Separate statement, and separate WRITER: the handler holds the token, the
@@ -410,6 +469,16 @@ type Querier interface {
 	// adapter/token), so a verification token cannot collide with — or be redeemed
 	// as — a reset token even though both live here.
 	IssueToken(ctx context.Context, arg IssueTokenParams) error
+	// The key management screen, newest first, keyset paged.
+	//
+	// Revoked keys are INCLUDED. The screen's question is "what credentials exist
+	// against this organization, and what happened to them" — hiding the revoked
+	// ones would remove the evidence that a revocation actually took effect, which
+	// is the thing somebody checks immediately after performing one.
+	//
+	// No secret, no digest, and no column that could hold one: this statement's
+	// select list is the whole of what a key management screen may see.
+	ListApiKeys(ctx context.Context, arg ListApiKeysParams) ([]ListApiKeysRow, error)
 	// Every credential on an account, for the security-settings screen.
 	ListCredentials(ctx context.Context, subjectID string) ([]ListCredentialsRow, error)
 	// The rotation job's work list: credentials still sealed under an old key
@@ -533,6 +602,15 @@ type Querier interface {
 	//
 	// Used to build an `allowCredentials` list and to render the security screen.
 	ListPasskeysForSubject(ctx context.Context, subjectID string) ([]PasskeyCredential, error)
+	// The management screen, newest first.
+	//
+	// Keyset pagination over (created_at, service_account_id) so the tiebreak column
+	// is UNIQUE; an ordering that can tie loses or repeats rows at a page boundary
+	// (platform/page). No org predicate, deliberately: row-level security supplies
+	// it from `app.org_id`, and a hand-written `org_id = $n` here would be a second
+	// tenant filter that can disagree with the policy — the dangerous direction
+	// being the one where somebody removes the policy and the query still "works".
+	ListServiceAccounts(ctx context.Context, arg ListServiceAccountsParams) ([]ListServiceAccountsRow, error)
 	// The device list, newest first.
 	//
 	// Keyset pagination: ordered by (created_at, session_id) so the tiebreak column
@@ -694,6 +772,19 @@ type Querier interface {
 	// locked-out authenticator leaves the lockout intact and the row looking
 	// maintained.
 	ResetCredentialPassword(ctx context.Context, arg ResetCredentialPasswordParams) (int64, error)
+	// Put a deadline on every CURRENT secret of a key, which is what a rotation
+	// supersedes.
+	//
+	// `retires_at IS NULL` is the filter, so a second rotation inside an overlap
+	// window does not extend the first superseded secret's life — it retires only
+	// the secret that was current, and the one already dying keeps the earlier
+	// deadline. Without that guard, rotating twice in an hour would push the oldest
+	// secret's retirement forward each time, which is the "old secret lives forever"
+	// failure with extra steps.
+	//
+	// Run BEFORE the new secret is inserted, so there is never an instant with two
+	// secrets that both look current.
+	RetireApiKeySecrets(ctx context.Context, arg RetireApiKeySecretsParams) (int64, error)
 	// Revoke every live session for a subject, optionally sparing one.
 	//
 	// The exception is "sign out everywhere else", which must not sign the caller
@@ -714,6 +805,17 @@ type Querier interface {
 	// closes is the attacker who triggered a VERIFICATION mail (or a second reset)
 	// before the victim recovered, and holds a live link that outlives the recovery.
 	RevokeAllTokensForSubject(ctx context.Context, subjectID string) (int64, error)
+	// Applied from identity.ApiKeyRevoked.
+	//
+	// `revoked_at IS NULL` makes it idempotent AND keeps the FIRST revocation's
+	// timestamp, so the column answers "when did this key die" rather than "when was
+	// this event last replayed".
+	//
+	// The timestamp is a PARAMETER and not now(). Every other timestamp on a key
+	// comes from the injected clock ADR-054 makes movable, and a statement-side
+	// now() reads the PostgreSQL wall clock instead — one row carrying two clocks,
+	// which is how a session came to report a lastSeenAt before its own createdAt.
+	RevokeApiKeyView(ctx context.Context, arg RevokeApiKeyViewParams) error
 	RevokeSession(ctx context.Context, sessionID string) (int64, error)
 	// End every live session for one subject.
 	//
@@ -737,7 +839,35 @@ type Querier interface {
 	// using one leaves the other usable — which is the window an attacker who
 	// triggered an extra reset is waiting for.
 	RevokeTokens(ctx context.Context, arg RevokeTokensParams) (int64, error)
+	// Applied from identity.ApiKeyRotated.
+	//
+	// Only the deadline and the rotation stamp move. The scopes, the owner and the
+	// org binding are deliberately absent from the SET list: a rotation that could
+	// change what a key may do would be a way to escalate a key without minting one,
+	// and the audit trail would read as routine maintenance.
+	//
+	// Guarded on `revoked_at IS NULL` so a replay cannot extend the life of a key
+	// that was revoked afterwards. The aggregate refuses to rotate a revoked key for
+	// the same reason; this is that rule stated where the projector can be replayed
+	// independently of it.
+	//
+	// Idempotent by assignment: the values written are the same on every replay.
+	RotateApiKeyView(ctx context.Context, arg RotateApiKeyViewParams) error
 	SetUserState(ctx context.Context, arg SetUserStateParams) error
+	// Reclaim rows whose deadline has passed.
+	//
+	// Garbage collection, not enforcement. GetApiKeySecret already refuses an
+	// expired or retired secret, so a row that outlives its deadline is dead
+	// storage rather than live access — which is why this can run on a schedule and
+	// why its failure is not a security incident.
+	//
+	// Measured against now() in SQL and taking no cutoff, exactly as SweepTokens
+	// and SweepTOTPReplay do, and for the reason app/retention.go gives for those:
+	// a row past its own expiry protects nothing, so there is no horizon anybody
+	// could reasonably want it kept over and no parameter for a caller to get
+	// wrong. The two statements that DO take a cutoff take one because they delete
+	// rows a human being may still need to ask a question about.
+	SweepApiKeySecrets(ctx context.Context) (int64, error)
 	// Retention for the projected half, on a much longer horizon than the token.
 	SweepExpiredSessionViews(ctx context.Context, absoluteExpiresAt pgtype.Timestamptz) (int64, error)
 	// Drop the SECRET half of sessions that can no longer be used.
@@ -762,6 +892,20 @@ type Querier interface {
 	// browser prompt times out — so this is routine housekeeping rather than an
 	// alarm. Consuming already deletes; this only reclaims what was never answered.
 	SweepWebauthnChallenges(ctx context.Context, expiresAt pgtype.Timestamptz) (int64, error)
+	// Advance `last_used_at`, at most once per key per minute.
+	//
+	// The threshold is IN THE STATEMENT rather than in Go, so the write is skipped
+	// by the database instead of by a read-modify-write in the authenticator. That
+	// matters twice: it is one round trip rather than two, and it removes the race
+	// in which two concurrent requests both read a stale value and both write.
+	//
+	// Not projected from an event, and there is deliberately no `ApiKeyUsed` — see
+	// identity.md §13. This column is derived, approximate, and rebuildable from
+	// nothing because nobody needs its history.
+	//
+	// No org predicate: row-level security supplies it. The authenticator therefore
+	// runs this under the key's own tenant scope, which it has from the secret row.
+	TouchApiKey(ctx context.Context, arg TouchApiKeyParams) error
 	// Record a successful use and clear the failure count.
 	//
 	// Clearing on SUCCESS is what makes the ceiling a consecutive-failure counter
@@ -796,6 +940,9 @@ type Querier interface {
 	// offset; taking the value from the caller keeps a session's whole lifetime on
 	// one clock.
 	TouchSession(ctx context.Context, arg TouchSessionParams) error
+	// Empties the table for a rebuild. TRUNCATE, not DELETE — see
+	// TruncateServiceAccounts.
+	TruncateApiKeys(ctx context.Context) error
 	// Empty the projection so it can be rebuilt from position zero.
 	//
 	// ONE table, on its own — unlike TruncateIdentityProjections, which must name
@@ -828,7 +975,24 @@ type Querier interface {
 	// a table that may be rebuilt repeatedly.
 	TruncateIdentityProjections(ctx context.Context) error
 	TruncatePasskeys(ctx context.Context) error
+	// Empties the table for a rebuild.
+	//
+	// TRUNCATE and not DELETE: a rebuild runs from an UNSCOPED system transaction,
+	// which under row-level security can see no rows and would therefore delete
+	// none — leaving a "rebuilt" projection full of its old contents. TRUNCATE is a
+	// table-level operation and is not filtered by row security (ADR-019).
+	TruncateServiceAccounts(ctx context.Context) error
 	TruncateWebauthnChallenges(ctx context.Context) error
+	// ---------------------------------------------------------------------------
+	// Projection: API keys
+	// ---------------------------------------------------------------------------
+	// Applied from identity.ApiKeyCreated.
+	//
+	// DO NOTHING on conflict, for UpsertSession's reason: a replay must not
+	// resurrect a key that was revoked after it was created. The revocation is a
+	// later event and is replayed after this one — but only if this one did not
+	// overwrite the row with its original state in between.
+	UpsertApiKey(ctx context.Context, arg UpsertApiKeyParams) error
 	// Credential storage: the one identity table that is NOT rebuildable from the
 	// log, because verifiers and TOTP secrets must never enter an event.
 	//
@@ -868,6 +1032,24 @@ type Querier interface {
 	// verified. A takeover of a released row must clear the release, and a row can
 	// only be verified by a confirmation that comes AFTER this event in stream order.
 	UpsertEmailReservation(ctx context.Context, arg UpsertEmailReservationParams) error
+	// Service accounts and API keys (identity.md §10).
+	//
+	// Two groups, and the split is migration 00051's: statements against
+	// `api_key_view` / `service_account_view` are PROJECTION statements and are
+	// written to be REPLAYABLE, because a projector may re-apply an event after a
+	// restart and a statement that failed on replay would stop it. Statements
+	// against `api_key_secret` are AUTHORITATIVE and are run by command handlers,
+	// because no replay can restore a digest.
+	// ---------------------------------------------------------------------------
+	// Projection: service accounts
+	// ---------------------------------------------------------------------------
+	// Applied from identity.ServiceAccountCreated.
+	//
+	// DO NOTHING on conflict, not DO UPDATE. A service account has exactly one
+	// creation event, so a conflict here is a replay — and re-writing the row would
+	// be re-writing it with the same values at best, or overwriting a later fact
+	// with an earlier one if this table ever gains a mutation.
+	UpsertServiceAccount(ctx context.Context, arg UpsertServiceAccountParams) error
 	// The PROJECTION half, written by the projector from SessionCreated.
 	//
 	// Carries no digest and no idle deadline: neither is in the log, so neither can

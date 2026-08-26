@@ -25,6 +25,7 @@ import (
 
 	"connectrpc.com/connect"
 	optionsv1 "github.com/chronos/chronos-go/gen/proto/chronos/options/v1"
+	"github.com/chronos/chronos-go/internal/modules/identity/domain"
 	"github.com/chronos/chronos-go/internal/platform/authz"
 	"github.com/chronos/chronos-go/internal/platform/cqrs"
 	"github.com/chronos/chronos-go/internal/platform/db"
@@ -66,7 +67,52 @@ type Principal struct {
 	// endpoints, and enforce applies that restriction: it is a property of the
 	// session, so it is enforced where the session is read, not in nine handlers.
 	RequiresCredentialRotation bool
+
+	// BoundOrg is the organization a MACHINE CREDENTIAL is tied to, chosen when
+	// it was minted and immutable afterwards (identity.md §10, review D2). Empty
+	// for a session.
+	//
+	// The difference from `Context.ActiveOrg` on a session is who chose it. A
+	// session is not scoped to an organization — a person belongs to several —
+	// so gate 1 reads a header and VERIFIES membership. A key names exactly one
+	// organization and the caller did not pick it, so gate 1 has nothing to
+	// choose and everything to enforce: a header naming a different organization
+	// is refused rather than resolved.
+	//
+	// Without this the binding would exist only in the database and nowhere in
+	// the request pipeline, and a key leaked from one customer's CI would reach
+	// another customer's data through an ordinary header — which is the
+	// cross-tenant breach identity.md §10 exists to close.
+	BoundOrg string
+
+	// Scopes is the coarse capability list a machine credential carries. Empty
+	// for a session, and empty for a key is a DENIAL rather than "no
+	// restriction": scopeSatisfied answers false for an empty list.
+	//
+	// The asymmetry is deliberate. A session is a person acting as themselves,
+	// so there is nothing to narrow and the graph is the whole answer. A key is
+	// a credential somebody handed to a program, and access.md §4 defines its
+	// permission as the INTERSECTION of its scopes and its owner's access — so
+	// the scopes have to be enforced somewhere in the pipeline, and a rule of
+	// the form "every handler remembers to check" is forgotten exactly once and
+	// then permanently.
+	Scopes []string
 }
+
+// Machine reports whether this request arrived on a non-human credential.
+//
+// Read off the principal's KIND rather than off a "is a key" boolean, which is
+// the distinction ids.ServiceAccount's own comment makes: a boolean that grants
+// something is exactly the field an injection bug sets, and its inverse — a
+// boolean that RESTRICTS — is exactly the field an injection bug clears. A kind
+// that must be one of an enumerated set, whose id must then parse under that
+// kind's prefix, cannot be cleared into "human" by a single wrong byte.
+//
+// The zero Principal is a machine by this predicate, because its kind is the
+// empty string rather than KindUser. That is the safe direction: a Principal a
+// test double or a half-built authenticator produced faces the stricter rules,
+// not the looser ones.
+func (p Principal) Machine() bool { return p.Subject.Kind != authz.KindUser }
 
 // Authenticator resolves the caller. Implemented by the identity module.
 type Authenticator interface {
@@ -487,6 +533,14 @@ func (g *Gates) enforce(
 				"be used for anything else"))
 	}
 
+	// A machine credential faces two rules a session does not, and both are here
+	// for the reason the two above are: they are properties of the CREDENTIAL,
+	// and a rule of the form "every handler remembers to check" is forgotten
+	// exactly once and then permanently.
+	if err := machineCredentialCheck(p, principal); err != nil {
+		return ctx, nil, err
+	}
+
 	// Attached here, once, and never again. Every later gate and the handler read
 	// the caller from the context rather than being passed it, so there is one
 	// answer to "who is this" for the whole request — and the idempotency scope,
@@ -521,7 +575,19 @@ func (g *Gates) enforce(
 		return ctx, nil, srvconnect.Error(errs.NotFoundf("not found"))
 	}
 	decision := g.deps.Authz.Check(ctx, authz.Query{
-		Principal: principal.Subject,
+		// Acting(), not Subject. For a session the two are the same value. For a
+		// machine credential the subject is the KEY — which is what the audit
+		// trail and every log line should see — and the object the graph holds a
+		// tuple for is its OWNER, because a key's authority is defined as its
+		// owner's narrowed by its scopes (access.md §4) rather than as a second
+		// set of grants that could drift from the owner's.
+		//
+		// The narrowing has already happened: machineCredentialCheck refused the
+		// request above unless the key carries the scope this method needs. So
+		// what reaches OpenFGA is the second half of the intersection, and the
+		// two halves are enforced by different code at different points, neither
+		// of which can be satisfied by the other.
+		Principal: principal.Subject.Acting(),
 		Relation:  p.Relation,
 		Resource:  authz.ResourceRef{Type: p.ResourceType, ID: resourceID},
 		Context:   principal.Context,
@@ -590,6 +656,90 @@ func selfCheck(p policy.Policy, principal Principal) error {
 				"rather than checking a relation against an empty resource", p.Method))
 	}
 	return nil
+}
+
+// machineCredentialCheck applies the two rules that exist only for a non-human
+// caller.
+//
+// # 1. A machine may not touch a person's own account
+//
+// Every self-scoped method in this system is one of a person's account screens:
+// their password, their sessions, their second factors, their deactivation. A
+// machine credential acting on one would be acting on the account of whoever
+// owns the key — so a personal access token minted for "read the workspace
+// list" could change the password of the person who minted it, and an
+// integration key could sign them out of every device.
+//
+// Refused HERE rather than in each handler. `identity/api.callerSubject` already
+// refuses a non-user principal, and that is a real backstop, but it lives in ONE
+// module: a self-scoped method added anywhere else would be unguarded until
+// somebody remembered. This is the same argument the public-mutation idempotency
+// check makes about its own backstop.
+//
+// ACCESS_DENIED and not NOT_FOUND, unlike the authz gate below. The caller
+// learns nothing about any resource — the answer depends only on what kind of
+// credential they presented, which they already know — and a NOT_FOUND here
+// would send an integrator hunting for a missing endpoint that is in the
+// document and works perfectly with a session.
+//
+// # 2. A machine may reach only what its scopes cover
+//
+// access.md §4 defines a key's permission as the INTERSECTION of its scopes and
+// its owner's access. The owner's half is gate 2. This is the other half, and it
+// runs FIRST — before the graph is consulted — so a key that could never reach
+// the method costs no OpenFGA round trip and leaks nothing about the object.
+//
+// The required scope is DERIVED from the method's own declaration rather than
+// annotated separately: `<resource_type>:<read|write>`, where write is anything
+// the subscription gate treats as mutating. Deriving it means a new RPC cannot
+// be added with a forgotten scope annotation — the failure of forgetting would
+// be a method every key can reach — and it means the published authz policy and
+// the scope requirement cannot disagree, because there is only one declaration.
+//
+// A method whose resource type is empty yields an empty required scope, and
+// domain.APIKeyScopeSatisfied answers false for that. That is the safe reading:
+// a method this function cannot characterise is one no machine credential
+// reaches, and the alternative is admitting it.
+func machineCredentialCheck(p policy.Policy, principal Principal) error {
+	if !principal.Machine() {
+		return nil
+	}
+	if p.SelfScoped() {
+		return srvconnect.Error(errs.AccessDeniedf(
+			"this endpoint acts on a person's own account, and a machine credential has none"))
+	}
+	if !domain.APIKeyScopeSatisfied(principal.Scopes, scopeFor(p)) {
+		// The required scope IS named. It is not an oracle — it is a property of
+		// the METHOD, published in the schema, identical for every caller — and
+		// an integrator whose key is missing one has no other way to find out
+		// which. Everything about the key itself stays unsaid.
+		return srvconnect.Error(errs.AccessDeniedf(
+			"this credential does not carry the %q scope", scopeFor(p)))
+	}
+	return nil
+}
+
+// scopeFor is the capability a method requires of a machine credential.
+//
+// Two levels and no more, because the vocabulary has to be derivable from what
+// every RPC already declares. `Mutating()` is the same predicate gate 5 uses to
+// decide whether an idempotency key is required and the same one the
+// subscription gate's classes drive, so "write" here means exactly what "write"
+// means everywhere else in the pipeline — there is no third definition to keep
+// in step.
+//
+// A finer vocabulary is deliberately not available. Per-resource permission is
+// OpenFGA's, and a scope grammar that grew an object id would be a second
+// authorization model evaluated in Go, drifting from the first (CLAUDE.md:
+// never evaluate permissions in Go).
+func scopeFor(p policy.Policy) string {
+	if p.ResourceType == "" {
+		return ""
+	}
+	if p.Mutating() {
+		return p.ResourceType + ":write"
+	}
+	return p.ResourceType + ":read"
 }
 
 // unavailable turns a missing gate into a refusal.

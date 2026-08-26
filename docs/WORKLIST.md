@@ -461,9 +461,53 @@ nothing ever ran.
       because an eraser without one destroys a key a court order says must be
       preserved — silently, since every other step succeeds.
 
-      **Retention exemptions (step 3) remain open** and are a different thing:
-      §7's table already says invoices are retained under Article 17(3)(b), and
-      nothing yet reads that table during an erasure.
+- [x] **Retention exemptions (step 3) — BUILT.** §7's table said invoices are
+      retained under Article 17(3)(b) and nothing read it. The erasure carried a
+      package-level `[]string` of three English sentences, passed to the
+      confirmation and to the export manifest — honest about being static, and
+      static was the problem: nothing compared it to §7, nothing could enumerate
+      it, and adding a data class with a statutory retention would have left the
+      confirmation saying what it always said while a new category of record
+      quietly survived.
+
+      §7's whole table is now `domain.RetentionSchedule()` — six classes with a
+      period, a disposition (`erased` / `pseudonymised` / `retained`), a legal
+      basis and a sentence for the person. `RetentionExemptions()` is derived
+      from it, so a class whose disposition changes moves between the two
+      answers by editing one field.
+
+      **The erased classes are in the table too**, which is what makes
+      compliance.md §16's "invoices survive erasure; session logs do not"
+      assertable — it is a statement about two rows of one table, and a list of
+      exemptions alone cannot make it. Absence would also mean both "erased" and
+      "nobody thought about it", which is the ambiguity `cat.Silent` exists to
+      remove.
+
+      `app.Exemptions` resolves the set PER SUBJECT: unconditional classes (the
+      event log, the operator audit trail) apply to everybody, and conditional
+      ones (invoices, breach records) are asked of the module that holds the
+      records. `NewErasure` and both export constructors REFUSE a nil resolver,
+      and `Execute` refuses an EMPTY set before the destroy — two exemptions are
+      unconditional, so empty means a broken resolver rather than a subject with
+      little data, and the confirmation it would produce says everything is gone.
+
+      **The failure direction is inverted on purpose.** An unanswerable question
+      STATES the class. Implying total deletion when tax records survive is the
+      misleading statement §7 names; telling somebody their invoices may be
+      retained when they have none is a smaller wrong.
+
+      **`AssumeRecordsExist` is the honest placeholder**, wired at both
+      composition roots rather than defaulted inside the resolver. Nothing can
+      yet ask billing whether a subject appears on an invoice — `invoice_view` is
+      keyed by organization — so the conditional classes are stated for
+      everybody. Replacing it is one line in `cmd/api/deps.go` and one in
+      `cmd/worker/erasure.go`.
+
+      The confirmation and the manifest now carry the class, the period and the
+      ARTICLE as separate fields rather than as prose, so the mail templates
+      render a legal basis as a legal basis and a translator can produce the
+      "why" in their own language. The manifest's `retained` changed shape, so
+      `ExportFormatVersion` is **2**.
 - [ ] **The subject graph is not traversed** (step 4). Only identity holds
       personal data today, so erasing it is erasing everything — but that stops
       being true the moment a second module does, and the traversal is what
@@ -471,11 +515,118 @@ nothing ever ran.
 - [x] **The reconciliation sweep.** The workflow is durable, so a lost one is
       unlikely rather than impossible; a sweep over overdue requests is the
       backstop billing.md §5 case 15 uses for the same class of failure.
-- [ ] **The remaining DSAR rights — TWO, not five, and the count was stale.**
-      Compliance §3 lists six. Erasure is built; RESTRICTION is built
-      (`RestrictProcessing`, `Lift`, `Get`); ACCESS and PORTABILITY are both
-      served by the asynchronous export. What is genuinely unbuilt is
-      **rectification (Article 16)** and **objection (Article 21)**.
+- [x] **The remaining DSAR rights — BOTH BUILT.** Compliance §3 lists six.
+      Erasure is built; RESTRICTION is built (`RestrictProcessing`, `Lift`,
+      `Get`); ACCESS and PORTABILITY are both served by the asynchronous export.
+      The two that were genuinely unbuilt — **rectification (Article 16)** and
+      **objection (Article 21)** — now are. See the two entries below.
+
+- [x] **Rectification (Art. 16) — BUILT, and this REVISES the entry further down
+      that closed it as "already satisfied".**
+
+      That entry was right about the mechanism and wrong about the record. Its
+      reasoning was: `UpdateProfile` already corrects display name, locale and
+      timezone, so a `PersonalDataCorrected` event would be "a second write path
+      to the same data". The first half holds. The second does not, because the
+      event was never going to be the write.
+
+      `RectifyMyData` records that a RIGHT was exercised and executes the
+      correction **through profile's own use case**, reached by a port
+      (`app.PersonalDataCorrections`) that `cmd/api` satisfies with the same
+      `*profileapp.Updates` instance the settings screen uses. One writer to the
+      vault, one `profile.ProfileUpdated.v1`, one projection — the thing the
+      earlier entry was protecting.
+
+      **What it adds is the distinction the earlier entry collapsed.** "Somebody
+      edited their profile" and "a data subject asserted that what we hold about
+      them is inaccurate and required its correction" are different legal facts
+      with different obligations: Article 12(3)'s one-month clock, and Article
+      19's duty to pass the correction to whoever the data was disclosed to. A
+      controller asked to evidence its Article 16 handling cannot answer with a
+      list of settings saves, and could not tell one from the other.
+
+      **The email address is still not correctable here, and that is now a named
+      refusal rather than a silence.** `domain.ErrEmailNotRectifiable` carries
+      its reason: identity.md §12 owns the change, with a token to the new
+      address, a revert token to the old one, and a window — all three because a
+      login identifier is also the account-recovery route. A rectification field
+      for `email` would move it on one authenticated call with none of that
+      proof, turning a statutory right into a bypass of an authentication
+      control. Article 16 does not require the correction to be unverified; it
+      requires it to be possible, and `ChangeEmail` makes it possible. A field
+      absent from a schema is a decision nobody can see, so the refusal names
+      itself and is asserted against.
+
+      **Phone is deliberately out of scope.** No flow anywhere writes
+      `pii.FieldPhone`, so there is nothing inaccurate to correct — and adding a
+      write path would make compliance the only writer of a security-relevant
+      identifier that identity should own.
+
+      The event carries FIELD NAMES and never values (ADR-002), and the response
+      does the same: echoing a corrected name would put personal data into proxy
+      logs and support screenshots for no gain. It is `cat.Silent`, because
+      `ProfileUpdated` is already a Security-class alert naming the fields that
+      changed — two mails minutes apart from two modules is two messages for one
+      event.
+
+- [x] **Objection (Art. 21) — BUILT, scoped NARROWLY, with the scope written
+      down.**
+
+      The obvious risk was building a second `RestrictProcessing` under another
+      name. It is not one, and the difference is observable rather than
+      doctrinal: a RESTRICTION is total and temporary — everything but storage
+      halts, transactional receipts included, while a dispute about the data runs
+      — and an OBJECTION is per-purpose and open-ended, so the account works
+      normally and one purpose stops until its author withdraws it. A subject can
+      hold both, and lifting the restriction must not release the objection.
+      `TestAnObjectionDoesNotStopTransactionalMail` is that difference as an
+      assertion; if it ever passes trivially, one right has absorbed the other
+      and the narrower one should be deleted rather than kept as a synonym.
+
+      **The purpose set contains only what the system can actually STOP.**
+      Article 21 reaches processing grounded in Article 6(1)(e)/(f), which here
+      is `activity_notifications` and `product_updates` — the two notification
+      classes that rest on legitimate interests. Security and transactional mail
+      rest on contract and on our own legal obligations, so the right does not
+      reach them; the aggregate REFUSES an unknown purpose, because an objection
+      nothing consults is a promise, and the person is told the processing
+      stopped while the mail keeps arriving.
+
+      `product_updates` is opt-in already (NOTIFICATIONS §3), so objecting
+      overlaps with not consenting. It is offered anyway for the one difference
+      that matters: consent withheld may be solicited again, and an objection may
+      not be.
+
+      **It is not a preference either.** A preference is per channel and ours to
+      re-solicit; an objection is a legal instruction about a PURPOSE, stops it
+      on every channel, and only its author may clear it. Enforced in the
+      dispatcher beside the Article 18 check and above the channel loop, which is
+      what makes the second property structural. It is consulted ONLY for the two
+      objectionable classes, so the extra lookup costs nothing on the majority of
+      sends.
+
+      **Article 21(1)'s controller override is NOT implemented, deliberately.**
+      Continuing on "compelling legitimate grounds" needs a documented balancing
+      test performed by a person, with the burden on the controller. Until an
+      operator workflow records one, an objection is honoured unconditionally —
+      the safe direction, and the correct behaviour absent the assessment the
+      exception requires. The event carries no `reason` field for ADR-002's usual
+      reason, and that is only tenable while there is no override to weigh it
+      against.
+
+      Migration **00045** adds `processing_objection_view`, keyed
+      `(subject_id, purpose)` so withdrawing one purpose cannot release the rest.
+      No CHECK constraint on `purpose`: a projector replays the log, and a
+      constraint narrower than the log turns a retired purpose into an
+      unreplayable projection. `Objection.Apply` applies a purpose the WRITE
+      would refuse, for the same reason — dropping it on replay would resume
+      processing somebody stopped, silently, and only for the people who objected
+      earliest.
+
+      Both new ports are asserted at the composition root
+      (`TestBothDataSubjectRightsAreWiredIntoTheSendingPath`): a nil port here is
+      permissive and therefore invisible, which is the shape that shipped three
+      dead notification channels.
 
 - [x] **Article 12(4): a deferred erasure now SAYS it was deferred.** Legal holds made deferral reachable for the first
       time. `Execute` now returns `ErrHeld` and the workflow waits, and nobody
@@ -515,6 +666,42 @@ nothing ever ran.
       gets one answer even if the workflow is restarted from scratch — and
       because 12(4) compliance is something we may have to evidence, which a
       variable inside a workflow's history is a poor place to keep.
+
+## Now — three things this session left named rather than finished
+
+- [ ] **`AssumeRecordsExist` is a placeholder, wired at three composition
+      roots.** The retention exemptions resolver asks "does this subject appear
+      on a retained record" and nothing can answer: `invoice_view` is keyed by
+      ORG, not by subject, so billing cannot say whether one person is named on
+      an invoice.
+
+      It resolves toward STATING the class, and that direction is right — §7
+      names under-statement as the misleading answer, and over-statement is the
+      smaller wrong. But "we may have retained invoice data about you" told to
+      somebody who was never invoiced is still a sentence we would rather not
+      send, and the fix is a subject-keyed read on billing's side.
+
+      Replacing it is one line in each of `cmd/api/deps.go`,
+      `cmd/worker/erasure.go` and `cmd/worker/export.go`. It is wired at the
+      roots rather than defaulted inside the resolver precisely so this entry
+      has somewhere to point.
+
+- [ ] **`app.Exports` — the SYNCHRONOUS export use case — is constructed by no
+      binary.** Verified: `NewExports` appears only in its own test file; the
+      async path uses `ExportRuns`, and `cmd/worker` wires that.
+
+      It is the "built, fully tested, wired into nothing" shape CLAUDE.md names,
+      and it is live duplication — two export implementations where one is dead.
+      Removal is SURGICAL rather than a file delete: `Bundle`, `RetainedRecord`
+      and `ExportedObject` in the same file ARE used by the async path.
+
+- [ ] **`docs/domains/compliance.md` §12/§13 are behind the code.** Objection's
+      two events and `processing_objection_view` are not in the spec's own
+      inventories. The specs are marked settled and this session added to them
+      three times (legal holds, deferral, objection) — a settled spec that no
+      longer describes the code is worse than one openly in progress.
+
+---
 
 ## The remaining work, analysed
 
@@ -690,6 +877,15 @@ already has a name for.
       fields `UpdateProfile` already corrects would be a second write path to the
       same data. The gap is a missing identity FEATURE, not a missing compliance
       mechanism.
+
+      **SUPERSEDED — see "Rectification (Art. 16) — BUILT" above.** The
+      conclusion was half right and is left here rather than deleted, because the
+      half that was wrong is worth keeping visible. "A second write path" assumed
+      the event would BE the write. It is not: `RectifyMyData` executes the
+      correction through profile's own use case and records only that a statutory
+      right was exercised — which is a different fact from a settings save, with
+      Article 12(3) and Article 19 attached to it, and which nothing in this
+      system could distinguish while the entry stood.
 
 - [x] **Email change — BUILT.** See "Done — email change" below.
 - [x] **Export and portability (Art. 15/20).** `ExportMyData` produces a JSON
@@ -1017,6 +1213,127 @@ to tell you yours, and on a laptop there was nowhere else to read it from.
 
 ---
 
+## Done — service accounts and API keys (identity.md §10)
+
+Machine credentials. Four events, two aggregates, two migrations, an
+authenticator, a gate rule and six RPCs. The design decisions worth carrying
+forward, each with the alternative it was chosen over:
+
+- **A service account is a distinct PRINCIPAL KIND, not a flag on an account.**
+  `ids.ServiceAccount` (`svc_…`), its own aggregate, its own table. The operator
+  plane refused the same shape for the same reason and said it more sharply
+  (operator.md §3): a boolean that grants something is exactly the field an
+  injection bug sets. It carries no `SubjectID` pseudonym and needs none — a
+  pseudonym stands in for personal data the vault holds, and a service account
+  has nothing to shred.
+
+- **A key's OWNER is a tagged pair, never a nullable column.**
+  `(owner_kind, owner_id)`, both NOT NULL, with a CHECK that the id's prefix
+  matches the kind. Two nullable columns admit "both set" and "neither set", and
+  both readings then live in every reader rather than in the schema. The prefix
+  check is a second, independent control: a flipped kind alone does not survive
+  the write, and does not survive the READ either
+  (`interceptor.ownerPrincipalKind`).
+
+- **Rotation is an overlap with a RECORDED DEADLINE.** `retires_at` is stamped on
+  the superseded secret at the instant of the rotation, so the old secret dies
+  whether or not any sweep has run — the sweep only reclaims the row. Default 24
+  hours (one deploy cycle), capped at seven days, and `immediate` collapses it to
+  nothing for a leak response. The two failures this is between are both real:
+  no overlap makes rotation an outage that has to be scheduled, so it never
+  happens; an unbounded one means the leaked secret a rotation was performed to
+  remove is still live.
+
+- **Revocation is both halves, in one request.** The command DELETES every secret
+  row and appends `ApiKeyRevoked`; the projection marks the row. Neither alone
+  closes the window — the event waits for the projector, and the delete leaves
+  nothing in the log saying why the key stopped working. This is the shape
+  operator offboarding settled on (`internal/operator/app/operators.go`,
+  `Disable`), append first so a failure never cuts off an integration with
+  nothing recorded.
+
+- **A key-authenticated request is AAL1, permanently.** A machine cannot present
+  a second factor, and no step-up ceremony exists that a program could perform.
+  All four key-management mutations declare `min_aal = ASSURANCE_LEVEL_2`, so a
+  key can never mint a second key or revoke the first to cover a track. The gate
+  additionally refuses a machine credential on every SELF-SCOPED method: those
+  are a person's own account screens, and a key acting on one would be acting on
+  the account of whoever owns it.
+
+- **Scopes are enforced, and the requirement is DERIVED.** `<resource type>:read`
+  or `:write`, compared against `<policy.ResourceType>:<read|write>` taken from
+  the RPC's own `(chronos.options.v1.authz)` declaration. Nothing to annotate
+  separately, so a new RPC cannot arrive with a forgotten scope rule — and gate 2
+  then asks OpenFGA about the key's OWNER, which is access.md §4's intersection
+  with the two halves enforced by different code at different points.
+
+**Five things the build decided that the design did not say:**
+
+1. **The authenticator resolves a key from `api_key_secret` ALONE**, and this is
+   a deliberate divergence from the session pair. `GetSessionByToken` INNER JOINs
+   `session_view`, so a projection rebuild signs every human out — they sign in
+   again. The same behaviour for machines is an outage with no human in the loop,
+   triggered by routine maintenance on an unrelated projection. So the owner, the
+   organization and the scopes are written onto the secret row by the command
+   handler. They cannot drift, because nothing edits any of them: changing a
+   key's owner, scopes or organization means a new key.
+
+2. **`api_key_secret` carries no row-level security, and that had to be decided
+   rather than inherited.** The authenticator runs before gate 1, so a policy on
+   `app.org_id` would make every key in the system fail to resolve. Its safety is
+   that its only key is a 256-bit digest. `api_key_view` and
+   `service_account_view` DO carry RLS, so the adapter holds both kinds of
+   transaction — the only one in identity that does.
+
+3. **`ids.PatternFor` and the API key token collided in `checkopenapi`.** The
+   gate recognises a published identifier as "an anchored pattern whose first
+   token is a lower-case word followed by `_`", and the token's `^chr_…` matched.
+   It demanded a `chr` Kind in `internal/platform/ids`, which would have been a
+   lie — a credential is not a prefixed ULID and nothing parses one. The gate now
+   also requires the pattern to be ONE segment (no `_` outside a character
+   class), which is what its own comment already claimed it detected. The
+   identifier rule is unchanged; both drift cases that motivated it are still
+   caught.
+
+4. **`notify` has an `AudienceActor` and it is the right audience here, not a
+   fallback.** These events are about a key and a machine principal, neither of
+   which is a data subject — `AudienceSubject` would resolve to nobody and the
+   reactor would PARK the message, which is a security alert silently not
+   delivered. The actor is the admin whose authority minted the credential, and
+   they are the one person who can say "I did not do that". `ServiceAccountCreated`
+   is silent, because a service account holds no credential until a key exists
+   and the key is what notifies.
+
+5. **Gate 1 had to learn about a bound organization**, and a service account is
+   not a member of one. A key names its organization immutably, so the resolver
+   ENFORCES rather than resolves: a header naming a different organization is
+   refused (as NOT_FOUND, so it is not a probe for which org a key belongs to).
+   `org_member_index` records people, so `RoleIn` would refuse every service
+   account — the binding replaces the check there, and is stronger, because it was
+   written once by an admin at AAL2 rather than re-derived from a projection per
+   request. A USER-owned key IS still membership-checked, which closes
+   identity.md §10's "revoke when the owner loses the organization" window
+   SYNCHRONOUSLY rather than waiting for the `MemberRemoved` reactor that does
+   not exist.
+
+**Deliberately NOT built, with the reason:**
+
+- **No `ApiKeyUsed` event.** identity.md §13 removes it and this build honours
+  that: `last_used_at` is a coalesced projection write, at most once per key per
+  minute, enforced in SQL rather than by a read-modify-write in the
+  authenticator.
+- **No IP allowlist and no per-key rate limit** (identity.md §10). The allowlist
+  needs a trustworthy client address, which `clientip.Resolver` supplies only
+  under a configured hop policy; the per-key limiter needs a bucket keyed on the
+  key id, which is `ratelimit`'s to declare. Both are additive.
+- **No `ServiceAccountDisabled`.** The containment an incident needs is revoking
+  the account's keys, which removes everything it can do. A disable that only set
+  a flag would be a second, weaker answer to the same question.
+- **No `MemberRemoved` reactor.** Gate 1 refuses a departed owner's key at the
+  next request, which is strictly faster than a reactor. The reactor is still
+  worth building — it removes the ROW rather than the access — and it now has a
+  synchronous control it cannot regress.
+
 ## Done — identity slice 2 (passkeys) and federation (identity.md §7)
 
 **Why this surfaced late, stated plainly.** Passkeys were scoped as slice 2 from
@@ -1044,8 +1361,8 @@ register:
 | --- | --- | --- |
 | `PasskeyRegistered`, `PasskeyRemoved` | §4, ADR-057, IDENTITY-SLICE-1 C3 | **done** |
 | `FederatedIdentityLinked`, `FederatedIdentityUnlinked` | §7, and §4.4's last unbuilt flow | **done** |
-| `ApiKeyCreated`, `ApiKeyRotated`, `ApiKeyRevoked` | FEATURES.md, §8 | not started |
-| `ServiceAccountCreated` | FEATURES.md | not started |
+| `ApiKeyCreated`, `ApiKeyRotated`, `ApiKeyRevoked` | FEATURES.md, §10 | **done** |
+| `ServiceAccountCreated` | FEATURES.md, §10 | **done** |
 | `DeviceTrusted` | §9 | not started |
 | `SessionCompromiseDetected` | §9 | not started |
 | `SecondFactorSucceeded` | §13 (`SecondFactorChallenged` exists) | not started |

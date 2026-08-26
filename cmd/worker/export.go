@@ -66,6 +66,16 @@ func newExportActivities(d *dependencies) (*temporaladapter.ExportActivities, er
 	// event is (ADR-029).
 	codec, upcasters := newComplianceCodec()
 
+	// The SAME resolver against the SAME schedule the erasure consults (see
+	// newErasure), so what a bundle says is retained and what an erasure
+	// confirmation says cannot disagree.
+	exemptions, err := complianceapp.NewExemptions(complianceapp.ExemptionsDeps{
+		Records: complianceapp.AssumeRecordsExist{},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("retention exemptions: %w", err)
+	}
+
 	runs, err := complianceapp.NewExportRuns(complianceapp.ExportRunsDeps{
 		Exports: eventsourcing.NewRepository[*compliancedomain.Export](
 			d.store, codec, upcasters,
@@ -79,6 +89,7 @@ func newExportActivities(d *dependencies) (*temporaladapter.ExportActivities, er
 		Store:        d.blobs,
 		Prefix:       profiledomain.AvatarPrefix,
 		Restrictions: restrictions,
+		Exemptions:   exemptions,
 		Now:          clock.System{}.Now,
 	})
 	if err != nil {

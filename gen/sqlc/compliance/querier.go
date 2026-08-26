@@ -18,6 +18,12 @@ type Querier interface {
 	// aggregate is what refuses an illegal transition; this records what the log
 	// says happened.
 	CompleteDataExport(ctx context.Context, arg CompleteDataExportParams) error
+	// Withdrawing deletes the row: presence IS the objection.
+	//
+	// Scoped to ONE purpose. A delete by subject alone would release every objection
+	// the person holds when they withdrew one, which is the failure the composite
+	// primary key exists to make impossible to write by accident.
+	DeleteObjection(ctx context.Context, arg DeleteObjectionParams) error
 	// Lifting deletes the row: presence IS the restriction.
 	DeleteRestriction(ctx context.Context, subjectID string) error
 	// Applied from DataExportFailed.
@@ -35,6 +41,13 @@ type Querier interface {
 	// would otherwise hand a stranger the manifest key for the most concentrated
 	// copy of somebody's data in the system.
 	GetDataExport(ctx context.Context, arg GetDataExportParams) (DataExportView, error)
+	// May this subject be processed for this purpose?
+	//
+	// Read once per Activity- or Product-class notification — never for Security or
+	// Transactional, which rest on contract and on legal obligations and which
+	// Article 21 does not reach. So it is a primary-key lookup and nothing more, on
+	// the minority of sends.
+	HasObjectedToPurpose(ctx context.Context, arg HasObjectedToPurposeParams) (bool, error)
 	// May this subject be contacted?
 	//
 	// Read once per tenant-facing notification, so it is a primary-key lookup and
@@ -43,7 +56,15 @@ type Querier interface {
 	IsProcessingRestricted(ctx context.Context, subjectID string) (bool, error)
 	// What has this person asked for, newest first.
 	ListDataExports(ctx context.Context, arg ListDataExportsParams) ([]ListDataExportsRow, error)
+	// Every purpose one subject has stopped, oldest objection first.
+	//
+	// For an operator answering a question about a person's own request. The
+	// SUBJECT's own list is read from the aggregate instead, so somebody who has
+	// just objected is not told their instruction has not taken effect while a
+	// projector catches up.
+	ListObjections(ctx context.Context, subjectID string) ([]ProcessingObjectionView, error)
 	TruncateDataExports(ctx context.Context) error
+	TruncateObjections(ctx context.Context) error
 	TruncateRestrictions(ctx context.Context) error
 	// Queries for data_export_view.
 	//
@@ -62,6 +83,14 @@ type Querier interface {
 	// rebuild the INSERT path runs, because the table was truncated, and the later
 	// events move it again in order.
 	UpsertDataExportRequest(ctx context.Context, arg UpsertDataExportRequestParams) error
+	// Queries for Article 21 processing objections.
+	// Record that one purpose is stopped for a subject.
+	//
+	// Upsert because a projector replays: the same event WILL arrive twice.
+	// `objected_at` is NOT updated on conflict — a replay must not move the instant
+	// the person was told about, and the aggregate keeps the first instant for the
+	// same reason.
+	UpsertObjection(ctx context.Context, arg UpsertObjectionParams) error
 	// Queries for Article 18 processing restrictions.
 	// Record that processing is halted for a subject.
 	//

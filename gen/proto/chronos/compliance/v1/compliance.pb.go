@@ -12,8 +12,16 @@
 // like this is one that acts on a person named by whoever asked.
 //
 // The rights are Chapter III of the GDPR. What is here is what is built;
-// compliance.md §3 lists six and this carries one, because shipping an endpoint
-// for a right the system cannot actually deliver is worse than not having it.
+// compliance.md §3 lists six and this carries four — access and portability
+// (15, 20), rectification (16), restriction (18) and objection (21) — because
+// shipping an endpoint for a right the system cannot actually deliver is worse
+// than not having it.
+//
+// The two that are absent are absent for opposite reasons. ERASURE (17) is
+// requested through identity, which owns the account the request ends, and
+// compliance executes it. CONSENT withdrawal (7(3)) has no endpoint because
+// there is no consent record to withdraw yet; the notification classes that
+// would rest on one are opt-in and off (NOTIFICATIONS §3).
 
 package compliancev1
 
@@ -35,6 +43,83 @@ const (
 	// Verify that runtime/protoimpl is sufficiently up-to-date.
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
+
+// ProcessingPurpose is one purpose this system processes personal data for that
+// rests on LEGITIMATE INTERESTS, and can therefore be objected to (Article 21).
+//
+// # Why the list is short, and why it is not the list of everything we do
+//
+// Article 21 reaches processing grounded in Article 6(1)(e) or 6(1)(f). It does
+// not reach processing grounded in contract or in a legal obligation, which is
+// most of what this system does: a password-changed alert, a verification link
+// and an invoice are none of them objectionable, and offering to stop them would
+// be offering something we would then have to refuse.
+//
+// So this enum contains only purposes the system can actually STOP, and each is
+// a purpose an entry in the notification catalogue rests on. A purpose nobody
+// can enforce is a promise, and a right implemented as a promise is worse than
+// one that is honestly absent.
+type ProcessingPurpose int32
+
+const (
+	// Unset. Refused rather than defaulted: an objection is a legal instruction,
+	// and guessing which processing somebody meant to stop is not available.
+	ProcessingPurpose_PROCESSING_PURPOSE_UNSPECIFIED ProcessingPurpose = 0
+	// Messages about what other people did — a mention, an assignment, a comment,
+	// an expiring key. Legitimate interest: they keep an account useful, and
+	// nobody agreed to them individually.
+	ProcessingPurpose_PROCESSING_PURPOSE_ACTIVITY_NOTIFICATIONS ProcessingPurpose = 1
+	// Product and marketing mail: release notes, announcements.
+	//
+	// Objectable under Article 21(2), which admits NO balancing test — direct
+	// marketing stops on request, always. It is opt-in here as well
+	// (NOTIFICATIONS §3), so an objection overlaps with simply not consenting;
+	// the objection is still offered because the two differ in one way that
+	// matters. Consent that is withheld may be solicited again. An objection may
+	// not be, until the person withdraws it.
+	ProcessingPurpose_PROCESSING_PURPOSE_PRODUCT_UPDATES ProcessingPurpose = 2
+)
+
+// Enum value maps for ProcessingPurpose.
+var (
+	ProcessingPurpose_name = map[int32]string{
+		0: "PROCESSING_PURPOSE_UNSPECIFIED",
+		1: "PROCESSING_PURPOSE_ACTIVITY_NOTIFICATIONS",
+		2: "PROCESSING_PURPOSE_PRODUCT_UPDATES",
+	}
+	ProcessingPurpose_value = map[string]int32{
+		"PROCESSING_PURPOSE_UNSPECIFIED":            0,
+		"PROCESSING_PURPOSE_ACTIVITY_NOTIFICATIONS": 1,
+		"PROCESSING_PURPOSE_PRODUCT_UPDATES":        2,
+	}
+)
+
+func (x ProcessingPurpose) Enum() *ProcessingPurpose {
+	p := new(ProcessingPurpose)
+	*p = x
+	return p
+}
+
+func (x ProcessingPurpose) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ProcessingPurpose) Descriptor() protoreflect.EnumDescriptor {
+	return file_chronos_compliance_v1_compliance_proto_enumTypes[0].Descriptor()
+}
+
+func (ProcessingPurpose) Type() protoreflect.EnumType {
+	return &file_chronos_compliance_v1_compliance_proto_enumTypes[0]
+}
+
+func (x ProcessingPurpose) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ProcessingPurpose.Descriptor instead.
+func (ProcessingPurpose) EnumDescriptor() ([]byte, []int) {
+	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{0}
+}
 
 // DataExportStatus is where one request has got to.
 type DataExportStatus int32
@@ -73,11 +158,11 @@ func (x DataExportStatus) String() string {
 }
 
 func (DataExportStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_chronos_compliance_v1_compliance_proto_enumTypes[0].Descriptor()
+	return file_chronos_compliance_v1_compliance_proto_enumTypes[1].Descriptor()
 }
 
 func (DataExportStatus) Type() protoreflect.EnumType {
-	return &file_chronos_compliance_v1_compliance_proto_enumTypes[0]
+	return &file_chronos_compliance_v1_compliance_proto_enumTypes[1]
 }
 
 func (x DataExportStatus) Number() protoreflect.EnumNumber {
@@ -86,7 +171,7 @@ func (x DataExportStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use DataExportStatus.Descriptor instead.
 func (DataExportStatus) EnumDescriptor() ([]byte, []int) {
-	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{0}
+	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{1}
 }
 
 // RestrictProcessingRequest halts processing of the caller's data (Article 18).
@@ -360,6 +445,507 @@ func (x *GetProcessingRestrictionResponse) GetRestrictedSince() *timestamppb.Tim
 	return nil
 }
 
+// RectifyMyDataRequest corrects inaccurate personal data about the caller
+// (Article 16).
+//
+// # Sparse, and it names no subject
+//
+// Every field has EXPLICIT PRESENCE, exactly as `UpdateProfileRequest` does: an
+// omitted field is "do not touch this", not "make this empty". The two are
+// different requests and a client must be able to tell them apart.
+//
+// # The email address is deliberately absent, and this is the decision worth
+// # reading
+//
+// Article 16 covers every inaccurate field, and an email address is the field a
+// person is most likely to have wrong. It is still not here, because identity
+// owns the email-change flow (identity.md §12) and that flow's whole substance
+// is PROOF: a token mailed to the new address, a revert token mailed to the old
+// one, and a revert window during which a hijacked change can be undone.
+//
+// A rectification field for `email` would be a second path to the same value
+// with none of that — an authenticated session could move the login identifier
+// to an attacker's mailbox in one call, and the account-recovery path with it.
+// A statutory right cannot be a bypass of an authentication control, and
+// Article 16 does not require that the correction be UNVERIFIED; it requires
+// that it be possible, which `ChangeEmail` already makes it.
+//
+// So the refusal is explicit rather than silent: `RectifyMyData` rejects a
+// request naming an address and says where the verified flow is. See the RPC.
+type RectifyMyDataRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The name other people read.
+	//
+	// Bounds are `chronos.profile.v1.UpdateProfileRequest.display_name`'s, and
+	// must stay equal to them: the correction is executed by the same use case
+	// that serves the settings screen, so a bound that differed here would refuse
+	// at this boundary a value that boundary accepts — or accept one the handler
+	// then rejects, which is the worse direction because the person is exercising
+	// a right rather than editing a preference.
+	DisplayName *string `protobuf:"bytes,1,opt,name=display_name,json=displayName,proto3,oneof" json:"display_name,omitempty"`
+	// The language to render wording in, as a BCP-47 tag: `en`, `en-GB`,
+	// `zh-Hans`, `de-AT`.
+	Locale *string `protobuf:"bytes,2,opt,name=locale,proto3,oneof" json:"locale,omitempty"`
+	// The IANA zone to render timestamps in, e.g. `Europe/Berlin`, `UTC`.
+	Timezone      *string `protobuf:"bytes,3,opt,name=timezone,proto3,oneof" json:"timezone,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RectifyMyDataRequest) Reset() {
+	*x = RectifyMyDataRequest{}
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RectifyMyDataRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RectifyMyDataRequest) ProtoMessage() {}
+
+func (x *RectifyMyDataRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RectifyMyDataRequest.ProtoReflect.Descriptor instead.
+func (*RectifyMyDataRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *RectifyMyDataRequest) GetDisplayName() string {
+	if x != nil && x.DisplayName != nil {
+		return *x.DisplayName
+	}
+	return ""
+}
+
+func (x *RectifyMyDataRequest) GetLocale() string {
+	if x != nil && x.Locale != nil {
+		return *x.Locale
+	}
+	return ""
+}
+
+func (x *RectifyMyDataRequest) GetTimezone() string {
+	if x != nil && x.Timezone != nil {
+		return *x.Timezone
+	}
+	return ""
+}
+
+// RectifyMyDataResponse names what was corrected, and never what it now says.
+//
+// The VALUES are absent on purpose. A response echoing the corrected name would
+// be personal data in a place that is logged by proxies, cached by clients and
+// captured in support screenshots — and the caller already knows what they sent.
+// `GetProfile` renders the state.
+type RectifyMyDataResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The field names this call actually changed, in the order this schema
+	// declares them. Empty when every field named was already correct, which is a
+	// success: the record already says what the person asked it to say.
+	CorrectedFields []string `protobuf:"bytes,1,rep,name=corrected_fields,json=correctedFields,proto3" json:"corrected_fields,omitempty"`
+	// When the correction was recorded, UTC. Unset when nothing changed.
+	CorrectedAt   *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=corrected_at,json=correctedAt,proto3" json:"corrected_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RectifyMyDataResponse) Reset() {
+	*x = RectifyMyDataResponse{}
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RectifyMyDataResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RectifyMyDataResponse) ProtoMessage() {}
+
+func (x *RectifyMyDataResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RectifyMyDataResponse.ProtoReflect.Descriptor instead.
+func (*RectifyMyDataResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *RectifyMyDataResponse) GetCorrectedFields() []string {
+	if x != nil {
+		return x.CorrectedFields
+	}
+	return nil
+}
+
+func (x *RectifyMyDataResponse) GetCorrectedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CorrectedAt
+	}
+	return nil
+}
+
+// ObjectToProcessingRequest stops one purpose for the caller (Article 21).
+type ObjectToProcessingRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Which processing to stop. Exactly one per call.
+	//
+	// One purpose per request rather than a list, because Article 21 is a
+	// per-purpose right and a partial failure over a list would leave the caller
+	// unable to tell which half took effect.
+	Purpose       ProcessingPurpose `protobuf:"varint,1,opt,name=purpose,proto3,enum=chronos.compliance.v1.ProcessingPurpose" json:"purpose,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ObjectToProcessingRequest) Reset() {
+	*x = ObjectToProcessingRequest{}
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ObjectToProcessingRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ObjectToProcessingRequest) ProtoMessage() {}
+
+func (x *ObjectToProcessingRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ObjectToProcessingRequest.ProtoReflect.Descriptor instead.
+func (*ObjectToProcessingRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *ObjectToProcessingRequest) GetPurpose() ProcessingPurpose {
+	if x != nil {
+		return x.Purpose
+	}
+	return ProcessingPurpose_PROCESSING_PURPOSE_UNSPECIFIED
+}
+
+// ObjectToProcessingResponse reports the state after the call.
+type ObjectToProcessingResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Whether this call changed anything. False means the objection already
+	// stood, which is a success: the caller asked for a state that holds.
+	Changed bool `protobuf:"varint,1,opt,name=changed,proto3" json:"changed,omitempty"`
+	// When the objection was first made — not this call. A repeated request must
+	// not move a date the person has been given.
+	ObjectedSince *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=objected_since,json=objectedSince,proto3" json:"objected_since,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ObjectToProcessingResponse) Reset() {
+	*x = ObjectToProcessingResponse{}
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ObjectToProcessingResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ObjectToProcessingResponse) ProtoMessage() {}
+
+func (x *ObjectToProcessingResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ObjectToProcessingResponse.ProtoReflect.Descriptor instead.
+func (*ObjectToProcessingResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *ObjectToProcessingResponse) GetChanged() bool {
+	if x != nil {
+		return x.Changed
+	}
+	return false
+}
+
+func (x *ObjectToProcessingResponse) GetObjectedSince() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ObjectedSince
+	}
+	return nil
+}
+
+// WithdrawProcessingObjectionRequest resumes one purpose the caller stopped.
+type WithdrawProcessingObjectionRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Which processing to resume.
+	Purpose       ProcessingPurpose `protobuf:"varint,1,opt,name=purpose,proto3,enum=chronos.compliance.v1.ProcessingPurpose" json:"purpose,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WithdrawProcessingObjectionRequest) Reset() {
+	*x = WithdrawProcessingObjectionRequest{}
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WithdrawProcessingObjectionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WithdrawProcessingObjectionRequest) ProtoMessage() {}
+
+func (x *WithdrawProcessingObjectionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WithdrawProcessingObjectionRequest.ProtoReflect.Descriptor instead.
+func (*WithdrawProcessingObjectionRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *WithdrawProcessingObjectionRequest) GetPurpose() ProcessingPurpose {
+	if x != nil {
+		return x.Purpose
+	}
+	return ProcessingPurpose_PROCESSING_PURPOSE_UNSPECIFIED
+}
+
+// WithdrawProcessingObjectionResponse reports the state after the call.
+type WithdrawProcessingObjectionResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// False means nothing was objected to, which is a success for the reason
+	// every cancel path here is: the control is clicked twice, and neither click
+	// is wrong.
+	Changed       bool `protobuf:"varint,1,opt,name=changed,proto3" json:"changed,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WithdrawProcessingObjectionResponse) Reset() {
+	*x = WithdrawProcessingObjectionResponse{}
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WithdrawProcessingObjectionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WithdrawProcessingObjectionResponse) ProtoMessage() {}
+
+func (x *WithdrawProcessingObjectionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WithdrawProcessingObjectionResponse.ProtoReflect.Descriptor instead.
+func (*WithdrawProcessingObjectionResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *WithdrawProcessingObjectionResponse) GetChanged() bool {
+	if x != nil {
+		return x.Changed
+	}
+	return false
+}
+
+// ListProcessingObjectionsRequest asks what the caller has objected to.
+type ListProcessingObjectionsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListProcessingObjectionsRequest) Reset() {
+	*x = ListProcessingObjectionsRequest{}
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListProcessingObjectionsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListProcessingObjectionsRequest) ProtoMessage() {}
+
+func (x *ListProcessingObjectionsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListProcessingObjectionsRequest.ProtoReflect.Descriptor instead.
+func (*ListProcessingObjectionsRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{12}
+}
+
+// ListProcessingObjectionsResponse is every objection the caller currently
+// holds.
+type ListProcessingObjectionsResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The caller's own objections. Bounded by the enum: there cannot be more of
+	// these than there are purposes.
+	Objections    []*ProcessingObjection `protobuf:"bytes,1,rep,name=objections,proto3" json:"objections,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListProcessingObjectionsResponse) Reset() {
+	*x = ListProcessingObjectionsResponse{}
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListProcessingObjectionsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListProcessingObjectionsResponse) ProtoMessage() {}
+
+func (x *ListProcessingObjectionsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListProcessingObjectionsResponse.ProtoReflect.Descriptor instead.
+func (*ListProcessingObjectionsResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *ListProcessingObjectionsResponse) GetObjections() []*ProcessingObjection {
+	if x != nil {
+		return x.Objections
+	}
+	return nil
+}
+
+// ProcessingObjection is one purpose the caller has stopped.
+type ProcessingObjection struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The purpose that is stopped.
+	Purpose ProcessingPurpose `protobuf:"varint,1,opt,name=purpose,proto3,enum=chronos.compliance.v1.ProcessingPurpose" json:"purpose,omitempty"`
+	// When the objection was made.
+	ObjectedSince *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=objected_since,json=objectedSince,proto3" json:"objected_since,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProcessingObjection) Reset() {
+	*x = ProcessingObjection{}
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProcessingObjection) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProcessingObjection) ProtoMessage() {}
+
+func (x *ProcessingObjection) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProcessingObjection.ProtoReflect.Descriptor instead.
+func (*ProcessingObjection) Descriptor() ([]byte, []int) {
+	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *ProcessingObjection) GetPurpose() ProcessingPurpose {
+	if x != nil {
+		return x.Purpose
+	}
+	return ProcessingPurpose_PROCESSING_PURPOSE_UNSPECIFIED
+}
+
+func (x *ProcessingObjection) GetObjectedSince() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ObjectedSince
+	}
+	return nil
+}
+
 // ExportMyDataRequest asks for a copy of everything held about the caller.
 type ExportMyDataRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -369,7 +955,7 @@ type ExportMyDataRequest struct {
 
 func (x *ExportMyDataRequest) Reset() {
 	*x = ExportMyDataRequest{}
-	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[6]
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -381,7 +967,7 @@ func (x *ExportMyDataRequest) String() string {
 func (*ExportMyDataRequest) ProtoMessage() {}
 
 func (x *ExportMyDataRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[6]
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -394,7 +980,7 @@ func (x *ExportMyDataRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExportMyDataRequest.ProtoReflect.Descriptor instead.
 func (*ExportMyDataRequest) Descriptor() ([]byte, []int) {
-	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{6}
+	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{15}
 }
 
 // ExportMyDataResponse names the request, and carries no link.
@@ -429,7 +1015,7 @@ type ExportMyDataResponse struct {
 
 func (x *ExportMyDataResponse) Reset() {
 	*x = ExportMyDataResponse{}
-	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[7]
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -441,7 +1027,7 @@ func (x *ExportMyDataResponse) String() string {
 func (*ExportMyDataResponse) ProtoMessage() {}
 
 func (x *ExportMyDataResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[7]
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -454,7 +1040,7 @@ func (x *ExportMyDataResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExportMyDataResponse.ProtoReflect.Descriptor instead.
 func (*ExportMyDataResponse) Descriptor() ([]byte, []int) {
-	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{7}
+	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ExportMyDataResponse) GetExportId() string {
@@ -486,7 +1072,7 @@ type GetDataExportRequest struct {
 
 func (x *GetDataExportRequest) Reset() {
 	*x = GetDataExportRequest{}
-	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[8]
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -498,7 +1084,7 @@ func (x *GetDataExportRequest) String() string {
 func (*GetDataExportRequest) ProtoMessage() {}
 
 func (x *GetDataExportRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[8]
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -511,7 +1097,7 @@ func (x *GetDataExportRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetDataExportRequest.ProtoReflect.Descriptor instead.
 func (*GetDataExportRequest) Descriptor() ([]byte, []int) {
-	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{8}
+	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *GetDataExportRequest) GetExportId() string {
@@ -558,7 +1144,7 @@ type GetDataExportResponse struct {
 
 func (x *GetDataExportResponse) Reset() {
 	*x = GetDataExportResponse{}
-	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[9]
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -570,7 +1156,7 @@ func (x *GetDataExportResponse) String() string {
 func (*GetDataExportResponse) ProtoMessage() {}
 
 func (x *GetDataExportResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[9]
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -583,7 +1169,7 @@ func (x *GetDataExportResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetDataExportResponse.ProtoReflect.Descriptor instead.
 func (*GetDataExportResponse) Descriptor() ([]byte, []int) {
-	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{9}
+	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *GetDataExportResponse) GetStatus() DataExportStatus {
@@ -660,7 +1246,7 @@ type ExportedFile struct {
 
 func (x *ExportedFile) Reset() {
 	*x = ExportedFile{}
-	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[10]
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -672,7 +1258,7 @@ func (x *ExportedFile) String() string {
 func (*ExportedFile) ProtoMessage() {}
 
 func (x *ExportedFile) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[10]
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -685,7 +1271,7 @@ func (x *ExportedFile) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExportedFile.ProtoReflect.Descriptor instead.
 func (*ExportedFile) Descriptor() ([]byte, []int) {
-	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{10}
+	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ExportedFile) GetKey() string {
@@ -720,7 +1306,7 @@ type ListDataExportsRequest struct {
 
 func (x *ListDataExportsRequest) Reset() {
 	*x = ListDataExportsRequest{}
-	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[11]
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -732,7 +1318,7 @@ func (x *ListDataExportsRequest) String() string {
 func (*ListDataExportsRequest) ProtoMessage() {}
 
 func (x *ListDataExportsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[11]
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -745,7 +1331,7 @@ func (x *ListDataExportsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDataExportsRequest.ProtoReflect.Descriptor instead.
 func (*ListDataExportsRequest) Descriptor() ([]byte, []int) {
-	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{11}
+	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ListDataExportsRequest) GetLimit() int32 {
@@ -770,7 +1356,7 @@ type ListDataExportsResponse struct {
 
 func (x *ListDataExportsResponse) Reset() {
 	*x = ListDataExportsResponse{}
-	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[12]
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -782,7 +1368,7 @@ func (x *ListDataExportsResponse) String() string {
 func (*ListDataExportsResponse) ProtoMessage() {}
 
 func (x *ListDataExportsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[12]
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -795,7 +1381,7 @@ func (x *ListDataExportsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDataExportsResponse.ProtoReflect.Descriptor instead.
 func (*ListDataExportsResponse) Descriptor() ([]byte, []int) {
-	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{12}
+	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ListDataExportsResponse) GetExports() []*DataExportSummary {
@@ -826,7 +1412,7 @@ type DataExportSummary struct {
 
 func (x *DataExportSummary) Reset() {
 	*x = DataExportSummary{}
-	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[13]
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -838,7 +1424,7 @@ func (x *DataExportSummary) String() string {
 func (*DataExportSummary) ProtoMessage() {}
 
 func (x *DataExportSummary) ProtoReflect() protoreflect.Message {
-	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[13]
+	mi := &file_chronos_compliance_v1_compliance_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -851,7 +1437,7 @@ func (x *DataExportSummary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DataExportSummary.ProtoReflect.Descriptor instead.
 func (*DataExportSummary) Descriptor() ([]byte, []int) {
-	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{13}
+	return file_chronos_compliance_v1_compliance_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *DataExportSummary) GetExportId() string {
@@ -913,7 +1499,36 @@ const file_chronos_compliance_v1_compliance_proto_rawDesc = "" +
 	"\n" +
 	"restricted\x18\x01 \x01(\bR\n" +
 	"restricted\x12E\n" +
-	"\x10restricted_since\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x0frestrictedSince\"\x15\n" +
+	"\x10restricted_since\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x0frestrictedSince\"\xb4\x02\n" +
+	"\x14RectifyMyDataRequest\x12>\n" +
+	"\fdisplay_name\x18\x01 \x01(\tB\x16\xbaH\x13r\x11\x10\x01\x18P2\v^\\S(.*\\S)?$H\x00R\vdisplayName\x88\x01\x01\x12Z\n" +
+	"\x06locale\x18\x02 \x01(\tB=\xbaH:r8\x18#24^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$H\x01R\x06locale\x88\x01\x01\x12W\n" +
+	"\btimezone\x18\x03 \x01(\tB6\xbaH3r1\x18@2-^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+.-]+)*$H\x02R\btimezone\x88\x01\x01B\x0f\n" +
+	"\r_display_nameB\t\n" +
+	"\a_localeB\v\n" +
+	"\t_timezone\"\xc5\x01\n" +
+	"\x15RectifyMyDataResponse\x12m\n" +
+	"\x10corrected_fields\x18\x01 \x03(\tBB\xbaG7:\x10\x12\x0e[display_name]x\x10\x8a\x01 ^(display_name|locale|timezone)$\xbaH\x05\x92\x01\x02\x10\x03R\x0fcorrectedFields\x12=\n" +
+	"\fcorrected_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\vcorrectedAt\"k\n" +
+	"\x19ObjectToProcessingRequest\x12N\n" +
+	"\apurpose\x18\x01 \x01(\x0e2(.chronos.compliance.v1.ProcessingPurposeB\n" +
+	"\xbaH\a\x82\x01\x04\x10\x01 \x00R\apurpose\"y\n" +
+	"\x1aObjectToProcessingResponse\x12\x18\n" +
+	"\achanged\x18\x01 \x01(\bR\achanged\x12A\n" +
+	"\x0eobjected_since\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\robjectedSince\"t\n" +
+	"\"WithdrawProcessingObjectionRequest\x12N\n" +
+	"\apurpose\x18\x01 \x01(\x0e2(.chronos.compliance.v1.ProcessingPurposeB\n" +
+	"\xbaH\a\x82\x01\x04\x10\x01 \x00R\apurpose\"?\n" +
+	"#WithdrawProcessingObjectionResponse\x12\x18\n" +
+	"\achanged\x18\x01 \x01(\bR\achanged\"!\n" +
+	"\x1fListProcessingObjectionsRequest\"x\n" +
+	" ListProcessingObjectionsResponse\x12T\n" +
+	"\n" +
+	"objections\x18\x01 \x03(\v2*.chronos.compliance.v1.ProcessingObjectionB\b\xbaH\x05\x92\x01\x02\x10\bR\n" +
+	"objections\"\x9c\x01\n" +
+	"\x13ProcessingObjection\x12B\n" +
+	"\apurpose\x18\x01 \x01(\x0e2(.chronos.compliance.v1.ProcessingPurposeR\apurpose\x12A\n" +
+	"\x0eobjected_since\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\robjectedSince\"\x15\n" +
 	"\x13ExportMyDataRequest\"\xf3\x01\n" +
 	"\x14ExportMyDataResponse\x12t\n" +
 	"\texport_id\x18\x03 \x01(\tBW\xbaGN:#\x12!export_01ARZ3NDEKTSV4RRFFQ69G5FAVx!\x8a\x01$^export_[0-7][0-9A-HJKMNP-TV-Z]{25}$\xbaH\x03\xc8\x01\x01R\bexportId\x12?\n" +
@@ -948,12 +1563,16 @@ const file_chronos_compliance_v1_compliance_proto_rawDesc = "" +
 	"\x0efailure_reason\x18\x04 \x01(\tB&\xbaG#:\x13\x12\x11source_unreadablex@\x8a\x01\t^[a-z_]*$R\rfailureReason\x12=\n" +
 	"\frequested_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\vrequestedAt\x129\n" +
 	"\n" +
-	"settled_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tsettledAt*\x93\x01\n" +
+	"settled_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tsettledAt*\x8e\x01\n" +
+	"\x11ProcessingPurpose\x12\"\n" +
+	"\x1ePROCESSING_PURPOSE_UNSPECIFIED\x10\x00\x12-\n" +
+	")PROCESSING_PURPOSE_ACTIVITY_NOTIFICATIONS\x10\x01\x12&\n" +
+	"\"PROCESSING_PURPOSE_PRODUCT_UPDATES\x10\x02*\x93\x01\n" +
 	"\x10DataExportStatus\x12\"\n" +
 	"\x1eDATA_EXPORT_STATUS_UNSPECIFIED\x10\x00\x12\x1e\n" +
 	"\x1aDATA_EXPORT_STATUS_PENDING\x10\x01\x12\x1c\n" +
 	"\x18DATA_EXPORT_STATUS_READY\x10\x02\x12\x1d\n" +
-	"\x19DATA_EXPORT_STATUS_FAILED\x10\x032\xec\b\n" +
+	"\x19DATA_EXPORT_STATUS_FAILED\x10\x032\xb6\x0f\n" +
 	"\x11ComplianceService\x12\xdf\x01\n" +
 	"\x12RestrictProcessing\x120.chronos.compliance.v1.RestrictProcessingRequest\x1a1.chronos.compliance.v1.RestrictProcessingResponse\"d\xbaGI2G\n" +
 	"E\n" +
@@ -975,6 +1594,23 @@ const file_chronos_compliance_v1_compliance_proto_rawDesc = "" +
 	"\x0fListDataExports\x12-.chronos.compliance.v1.ListDataExportsRequest\x1a..chronos.compliance.v1.ListDataExportsResponse\"\x14\xca\xf3\x18\f\n" +
 	"\x04self\x12\x04user\xd0\xf3\x18\x01\x12\xa1\x01\n" +
 	"\x18GetProcessingRestriction\x126.chronos.compliance.v1.GetProcessingRestrictionRequest\x1a7.chronos.compliance.v1.GetProcessingRestrictionResponse\"\x14\xca\xf3\x18\f\n" +
+	"\x04self\x12\x04user\xd0\xf3\x18\x01\x12\xcc\x01\n" +
+	"\rRectifyMyData\x12+.chronos.compliance.v1.RectifyMyDataRequest\x1a,.chronos.compliance.v1.RectifyMyDataResponse\"`\xbaGI2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-key\xca\xf3\x18\f\n" +
+	"\x04self\x12\x04user\xd0\xf3\x18\x02\x12\xdb\x01\n" +
+	"\x12ObjectToProcessing\x120.chronos.compliance.v1.ObjectToProcessingRequest\x1a1.chronos.compliance.v1.ObjectToProcessingResponse\"`\xbaGI2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-key\xca\xf3\x18\f\n" +
+	"\x04self\x12\x04user\xd0\xf3\x18\x02\x12\xf6\x01\n" +
+	"\x1bWithdrawProcessingObjection\x129.chronos.compliance.v1.WithdrawProcessingObjectionRequest\x1a:.chronos.compliance.v1.WithdrawProcessingObjectionResponse\"`\xbaGI2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-key\xca\xf3\x18\f\n" +
+	"\x04self\x12\x04user\xd0\xf3\x18\x02\x12\xa1\x01\n" +
+	"\x18ListProcessingObjections\x126.chronos.compliance.v1.ListProcessingObjectionsRequest\x1a7.chronos.compliance.v1.ListProcessingObjectionsResponse\"\x14\xca\xf3\x18\f\n" +
 	"\x04self\x12\x04user\xd0\xf3\x18\x01B\xee\x01\n" +
 	"\x19com.chronos.compliance.v1B\x0fComplianceProtoP\x01ZJgithub.com/chronos/chronos-go/gen/proto/chronos/compliance/v1;compliancev1\xa2\x02\x03CCX\xaa\x02\x15Chronos.Compliance.V1\xca\x02\x15Chronos\\Compliance\\V1\xe2\x02!Chronos\\Compliance\\V1\\GPBMetadata\xea\x02\x17Chronos::Compliance::V1b\x06proto3"
 
@@ -990,56 +1626,81 @@ func file_chronos_compliance_v1_compliance_proto_rawDescGZIP() []byte {
 	return file_chronos_compliance_v1_compliance_proto_rawDescData
 }
 
-var file_chronos_compliance_v1_compliance_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_chronos_compliance_v1_compliance_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_chronos_compliance_v1_compliance_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_chronos_compliance_v1_compliance_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_chronos_compliance_v1_compliance_proto_goTypes = []any{
-	(DataExportStatus)(0),                     // 0: chronos.compliance.v1.DataExportStatus
-	(*RestrictProcessingRequest)(nil),         // 1: chronos.compliance.v1.RestrictProcessingRequest
-	(*RestrictProcessingResponse)(nil),        // 2: chronos.compliance.v1.RestrictProcessingResponse
-	(*LiftProcessingRestrictionRequest)(nil),  // 3: chronos.compliance.v1.LiftProcessingRestrictionRequest
-	(*LiftProcessingRestrictionResponse)(nil), // 4: chronos.compliance.v1.LiftProcessingRestrictionResponse
-	(*GetProcessingRestrictionRequest)(nil),   // 5: chronos.compliance.v1.GetProcessingRestrictionRequest
-	(*GetProcessingRestrictionResponse)(nil),  // 6: chronos.compliance.v1.GetProcessingRestrictionResponse
-	(*ExportMyDataRequest)(nil),               // 7: chronos.compliance.v1.ExportMyDataRequest
-	(*ExportMyDataResponse)(nil),              // 8: chronos.compliance.v1.ExportMyDataResponse
-	(*GetDataExportRequest)(nil),              // 9: chronos.compliance.v1.GetDataExportRequest
-	(*GetDataExportResponse)(nil),             // 10: chronos.compliance.v1.GetDataExportResponse
-	(*ExportedFile)(nil),                      // 11: chronos.compliance.v1.ExportedFile
-	(*ListDataExportsRequest)(nil),            // 12: chronos.compliance.v1.ListDataExportsRequest
-	(*ListDataExportsResponse)(nil),           // 13: chronos.compliance.v1.ListDataExportsResponse
-	(*DataExportSummary)(nil),                 // 14: chronos.compliance.v1.DataExportSummary
-	(*timestamppb.Timestamp)(nil),             // 15: google.protobuf.Timestamp
+	(ProcessingPurpose)(0),                      // 0: chronos.compliance.v1.ProcessingPurpose
+	(DataExportStatus)(0),                       // 1: chronos.compliance.v1.DataExportStatus
+	(*RestrictProcessingRequest)(nil),           // 2: chronos.compliance.v1.RestrictProcessingRequest
+	(*RestrictProcessingResponse)(nil),          // 3: chronos.compliance.v1.RestrictProcessingResponse
+	(*LiftProcessingRestrictionRequest)(nil),    // 4: chronos.compliance.v1.LiftProcessingRestrictionRequest
+	(*LiftProcessingRestrictionResponse)(nil),   // 5: chronos.compliance.v1.LiftProcessingRestrictionResponse
+	(*GetProcessingRestrictionRequest)(nil),     // 6: chronos.compliance.v1.GetProcessingRestrictionRequest
+	(*GetProcessingRestrictionResponse)(nil),    // 7: chronos.compliance.v1.GetProcessingRestrictionResponse
+	(*RectifyMyDataRequest)(nil),                // 8: chronos.compliance.v1.RectifyMyDataRequest
+	(*RectifyMyDataResponse)(nil),               // 9: chronos.compliance.v1.RectifyMyDataResponse
+	(*ObjectToProcessingRequest)(nil),           // 10: chronos.compliance.v1.ObjectToProcessingRequest
+	(*ObjectToProcessingResponse)(nil),          // 11: chronos.compliance.v1.ObjectToProcessingResponse
+	(*WithdrawProcessingObjectionRequest)(nil),  // 12: chronos.compliance.v1.WithdrawProcessingObjectionRequest
+	(*WithdrawProcessingObjectionResponse)(nil), // 13: chronos.compliance.v1.WithdrawProcessingObjectionResponse
+	(*ListProcessingObjectionsRequest)(nil),     // 14: chronos.compliance.v1.ListProcessingObjectionsRequest
+	(*ListProcessingObjectionsResponse)(nil),    // 15: chronos.compliance.v1.ListProcessingObjectionsResponse
+	(*ProcessingObjection)(nil),                 // 16: chronos.compliance.v1.ProcessingObjection
+	(*ExportMyDataRequest)(nil),                 // 17: chronos.compliance.v1.ExportMyDataRequest
+	(*ExportMyDataResponse)(nil),                // 18: chronos.compliance.v1.ExportMyDataResponse
+	(*GetDataExportRequest)(nil),                // 19: chronos.compliance.v1.GetDataExportRequest
+	(*GetDataExportResponse)(nil),               // 20: chronos.compliance.v1.GetDataExportResponse
+	(*ExportedFile)(nil),                        // 21: chronos.compliance.v1.ExportedFile
+	(*ListDataExportsRequest)(nil),              // 22: chronos.compliance.v1.ListDataExportsRequest
+	(*ListDataExportsResponse)(nil),             // 23: chronos.compliance.v1.ListDataExportsResponse
+	(*DataExportSummary)(nil),                   // 24: chronos.compliance.v1.DataExportSummary
+	(*timestamppb.Timestamp)(nil),               // 25: google.protobuf.Timestamp
 }
 var file_chronos_compliance_v1_compliance_proto_depIdxs = []int32{
-	15, // 0: chronos.compliance.v1.RestrictProcessingResponse.restricted_since:type_name -> google.protobuf.Timestamp
-	15, // 1: chronos.compliance.v1.GetProcessingRestrictionResponse.restricted_since:type_name -> google.protobuf.Timestamp
-	0,  // 2: chronos.compliance.v1.ExportMyDataResponse.status:type_name -> chronos.compliance.v1.DataExportStatus
-	0,  // 3: chronos.compliance.v1.GetDataExportResponse.status:type_name -> chronos.compliance.v1.DataExportStatus
-	11, // 4: chronos.compliance.v1.GetDataExportResponse.files:type_name -> chronos.compliance.v1.ExportedFile
-	15, // 5: chronos.compliance.v1.GetDataExportResponse.expires_at:type_name -> google.protobuf.Timestamp
-	15, // 6: chronos.compliance.v1.GetDataExportResponse.requested_at:type_name -> google.protobuf.Timestamp
-	15, // 7: chronos.compliance.v1.GetDataExportResponse.settled_at:type_name -> google.protobuf.Timestamp
-	14, // 8: chronos.compliance.v1.ListDataExportsResponse.exports:type_name -> chronos.compliance.v1.DataExportSummary
-	0,  // 9: chronos.compliance.v1.DataExportSummary.status:type_name -> chronos.compliance.v1.DataExportStatus
-	15, // 10: chronos.compliance.v1.DataExportSummary.requested_at:type_name -> google.protobuf.Timestamp
-	15, // 11: chronos.compliance.v1.DataExportSummary.settled_at:type_name -> google.protobuf.Timestamp
-	1,  // 12: chronos.compliance.v1.ComplianceService.RestrictProcessing:input_type -> chronos.compliance.v1.RestrictProcessingRequest
-	3,  // 13: chronos.compliance.v1.ComplianceService.LiftProcessingRestriction:input_type -> chronos.compliance.v1.LiftProcessingRestrictionRequest
-	7,  // 14: chronos.compliance.v1.ComplianceService.ExportMyData:input_type -> chronos.compliance.v1.ExportMyDataRequest
-	9,  // 15: chronos.compliance.v1.ComplianceService.GetDataExport:input_type -> chronos.compliance.v1.GetDataExportRequest
-	12, // 16: chronos.compliance.v1.ComplianceService.ListDataExports:input_type -> chronos.compliance.v1.ListDataExportsRequest
-	5,  // 17: chronos.compliance.v1.ComplianceService.GetProcessingRestriction:input_type -> chronos.compliance.v1.GetProcessingRestrictionRequest
-	2,  // 18: chronos.compliance.v1.ComplianceService.RestrictProcessing:output_type -> chronos.compliance.v1.RestrictProcessingResponse
-	4,  // 19: chronos.compliance.v1.ComplianceService.LiftProcessingRestriction:output_type -> chronos.compliance.v1.LiftProcessingRestrictionResponse
-	8,  // 20: chronos.compliance.v1.ComplianceService.ExportMyData:output_type -> chronos.compliance.v1.ExportMyDataResponse
-	10, // 21: chronos.compliance.v1.ComplianceService.GetDataExport:output_type -> chronos.compliance.v1.GetDataExportResponse
-	13, // 22: chronos.compliance.v1.ComplianceService.ListDataExports:output_type -> chronos.compliance.v1.ListDataExportsResponse
-	6,  // 23: chronos.compliance.v1.ComplianceService.GetProcessingRestriction:output_type -> chronos.compliance.v1.GetProcessingRestrictionResponse
-	18, // [18:24] is the sub-list for method output_type
-	12, // [12:18] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	25, // 0: chronos.compliance.v1.RestrictProcessingResponse.restricted_since:type_name -> google.protobuf.Timestamp
+	25, // 1: chronos.compliance.v1.GetProcessingRestrictionResponse.restricted_since:type_name -> google.protobuf.Timestamp
+	25, // 2: chronos.compliance.v1.RectifyMyDataResponse.corrected_at:type_name -> google.protobuf.Timestamp
+	0,  // 3: chronos.compliance.v1.ObjectToProcessingRequest.purpose:type_name -> chronos.compliance.v1.ProcessingPurpose
+	25, // 4: chronos.compliance.v1.ObjectToProcessingResponse.objected_since:type_name -> google.protobuf.Timestamp
+	0,  // 5: chronos.compliance.v1.WithdrawProcessingObjectionRequest.purpose:type_name -> chronos.compliance.v1.ProcessingPurpose
+	16, // 6: chronos.compliance.v1.ListProcessingObjectionsResponse.objections:type_name -> chronos.compliance.v1.ProcessingObjection
+	0,  // 7: chronos.compliance.v1.ProcessingObjection.purpose:type_name -> chronos.compliance.v1.ProcessingPurpose
+	25, // 8: chronos.compliance.v1.ProcessingObjection.objected_since:type_name -> google.protobuf.Timestamp
+	1,  // 9: chronos.compliance.v1.ExportMyDataResponse.status:type_name -> chronos.compliance.v1.DataExportStatus
+	1,  // 10: chronos.compliance.v1.GetDataExportResponse.status:type_name -> chronos.compliance.v1.DataExportStatus
+	21, // 11: chronos.compliance.v1.GetDataExportResponse.files:type_name -> chronos.compliance.v1.ExportedFile
+	25, // 12: chronos.compliance.v1.GetDataExportResponse.expires_at:type_name -> google.protobuf.Timestamp
+	25, // 13: chronos.compliance.v1.GetDataExportResponse.requested_at:type_name -> google.protobuf.Timestamp
+	25, // 14: chronos.compliance.v1.GetDataExportResponse.settled_at:type_name -> google.protobuf.Timestamp
+	24, // 15: chronos.compliance.v1.ListDataExportsResponse.exports:type_name -> chronos.compliance.v1.DataExportSummary
+	1,  // 16: chronos.compliance.v1.DataExportSummary.status:type_name -> chronos.compliance.v1.DataExportStatus
+	25, // 17: chronos.compliance.v1.DataExportSummary.requested_at:type_name -> google.protobuf.Timestamp
+	25, // 18: chronos.compliance.v1.DataExportSummary.settled_at:type_name -> google.protobuf.Timestamp
+	2,  // 19: chronos.compliance.v1.ComplianceService.RestrictProcessing:input_type -> chronos.compliance.v1.RestrictProcessingRequest
+	4,  // 20: chronos.compliance.v1.ComplianceService.LiftProcessingRestriction:input_type -> chronos.compliance.v1.LiftProcessingRestrictionRequest
+	17, // 21: chronos.compliance.v1.ComplianceService.ExportMyData:input_type -> chronos.compliance.v1.ExportMyDataRequest
+	19, // 22: chronos.compliance.v1.ComplianceService.GetDataExport:input_type -> chronos.compliance.v1.GetDataExportRequest
+	22, // 23: chronos.compliance.v1.ComplianceService.ListDataExports:input_type -> chronos.compliance.v1.ListDataExportsRequest
+	6,  // 24: chronos.compliance.v1.ComplianceService.GetProcessingRestriction:input_type -> chronos.compliance.v1.GetProcessingRestrictionRequest
+	8,  // 25: chronos.compliance.v1.ComplianceService.RectifyMyData:input_type -> chronos.compliance.v1.RectifyMyDataRequest
+	10, // 26: chronos.compliance.v1.ComplianceService.ObjectToProcessing:input_type -> chronos.compliance.v1.ObjectToProcessingRequest
+	12, // 27: chronos.compliance.v1.ComplianceService.WithdrawProcessingObjection:input_type -> chronos.compliance.v1.WithdrawProcessingObjectionRequest
+	14, // 28: chronos.compliance.v1.ComplianceService.ListProcessingObjections:input_type -> chronos.compliance.v1.ListProcessingObjectionsRequest
+	3,  // 29: chronos.compliance.v1.ComplianceService.RestrictProcessing:output_type -> chronos.compliance.v1.RestrictProcessingResponse
+	5,  // 30: chronos.compliance.v1.ComplianceService.LiftProcessingRestriction:output_type -> chronos.compliance.v1.LiftProcessingRestrictionResponse
+	18, // 31: chronos.compliance.v1.ComplianceService.ExportMyData:output_type -> chronos.compliance.v1.ExportMyDataResponse
+	20, // 32: chronos.compliance.v1.ComplianceService.GetDataExport:output_type -> chronos.compliance.v1.GetDataExportResponse
+	23, // 33: chronos.compliance.v1.ComplianceService.ListDataExports:output_type -> chronos.compliance.v1.ListDataExportsResponse
+	7,  // 34: chronos.compliance.v1.ComplianceService.GetProcessingRestriction:output_type -> chronos.compliance.v1.GetProcessingRestrictionResponse
+	9,  // 35: chronos.compliance.v1.ComplianceService.RectifyMyData:output_type -> chronos.compliance.v1.RectifyMyDataResponse
+	11, // 36: chronos.compliance.v1.ComplianceService.ObjectToProcessing:output_type -> chronos.compliance.v1.ObjectToProcessingResponse
+	13, // 37: chronos.compliance.v1.ComplianceService.WithdrawProcessingObjection:output_type -> chronos.compliance.v1.WithdrawProcessingObjectionResponse
+	15, // 38: chronos.compliance.v1.ComplianceService.ListProcessingObjections:output_type -> chronos.compliance.v1.ListProcessingObjectionsResponse
+	29, // [29:39] is the sub-list for method output_type
+	19, // [19:29] is the sub-list for method input_type
+	19, // [19:19] is the sub-list for extension type_name
+	19, // [19:19] is the sub-list for extension extendee
+	0,  // [0:19] is the sub-list for field type_name
 }
 
 func init() { file_chronos_compliance_v1_compliance_proto_init() }
@@ -1047,13 +1708,14 @@ func file_chronos_compliance_v1_compliance_proto_init() {
 	if File_chronos_compliance_v1_compliance_proto != nil {
 		return
 	}
+	file_chronos_compliance_v1_compliance_proto_msgTypes[6].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chronos_compliance_v1_compliance_proto_rawDesc), len(file_chronos_compliance_v1_compliance_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   14,
+			NumEnums:      2,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -11,7 +11,9 @@ This is the last message you will receive from us at this address.
 
 What is retained, and why:
 {{range .Retained}}
-  - {{.}}
+  - {{.Reason}}.
+    Kept for: {{.Period}}.{{if .LegalBasis}}
+    Legal basis: {{.LegalBasis}}.{{end}}
 {{end}}
 If you believe this was done without your permission, contact support. Please
 note that we can no longer look you up by name or address.

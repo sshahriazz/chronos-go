@@ -817,14 +817,75 @@ func (d *dependencies) buildIdentity(
 		return nil, fmt.Errorf("username availability: %w", err)
 	}
 
+	// Service accounts and API keys (identity.md §10).
+	//
+	// The adapter holds BOTH transactions and is the only one in identity that
+	// does: `api_key_secret` carries no row-level security because the
+	// authenticator reads it before any organization is known, while
+	// `api_key_view` and `service_account_view` are org-scoped and must be read
+	// under `InTenantTx` or they return nothing (migration 00051).
+	//
+	// Constructed unconditionally, even when this deployment mints no keys,
+	// because the READ side is always served: an organization that once held keys
+	// can still list them, and the authenticator can still resolve one minted by
+	// a deployment that was configured. Only the command side is gated on the
+	// environment name.
+	apiKeyStore, err := identitypg.NewAPIKeys(tx, tx)
+	if err != nil {
+		return nil, fmt.Errorf("API key store: %w", err)
+	}
+	d.apiKeyStore = apiKeyStore
+
 	queries, err := app.NewQueries(app.QueriesDeps{
 		Accounts: readModel,
 		Sessions: readModel,
 		Methods:  readModel,
 		History:  readModel,
+		Keys:     apiKeyStore,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("identity read side: %w", err)
+	}
+
+	// The command side. nil when IDENTITY_API_KEY_ENVIRONMENT is unset, which is
+	// a SUPPORTED state for the reason buildPasskeys' absence is: the environment
+	// segment is bound into every digest and cannot be defaulted without making a
+	// staging credential and a production credential the same shape. The four key
+	// RPCs then answer NOT_FOUND naming the variable, and the read side and the
+	// authenticator keep working.
+	var apiKeys *app.APIKeys
+	if cfg.Identity.APIKeysConfigured() {
+		apiKeyRepo := eventsourcing.NewRepository[*domain.APIKey](
+			d.store, d.codec, d.upcasters, app.APIKeyCategory, domain.NewAPIKey)
+		serviceAccountRepo := eventsourcing.NewRepository[*domain.ServiceAccount](
+			d.store, d.codec, d.upcasters, app.ServiceAccountCategory, domain.NewServiceAccount)
+
+		apiKeys, err = app.NewAPIKeys(app.APIKeysDeps{
+			Clock: clk,
+			// The SAME entropy source every identifier in this process uses, and
+			// crypto/rand underneath. Not a second reader built here: a bounded or
+			// seeded one would produce guessable credentials while every test
+			// passed.
+			Entropy:     ids.Entropy(),
+			Environment: cfg.Identity.APIKeyEnvironment,
+			Accounts:    serviceAccountRepo,
+			Keys:        apiKeyRepo,
+			Appender:    d.store,
+			Schemas:     d.upcasters,
+			Secrets:     apiKeyStore,
+			Directory:   apiKeyStore,
+			Log:         log,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("API keys: %w", err)
+		}
+		log.Info("API keys configured", "environment", cfg.Identity.APIKeyEnvironment)
+	} else {
+		// Named at INFO rather than silently: a deployment that cannot mint keys
+		// looks identical from outside to one whose key RPCs are broken, and the
+		// only person who can tell them apart is whoever reads this line.
+		log.Info("API keys are not configured; the key RPCs will answer NOT_FOUND",
+			"set", "IDENTITY_API_KEY_ENVIRONMENT")
 	}
 
 	// Recorded so a composition-root test can assert it without reaching into the
@@ -867,7 +928,12 @@ func (d *dependencies) buildIdentity(
 		// buildFederation. The federation RPCs then answer NOT_FOUND naming what
 		// to set, except ListFederatedProviders, which answers an empty list
 		// because "nothing" is a valid thing for a client to render.
-		Federation:  federation,
+		Federation: federation,
+		// nil when IDENTITY_API_KEY_ENVIRONMENT is unset, which is a supported
+		// state — see above. The four key RPCs then answer NOT_FOUND naming the
+		// variable; the two LIST RPCs keep working, because reading what already
+		// exists needs no environment name.
+		APIKeys:     apiKeys,
 		Queries:     queries,
 		Directory:   readModel,
 		CallerScope: callerScope,

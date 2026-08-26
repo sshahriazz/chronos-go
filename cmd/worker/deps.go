@@ -373,8 +373,18 @@ func newDependencies(cfg *config.Config, log *slog.Logger, codec *eventcodec.JSO
 		// lookup errors, and this being nil at all is asserted by a test rather
 		// than trusted.
 		Restrictions: restrictionsOrNil(d, log),
-		Log:          log,
-		Observer:     d.metrics.Notifications(),
+		// Article 21, and nil here fails in the same direction as Article 18
+		// above: an unread objection is a person who told us to stop one purpose
+		// being processed for it anyway. The dispatcher REFUSES to send when the
+		// lookup errors, for the same reason.
+		//
+		// It is a SEPARATE lookup rather than a wider restriction because the two
+		// rights suppress different things — a restricted subject loses their
+		// receipts and an objecting subject keeps them. If one port could serve
+		// both, one of the rights has absorbed the other.
+		Objections: objectionsOrNil(d, log),
+		Log:        log,
+		Observer:   d.metrics.Notifications(),
 	})
 
 	// The lapsed email-reservation sweep. Constructed before the worker, because
@@ -1007,4 +1017,26 @@ func restrictionsOrNil(d *dependencies, log *slog.Logger) notify.Restrictions {
 		return nil
 	}
 	return r
+}
+
+// objectionsOrNil is restrictionsOrNil's twin for Article 21.
+//
+// Separate rather than folded into it, because the two answer different
+// questions and a single helper returning both would invite a single port
+// serving both — at which point the narrower right has quietly become the wider
+// one. The duplication here is four lines and the confusion it prevents is a
+// legal one.
+func objectionsOrNil(d *dependencies, log *slog.Logger) notify.Objections {
+	if d.pool == nil {
+		log.Error("no Article 21 objection lookup: postgres is unreachable, so every " +
+			"activity- and product-class notification is refused rather than risk " +
+			"processing a purpose somebody objected to")
+		return nil
+	}
+	o, err := compliancepg.NewObjections(pgadapter.New(d.pool))
+	if err != nil {
+		log.Error("no Article 21 objection lookup", "error", err)
+		return nil
+	}
+	return o
 }

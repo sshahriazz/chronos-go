@@ -60,7 +60,25 @@ func TestEveryTemplateRenders(t *testing.T) {
 					// A slice, so a template that ranges over it renders. The
 					// erasure confirmation must list what was retained, and a
 					// string here would range over its bytes.
-					"Retained": []string{"invoices, where a statutory period applies"},
+					//
+					// The ENTRIES are maps rather than sentences, matching what
+					// `app.retainedForTemplate` produces. Each carries the class,
+					// the period and the ARTICLE separately, because
+					// compliance.md §7 requires the DSAR response to say what is
+					// retained AND on what legal basis — and a translator working
+					// from a finished English sentence cannot produce the "why" in
+					// their own language.
+					//
+					// This fixture is the only place the data contract is checked
+					// before a customer sees the result, so a template reaching
+					// for a key that is not here fails at `render` rather than
+					// rendering a blank bullet in somebody's final message from us.
+					"Retained": []map[string]string{{
+						"DataClass":  "invoices_and_tax_records",
+						"Period":     "7–10 years, depending on jurisdiction",
+						"LegalBasis": "GDPR Article 17(3)(b) — compliance with a legal obligation (tax law)",
+						"Reason":     "invoices and tax records are kept because tax law requires it",
+					}},
 				},
 			})
 			if err != nil {

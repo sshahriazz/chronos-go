@@ -115,6 +115,7 @@ func service(
 
 	svc, err := complianceapi.New(complianceapi.Deps{
 		Restrictions: r, Exports: &fakeExports{}, ExportViews: &fakeExportViews{},
+		Rectifications: &fakeRectifications{}, Objections: &fakeObjections{},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -360,17 +361,47 @@ func TestAFailingRestrictionIsReported(t *testing.T) {
 }
 
 // AN INCOMPLETE WIRING IS REFUSED.
+//
+// Every right this service serves is checked, one at a time, because the failure
+// they share is the same and it is quiet: a nil use case makes exactly one
+// endpoint answer `unimplemented` while the other four keep working, so the
+// service constructs, the health check passes, and the only signal is a data
+// subject who cannot exercise one right.
 func TestTheComplianceServiceRefusesAnIncompleteWiring(t *testing.T) {
-	if _, err := complianceapi.New(complianceapi.Deps{
-		Exports: &fakeExports{},
-	}); err == nil {
-		t.Error("a service with no restriction use case was accepted")
+	full := func() complianceapi.Deps {
+		return complianceapi.Deps{
+			Restrictions:   &fakeRestrictions{},
+			Exports:        &fakeExports{},
+			ExportViews:    &fakeExportViews{},
+			Rectifications: &fakeRectifications{},
+			Objections:     &fakeObjections{},
+		}
 	}
-	if _, err := complianceapi.New(complianceapi.Deps{
-		Restrictions: &fakeRestrictions{},
-	}); err == nil {
-		t.Error("a service with no export use case was accepted; a person cannot obtain a " +
-			"copy of their own data")
+	if _, err := complianceapi.New(full()); err != nil {
+		t.Fatalf("a complete wiring was refused: %v", err)
+	}
+
+	for name, drop := range map[string]func(*complianceapi.Deps){
+		"restrictions": func(d *complianceapi.Deps) { d.Restrictions = nil },
+		"exports":      func(d *complianceapi.Deps) { d.Exports = nil },
+		"export views": func(d *complianceapi.Deps) { d.ExportViews = nil },
+		// Article 16. Without it the only record of a correction is a profile
+		// save, which cannot be told apart from somebody editing a preference —
+		// so a controller asked to evidence its rectification handling has
+		// nothing to answer with.
+		"rectifications": func(d *complianceapi.Deps) { d.Rectifications = nil },
+		// Article 21. Without it the only way to stop processing that rests on
+		// legitimate interests is a preference toggle, which we may re-solicit
+		// and an objection forbids us to.
+		"objections": func(d *complianceapi.Deps) { d.Objections = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			deps := full()
+			drop(&deps)
+			if _, err := complianceapi.New(deps); err == nil {
+				t.Errorf("a service with no %s was accepted", name)
+			}
+		})
 	}
 }
 
@@ -385,6 +416,7 @@ func TestTheExportActsOnTheAuthenticatedCaller(t *testing.T) {
 	exports := &fakeExports{exportID: "export_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
 	svc, err := complianceapi.New(complianceapi.Deps{
 		Restrictions: &fakeRestrictions{}, Exports: exports,
+		Rectifications: &fakeRectifications{}, Objections: &fakeObjections{},
 		ExportViews: &fakeExportViews{},
 	})
 	if err != nil {
@@ -423,6 +455,7 @@ func TestAFailingExportDoesNotLeakTheStoreError(t *testing.T) {
 	exports := &fakeExports{err: errs.Internalf("producing the export").Wrap(errors.New(leak))}
 	svc, err := complianceapi.New(complianceapi.Deps{
 		Restrictions: &fakeRestrictions{}, Exports: exports,
+		Rectifications: &fakeRectifications{}, Objections: &fakeObjections{},
 		ExportViews: &fakeExportViews{},
 	})
 	if err != nil {

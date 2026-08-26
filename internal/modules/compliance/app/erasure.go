@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/chronos/chronos-go/internal/modules/compliance/domain"
 )
 
 // Vault destroys the subject key. This is the irreversible step.
@@ -41,28 +43,26 @@ type AccountErasure interface {
 // §9 requires the confirmation before the address is purged, and after the
 // destroy there is no address left to resolve — the vault answers a tombstone,
 // and a send to an erased subject is skipped rather than failed.
+//
+// `retained` is the RESOLVED exemption set for this subject, not a fixed list.
+// It used to be `[]string` of hand-written sentences, and the change of type is
+// the point: a class, a period and an ARTICLE travel separately, so the
+// confirmation can say what was kept and on what legal basis rather than
+// carrying a sentence that happens to mention both.
 type Confirmation interface {
-	SendErasureComplete(ctx context.Context, subjectID string, retained []string) error
+	SendErasureComplete(
+		ctx context.Context, subjectID string, retained []domain.RetentionPolicy,
+	) error
 }
 
-// Retained is what survives an erasure, and why.
+// RetentionExemptions resolves what an erasure will leave behind, per subject.
 //
-// Stated to the person rather than assumed, because a confirmation implying
-// total deletion when tax records survive is a misleading statement about
-// processing (compliance.md §7, NOTIFICATIONS §9).
-//
-// It is a fixed list rather than a computed one, and that is honest for now:
-// nothing in this build can yet ask billing "does this subject appear on an
-// invoice". Naming the categories unconditionally is over-inclusive, which is
-// the safe direction — telling somebody their invoices may be retained when
-// they have none is a smaller wrong than the reverse.
-var Retained = []string{
-	"invoices and tax records, where a statutory retention period applies " +
-		"(Article 17(3)(b))",
-	"operator audit entries, which keep only the pseudonym — the key that could " +
-		"resolve it to you is destroyed",
-	"the event log, which is pseudonymised by that same key destruction rather " +
-		"than rewritten",
+// A port rather than a direct call to *Exemptions so a test can assert what
+// happens when the answer is empty — which is the case the erasure refuses, and
+// which no real resolver can produce today because two of the classes are
+// unconditional.
+type RetentionExemptions interface {
+	For(ctx context.Context, subjectID string) []domain.RetentionPolicy
 }
 
 // ObjectErasure deletes the subject's stored objects.
@@ -77,14 +77,15 @@ type ObjectErasure interface {
 
 // Erasure executes a due erasure request.
 type Erasure struct {
-	vault     Vault
-	accounts  AccountErasure
-	objects   ObjectErasure
-	confirm   Confirmation
-	holds     LegalHolds
-	deferrals Deferrals
-	log       *slog.Logger
-	now       func() time.Time
+	vault      Vault
+	accounts   AccountErasure
+	objects    ObjectErasure
+	confirm    Confirmation
+	holds      LegalHolds
+	deferrals  Deferrals
+	exemptions RetentionExemptions
+	log        *slog.Logger
+	now        func() time.Time
 }
 
 // Deferrals records that a request is waiting, and that the person was told.
@@ -133,14 +134,15 @@ type LegalHolds interface {
 
 // ErasureDeps is what Erasure needs.
 type ErasureDeps struct {
-	Vault     Vault
-	Accounts  AccountErasure
-	Objects   ObjectErasure
-	Confirm   Confirmation
-	Log       *slog.Logger
-	Holds     LegalHolds
-	Deferrals Deferrals
-	Now       func() time.Time
+	Vault      Vault
+	Accounts   AccountErasure
+	Objects    ObjectErasure
+	Confirm    Confirmation
+	Log        *slog.Logger
+	Holds      LegalHolds
+	Deferrals  Deferrals
+	Exemptions RetentionExemptions
+	Now        func() time.Time
 }
 
 func NewErasure(d ErasureDeps) (*Erasure, error) {
@@ -169,6 +171,12 @@ func NewErasure(d ErasureDeps) (*Erasure, error) {
 		return nil, fmt.Errorf("compliance: a deferral recorder is required; Article 12(4) " +
 			"obliges us to tell somebody their request is not being acted on, and without " +
 			"this the erasure waits silently for as long as a matter runs")
+	case d.Exemptions == nil:
+		return nil, fmt.Errorf("compliance: a retention-exemption resolver is required; " +
+			"compliance.md §4 step 3 is 'resolve retention exemptions', and §7 requires " +
+			"the confirmation to say what survives and on what legal basis. An eraser " +
+			"without one would send a confirmation implying total deletion while tax " +
+			"records are retained under Article 17(3)(b)")
 	case d.Now == nil:
 		return nil, fmt.Errorf("compliance: a clock is required")
 	}
@@ -179,7 +187,7 @@ func NewErasure(d ErasureDeps) (*Erasure, error) {
 	return &Erasure{
 		vault: d.Vault, accounts: d.Accounts, objects: d.Objects,
 		confirm: d.Confirm, holds: d.Holds, deferrals: d.Deferrals,
-		log: log, now: d.Now,
+		exemptions: d.Exemptions, log: log, now: d.Now,
 	}, nil
 }
 
@@ -297,7 +305,33 @@ func (e *Erasure) Execute(ctx context.Context, subjectID string) error {
 			"subject_id", subjectID, "error", err)
 	}
 
-	if err := e.confirm.SendErasureComplete(ctx, subjectID, Retained); err != nil {
+	// STEP 3 — "resolve retention exemptions" (compliance.md §4).
+	//
+	// It happens HERE, one line before the confirmation, and not earlier: the
+	// resolved set exists only to be stated, so resolving it before the hold
+	// check would ask billing a question about somebody whose erasure is not
+	// going to run.
+	//
+	// It cannot fail. Every question this resolver cannot answer resolves
+	// towards naming the class, because implying total deletion when tax records
+	// survive is the misleading statement §7 names.
+	retained := e.exemptions.For(ctx, subjectID)
+	if len(retained) == 0 {
+		// REFUSED. Two exemptions are unconditional — the event log and the
+		// operator audit trail apply to everybody who ever used this system — so
+		// an empty set is not a subject with unusually little data. It is a
+		// resolver that is not doing its job, and sending the confirmation
+		// anyway would tell somebody everything about them is gone.
+		//
+		// The confirmation sender refuses an empty list too. This is the second
+		// of the two, deliberately: that one protects the message, and this one
+		// stops the erasure before its irreversible step on the same evidence.
+		return fmt.Errorf("compliance: no retention exemptions resolved for %s; the event "+
+			"log and the operator audit trail survive every erasure, so an empty set is a "+
+			"broken resolver rather than a subject with nothing retained", subjectID)
+	}
+
+	if err := e.confirm.SendErasureComplete(ctx, subjectID, retained); err != nil {
 		// FAILS THE WHOLE ERASURE rather than proceeding without it. The
 		// alternative is an erasure nobody was told about, which is both a
 		// process failure under Article 12 and the one part of this that cannot

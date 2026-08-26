@@ -182,6 +182,7 @@ func newRunHarness(t *testing.T, restricted fakeRestricted) *runHarness {
 		Store:        store,
 		Prefix:       func(s string) string { return "px" + s },
 		Restrictions: restricted,
+		Exemptions:   realExemptions(),
 		Now:          func() time.Time { return runAt },
 	})
 	if err != nil {
@@ -398,6 +399,7 @@ func TestExportRunsRefusesAPartialWiring(t *testing.T) {
 			Store:        &recordingStore{},
 			Prefix:       func(string) string { return "p" },
 			Restrictions: fakeRestricted{},
+			Exemptions:   realExemptions(),
 			Now:          func() time.Time { return runAt },
 		}
 	}
@@ -411,7 +413,10 @@ func TestExportRunsRefusesAPartialWiring(t *testing.T) {
 		// Without it every export runs for a restricted subject, which is the one
 		// failure here that silently violates a right rather than failing loudly.
 		"no restrictions": func(d *app.ExportRunsDeps) { d.Restrictions = nil },
-		"no clock":        func(d *app.ExportRunsDeps) { d.Now = nil },
+		// A manifest built with no exemption resolver states nothing about what
+		// survives, which answers Article 15(1) with values alone.
+		"no exemptions": func(d *app.ExportRunsDeps) { d.Exemptions = nil },
+		"no clock":      func(d *app.ExportRunsDeps) { d.Now = nil },
 	} {
 		t.Run(name, func(t *testing.T) {
 			deps := full()

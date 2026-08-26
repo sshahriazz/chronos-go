@@ -8,8 +8,16 @@ syntax = "proto3";
 // like this is one that acts on a person named by whoever asked.
 //
 // The rights are Chapter III of the GDPR. What is here is what is built;
-// compliance.md §3 lists six and this carries one, because shipping an endpoint
-// for a right the system cannot actually deliver is worse than not having it.
+// compliance.md §3 lists six and this carries four — access and portability
+// (15, 20), rectification (16), restriction (18) and objection (21) — because
+// shipping an endpoint for a right the system cannot actually deliver is worse
+// than not having it.
+//
+// The two that are absent are absent for opposite reasons. ERASURE (17) is
+// requested through identity, which owns the account the request ends, and
+// compliance executes it. CONSENT withdrawal (7(3)) has no endpoint because
+// there is no consent record to withdraw yet; the notification classes that
+// would rest on one are opt-in and off (NOTIFICATIONS §3).
 package chronos.compliance.v1;
 
 import "buf/validate/validate.proto";
@@ -52,6 +60,186 @@ message GetProcessingRestrictionResponse {
 
   // When it began. Unset when there is no restriction.
   google.protobuf.Timestamp restricted_since = 2;
+}
+
+// RectifyMyDataRequest corrects inaccurate personal data about the caller
+// (Article 16).
+//
+// # Sparse, and it names no subject
+//
+// Every field has EXPLICIT PRESENCE, exactly as `UpdateProfileRequest` does: an
+// omitted field is "do not touch this", not "make this empty". The two are
+// different requests and a client must be able to tell them apart.
+//
+// # The email address is deliberately absent, and this is the decision worth
+// # reading
+//
+// Article 16 covers every inaccurate field, and an email address is the field a
+// person is most likely to have wrong. It is still not here, because identity
+// owns the email-change flow (identity.md §12) and that flow's whole substance
+// is PROOF: a token mailed to the new address, a revert token mailed to the old
+// one, and a revert window during which a hijacked change can be undone.
+//
+// A rectification field for `email` would be a second path to the same value
+// with none of that — an authenticated session could move the login identifier
+// to an attacker's mailbox in one call, and the account-recovery path with it.
+// A statutory right cannot be a bypass of an authentication control, and
+// Article 16 does not require that the correction be UNVERIFIED; it requires
+// that it be possible, which `ChangeEmail` already makes it.
+//
+// So the refusal is explicit rather than silent: `RectifyMyData` rejects a
+// request naming an address and says where the verified flow is. See the RPC.
+message RectifyMyDataRequest {
+  // The name other people read.
+  //
+  // Bounds are `chronos.profile.v1.UpdateProfileRequest.display_name`'s, and
+  // must stay equal to them: the correction is executed by the same use case
+  // that serves the settings screen, so a bound that differed here would refuse
+  // at this boundary a value that boundary accepts — or accept one the handler
+  // then rejects, which is the worse direction because the person is exercising
+  // a right rather than editing a preference.
+  optional string display_name = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 80
+    pattern: "^\\S(.*\\S)?$"
+  }];
+
+  // The language to render wording in, as a BCP-47 tag: `en`, `en-GB`,
+  // `zh-Hans`, `de-AT`.
+  optional string locale = 2 [(buf.validate.field).string = {
+    max_len: 35
+    pattern: "^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$"
+  }];
+
+  // The IANA zone to render timestamps in, e.g. `Europe/Berlin`, `UTC`.
+  optional string timezone = 3 [(buf.validate.field).string = {
+    max_len: 64
+    pattern: "^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+.-]+)*$"
+  }];
+}
+
+// RectifyMyDataResponse names what was corrected, and never what it now says.
+//
+// The VALUES are absent on purpose. A response echoing the corrected name would
+// be personal data in a place that is logged by proxies, cached by clients and
+// captured in support screenshots — and the caller already knows what they sent.
+// `GetProfile` renders the state.
+message RectifyMyDataResponse {
+  // The field names this call actually changed, in the order this schema
+  // declares them. Empty when every field named was already correct, which is a
+  // success: the record already says what the person asked it to say.
+  repeated string corrected_fields = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "[display_name]"}
+      // A closed set — the field names of RectifyMyDataRequest. Published rather
+      // than enforced because this is a RESPONSE field: the server produces it
+      // from its own constants, so a rule here would bound nothing a caller can
+      // send.
+      pattern: "^(display_name|locale|timezone)$"
+      max_length: 16
+    },
+    (buf.validate.field).repeated.max_items = 3
+  ];
+
+  // When the correction was recorded, UTC. Unset when nothing changed.
+  google.protobuf.Timestamp corrected_at = 2;
+}
+
+// ProcessingPurpose is one purpose this system processes personal data for that
+// rests on LEGITIMATE INTERESTS, and can therefore be objected to (Article 21).
+//
+// # Why the list is short, and why it is not the list of everything we do
+//
+// Article 21 reaches processing grounded in Article 6(1)(e) or 6(1)(f). It does
+// not reach processing grounded in contract or in a legal obligation, which is
+// most of what this system does: a password-changed alert, a verification link
+// and an invoice are none of them objectionable, and offering to stop them would
+// be offering something we would then have to refuse.
+//
+// So this enum contains only purposes the system can actually STOP, and each is
+// a purpose an entry in the notification catalogue rests on. A purpose nobody
+// can enforce is a promise, and a right implemented as a promise is worse than
+// one that is honestly absent.
+enum ProcessingPurpose {
+  // Unset. Refused rather than defaulted: an objection is a legal instruction,
+  // and guessing which processing somebody meant to stop is not available.
+  PROCESSING_PURPOSE_UNSPECIFIED = 0;
+
+  // Messages about what other people did — a mention, an assignment, a comment,
+  // an expiring key. Legitimate interest: they keep an account useful, and
+  // nobody agreed to them individually.
+  PROCESSING_PURPOSE_ACTIVITY_NOTIFICATIONS = 1;
+
+  // Product and marketing mail: release notes, announcements.
+  //
+  // Objectable under Article 21(2), which admits NO balancing test — direct
+  // marketing stops on request, always. It is opt-in here as well
+  // (NOTIFICATIONS §3), so an objection overlaps with simply not consenting;
+  // the objection is still offered because the two differ in one way that
+  // matters. Consent that is withheld may be solicited again. An objection may
+  // not be, until the person withdraws it.
+  PROCESSING_PURPOSE_PRODUCT_UPDATES = 2;
+}
+
+// ObjectToProcessingRequest stops one purpose for the caller (Article 21).
+message ObjectToProcessingRequest {
+  // Which processing to stop. Exactly one per call.
+  //
+  // One purpose per request rather than a list, because Article 21 is a
+  // per-purpose right and a partial failure over a list would leave the caller
+  // unable to tell which half took effect.
+  ProcessingPurpose purpose = 1 [(buf.validate.field).enum = {
+    defined_only: true
+    not_in: [0]
+  }];
+}
+
+// ObjectToProcessingResponse reports the state after the call.
+message ObjectToProcessingResponse {
+  // Whether this call changed anything. False means the objection already
+  // stood, which is a success: the caller asked for a state that holds.
+  bool changed = 1;
+
+  // When the objection was first made — not this call. A repeated request must
+  // not move a date the person has been given.
+  google.protobuf.Timestamp objected_since = 2;
+}
+
+// WithdrawProcessingObjectionRequest resumes one purpose the caller stopped.
+message WithdrawProcessingObjectionRequest {
+  // Which processing to resume.
+  ProcessingPurpose purpose = 1 [(buf.validate.field).enum = {
+    defined_only: true
+    not_in: [0]
+  }];
+}
+
+// WithdrawProcessingObjectionResponse reports the state after the call.
+message WithdrawProcessingObjectionResponse {
+  // False means nothing was objected to, which is a success for the reason
+  // every cancel path here is: the control is clicked twice, and neither click
+  // is wrong.
+  bool changed = 1;
+}
+
+// ListProcessingObjectionsRequest asks what the caller has objected to.
+message ListProcessingObjectionsRequest {}
+
+// ListProcessingObjectionsResponse is every objection the caller currently
+// holds.
+message ListProcessingObjectionsResponse {
+  // The caller's own objections. Bounded by the enum: there cannot be more of
+  // these than there are purposes.
+  repeated ProcessingObjection objections = 1 [(buf.validate.field).repeated.max_items = 8];
+}
+
+// ProcessingObjection is one purpose the caller has stopped.
+message ProcessingObjection {
+  // The purpose that is stopped.
+  ProcessingPurpose purpose = 1;
+
+  // When the objection was made.
+  google.protobuf.Timestamp objected_since = 2;
 }
 
 // ExportMyDataRequest asks for a copy of everything held about the caller.
@@ -497,6 +685,184 @@ service ComplianceService {
   // request from an ordinary session. Requiring step-up to read what you already
   // asked for would make the setting hard to verify and easy to forget.
   rpc GetProcessingRestriction(GetProcessingRestrictionRequest) returns (GetProcessingRestrictionResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_READ;
+  }
+
+  // RectifyMyData corrects inaccurate personal data about the caller
+  // (Article 16).
+  //
+  // # What this adds over the settings screen, which performs the same write
+  //
+  // `ProfileService.UpdateProfile` already changes a display name, and this
+  // endpoint executes the correction THROUGH IT rather than beside it — one
+  // write path to the vault, one `profile.ProfileUpdated.v1`, one projection.
+  // A second writer would give the vault and the profile's own history two
+  // accounts of when a name changed, and support conversations about
+  // impersonation are settled from that history.
+  //
+  // What this adds is the RECORD THAT A RIGHT WAS EXERCISED. "Somebody edited
+  // their profile" and "a data subject asserted that what we hold about them is
+  // inaccurate and required its correction" are different legal facts with
+  // different obligations attached — Article 12(3)'s one-month clock, and
+  // Article 19's duty to tell the recipients the data was disclosed to. Only the
+  // second is answerable from `compliance.PersonalDataCorrected.v1`, and a
+  // controller asked to evidence its Article 16 handling cannot answer with a
+  // list of profile saves.
+  //
+  // # The email address is not a field here
+  //
+  // identity.md §12 owns it, with a token to the new address, a revert token to
+  // the old one, and a window. A rectification path for `email` would move a
+  // login identifier — and the account-recovery route with it — on one
+  // authenticated call with no proof of the new mailbox. A request naming an
+  // address is refused with a pointer to `ChangeEmail`; see
+  // RectifyMyDataRequest.
+  //
+  // # AAL1, matching UpdateProfile
+  //
+  // Requiring step-up here and not there would make the statutory right harder
+  // to exercise than the product control that performs the identical write,
+  // which is the friction Article 12(2) tells a controller not to introduce. The
+  // write is also self-announcing: `ProfileUpdated` is a Security-class
+  // notification, so a correction nobody made is reported to the person it was
+  // made about.
+  //
+  // A call naming no field is refused. It records nothing, and an event
+  // asserting that nothing was corrected is evidence of nothing.
+  rpc RectifyMyData(RectifyMyDataRequest) returns (RectifyMyDataResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // ObjectToProcessing stops one purpose that rests on legitimate interests
+  // (Article 21).
+  //
+  // # It is NOT a narrower restriction, and the difference is enforceable
+  //
+  // Article 18 restriction is TOTAL and TEMPORARY: it halts everything except
+  // storage — transactional receipts included — while a dispute runs, and it is
+  // lifted when the dispute settles. Article 21 objection is PER-PURPOSE and
+  // stands until the person withdraws it: the account keeps working, receipts
+  // and verification links keep arriving, and exactly one purpose stops.
+  //
+  // The two therefore differ in what a caller can observe: a restricted subject
+  // receives no invoice mail, an objecting subject still does. If this endpoint
+  // ever came to mean "stop everything", it would be a duplicate of
+  // RestrictProcessing and should be deleted rather than kept as a synonym.
+  //
+  // # It is also not a notification preference
+  //
+  // A preference is ours to interpret and is expressed per channel: mute email,
+  // keep in-app. An objection is a legal instruction about a PURPOSE, so it
+  // stops that processing on every channel at once, and no product control may
+  // clear it — only the person who made it. That is why it is a separate record
+  // from `ChannelPreferenceSet` rather than a flag on one.
+  //
+  // # What it can never silence
+  //
+  // Security and transactional messages. They rest on contract and on the
+  // controller's own legal obligations, not on legitimate interests, so
+  // Article 21 does not reach them — and a control a session holder could set to
+  // stop a password-changed alert is the tripwire disabled by the takeover
+  // itself. The purposes offered are exactly those that can be stopped, and no
+  // more.
+  //
+  // # Article 21(1)'s override is NOT implemented, deliberately
+  //
+  // The controller may continue processing where it demonstrates compelling
+  // legitimate grounds that override the subject's interests. Demonstrating that
+  // is a documented balancing test performed by a person, and the burden is on
+  // the controller. Until there is an operator workflow that records one, an
+  // objection is honoured unconditionally — which is the safe direction, and is
+  // the correct behaviour in the absence of the assessment the exception
+  // requires.
+  //
+  // AAL1: what an objection can stop is exactly what a notification preference
+  // can already stop from an ordinary session, and it can never reach a security
+  // alert. Requiring step-up would make the statutory right harder to exercise
+  // than the product control with the same effect.
+  //
+  // Idempotent: a second call reports `changed: false` and the ORIGINAL instant.
+  rpc ObjectToProcessing(ObjectToProcessingRequest) returns (ObjectToProcessingResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // WithdrawProcessingObjection resumes one purpose the caller had stopped.
+  //
+  // Only the person who objected may withdraw it. That asymmetry is the whole
+  // reason an objection is not a preference: a preference is a setting either
+  // side may reasonably change, and an objection is an instruction that binds
+  // the controller until its author releases it.
+  //
+  // Withdrawing nothing succeeds and reports `changed: false`.
+  rpc WithdrawProcessingObjection(WithdrawProcessingObjectionRequest) returns (WithdrawProcessingObjectionResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "self"
+      resource_type: "user"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // ListProcessingObjections returns every objection the caller holds.
+  //
+  // A READ, and AAL1, for GetProcessingRestriction's reason: somebody must be
+  // able to see the state of their own instruction from an ordinary session, or
+  // the instruction is hard to verify and easy to forget.
+  //
+  // Read from the caller's own stream rather than a projection, so a person who
+  // has just objected is not told the objection has not taken effect while a
+  // projector catches up.
+  rpc ListProcessingObjections(ListProcessingObjectionsRequest) returns (ListProcessingObjectionsResponse) {
     option (chronos.options.v1.authz) = {
       relation: "self"
       resource_type: "user"

@@ -469,6 +469,9 @@ type fakeQueries struct {
 	methodsFn  func(string) ([]app.AuthMethod, error)
 	historyFn  func(string, page.Token, int) (page.Page[app.LoginRecord], error)
 
+	apiKeysFn         func(string, page.Token, int) (page.Page[app.APIKeySummary], error)
+	serviceAccountsFn func(string, page.Token, int) (page.Page[app.ServiceAccountSummary], error)
+
 	calls []queryCall
 }
 
@@ -518,6 +521,34 @@ func (f *fakeQueries) ListLoginHistory(
 		return page.Page[app.LoginRecord]{}, nil
 	}
 	return f.historyFn(subjectID, token, size)
+}
+
+// The two ORG-scoped reads. They take an organization rather than a subject,
+// because the rows they return belong to a tenant and are filtered by row-level
+// security rather than by a predicate this layer writes.
+//
+// The recorded call carries the org in the subjectID slot deliberately: the field
+// is "which principal or tenant did the handler scope this read to", and what a
+// test needs to assert is that the handler passed the RESOLVED scope rather than
+// anything from the request.
+func (f *fakeQueries) ListAPIKeys(
+	_ context.Context, orgID string, token page.Token, size int,
+) (page.Page[app.APIKeySummary], error) {
+	f.record(queryCall{method: "ListAPIKeys", subjectID: orgID, token: token, size: size})
+	if f.apiKeysFn == nil {
+		return page.Page[app.APIKeySummary]{}, nil
+	}
+	return f.apiKeysFn(orgID, token, size)
+}
+
+func (f *fakeQueries) ListServiceAccounts(
+	_ context.Context, orgID string, token page.Token, size int,
+) (page.Page[app.ServiceAccountSummary], error) {
+	f.record(queryCall{method: "ListServiceAccounts", subjectID: orgID, token: token, size: size})
+	if f.serviceAccountsFn == nil {
+		return page.Page[app.ServiceAccountSummary]{}, nil
+	}
+	return f.serviceAccountsFn(orgID, token, size)
 }
 
 type fakeDirectory struct {

@@ -111,6 +111,56 @@ func checkIdempotencyKeyBound(r *reporter, spec map[string]any) {
 // `image/`, a handle with a character class, a URI with its scheme.
 var identifierPattern = regexp.MustCompile(`^\^([a-z][a-z0-9]*)_`)
 
+// isIdentifierShaped narrows identifierPattern to what its own comment claims it
+// detects, and the narrowing was forced by a real value that is not an
+// identifier.
+//
+// An API key travels as `chr_<env>_<key id>_<secret>` (identity.md §10). Its
+// published pattern begins `^chr_`, so the prefix test above matched it and the
+// gate demanded that `internal/platform/ids` register a `chr` Kind — which would
+// have been a lie: a credential is not a prefixed ULID, nothing parses one
+// through `ids.Parse`, and adding the Kind to satisfy the gate would have put a
+// secret's grammar in the identifier registry that `ids.PatternFor` is the
+// authority for.
+//
+// The distinguishing property is structural rather than a name to special-case:
+// an identifier is ONE prefixed segment — `^prefix_<body>$` — and every value in
+// this document that is not one has a further separator at the top level. So the
+// remainder is scanned for a '_' outside a character class, and a pattern that
+// has one is not an identifier.
+//
+// Underscores INSIDE a class do not count: `[A-Za-z0-9_-]` is a base64url
+// alphabet, and treating it as a separator would exempt exactly the kind of
+// pattern this gate exists to check.
+//
+// This does not relax the rule. Every identifier still has to match
+// `ids.PatternFor` exactly, including the drift cases that motivated the gate —
+// an uppercase-only body and a permissive leading character are both single
+// segments and are still caught.
+func isIdentifierShaped(body string) bool {
+	m := identifierPattern.FindStringSubmatch(body)
+	if m == nil {
+		return false
+	}
+	remainder := body[len(m[0]):]
+	inClass := false
+	for i := 0; i < len(remainder); i++ {
+		switch remainder[i] {
+		case '\\':
+			i++ // an escaped character is never a separator
+		case '[':
+			inClass = true
+		case ']':
+			inClass = false
+		case '_':
+			if !inClass {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // checkIdentifierGrammar holds every published identifier to the one grammar
 // internal/platform/ids implements.
 //
@@ -153,11 +203,10 @@ func checkIdentifierGrammar(r *reporter, schemas []schemaAt) {
 		// publish a different grammar for the non-empty case.
 		body, optional := strings.CutPrefix(pattern, "^$|")
 
-		m := identifierPattern.FindStringSubmatch(body)
-		if m == nil {
+		if !isIdentifierShaped(body) {
 			continue
 		}
-		prefix := m[1]
+		prefix := identifierPattern.FindStringSubmatch(body)[1]
 		if _, isKnown := known[prefix]; !isKnown {
 			problems = append(problems, fmt.Sprintf(
 				"%s: publishes identifiers prefixed %q, which internal/platform/ids does not "+

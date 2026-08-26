@@ -83,6 +83,12 @@ func RegisterEvents(codec *eventcodec.JSON) {
 	eventcodec.Register[contract.SessionRevoked](codec)
 	eventcodec.Register[contract.SessionExpired](codec)
 	eventcodec.Register[contract.DeviceRegistered](codec)
+
+	// Service accounts and API keys (identity.md §10).
+	eventcodec.Register[contract.ServiceAccountCreated](codec)
+	eventcodec.Register[contract.ApiKeyCreated](codec)
+	eventcodec.Register[contract.ApiKeyRotated](codec)
+	eventcodec.Register[contract.ApiKeyRevoked](codec)
 }
 
 // RegisterSchemas declares the current schema version of every identity event
@@ -161,6 +167,9 @@ func eventTypes() []string {
 		&contract.SessionCreated{}, &contract.SessionElevated{},
 		&contract.SessionRevoked{}, &contract.SessionExpired{},
 		&contract.DeviceRegistered{},
+
+		&contract.ServiceAccountCreated{}, &contract.ApiKeyCreated{},
+		&contract.ApiKeyRotated{}, &contract.ApiKeyRevoked{},
 	}
 	names := make([]string, len(events))
 	for i, e := range events {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/chronos/chronos-go/internal/modules/compliance/app"
+	"github.com/chronos/chronos-go/internal/modules/compliance/domain"
 	"github.com/chronos/chronos-go/internal/platform/blob"
 	"github.com/chronos/chronos-go/internal/platform/codec"
 )
@@ -65,7 +66,11 @@ func newExports(t *testing.T, p *fakeProfileSource, st *fakeExportStore) *app.Ex
 	e, err := app.NewExports(app.ExportsDeps{
 		Profile: p, Store: st,
 		Prefix: func(s string) string { return "subj" + s },
-		Now:    func() time.Time { return exportNow },
+		// The REAL schedule, not a stub. What this test asserts about the bundle
+		// — that it names invoices — is only meaningful if the set under test is
+		// the one a running system produces.
+		Exemptions: realExemptions(),
+		Now:        func() time.Time { return exportNow },
 	})
 	if err != nil {
 		t.Fatalf("NewExports: %v", err)
@@ -136,16 +141,68 @@ func TestTheBundleStatesWhatIsRetained(t *testing.T) {
 		t.Fatal("the bundle states nothing about what is retained; it lists values and " +
 			"implies they are everything")
 	}
-	var mentionsInvoices bool
+	var invoices app.RetainedRecord
 	for _, r := range bundle.Retained {
-		if strings.Contains(strings.ToLower(r), "invoice") {
-			mentionsInvoices = true
+		if strings.Contains(strings.ToLower(r.DataClass), "invoice") {
+			invoices = r
 		}
 	}
-	if !mentionsInvoices {
-		t.Errorf("the retained list does not mention invoices: %v. They survive under "+
+	if invoices.DataClass == "" {
+		t.Fatalf("the retained list does not mention invoices: %v. They survive under "+
 			"Article 17(3)(b) and a bundle that implies otherwise is a misleading "+
 			"statement about processing", bundle.Retained)
+	}
+
+	// THE LEGAL BASIS IS ITS OWN FIELD, and this is what the format-version bump
+	// bought. It used to be a clause inside an English sentence, so a reader
+	// could display the statement and could not do anything else with it — not
+	// tell which class it was about, not extract the basis, not translate it.
+	if invoices.LegalBasis == "" {
+		t.Error("the invoice exemption states no legal basis. compliance.md §7 requires " +
+			"the DSAR response to say what is retained AND why, and 'why' under the GDPR " +
+			"is an article rather than a business reason")
+	}
+	if !strings.Contains(invoices.LegalBasis, "17(3)(b)") {
+		t.Errorf("the invoice exemption cites %q; tax-law retention rests on Article "+
+			"17(3)(b) and citing anything else states the wrong ground for keeping "+
+			"somebody's data", invoices.LegalBasis)
+	}
+	if invoices.Period == "" {
+		t.Error("the invoice exemption states no retention period. Article 15(1)(d) asks " +
+			"for the envisaged storage period, which is the one thing 'we keep some of it' " +
+			"does not answer")
+	}
+}
+
+// THE BUNDLE STATES ONLY WHAT SURVIVES, NOT THE WHOLE SCHEDULE.
+//
+// The retention schedule has six classes and two of them are erased with the
+// subject. Listing those in a portability bundle under a heading that says what
+// is RETAINED would tell somebody their session logs are kept when they are
+// destroyed — the same misleading-statement failure as the omission, pointing
+// the other way.
+func TestTheBundleDoesNotListWhatIsErased(t *testing.T) {
+	store := &fakeExportStore{}
+	if _, err := newExports(t, &fakeProfileSource{}, store).Produce(
+		context.Background(), "subj_1"); err != nil {
+		t.Fatal(err)
+	}
+
+	bundle, err := codec.Tolerant[app.Bundle](store.putBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range bundle.Retained {
+		if r.Disposition == string(domain.DispositionErased) {
+			t.Errorf("the bundle lists %q as retained, and its disposition is %q — the "+
+				"person is being told we keep something we destroy",
+				r.DataClass, r.Disposition)
+		}
+	}
+	if len(bundle.Retained) >= len(domain.RetentionSchedule()) {
+		t.Errorf("the bundle lists %d classes and the whole schedule has %d; the erased "+
+			"classes are being published as exemptions",
+			len(bundle.Retained), len(domain.RetentionSchedule()))
 	}
 }
 
@@ -272,8 +329,9 @@ func TestAnEmptyPrefixIsRefused(t *testing.T) {
 	store := &fakeExportStore{}
 	e, err := app.NewExports(app.ExportsDeps{
 		Profile: &fakeProfileSource{}, Store: store,
-		Prefix: func(string) string { return "" },
-		Now:    func() time.Time { return exportNow },
+		Prefix:     func(string) string { return "" },
+		Exemptions: realExemptions(),
+		Now:        func() time.Time { return exportNow },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -292,8 +350,9 @@ func TestAnEmptyPrefixIsRefused(t *testing.T) {
 func TestExportsRefusesAnIncompleteWiring(t *testing.T) {
 	full := app.ExportsDeps{
 		Profile: &fakeProfileSource{}, Store: &fakeExportStore{},
-		Prefix: func(s string) string { return "p" + s },
-		Now:    func() time.Time { return exportNow },
+		Prefix:     func(s string) string { return "p" + s },
+		Exemptions: realExemptions(),
+		Now:        func() time.Time { return exportNow },
 	}
 	if _, err := app.NewExports(full); err != nil {
 		t.Fatalf("a complete wiring was refused: %v", err)
@@ -304,6 +363,11 @@ func TestExportsRefusesAnIncompleteWiring(t *testing.T) {
 		"store":   func(d *app.ExportsDeps) { d.Store = nil },
 		"prefix":  func(d *app.ExportsDeps) { d.Prefix = nil },
 		"clock":   func(d *app.ExportsDeps) { d.Now = nil },
+		// A bundle built with no exemption resolver would list values and say
+		// nothing about what survives — an accurate file and a misleading answer
+		// to Article 15(1). Refused at construction rather than discovered by a
+		// person reading their own export.
+		"exemptions": func(d *app.ExportsDeps) { d.Exemptions = nil },
 	} {
 		t.Run(name, func(t *testing.T) {
 			deps := full

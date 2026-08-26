@@ -303,6 +303,69 @@ func (FailureReason) EnumDescriptor() ([]byte, []int) {
 	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{2}
 }
 
+// ApiKeyOwnerKind is the sort of principal an API key acts as.
+//
+// A tagged pair with the owner id rather than two optional id fields. Two
+// optional fields admit "both set" and "neither set", and both of those have to
+// be interpreted by whoever reads them — which puts the interpretation in every
+// client instead of in the schema.
+type ApiKeyOwnerKind int32
+
+const (
+	// Unset. Never returned by the server: a stored key always has exactly one
+	// owner of a known kind, and a value here would mean a row this build cannot
+	// interpret.
+	ApiKeyOwnerKind_API_KEY_OWNER_KIND_UNSPECIFIED ApiKeyOwnerKind = 0
+	// A personal access token. It acts as the person who created it, narrowed by
+	// its scopes, and it dies with their account — which is what makes it the
+	// wrong choice for anything a team depends on.
+	ApiKeyOwnerKind_API_KEY_OWNER_KIND_USER ApiKeyOwnerKind = 1
+	// An integration credential. It acts as a service account owned by the
+	// organization, so it survives the departure of whoever created it.
+	ApiKeyOwnerKind_API_KEY_OWNER_KIND_SERVICE_ACCOUNT ApiKeyOwnerKind = 2
+)
+
+// Enum value maps for ApiKeyOwnerKind.
+var (
+	ApiKeyOwnerKind_name = map[int32]string{
+		0: "API_KEY_OWNER_KIND_UNSPECIFIED",
+		1: "API_KEY_OWNER_KIND_USER",
+		2: "API_KEY_OWNER_KIND_SERVICE_ACCOUNT",
+	}
+	ApiKeyOwnerKind_value = map[string]int32{
+		"API_KEY_OWNER_KIND_UNSPECIFIED":     0,
+		"API_KEY_OWNER_KIND_USER":            1,
+		"API_KEY_OWNER_KIND_SERVICE_ACCOUNT": 2,
+	}
+)
+
+func (x ApiKeyOwnerKind) Enum() *ApiKeyOwnerKind {
+	p := new(ApiKeyOwnerKind)
+	*p = x
+	return p
+}
+
+func (x ApiKeyOwnerKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ApiKeyOwnerKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_chronos_identity_v1_identity_proto_enumTypes[3].Descriptor()
+}
+
+func (ApiKeyOwnerKind) Type() protoreflect.EnumType {
+	return &file_chronos_identity_v1_identity_proto_enumTypes[3]
+}
+
+func (x ApiKeyOwnerKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ApiKeyOwnerKind.Descriptor instead.
+func (ApiKeyOwnerKind) EnumDescriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{3}
+}
+
 // RegisterRequest claims an address and creates the account that claims it.
 //
 // It creates NO CREDENTIAL. The account it produces is Pending, passwordless
@@ -5379,6 +5442,1092 @@ func (x *ListFederatedProvidersResponse) GetProviders() []string {
 	return nil
 }
 
+// CreateServiceAccountRequest names a new non-human principal.
+type CreateServiceAccountRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// A machine-readable label, unique within the organization.
+	//
+	// Lower-case snake, and the pattern is an ADR-002 control rather than a
+	// formatting preference: this value enters the event log in cleartext, the log
+	// is append-only, and free text is exactly where personal data arrives in a
+	// field like this — "alice's deploy bot" would put a colleague's name into a
+	// record erasure can never reach. `deploy_bot` cannot hold a sentence.
+	//
+	// The same rule already governs every `reason` field in this file.
+	Name          string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateServiceAccountRequest) Reset() {
+	*x = CreateServiceAccountRequest{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[76]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateServiceAccountRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateServiceAccountRequest) ProtoMessage() {}
+
+func (x *CreateServiceAccountRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[76]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateServiceAccountRequest.ProtoReflect.Descriptor instead.
+func (*CreateServiceAccountRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{76}
+}
+
+func (x *CreateServiceAccountRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+// CreateServiceAccountResponse is the principal that now exists, and holds no
+// credential.
+//
+// There is deliberately no token here. Creating a principal and giving it a way
+// in are two decisions, the second is the one that changes what can happen, and
+// an incident timeline has to be able to tell them apart. Call CreateApiKey.
+type CreateServiceAccountResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The principal's identifier. It is BOTH the account id and the id that
+	// appears in events, in tuples and in an API key's owner field — a service
+	// account has no personal data, so it needs no pseudonym to stand in for any.
+	ServiceAccountId string `protobuf:"bytes,1,opt,name=service_account_id,json=serviceAccountId,proto3" json:"service_account_id,omitempty"`
+	// The name, echoed so a client can render the row it just created without a
+	// second call.
+	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	// When it was created, UTC.
+	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateServiceAccountResponse) Reset() {
+	*x = CreateServiceAccountResponse{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[77]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateServiceAccountResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateServiceAccountResponse) ProtoMessage() {}
+
+func (x *CreateServiceAccountResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[77]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateServiceAccountResponse.ProtoReflect.Descriptor instead.
+func (*CreateServiceAccountResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{77}
+}
+
+func (x *CreateServiceAccountResponse) GetServiceAccountId() string {
+	if x != nil {
+		return x.ServiceAccountId
+	}
+	return ""
+}
+
+func (x *CreateServiceAccountResponse) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *CreateServiceAccountResponse) GetCreatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return nil
+}
+
+// ListServiceAccountsRequest is one page of the organization's non-human
+// principals.
+type ListServiceAccountsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// How many entries to return. Zero means the server's default (50), and the
+	// server CLAMPS anything above its maximum (200) rather than refusing it, so a
+	// client must read the returned page's length rather than assume it got what
+	// it asked for. See ListSessionsRequest.page_size for why the ceiling is an
+	// annotation and only the negative half is a rule.
+	PageSize int32 `protobuf:"varint,1,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
+	// An opaque cursor from a previous response's next_page_token. Empty starts at
+	// the beginning; a token from a different list is an error rather than a
+	// silent restart.
+	PageToken     string `protobuf:"bytes,2,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListServiceAccountsRequest) Reset() {
+	*x = ListServiceAccountsRequest{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[78]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListServiceAccountsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListServiceAccountsRequest) ProtoMessage() {}
+
+func (x *ListServiceAccountsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[78]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListServiceAccountsRequest.ProtoReflect.Descriptor instead.
+func (*ListServiceAccountsRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{78}
+}
+
+func (x *ListServiceAccountsRequest) GetPageSize() int32 {
+	if x != nil {
+		return x.PageSize
+	}
+	return 0
+}
+
+func (x *ListServiceAccountsRequest) GetPageToken() string {
+	if x != nil {
+		return x.PageToken
+	}
+	return ""
+}
+
+// ServiceAccount is one non-human principal, as a management screen shows it.
+type ServiceAccount struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The principal's identifier, and what CreateApiKey names as an owner.
+	ServiceAccountId string `protobuf:"bytes,1,opt,name=service_account_id,json=serviceAccountId,proto3" json:"service_account_id,omitempty"`
+	// The machine-readable label, unique within the organization.
+	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	// The pseudonym of the admin who created it. A pseudonym and never a name: the
+	// projection holds no personal data, and a client renders a person by asking
+	// the profile service for this subject (ADR-002, compliance.md §1).
+	CreatedBy string `protobuf:"bytes,3,opt,name=created_by,json=createdBy,proto3" json:"created_by,omitempty"`
+	// When it was created, UTC. The list is ordered by it, so a caller cannot page
+	// without the server having sorted on something stable.
+	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ServiceAccount) Reset() {
+	*x = ServiceAccount{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[79]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ServiceAccount) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ServiceAccount) ProtoMessage() {}
+
+func (x *ServiceAccount) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[79]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ServiceAccount.ProtoReflect.Descriptor instead.
+func (*ServiceAccount) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{79}
+}
+
+func (x *ServiceAccount) GetServiceAccountId() string {
+	if x != nil {
+		return x.ServiceAccountId
+	}
+	return ""
+}
+
+func (x *ServiceAccount) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ServiceAccount) GetCreatedBy() string {
+	if x != nil {
+		return x.CreatedBy
+	}
+	return ""
+}
+
+func (x *ServiceAccount) GetCreatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return nil
+}
+
+// ListServiceAccountsResponse is one page, newest first.
+type ListServiceAccountsResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The page, newest first. The ceiling is the page size the server clamps to.
+	ServiceAccounts []*ServiceAccount `protobuf:"bytes,1,rep,name=service_accounts,json=serviceAccounts,proto3" json:"service_accounts,omitempty"`
+	// The cursor for the next page. EMPTY MEANS DONE — a client must not infer the
+	// end from a short page, because a clamped page size makes short pages
+	// ordinary.
+	NextPageToken string `protobuf:"bytes,2,opt,name=next_page_token,json=nextPageToken,proto3" json:"next_page_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListServiceAccountsResponse) Reset() {
+	*x = ListServiceAccountsResponse{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[80]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListServiceAccountsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListServiceAccountsResponse) ProtoMessage() {}
+
+func (x *ListServiceAccountsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[80]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListServiceAccountsResponse.ProtoReflect.Descriptor instead.
+func (*ListServiceAccountsResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{80}
+}
+
+func (x *ListServiceAccountsResponse) GetServiceAccounts() []*ServiceAccount {
+	if x != nil {
+		return x.ServiceAccounts
+	}
+	return nil
+}
+
+func (x *ListServiceAccountsResponse) GetNextPageToken() string {
+	if x != nil {
+		return x.NextPageToken
+	}
+	return ""
+}
+
+// CreateApiKeyRequest mints a machine credential in the caller's organization.
+type CreateApiKeyRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The service account this key acts as. EMPTY means the key is a personal
+	// access token owned by the caller.
+	//
+	// The default is deliberately the NARROWER of the two: a key that defaulted to
+	// a service account would be a durable, organization-owned credential created
+	// by a client that simply did not send the field, and it would outlive the
+	// person who created it.
+	//
+	// There is deliberately NO field naming a user as the owner. A personal token
+	// is always the caller's own — an admin able to name a colleague could mint a
+	// credential that acts as them, which is impersonation with an audit trail
+	// saying the colleague did it.
+	ServiceAccountId string `protobuf:"bytes,1,opt,name=service_account_id,json=serviceAccountId,proto3" json:"service_account_id,omitempty"`
+	// The coarse capability list, `<resource type>:read` or
+	// `<resource type>:write`.
+	//
+	// A key's effective permission is the INTERSECTION of these and its owner's
+	// access (access.md §4), so a scope can only ever NARROW — a key can never
+	// exceed the principal it acts as, and narrowing the owner narrows every key
+	// they hold. `:write` implies `:read` on the same resource type; nothing else
+	// is implied.
+	//
+	// Required and non-empty. A key with no scopes can do nothing, which is
+	// useless rather than dangerous — but it is also exactly what a list dropped
+	// between the client and the server looks like, and the second reading is the
+	// one worth refusing.
+	//
+	// Fine-grained, per-resource permission is NOT expressible here and never will
+	// be: that is OpenFGA's, and a scope vocabulary that grew a third axis would
+	// be a second authorization model evaluated in Go, drifting from the first.
+	Scopes []string `protobuf:"bytes,2,rep,name=scopes,proto3" json:"scopes,omitempty"`
+	// How long the key lives, in seconds. Zero means the server's default
+	// (90 days).
+	//
+	// Expiry is MANDATORY — identity.md §10 makes it a requirement rather than an
+	// option — and the ceiling is one year. Both ends are REFUSED rather than
+	// clamped, unlike a page size: an over-long lifetime is not a request the
+	// server can satisfy with less, because the caller would then hold a
+	// credential that dies at a date they were never told.
+	LifetimeSeconds int64 `protobuf:"varint,3,opt,name=lifetime_seconds,json=lifetimeSeconds,proto3" json:"lifetime_seconds,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *CreateApiKeyRequest) Reset() {
+	*x = CreateApiKeyRequest{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[81]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateApiKeyRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateApiKeyRequest) ProtoMessage() {}
+
+func (x *CreateApiKeyRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[81]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateApiKeyRequest.ProtoReflect.Descriptor instead.
+func (*CreateApiKeyRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{81}
+}
+
+func (x *CreateApiKeyRequest) GetServiceAccountId() string {
+	if x != nil {
+		return x.ServiceAccountId
+	}
+	return ""
+}
+
+func (x *CreateApiKeyRequest) GetScopes() []string {
+	if x != nil {
+		return x.Scopes
+	}
+	return nil
+}
+
+func (x *CreateApiKeyRequest) GetLifetimeSeconds() int64 {
+	if x != nil {
+		return x.LifetimeSeconds
+	}
+	return 0
+}
+
+// CreateApiKeyResponse carries the token back ONCE.
+//
+// Only the digest is stored, so this is the only moment the token exists
+// anywhere this system can reach. A caller that loses it rotates the key, which
+// is the correct outcome — an endpoint that could re-display it would turn a
+// stolen admin session into a permanent copy of every credential the
+// organization holds, which is exactly what GenerateRecoveryCodesResponse
+// refuses for the same reason.
+type CreateApiKeyResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The key's public identifier. It is what RotateApiKey and RevokeApiKey name,
+	// and it is NOT secret: it travels inside the token's own public segment so a
+	// leaked credential can be attributed and revoked without anybody presenting
+	// the secret.
+	KeyId string `protobuf:"bytes,1,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"`
+	// The credential. Returned ONLY here. Never log it, never store it in a
+	// repository, and show it once.
+	//
+	// `chr_<env>_<key id>_<secret>`. The `chr_` prefix is there so secret scanners
+	// — GitHub's, a pre-commit hook, a log scrubber — can recognise one of these
+	// in a paste without knowing anything else about it, which is the whole of
+	// identity.md §10's leak-response story.
+	//
+	// The bound is published rather than enforced: this is a response field, and
+	// stating a length a client can size a buffer from is the point. The secret is
+	// 43 characters of unpadded base64url over 256 bits of entropy.
+	Token string `protobuf:"bytes,2,opt,name=token,proto3" json:"token,omitempty"`
+	// What the key acts as.
+	OwnerKind ApiKeyOwnerKind `protobuf:"varint,3,opt,name=owner_kind,json=ownerKind,proto3,enum=chronos.identity.v1.ApiKeyOwnerKind" json:"owner_kind,omitempty"`
+	// The principal it acts as: a `svc_` service account, or the caller's own
+	// `subj_` pseudonym for a personal access token.
+	OwnerId string `protobuf:"bytes,4,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"`
+	// The capability list as stored: sorted and deduplicated, which is why it may
+	// not be the order it was sent in.
+	Scopes []string `protobuf:"bytes,5,rep,name=scopes,proto3" json:"scopes,omitempty"`
+	// When the key stops working, UTC. Mandatory and never zero.
+	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateApiKeyResponse) Reset() {
+	*x = CreateApiKeyResponse{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[82]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateApiKeyResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateApiKeyResponse) ProtoMessage() {}
+
+func (x *CreateApiKeyResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[82]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateApiKeyResponse.ProtoReflect.Descriptor instead.
+func (*CreateApiKeyResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{82}
+}
+
+func (x *CreateApiKeyResponse) GetKeyId() string {
+	if x != nil {
+		return x.KeyId
+	}
+	return ""
+}
+
+func (x *CreateApiKeyResponse) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+func (x *CreateApiKeyResponse) GetOwnerKind() ApiKeyOwnerKind {
+	if x != nil {
+		return x.OwnerKind
+	}
+	return ApiKeyOwnerKind_API_KEY_OWNER_KIND_UNSPECIFIED
+}
+
+func (x *CreateApiKeyResponse) GetOwnerId() string {
+	if x != nil {
+		return x.OwnerId
+	}
+	return ""
+}
+
+func (x *CreateApiKeyResponse) GetScopes() []string {
+	if x != nil {
+		return x.Scopes
+	}
+	return nil
+}
+
+func (x *CreateApiKeyResponse) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
+// RotateApiKeyRequest replaces a key's secret without replacing the key.
+//
+// The identifier, the scopes, the organization binding and every grant that
+// names the owner are unchanged. That is the point: a rotation that produced a
+// new key id would require every consumer to be reconfigured, which is the cost
+// rotation exists to avoid — and a system whose rotation is expensive is a
+// system whose secrets are never rotated.
+type RotateApiKeyRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The key to rotate. A key in another organization answers exactly as one that
+	// does not exist: a key id is not a secret, so telling the two apart would
+	// turn this into a probe for which key ids exist across every tenant.
+	KeyId string `protobuf:"bytes,1,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"`
+	// How long the SUPERSEDED secret keeps working, in seconds. Zero means the
+	// server's default (24 hours) unless `immediate` is set.
+	//
+	// The overlap is what makes rotation something anybody actually does. Without
+	// one, revoke-then-issue leaves a window in which neither secret works and
+	// every consumer of the key fails — so rotation becomes an outage that has to
+	// be scheduled, which means it does not happen. With an UNBOUNDED one the old
+	// secret is live forever, because nobody remembers to remove it, and a
+	// rotation performed BECAUSE a secret leaked would not have removed the leaked
+	// secret. So it is a recorded DEADLINE, capped at seven days.
+	OverlapSeconds int64 `protobuf:"varint,2,opt,name=overlap_seconds,json=overlapSeconds,proto3" json:"overlap_seconds,omitempty"`
+	// Retire the old secret AT ONCE. This is the leak response.
+	//
+	// A separate flag rather than "overlap_seconds = 0", because a zero has two
+	// readings with opposite consequences — the default keeps a leaked secret
+	// alive for a day, and zero breaks every consumer that has not reconfigured —
+	// and an unset field would resolve to whichever the implementation happened to
+	// pick.
+	Immediate bool `protobuf:"varint,3,opt,name=immediate,proto3" json:"immediate,omitempty"`
+	// How long the NEW secret lives, in seconds. Zero means the server's default
+	// (90 days), capped at one year exactly as CreateApiKeyRequest is.
+	//
+	// Rotation re-arms the expiry clock rather than inheriting the old deadline: a
+	// key rotated on its last day that kept the old one would expire hours after
+	// everybody had reconfigured for it.
+	LifetimeSeconds int64 `protobuf:"varint,4,opt,name=lifetime_seconds,json=lifetimeSeconds,proto3" json:"lifetime_seconds,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *RotateApiKeyRequest) Reset() {
+	*x = RotateApiKeyRequest{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[83]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RotateApiKeyRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RotateApiKeyRequest) ProtoMessage() {}
+
+func (x *RotateApiKeyRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[83]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RotateApiKeyRequest.ProtoReflect.Descriptor instead.
+func (*RotateApiKeyRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{83}
+}
+
+func (x *RotateApiKeyRequest) GetKeyId() string {
+	if x != nil {
+		return x.KeyId
+	}
+	return ""
+}
+
+func (x *RotateApiKeyRequest) GetOverlapSeconds() int64 {
+	if x != nil {
+		return x.OverlapSeconds
+	}
+	return 0
+}
+
+func (x *RotateApiKeyRequest) GetImmediate() bool {
+	if x != nil {
+		return x.Immediate
+	}
+	return false
+}
+
+func (x *RotateApiKeyRequest) GetLifetimeSeconds() int64 {
+	if x != nil {
+		return x.LifetimeSeconds
+	}
+	return 0
+}
+
+// RotateApiKeyResponse carries the new token back once, and says when the old
+// one dies.
+type RotateApiKeyResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The new credential. Returned ONLY here — see CreateApiKeyResponse.token.
+	Token string `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	// When the SUPERSEDED secret stops working, UTC. Equal to the rotation instant
+	// for an immediate rotation.
+	//
+	// Returned so a client can show it. "Your old key works until 14:02 tomorrow"
+	// is the sentence that makes a rotation safe to perform, and a client that had
+	// to compute it from a policy constant would be computing a number this server
+	// is free to change.
+	PreviousRetiresAt *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=previous_retires_at,json=previousRetiresAt,proto3" json:"previous_retires_at,omitempty"`
+	// When the NEW secret stops working, UTC.
+	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RotateApiKeyResponse) Reset() {
+	*x = RotateApiKeyResponse{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[84]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RotateApiKeyResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RotateApiKeyResponse) ProtoMessage() {}
+
+func (x *RotateApiKeyResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[84]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RotateApiKeyResponse.ProtoReflect.Descriptor instead.
+func (*RotateApiKeyResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{84}
+}
+
+func (x *RotateApiKeyResponse) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+func (x *RotateApiKeyResponse) GetPreviousRetiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.PreviousRetiresAt
+	}
+	return nil
+}
+
+func (x *RotateApiKeyResponse) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
+// RevokeApiKeyRequest ends a key and every secret it ever had.
+type RevokeApiKeyRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The key to revoke. A key in another organization answers as one that does
+	// not exist — see RotateApiKeyRequest.key_id.
+	KeyId string `protobuf:"bytes,1,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"`
+	// A short machine-readable label recorded with the revocation, for example
+	// `leaked` or `owner_left`. Optional.
+	//
+	// It enters an event, so the pattern is what makes "machine-readable" and "no
+	// free text" true rather than merely stated: lower-case snake, so a sentence
+	// somebody typed — which is where personal data arrives in a field like this —
+	// cannot reach an append-only log (ADR-002).
+	Reason        string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RevokeApiKeyRequest) Reset() {
+	*x = RevokeApiKeyRequest{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[85]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokeApiKeyRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokeApiKeyRequest) ProtoMessage() {}
+
+func (x *RevokeApiKeyRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[85]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokeApiKeyRequest.ProtoReflect.Descriptor instead.
+func (*RevokeApiKeyRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{85}
+}
+
+func (x *RevokeApiKeyRequest) GetKeyId() string {
+	if x != nil {
+		return x.KeyId
+	}
+	return ""
+}
+
+func (x *RevokeApiKeyRequest) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+// RevokeApiKeyResponse reports what the revocation did.
+type RevokeApiKeyResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// False when the key was already revoked. Nothing was appended, and it is NOT
+	// an error: the caller wanted the key unusable and it is.
+	Changed bool `protobuf:"varint,1,opt,name=changed,proto3" json:"changed,omitempty"`
+	// How many stored secrets were destroyed. Usually one, or two during a
+	// rotation overlap, and zero for a key whose secrets had already been swept.
+	//
+	// It is reported rather than hidden because it is the evidence that the
+	// IMMEDIATE half of the revocation ran. The event alone would leave the key
+	// usable until the projector caught up, which for a credential with no
+	// short-lived access token in front of it is far too long.
+	SecretsDestroyed int32 `protobuf:"varint,2,opt,name=secrets_destroyed,json=secretsDestroyed,proto3" json:"secrets_destroyed,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *RevokeApiKeyResponse) Reset() {
+	*x = RevokeApiKeyResponse{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[86]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokeApiKeyResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokeApiKeyResponse) ProtoMessage() {}
+
+func (x *RevokeApiKeyResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[86]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokeApiKeyResponse.ProtoReflect.Descriptor instead.
+func (*RevokeApiKeyResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{86}
+}
+
+func (x *RevokeApiKeyResponse) GetChanged() bool {
+	if x != nil {
+		return x.Changed
+	}
+	return false
+}
+
+func (x *RevokeApiKeyResponse) GetSecretsDestroyed() int32 {
+	if x != nil {
+		return x.SecretsDestroyed
+	}
+	return 0
+}
+
+// ListApiKeysRequest is one page of the organization's keys.
+type ListApiKeysRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// How many entries to return. Zero means the server's default (50), clamped at
+	// 200 — see ListSessionsRequest.page_size.
+	PageSize int32 `protobuf:"varint,1,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
+	// An opaque cursor from a previous response's next_page_token. Empty starts at
+	// the beginning.
+	PageToken     string `protobuf:"bytes,2,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListApiKeysRequest) Reset() {
+	*x = ListApiKeysRequest{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[87]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListApiKeysRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListApiKeysRequest) ProtoMessage() {}
+
+func (x *ListApiKeysRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[87]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListApiKeysRequest.ProtoReflect.Descriptor instead.
+func (*ListApiKeysRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{87}
+}
+
+func (x *ListApiKeysRequest) GetPageSize() int32 {
+	if x != nil {
+		return x.PageSize
+	}
+	return 0
+}
+
+func (x *ListApiKeysRequest) GetPageToken() string {
+	if x != nil {
+		return x.PageToken
+	}
+	return ""
+}
+
+// ApiKey is one machine credential, as a management screen shows it.
+//
+// There is no token and no digest, and no field this message could grow that
+// would hold one: the statement behind it selects no secret column. A key list
+// that returned anything derived from the credential would put it on the one
+// screen whose entire purpose is to let somebody revoke it — the same rule the
+// device list follows.
+type ApiKey struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The key's public identifier.
+	KeyId string `protobuf:"bytes,1,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"`
+	// What the key acts as.
+	OwnerKind ApiKeyOwnerKind `protobuf:"varint,2,opt,name=owner_kind,json=ownerKind,proto3,enum=chronos.identity.v1.ApiKeyOwnerKind" json:"owner_kind,omitempty"`
+	// The principal it acts as: a `svc_` service account, or a `subj_` pseudonym
+	// for a personal access token.
+	OwnerId string `protobuf:"bytes,3,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"`
+	// The capability list, sorted.
+	Scopes []string `protobuf:"bytes,4,rep,name=scopes,proto3" json:"scopes,omitempty"`
+	// When the key stops working, UTC.
+	ExpiresAt *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	// When it was revoked, UTC. Unset for a live key.
+	//
+	// Revoked keys are LISTED, deliberately. The screen's question is "what
+	// credentials exist against this organization, and what happened to them" —
+	// hiding the revoked ones would remove the evidence that a revocation took
+	// effect, which is what somebody checks immediately after performing one.
+	RevokedAt *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=revoked_at,json=revokedAt,proto3" json:"revoked_at,omitempty"`
+	// When its secret was last replaced, UTC. Unset for a key never rotated.
+	RotatedAt *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=rotated_at,json=rotatedAt,proto3" json:"rotated_at,omitempty"`
+	// When a request last presented this key, UTC. Unset for a key never used.
+	//
+	// DELIBERATELY APPROXIMATE: it advances at most once per key per minute, and
+	// there is no event behind it. An event per REQUEST would make the log grow
+	// with traffic rather than with state, and the cost would land at rebuild time
+	// — the recovery procedure for every projection (identity.md §13). "Last used
+	// about a minute ago" is the whole requirement, and a projection rebuild
+	// clears this column, which loses a hint and no fact.
+	LastUsedAt *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=last_used_at,json=lastUsedAt,proto3" json:"last_used_at,omitempty"`
+	// The pseudonym of the admin who minted it. A pseudonym and never a name.
+	CreatedBy string `protobuf:"bytes,9,opt,name=created_by,json=createdBy,proto3" json:"created_by,omitempty"`
+	// When it was minted, UTC. The list is ordered by it.
+	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ApiKey) Reset() {
+	*x = ApiKey{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[88]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ApiKey) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ApiKey) ProtoMessage() {}
+
+func (x *ApiKey) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[88]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ApiKey.ProtoReflect.Descriptor instead.
+func (*ApiKey) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{88}
+}
+
+func (x *ApiKey) GetKeyId() string {
+	if x != nil {
+		return x.KeyId
+	}
+	return ""
+}
+
+func (x *ApiKey) GetOwnerKind() ApiKeyOwnerKind {
+	if x != nil {
+		return x.OwnerKind
+	}
+	return ApiKeyOwnerKind_API_KEY_OWNER_KIND_UNSPECIFIED
+}
+
+func (x *ApiKey) GetOwnerId() string {
+	if x != nil {
+		return x.OwnerId
+	}
+	return ""
+}
+
+func (x *ApiKey) GetScopes() []string {
+	if x != nil {
+		return x.Scopes
+	}
+	return nil
+}
+
+func (x *ApiKey) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
+func (x *ApiKey) GetRevokedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.RevokedAt
+	}
+	return nil
+}
+
+func (x *ApiKey) GetRotatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.RotatedAt
+	}
+	return nil
+}
+
+func (x *ApiKey) GetLastUsedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastUsedAt
+	}
+	return nil
+}
+
+func (x *ApiKey) GetCreatedBy() string {
+	if x != nil {
+		return x.CreatedBy
+	}
+	return ""
+}
+
+func (x *ApiKey) GetCreatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return nil
+}
+
+// ListApiKeysResponse is one page, newest first, revoked keys included.
+type ListApiKeysResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The page, newest first. The ceiling is the page size the server clamps to.
+	ApiKeys []*ApiKey `protobuf:"bytes,1,rep,name=api_keys,json=apiKeys,proto3" json:"api_keys,omitempty"`
+	// The cursor for the next page. EMPTY MEANS DONE.
+	NextPageToken string `protobuf:"bytes,2,opt,name=next_page_token,json=nextPageToken,proto3" json:"next_page_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListApiKeysResponse) Reset() {
+	*x = ListApiKeysResponse{}
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[89]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListApiKeysResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListApiKeysResponse) ProtoMessage() {}
+
+func (x *ListApiKeysResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_identity_v1_identity_proto_msgTypes[89]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListApiKeysResponse.ProtoReflect.Descriptor instead.
+func (*ListApiKeysResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_identity_v1_identity_proto_rawDescGZIP(), []int{89}
+}
+
+func (x *ListApiKeysResponse) GetApiKeys() []*ApiKey {
+	if x != nil {
+		return x.ApiKeys
+	}
+	return nil
+}
+
+func (x *ListApiKeysResponse) GetNextPageToken() string {
+	if x != nil {
+		return x.NextPageToken
+	}
+	return ""
+}
+
 var File_chronos_identity_v1_identity_proto protoreflect.FileDescriptor
 
 const file_chronos_identity_v1_identity_proto_rawDesc = "" +
@@ -5667,7 +6816,87 @@ const file_chronos_identity_v1_identity_proto_rawDesc = "" +
 	"\x1dListFederatedProvidersRequest\"q\n" +
 	"\x1eListFederatedProvidersResponse\x12O\n" +
 	"\tproviders\x18\x01 \x03(\tB1\xbaG\x11:\f\x12\n" +
-	"['google']\x90\x01\x10\xbaH\x1a\x92\x01\x17\x10\x10\"\x13r\x11\x18 2\r^[a-z0-9_-]+$R\tproviders*\xac\x01\n" +
+	"['google']\x90\x01\x10\xbaH\x1a\x92\x01\x17\x10\x10\"\x13r\x11\x18 2\r^[a-z0-9_-]+$R\tproviders\"a\n" +
+	"\x1bCreateServiceAccountRequest\x12B\n" +
+	"\x04name\x18\x01 \x01(\tB.\xbaG\x0e:\f\x12\n" +
+	"deploy_bot\xbaH\x1a\xc8\x01\x01r\x15\x18@2\x11^[a-z][a-z0-9_]*$R\x04name\"\x9c\x02\n" +
+	"\x1cCreateServiceAccountResponse\x12}\n" +
+	"\x12service_account_id\x18\x01 \x01(\tBO\xbaG\": \x12\x1esvc_01ARZ3NDEKTSV4RRFFQ69G5FAV\xbaH'r%\x18\x1e2!^svc_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\x10serviceAccountId\x12B\n" +
+	"\x04name\x18\x02 \x01(\tB.\xbaG\x0e:\f\x12\n" +
+	"deploy_bot\xbaH\x1ar\x18\x18@2\x14^$|^[a-z][a-z0-9_]*$R\x04name\x129\n" +
+	"\n" +
+	"created_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\xc8\x01\n" +
+	"\x1aListServiceAccountsRequest\x126\n" +
+	"\tpage_size\x18\x01 \x01(\x05B\x19\xbaG\x0f:\x04\x12\x0250Y\x00\x00\x00\x00\x00\x00i@\xbaH\x04\x1a\x02(\x00R\bpageSize\x12r\n" +
+	"\n" +
+	"page_token\x18\x02 \x01(\tBS\xbaG6:4\x122PLACEHOLDER-opaque-cursor-from-a-previous-response\xbaH\x17r\x15\x18\x80\b2\x10^[A-Za-z0-9_-]*$R\tpageToken\"\x83\x03\n" +
+	"\x0eServiceAccount\x12}\n" +
+	"\x12service_account_id\x18\x01 \x01(\tBO\xbaG\": \x12\x1esvc_01ARZ3NDEKTSV4RRFFQ69G5FAV\xbaH'r%\x18\x1e2!^svc_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\x10serviceAccountId\x12B\n" +
+	"\x04name\x18\x02 \x01(\tB.\xbaG\x0e:\f\x12\n" +
+	"deploy_bot\xbaH\x1ar\x18\x18@2\x14^$|^[a-z][a-z0-9_]*$R\x04name\x12s\n" +
+	"\n" +
+	"created_by\x18\x03 \x01(\tBT\xbaG#:!\x12\x1fsubj_01ARZ3NDEKTSV4RRFFQ69G5FAV\xbaH+r)\x18\x1f2%^$|^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\tcreatedBy\x129\n" +
+	"\n" +
+	"created_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\xee\x01\n" +
+	"\x1bListServiceAccountsResponse\x12Y\n" +
+	"\x10service_accounts\x18\x01 \x03(\v2#.chronos.identity.v1.ServiceAccountB\t\xbaH\x06\x92\x01\x03\x10\xc8\x01R\x0fserviceAccounts\x12t\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tBL\xbaG/:-\x12+PLACEHOLDER-opaque-cursor-for-the-next-page\xbaH\x17r\x15\x18\x80\b2\x10^[A-Za-z0-9_-]*$R\rnextPageToken\"\xab\x02\n" +
+	"\x13CreateApiKeyRequest\x12\x80\x01\n" +
+	"\x12service_account_id\x18\x01 \x01(\tBR\xbaG\": \x12\x1esvc_01ARZ3NDEKTSV4RRFFQ69G5FAV\xbaH*r(\x18\x1e2$^$|^svc_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\x10serviceAccountId\x12J\n" +
+	"\x06scopes\x18\x02 \x03(\tB2\xbaH/\x92\x01,\b\x01\x10 \x18\x01\"$r\"\x18@2\x1e^[a-z][a-z0-9_]*:(read|write)$R\x06scopes\x12E\n" +
+	"\x10lifetime_seconds\x18\x03 \x01(\x03B\x1a\xbaG\v:\t\x12\a7776000\xbaH\t\"\a\x18\x80\xe7\x84\x0f(\x00R\x0flifetimeSeconds\"\xfc\x04\n" +
+	"\x14CreateApiKeyResponse\x12f\n" +
+	"\x06key_id\x18\x01 \x01(\tBO\xbaG\": \x12\x1ekey_01ARZ3NDEKTSV4RRFFQ69G5FAV\xbaH'r%\x18\x1e2!^key_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\x05keyId\x12\xc4\x01\n" +
+	"\x05token\x18\x02 \x01(\tB\xad\x01\xbaG\xa9\x01:V\x12Tchr_live_key_01ARZ3NDEKTSV4RRFFQ69G5FAV_PLACEHOLDERPLACEHOLDERPLACEHOLDERPLACEHOLDERx\x80\x01\x8a\x01K^chr_[a-z][a-z0-9]{0,15}_key_[0-7][0-9A-HJKMNP-TV-Z]{25}_[A-Za-z0-9_-]{43}$R\x05token\x12C\n" +
+	"\n" +
+	"owner_kind\x18\x03 \x01(\x0e2$.chronos.identity.v1.ApiKeyOwnerKindR\townerKind\x12m\n" +
+	"\bowner_id\x18\x04 \x01(\tBR\xbaGO: \x12\x1esvc_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\x8a\x01(^(svc|subj)_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\aownerId\x12F\n" +
+	"\x06scopes\x18\x05 \x03(\tB.\xbaH+\x92\x01(\x10 \"$r\"\x18@2\x1e^[a-z][a-z0-9_]*:(read|write)$R\x06scopes\x129\n" +
+	"\n" +
+	"expires_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"\xa7\x02\n" +
+	"\x13RotateApiKeyRequest\x12i\n" +
+	"\x06key_id\x18\x01 \x01(\tBR\xbaG\": \x12\x1ekey_01ARZ3NDEKTSV4RRFFQ69G5FAV\xbaH*\xc8\x01\x01r%\x18\x1e2!^key_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\x05keyId\x12@\n" +
+	"\x0foverlap_seconds\x18\x02 \x01(\x03B\x17\xbaG\t:\a\x12\x0586400\xbaH\b\"\x06\x18\x80\xf5$(\x00R\x0eoverlapSeconds\x12\x1c\n" +
+	"\timmediate\x18\x03 \x01(\bR\timmediate\x12E\n" +
+	"\x10lifetime_seconds\x18\x04 \x01(\x03B\x1a\xbaG\v:\t\x12\a7776000\xbaH\t\"\a\x18\x80\xe7\x84\x0f(\x00R\x0flifetimeSeconds\"\xe4\x02\n" +
+	"\x14RotateApiKeyResponse\x12\xc4\x01\n" +
+	"\x05token\x18\x01 \x01(\tB\xad\x01\xbaG\xa9\x01:V\x12Tchr_live_key_01ARZ3NDEKTSV4RRFFQ69G5FAV_PLACEHOLDERPLACEHOLDERPLACEHOLDERPLACEHOLDERx\x80\x01\x8a\x01K^chr_[a-z][a-z0-9]{0,15}_key_[0-7][0-9A-HJKMNP-TV-Z]{25}_[A-Za-z0-9_-]{43}$R\x05token\x12J\n" +
+	"\x13previous_retires_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x11previousRetiresAt\x129\n" +
+	"\n" +
+	"expires_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"\xc4\x01\n" +
+	"\x13RevokeApiKeyRequest\x12i\n" +
+	"\x06key_id\x18\x01 \x01(\tBR\xbaG\": \x12\x1ekey_01ARZ3NDEKTSV4RRFFQ69G5FAV\xbaH*\xc8\x01\x01r%\x18\x1e2!^key_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\x05keyId\x12B\n" +
+	"\x06reason\x18\x02 \x01(\tB*\xbaG\n" +
+	":\b\x12\x06leaked\xbaH\x1ar\x18\x18@2\x14^$|^[a-z][a-z0-9_]*$R\x06reason\"w\n" +
+	"\x14RevokeApiKeyResponse\x12\x18\n" +
+	"\achanged\x18\x01 \x01(\bR\achanged\x12E\n" +
+	"\x11secrets_destroyed\x18\x02 \x01(\x05B\x18\xbaG\x0e:\x03\x12\x011Y\x00\x00\xc0\xff\xff\xff\xdfA\xbaH\x04\x1a\x02(\x00R\x10secretsDestroyed\"\xc0\x01\n" +
+	"\x12ListApiKeysRequest\x126\n" +
+	"\tpage_size\x18\x01 \x01(\x05B\x19\xbaG\x0f:\x04\x12\x0250Y\x00\x00\x00\x00\x00\x00i@\xbaH\x04\x1a\x02(\x00R\bpageSize\x12r\n" +
+	"\n" +
+	"page_token\x18\x02 \x01(\tBS\xbaG6:4\x122PLACEHOLDER-opaque-cursor-from-a-previous-response\xbaH\x17r\x15\x18\x80\b2\x10^[A-Za-z0-9_-]*$R\tpageToken\"\x8e\x06\n" +
+	"\x06ApiKey\x12f\n" +
+	"\x06key_id\x18\x01 \x01(\tBO\xbaG\": \x12\x1ekey_01ARZ3NDEKTSV4RRFFQ69G5FAV\xbaH'r%\x18\x1e2!^key_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\x05keyId\x12C\n" +
+	"\n" +
+	"owner_kind\x18\x02 \x01(\x0e2$.chronos.identity.v1.ApiKeyOwnerKindR\townerKind\x12p\n" +
+	"\bowner_id\x18\x03 \x01(\tBU\xbaGR: \x12\x1esvc_01ARZ3NDEKTSV4RRFFQ69G5FAVx\x1f\x8a\x01+^$|^(svc|subj)_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\aownerId\x12F\n" +
+	"\x06scopes\x18\x04 \x03(\tB.\xbaH+\x92\x01(\x10 \"$r\"\x18@2\x1e^[a-z][a-z0-9_]*:(read|write)$R\x06scopes\x129\n" +
+	"\n" +
+	"expires_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x129\n" +
+	"\n" +
+	"revoked_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\trevokedAt\x129\n" +
+	"\n" +
+	"rotated_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\trotatedAt\x12<\n" +
+	"\flast_used_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"lastUsedAt\x12s\n" +
+	"\n" +
+	"created_by\x18\t \x01(\tBT\xbaG#:!\x12\x1fsubj_01ARZ3NDEKTSV4RRFFQ69G5FAV\xbaH+r)\x18\x1f2%^$|^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\tcreatedBy\x129\n" +
+	"\n" +
+	"created_at\x18\n" +
+	" \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\xce\x01\n" +
+	"\x13ListApiKeysResponse\x12A\n" +
+	"\bapi_keys\x18\x01 \x03(\v2\x1b.chronos.identity.v1.ApiKeyB\t\xbaH\x06\x92\x01\x03\x10\xc8\x01R\aapiKeys\x12t\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tBL\xbaG/:-\x12+PLACEHOLDER-opaque-cursor-for-the-next-page\xbaH\x17r\x15\x18\x80\b2\x10^[A-Za-z0-9_-]*$R\rnextPageToken*\xac\x01\n" +
 	"\n" +
 	"MethodKind\x12\x1b\n" +
 	"\x17METHOD_KIND_UNSPECIFIED\x10\x00\x12\x18\n" +
@@ -5692,7 +6921,11 @@ const file_chronos_identity_v1_identity_proto_rawDesc = "" +
 	"$FAILURE_REASON_INCOMPLETE_ENROLLMENT\x10\x06\x12\x1e\n" +
 	"\x1aFAILURE_REASON_DEACTIVATED\x10\a\x12\x1c\n" +
 	"\x18FAILURE_REASON_SUSPENDED\x10\b\x12\x1f\n" +
-	"\x1bFAILURE_REASON_RATE_LIMITED\x10\t2\xe7\xb6\x01\n" +
+	"\x1bFAILURE_REASON_RATE_LIMITED\x10\t*z\n" +
+	"\x0fApiKeyOwnerKind\x12\"\n" +
+	"\x1eAPI_KEY_OWNER_KIND_UNSPECIFIED\x10\x00\x12\x1b\n" +
+	"\x17API_KEY_OWNER_KIND_USER\x10\x01\x12&\n" +
+	"\"API_KEY_OWNER_KIND_SERVICE_ACCOUNT\x10\x022\xee\xbf\x01\n" +
 	"\x0fIdentityService\x12\xee\x04\n" +
 	"\bRegister\x12$.chronos.identity.v1.RegisterRequest\x1a%.chronos.identity.v1.RegisterResponse\"\x94\x04\xbaG\x88\x042G\n" +
 	"E\n" +
@@ -6279,7 +7512,31 @@ const file_chronos_identity_v1_identity_proto_rawDesc = "" +
 	"E\n" +
 	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
 	"$#/components/schemas/idempotency-key\xca\xf3\x18\f\n" +
-	"\x04self\x12\x04user\xd0\xf3\x18\x02\xe0\xf3\x18\x02B\xde\x01\n" +
+	"\x04self\x12\x04user\xd0\xf3\x18\x02\xe0\xf3\x18\x02\x12\xea\x01\n" +
+	"\x14CreateServiceAccount\x120.chronos.identity.v1.CreateServiceAccountRequest\x1a1.chronos.identity.v1.CreateServiceAccountResponse\"m\xbaGI2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-key\xca\xf3\x18\x15\n" +
+	"\x05admin\x12\forganization\xd0\xf3\x18\x02\xe0\xf3\x18\x02\x12\x97\x01\n" +
+	"\x13ListServiceAccounts\x12/.chronos.identity.v1.ListServiceAccountsRequest\x1a0.chronos.identity.v1.ListServiceAccountsResponse\"\x1d\xca\xf3\x18\x15\n" +
+	"\x05admin\x12\forganization\xd0\xf3\x18\x01\x12\xd2\x01\n" +
+	"\fCreateApiKey\x12(.chronos.identity.v1.CreateApiKeyRequest\x1a).chronos.identity.v1.CreateApiKeyResponse\"m\xbaGI2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-key\xca\xf3\x18\x15\n" +
+	"\x05admin\x12\forganization\xd0\xf3\x18\x02\xe0\xf3\x18\x02\x12\xd2\x01\n" +
+	"\fRotateApiKey\x12(.chronos.identity.v1.RotateApiKeyRequest\x1a).chronos.identity.v1.RotateApiKeyResponse\"m\xbaGI2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-key\xca\xf3\x18\x15\n" +
+	"\x05admin\x12\forganization\xd0\xf3\x18\x02\xe0\xf3\x18\x02\x12\xd2\x01\n" +
+	"\fRevokeApiKey\x12(.chronos.identity.v1.RevokeApiKeyRequest\x1a).chronos.identity.v1.RevokeApiKeyResponse\"m\xbaGI2G\n" +
+	"E\n" +
+	"\x0fIdempotency-Key\x12\x06header \x01R(\x12&\n" +
+	"$#/components/schemas/idempotency-key\xca\xf3\x18\x15\n" +
+	"\x05admin\x12\forganization\xd0\xf3\x18\x02\xe0\xf3\x18\x02\x12\x7f\n" +
+	"\vListApiKeys\x12'.chronos.identity.v1.ListApiKeysRequest\x1a(.chronos.identity.v1.ListApiKeysResponse\"\x1d\xca\xf3\x18\x15\n" +
+	"\x05admin\x12\forganization\xd0\xf3\x18\x01B\xde\x01\n" +
 	"\x17com.chronos.identity.v1B\rIdentityProtoP\x01ZFgithub.com/chronos/chronos-go/gen/proto/chronos/identity/v1;identityv1\xa2\x02\x03CIX\xaa\x02\x13Chronos.Identity.V1\xca\x02\x13Chronos\\Identity\\V1\xe2\x02\x1fChronos\\Identity\\V1\\GPBMetadata\xea\x02\x15Chronos::Identity::V1b\x06proto3"
 
 var (
@@ -6294,210 +7551,251 @@ func file_chronos_identity_v1_identity_proto_rawDescGZIP() []byte {
 	return file_chronos_identity_v1_identity_proto_rawDescData
 }
 
-var file_chronos_identity_v1_identity_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_chronos_identity_v1_identity_proto_msgTypes = make([]protoimpl.MessageInfo, 76)
+var file_chronos_identity_v1_identity_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_chronos_identity_v1_identity_proto_msgTypes = make([]protoimpl.MessageInfo, 90)
 var file_chronos_identity_v1_identity_proto_goTypes = []any{
 	(MethodKind)(0),                           // 0: chronos.identity.v1.MethodKind
 	(AccountState)(0),                         // 1: chronos.identity.v1.AccountState
 	(FailureReason)(0),                        // 2: chronos.identity.v1.FailureReason
-	(*RegisterRequest)(nil),                   // 3: chronos.identity.v1.RegisterRequest
-	(*RegisterResponse)(nil),                  // 4: chronos.identity.v1.RegisterResponse
-	(*VerifyEmailRequest)(nil),                // 5: chronos.identity.v1.VerifyEmailRequest
-	(*VerifyEmailResponse)(nil),               // 6: chronos.identity.v1.VerifyEmailResponse
-	(*ResendEmailVerificationRequest)(nil),    // 7: chronos.identity.v1.ResendEmailVerificationRequest
-	(*ResendEmailVerificationResponse)(nil),   // 8: chronos.identity.v1.ResendEmailVerificationResponse
-	(*RequestPasswordResetRequest)(nil),       // 9: chronos.identity.v1.RequestPasswordResetRequest
-	(*RequestEmailChangeRequest)(nil),         // 10: chronos.identity.v1.RequestEmailChangeRequest
-	(*RequestEmailChangeResponse)(nil),        // 11: chronos.identity.v1.RequestEmailChangeResponse
-	(*CancelEmailChangeRequest)(nil),          // 12: chronos.identity.v1.CancelEmailChangeRequest
-	(*CancelEmailChangeResponse)(nil),         // 13: chronos.identity.v1.CancelEmailChangeResponse
-	(*ConfirmEmailChangeRequest)(nil),         // 14: chronos.identity.v1.ConfirmEmailChangeRequest
-	(*ConfirmEmailChangeResponse)(nil),        // 15: chronos.identity.v1.ConfirmEmailChangeResponse
-	(*RevertEmailChangeRequest)(nil),          // 16: chronos.identity.v1.RevertEmailChangeRequest
-	(*RevertEmailChangeResponse)(nil),         // 17: chronos.identity.v1.RevertEmailChangeResponse
-	(*RequestPasswordResetResponse)(nil),      // 18: chronos.identity.v1.RequestPasswordResetResponse
-	(*ResetPasswordRequest)(nil),              // 19: chronos.identity.v1.ResetPasswordRequest
-	(*ResetPasswordResponse)(nil),             // 20: chronos.identity.v1.ResetPasswordResponse
-	(*AuthenticateRequest)(nil),               // 21: chronos.identity.v1.AuthenticateRequest
-	(*AuthenticateResponse)(nil),              // 22: chronos.identity.v1.AuthenticateResponse
-	(*CreateSessionRequest)(nil),              // 23: chronos.identity.v1.CreateSessionRequest
-	(*CreateSessionResponse)(nil),             // 24: chronos.identity.v1.CreateSessionResponse
-	(*GetUserRequest)(nil),                    // 25: chronos.identity.v1.GetUserRequest
-	(*GetUserResponse)(nil),                   // 26: chronos.identity.v1.GetUserResponse
-	(*CheckUsernameAvailabilityRequest)(nil),  // 27: chronos.identity.v1.CheckUsernameAvailabilityRequest
-	(*CheckUsernameAvailabilityResponse)(nil), // 28: chronos.identity.v1.CheckUsernameAvailabilityResponse
-	(*ListSessionsRequest)(nil),               // 29: chronos.identity.v1.ListSessionsRequest
-	(*Session)(nil),                           // 30: chronos.identity.v1.Session
-	(*ListSessionsResponse)(nil),              // 31: chronos.identity.v1.ListSessionsResponse
-	(*ListMethodsRequest)(nil),                // 32: chronos.identity.v1.ListMethodsRequest
-	(*AuthMethod)(nil),                        // 33: chronos.identity.v1.AuthMethod
-	(*ListMethodsResponse)(nil),               // 34: chronos.identity.v1.ListMethodsResponse
-	(*ListLoginHistoryRequest)(nil),           // 35: chronos.identity.v1.ListLoginHistoryRequest
-	(*LoginAttempt)(nil),                      // 36: chronos.identity.v1.LoginAttempt
-	(*ListLoginHistoryResponse)(nil),          // 37: chronos.identity.v1.ListLoginHistoryResponse
-	(*EnrollTotpRequest)(nil),                 // 38: chronos.identity.v1.EnrollTotpRequest
-	(*EnrollTotpResponse)(nil),                // 39: chronos.identity.v1.EnrollTotpResponse
-	(*ConfirmTotpRequest)(nil),                // 40: chronos.identity.v1.ConfirmTotpRequest
-	(*ConfirmTotpResponse)(nil),               // 41: chronos.identity.v1.ConfirmTotpResponse
-	(*GenerateRecoveryCodesRequest)(nil),      // 42: chronos.identity.v1.GenerateRecoveryCodesRequest
-	(*GenerateRecoveryCodesResponse)(nil),     // 43: chronos.identity.v1.GenerateRecoveryCodesResponse
-	(*RevokeSessionRequest)(nil),              // 44: chronos.identity.v1.RevokeSessionRequest
-	(*RevokeSessionResponse)(nil),             // 45: chronos.identity.v1.RevokeSessionResponse
-	(*RevokeAllSessionsRequest)(nil),          // 46: chronos.identity.v1.RevokeAllSessionsRequest
-	(*RevokeAllSessionsResponse)(nil),         // 47: chronos.identity.v1.RevokeAllSessionsResponse
-	(*DeactivateAccountRequest)(nil),          // 48: chronos.identity.v1.DeactivateAccountRequest
-	(*DeactivateAccountResponse)(nil),         // 49: chronos.identity.v1.DeactivateAccountResponse
-	(*RequestAccountDeletionRequest)(nil),     // 50: chronos.identity.v1.RequestAccountDeletionRequest
-	(*CancelAccountDeletionRequest)(nil),      // 51: chronos.identity.v1.CancelAccountDeletionRequest
-	(*CancelAccountDeletionResponse)(nil),     // 52: chronos.identity.v1.CancelAccountDeletionResponse
-	(*RequestAccountDeletionResponse)(nil),    // 53: chronos.identity.v1.RequestAccountDeletionResponse
-	(*BeginPasskeyRegistrationRequest)(nil),   // 54: chronos.identity.v1.BeginPasskeyRegistrationRequest
-	(*BeginPasskeyRegistrationResponse)(nil),  // 55: chronos.identity.v1.BeginPasskeyRegistrationResponse
-	(*FinishPasskeyRegistrationRequest)(nil),  // 56: chronos.identity.v1.FinishPasskeyRegistrationRequest
-	(*FinishPasskeyRegistrationResponse)(nil), // 57: chronos.identity.v1.FinishPasskeyRegistrationResponse
-	(*BeginPasskeyLoginRequest)(nil),          // 58: chronos.identity.v1.BeginPasskeyLoginRequest
-	(*BeginPasskeyLoginResponse)(nil),         // 59: chronos.identity.v1.BeginPasskeyLoginResponse
-	(*FinishPasskeyLoginRequest)(nil),         // 60: chronos.identity.v1.FinishPasskeyLoginRequest
-	(*FinishPasskeyLoginResponse)(nil),        // 61: chronos.identity.v1.FinishPasskeyLoginResponse
-	(*ListPasskeysRequest)(nil),               // 62: chronos.identity.v1.ListPasskeysRequest
-	(*Passkey)(nil),                           // 63: chronos.identity.v1.Passkey
-	(*ListPasskeysResponse)(nil),              // 64: chronos.identity.v1.ListPasskeysResponse
-	(*RemovePasskeyRequest)(nil),              // 65: chronos.identity.v1.RemovePasskeyRequest
-	(*RemovePasskeyResponse)(nil),             // 66: chronos.identity.v1.RemovePasskeyResponse
-	(*BeginFederatedSignInRequest)(nil),       // 67: chronos.identity.v1.BeginFederatedSignInRequest
-	(*BeginFederatedSignInResponse)(nil),      // 68: chronos.identity.v1.BeginFederatedSignInResponse
-	(*FinishFederatedSignInRequest)(nil),      // 69: chronos.identity.v1.FinishFederatedSignInRequest
-	(*FinishFederatedSignInResponse)(nil),     // 70: chronos.identity.v1.FinishFederatedSignInResponse
-	(*BeginFederatedLinkRequest)(nil),         // 71: chronos.identity.v1.BeginFederatedLinkRequest
-	(*BeginFederatedLinkResponse)(nil),        // 72: chronos.identity.v1.BeginFederatedLinkResponse
-	(*FinishFederatedLinkRequest)(nil),        // 73: chronos.identity.v1.FinishFederatedLinkRequest
-	(*FinishFederatedLinkResponse)(nil),       // 74: chronos.identity.v1.FinishFederatedLinkResponse
-	(*UnlinkFederatedIdentityRequest)(nil),    // 75: chronos.identity.v1.UnlinkFederatedIdentityRequest
-	(*UnlinkFederatedIdentityResponse)(nil),   // 76: chronos.identity.v1.UnlinkFederatedIdentityResponse
-	(*ListFederatedProvidersRequest)(nil),     // 77: chronos.identity.v1.ListFederatedProvidersRequest
-	(*ListFederatedProvidersResponse)(nil),    // 78: chronos.identity.v1.ListFederatedProvidersResponse
-	(v1.AssuranceLevel)(0),                    // 79: chronos.options.v1.AssuranceLevel
-	(*timestamppb.Timestamp)(nil),             // 80: google.protobuf.Timestamp
+	(ApiKeyOwnerKind)(0),                      // 3: chronos.identity.v1.ApiKeyOwnerKind
+	(*RegisterRequest)(nil),                   // 4: chronos.identity.v1.RegisterRequest
+	(*RegisterResponse)(nil),                  // 5: chronos.identity.v1.RegisterResponse
+	(*VerifyEmailRequest)(nil),                // 6: chronos.identity.v1.VerifyEmailRequest
+	(*VerifyEmailResponse)(nil),               // 7: chronos.identity.v1.VerifyEmailResponse
+	(*ResendEmailVerificationRequest)(nil),    // 8: chronos.identity.v1.ResendEmailVerificationRequest
+	(*ResendEmailVerificationResponse)(nil),   // 9: chronos.identity.v1.ResendEmailVerificationResponse
+	(*RequestPasswordResetRequest)(nil),       // 10: chronos.identity.v1.RequestPasswordResetRequest
+	(*RequestEmailChangeRequest)(nil),         // 11: chronos.identity.v1.RequestEmailChangeRequest
+	(*RequestEmailChangeResponse)(nil),        // 12: chronos.identity.v1.RequestEmailChangeResponse
+	(*CancelEmailChangeRequest)(nil),          // 13: chronos.identity.v1.CancelEmailChangeRequest
+	(*CancelEmailChangeResponse)(nil),         // 14: chronos.identity.v1.CancelEmailChangeResponse
+	(*ConfirmEmailChangeRequest)(nil),         // 15: chronos.identity.v1.ConfirmEmailChangeRequest
+	(*ConfirmEmailChangeResponse)(nil),        // 16: chronos.identity.v1.ConfirmEmailChangeResponse
+	(*RevertEmailChangeRequest)(nil),          // 17: chronos.identity.v1.RevertEmailChangeRequest
+	(*RevertEmailChangeResponse)(nil),         // 18: chronos.identity.v1.RevertEmailChangeResponse
+	(*RequestPasswordResetResponse)(nil),      // 19: chronos.identity.v1.RequestPasswordResetResponse
+	(*ResetPasswordRequest)(nil),              // 20: chronos.identity.v1.ResetPasswordRequest
+	(*ResetPasswordResponse)(nil),             // 21: chronos.identity.v1.ResetPasswordResponse
+	(*AuthenticateRequest)(nil),               // 22: chronos.identity.v1.AuthenticateRequest
+	(*AuthenticateResponse)(nil),              // 23: chronos.identity.v1.AuthenticateResponse
+	(*CreateSessionRequest)(nil),              // 24: chronos.identity.v1.CreateSessionRequest
+	(*CreateSessionResponse)(nil),             // 25: chronos.identity.v1.CreateSessionResponse
+	(*GetUserRequest)(nil),                    // 26: chronos.identity.v1.GetUserRequest
+	(*GetUserResponse)(nil),                   // 27: chronos.identity.v1.GetUserResponse
+	(*CheckUsernameAvailabilityRequest)(nil),  // 28: chronos.identity.v1.CheckUsernameAvailabilityRequest
+	(*CheckUsernameAvailabilityResponse)(nil), // 29: chronos.identity.v1.CheckUsernameAvailabilityResponse
+	(*ListSessionsRequest)(nil),               // 30: chronos.identity.v1.ListSessionsRequest
+	(*Session)(nil),                           // 31: chronos.identity.v1.Session
+	(*ListSessionsResponse)(nil),              // 32: chronos.identity.v1.ListSessionsResponse
+	(*ListMethodsRequest)(nil),                // 33: chronos.identity.v1.ListMethodsRequest
+	(*AuthMethod)(nil),                        // 34: chronos.identity.v1.AuthMethod
+	(*ListMethodsResponse)(nil),               // 35: chronos.identity.v1.ListMethodsResponse
+	(*ListLoginHistoryRequest)(nil),           // 36: chronos.identity.v1.ListLoginHistoryRequest
+	(*LoginAttempt)(nil),                      // 37: chronos.identity.v1.LoginAttempt
+	(*ListLoginHistoryResponse)(nil),          // 38: chronos.identity.v1.ListLoginHistoryResponse
+	(*EnrollTotpRequest)(nil),                 // 39: chronos.identity.v1.EnrollTotpRequest
+	(*EnrollTotpResponse)(nil),                // 40: chronos.identity.v1.EnrollTotpResponse
+	(*ConfirmTotpRequest)(nil),                // 41: chronos.identity.v1.ConfirmTotpRequest
+	(*ConfirmTotpResponse)(nil),               // 42: chronos.identity.v1.ConfirmTotpResponse
+	(*GenerateRecoveryCodesRequest)(nil),      // 43: chronos.identity.v1.GenerateRecoveryCodesRequest
+	(*GenerateRecoveryCodesResponse)(nil),     // 44: chronos.identity.v1.GenerateRecoveryCodesResponse
+	(*RevokeSessionRequest)(nil),              // 45: chronos.identity.v1.RevokeSessionRequest
+	(*RevokeSessionResponse)(nil),             // 46: chronos.identity.v1.RevokeSessionResponse
+	(*RevokeAllSessionsRequest)(nil),          // 47: chronos.identity.v1.RevokeAllSessionsRequest
+	(*RevokeAllSessionsResponse)(nil),         // 48: chronos.identity.v1.RevokeAllSessionsResponse
+	(*DeactivateAccountRequest)(nil),          // 49: chronos.identity.v1.DeactivateAccountRequest
+	(*DeactivateAccountResponse)(nil),         // 50: chronos.identity.v1.DeactivateAccountResponse
+	(*RequestAccountDeletionRequest)(nil),     // 51: chronos.identity.v1.RequestAccountDeletionRequest
+	(*CancelAccountDeletionRequest)(nil),      // 52: chronos.identity.v1.CancelAccountDeletionRequest
+	(*CancelAccountDeletionResponse)(nil),     // 53: chronos.identity.v1.CancelAccountDeletionResponse
+	(*RequestAccountDeletionResponse)(nil),    // 54: chronos.identity.v1.RequestAccountDeletionResponse
+	(*BeginPasskeyRegistrationRequest)(nil),   // 55: chronos.identity.v1.BeginPasskeyRegistrationRequest
+	(*BeginPasskeyRegistrationResponse)(nil),  // 56: chronos.identity.v1.BeginPasskeyRegistrationResponse
+	(*FinishPasskeyRegistrationRequest)(nil),  // 57: chronos.identity.v1.FinishPasskeyRegistrationRequest
+	(*FinishPasskeyRegistrationResponse)(nil), // 58: chronos.identity.v1.FinishPasskeyRegistrationResponse
+	(*BeginPasskeyLoginRequest)(nil),          // 59: chronos.identity.v1.BeginPasskeyLoginRequest
+	(*BeginPasskeyLoginResponse)(nil),         // 60: chronos.identity.v1.BeginPasskeyLoginResponse
+	(*FinishPasskeyLoginRequest)(nil),         // 61: chronos.identity.v1.FinishPasskeyLoginRequest
+	(*FinishPasskeyLoginResponse)(nil),        // 62: chronos.identity.v1.FinishPasskeyLoginResponse
+	(*ListPasskeysRequest)(nil),               // 63: chronos.identity.v1.ListPasskeysRequest
+	(*Passkey)(nil),                           // 64: chronos.identity.v1.Passkey
+	(*ListPasskeysResponse)(nil),              // 65: chronos.identity.v1.ListPasskeysResponse
+	(*RemovePasskeyRequest)(nil),              // 66: chronos.identity.v1.RemovePasskeyRequest
+	(*RemovePasskeyResponse)(nil),             // 67: chronos.identity.v1.RemovePasskeyResponse
+	(*BeginFederatedSignInRequest)(nil),       // 68: chronos.identity.v1.BeginFederatedSignInRequest
+	(*BeginFederatedSignInResponse)(nil),      // 69: chronos.identity.v1.BeginFederatedSignInResponse
+	(*FinishFederatedSignInRequest)(nil),      // 70: chronos.identity.v1.FinishFederatedSignInRequest
+	(*FinishFederatedSignInResponse)(nil),     // 71: chronos.identity.v1.FinishFederatedSignInResponse
+	(*BeginFederatedLinkRequest)(nil),         // 72: chronos.identity.v1.BeginFederatedLinkRequest
+	(*BeginFederatedLinkResponse)(nil),        // 73: chronos.identity.v1.BeginFederatedLinkResponse
+	(*FinishFederatedLinkRequest)(nil),        // 74: chronos.identity.v1.FinishFederatedLinkRequest
+	(*FinishFederatedLinkResponse)(nil),       // 75: chronos.identity.v1.FinishFederatedLinkResponse
+	(*UnlinkFederatedIdentityRequest)(nil),    // 76: chronos.identity.v1.UnlinkFederatedIdentityRequest
+	(*UnlinkFederatedIdentityResponse)(nil),   // 77: chronos.identity.v1.UnlinkFederatedIdentityResponse
+	(*ListFederatedProvidersRequest)(nil),     // 78: chronos.identity.v1.ListFederatedProvidersRequest
+	(*ListFederatedProvidersResponse)(nil),    // 79: chronos.identity.v1.ListFederatedProvidersResponse
+	(*CreateServiceAccountRequest)(nil),       // 80: chronos.identity.v1.CreateServiceAccountRequest
+	(*CreateServiceAccountResponse)(nil),      // 81: chronos.identity.v1.CreateServiceAccountResponse
+	(*ListServiceAccountsRequest)(nil),        // 82: chronos.identity.v1.ListServiceAccountsRequest
+	(*ServiceAccount)(nil),                    // 83: chronos.identity.v1.ServiceAccount
+	(*ListServiceAccountsResponse)(nil),       // 84: chronos.identity.v1.ListServiceAccountsResponse
+	(*CreateApiKeyRequest)(nil),               // 85: chronos.identity.v1.CreateApiKeyRequest
+	(*CreateApiKeyResponse)(nil),              // 86: chronos.identity.v1.CreateApiKeyResponse
+	(*RotateApiKeyRequest)(nil),               // 87: chronos.identity.v1.RotateApiKeyRequest
+	(*RotateApiKeyResponse)(nil),              // 88: chronos.identity.v1.RotateApiKeyResponse
+	(*RevokeApiKeyRequest)(nil),               // 89: chronos.identity.v1.RevokeApiKeyRequest
+	(*RevokeApiKeyResponse)(nil),              // 90: chronos.identity.v1.RevokeApiKeyResponse
+	(*ListApiKeysRequest)(nil),                // 91: chronos.identity.v1.ListApiKeysRequest
+	(*ApiKey)(nil),                            // 92: chronos.identity.v1.ApiKey
+	(*ListApiKeysResponse)(nil),               // 93: chronos.identity.v1.ListApiKeysResponse
+	(v1.AssuranceLevel)(0),                    // 94: chronos.options.v1.AssuranceLevel
+	(*timestamppb.Timestamp)(nil),             // 95: google.protobuf.Timestamp
 }
 var file_chronos_identity_v1_identity_proto_depIdxs = []int32{
 	0,  // 0: chronos.identity.v1.AuthenticateResponse.offered:type_name -> chronos.identity.v1.MethodKind
-	79, // 1: chronos.identity.v1.CreateSessionResponse.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
-	80, // 2: chronos.identity.v1.CreateSessionResponse.idle_expires_at:type_name -> google.protobuf.Timestamp
-	80, // 3: chronos.identity.v1.CreateSessionResponse.absolute_expires_at:type_name -> google.protobuf.Timestamp
+	94, // 1: chronos.identity.v1.CreateSessionResponse.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
+	95, // 2: chronos.identity.v1.CreateSessionResponse.idle_expires_at:type_name -> google.protobuf.Timestamp
+	95, // 3: chronos.identity.v1.CreateSessionResponse.absolute_expires_at:type_name -> google.protobuf.Timestamp
 	1,  // 4: chronos.identity.v1.GetUserResponse.state:type_name -> chronos.identity.v1.AccountState
-	80, // 5: chronos.identity.v1.GetUserResponse.registered_at:type_name -> google.protobuf.Timestamp
-	80, // 6: chronos.identity.v1.GetUserResponse.activated_at:type_name -> google.protobuf.Timestamp
-	80, // 7: chronos.identity.v1.GetUserResponse.deactivated_at:type_name -> google.protobuf.Timestamp
-	80, // 8: chronos.identity.v1.GetUserResponse.suspended_at:type_name -> google.protobuf.Timestamp
-	80, // 9: chronos.identity.v1.GetUserResponse.deletion_requested_at:type_name -> google.protobuf.Timestamp
-	80, // 10: chronos.identity.v1.GetUserResponse.deletion_scheduled_for:type_name -> google.protobuf.Timestamp
-	79, // 11: chronos.identity.v1.Session.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
-	80, // 12: chronos.identity.v1.Session.idle_expires_at:type_name -> google.protobuf.Timestamp
-	80, // 13: chronos.identity.v1.Session.absolute_expires_at:type_name -> google.protobuf.Timestamp
-	80, // 14: chronos.identity.v1.Session.created_at:type_name -> google.protobuf.Timestamp
-	80, // 15: chronos.identity.v1.Session.last_seen_at:type_name -> google.protobuf.Timestamp
-	30, // 16: chronos.identity.v1.ListSessionsResponse.sessions:type_name -> chronos.identity.v1.Session
+	95, // 5: chronos.identity.v1.GetUserResponse.registered_at:type_name -> google.protobuf.Timestamp
+	95, // 6: chronos.identity.v1.GetUserResponse.activated_at:type_name -> google.protobuf.Timestamp
+	95, // 7: chronos.identity.v1.GetUserResponse.deactivated_at:type_name -> google.protobuf.Timestamp
+	95, // 8: chronos.identity.v1.GetUserResponse.suspended_at:type_name -> google.protobuf.Timestamp
+	95, // 9: chronos.identity.v1.GetUserResponse.deletion_requested_at:type_name -> google.protobuf.Timestamp
+	95, // 10: chronos.identity.v1.GetUserResponse.deletion_scheduled_for:type_name -> google.protobuf.Timestamp
+	94, // 11: chronos.identity.v1.Session.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
+	95, // 12: chronos.identity.v1.Session.idle_expires_at:type_name -> google.protobuf.Timestamp
+	95, // 13: chronos.identity.v1.Session.absolute_expires_at:type_name -> google.protobuf.Timestamp
+	95, // 14: chronos.identity.v1.Session.created_at:type_name -> google.protobuf.Timestamp
+	95, // 15: chronos.identity.v1.Session.last_seen_at:type_name -> google.protobuf.Timestamp
+	31, // 16: chronos.identity.v1.ListSessionsResponse.sessions:type_name -> chronos.identity.v1.Session
 	0,  // 17: chronos.identity.v1.AuthMethod.kind:type_name -> chronos.identity.v1.MethodKind
-	80, // 18: chronos.identity.v1.AuthMethod.added_at:type_name -> google.protobuf.Timestamp
-	80, // 19: chronos.identity.v1.AuthMethod.enabled_at:type_name -> google.protobuf.Timestamp
-	80, // 20: chronos.identity.v1.AuthMethod.last_used_at:type_name -> google.protobuf.Timestamp
-	33, // 21: chronos.identity.v1.ListMethodsResponse.methods:type_name -> chronos.identity.v1.AuthMethod
+	95, // 18: chronos.identity.v1.AuthMethod.added_at:type_name -> google.protobuf.Timestamp
+	95, // 19: chronos.identity.v1.AuthMethod.enabled_at:type_name -> google.protobuf.Timestamp
+	95, // 20: chronos.identity.v1.AuthMethod.last_used_at:type_name -> google.protobuf.Timestamp
+	34, // 21: chronos.identity.v1.ListMethodsResponse.methods:type_name -> chronos.identity.v1.AuthMethod
 	2,  // 22: chronos.identity.v1.LoginAttempt.reason:type_name -> chronos.identity.v1.FailureReason
 	0,  // 23: chronos.identity.v1.LoginAttempt.methods:type_name -> chronos.identity.v1.MethodKind
-	79, // 24: chronos.identity.v1.LoginAttempt.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
-	80, // 25: chronos.identity.v1.LoginAttempt.occurred_at:type_name -> google.protobuf.Timestamp
-	36, // 26: chronos.identity.v1.ListLoginHistoryResponse.attempts:type_name -> chronos.identity.v1.LoginAttempt
-	80, // 27: chronos.identity.v1.EnrollTotpResponse.expires_at:type_name -> google.protobuf.Timestamp
-	80, // 28: chronos.identity.v1.RequestAccountDeletionResponse.scheduled_for:type_name -> google.protobuf.Timestamp
-	80, // 29: chronos.identity.v1.BeginPasskeyRegistrationResponse.expires_at:type_name -> google.protobuf.Timestamp
-	80, // 30: chronos.identity.v1.BeginPasskeyLoginResponse.expires_at:type_name -> google.protobuf.Timestamp
-	79, // 31: chronos.identity.v1.FinishPasskeyLoginResponse.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
-	80, // 32: chronos.identity.v1.FinishPasskeyLoginResponse.expires_at:type_name -> google.protobuf.Timestamp
-	80, // 33: chronos.identity.v1.Passkey.created_at:type_name -> google.protobuf.Timestamp
-	80, // 34: chronos.identity.v1.Passkey.last_used_at:type_name -> google.protobuf.Timestamp
-	80, // 35: chronos.identity.v1.Passkey.clone_warned_at:type_name -> google.protobuf.Timestamp
-	63, // 36: chronos.identity.v1.ListPasskeysResponse.passkeys:type_name -> chronos.identity.v1.Passkey
-	80, // 37: chronos.identity.v1.BeginFederatedSignInResponse.expires_at:type_name -> google.protobuf.Timestamp
-	79, // 38: chronos.identity.v1.FinishFederatedSignInResponse.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
-	80, // 39: chronos.identity.v1.FinishFederatedSignInResponse.expires_at:type_name -> google.protobuf.Timestamp
-	80, // 40: chronos.identity.v1.BeginFederatedLinkResponse.expires_at:type_name -> google.protobuf.Timestamp
-	3,  // 41: chronos.identity.v1.IdentityService.Register:input_type -> chronos.identity.v1.RegisterRequest
-	5,  // 42: chronos.identity.v1.IdentityService.VerifyEmail:input_type -> chronos.identity.v1.VerifyEmailRequest
-	7,  // 43: chronos.identity.v1.IdentityService.ResendEmailVerification:input_type -> chronos.identity.v1.ResendEmailVerificationRequest
-	27, // 44: chronos.identity.v1.IdentityService.CheckUsernameAvailability:input_type -> chronos.identity.v1.CheckUsernameAvailabilityRequest
-	9,  // 45: chronos.identity.v1.IdentityService.RequestPasswordReset:input_type -> chronos.identity.v1.RequestPasswordResetRequest
-	19, // 46: chronos.identity.v1.IdentityService.ResetPassword:input_type -> chronos.identity.v1.ResetPasswordRequest
-	21, // 47: chronos.identity.v1.IdentityService.Authenticate:input_type -> chronos.identity.v1.AuthenticateRequest
-	23, // 48: chronos.identity.v1.IdentityService.CreateSession:input_type -> chronos.identity.v1.CreateSessionRequest
-	25, // 49: chronos.identity.v1.IdentityService.GetUser:input_type -> chronos.identity.v1.GetUserRequest
-	29, // 50: chronos.identity.v1.IdentityService.ListSessions:input_type -> chronos.identity.v1.ListSessionsRequest
-	32, // 51: chronos.identity.v1.IdentityService.ListMethods:input_type -> chronos.identity.v1.ListMethodsRequest
-	35, // 52: chronos.identity.v1.IdentityService.ListLoginHistory:input_type -> chronos.identity.v1.ListLoginHistoryRequest
-	38, // 53: chronos.identity.v1.IdentityService.EnrollTotp:input_type -> chronos.identity.v1.EnrollTotpRequest
-	40, // 54: chronos.identity.v1.IdentityService.ConfirmTotp:input_type -> chronos.identity.v1.ConfirmTotpRequest
-	42, // 55: chronos.identity.v1.IdentityService.GenerateRecoveryCodes:input_type -> chronos.identity.v1.GenerateRecoveryCodesRequest
-	44, // 56: chronos.identity.v1.IdentityService.RevokeSession:input_type -> chronos.identity.v1.RevokeSessionRequest
-	46, // 57: chronos.identity.v1.IdentityService.RevokeAllSessions:input_type -> chronos.identity.v1.RevokeAllSessionsRequest
-	48, // 58: chronos.identity.v1.IdentityService.DeactivateAccount:input_type -> chronos.identity.v1.DeactivateAccountRequest
-	50, // 59: chronos.identity.v1.IdentityService.RequestAccountDeletion:input_type -> chronos.identity.v1.RequestAccountDeletionRequest
-	51, // 60: chronos.identity.v1.IdentityService.CancelAccountDeletion:input_type -> chronos.identity.v1.CancelAccountDeletionRequest
-	10, // 61: chronos.identity.v1.IdentityService.RequestEmailChange:input_type -> chronos.identity.v1.RequestEmailChangeRequest
-	12, // 62: chronos.identity.v1.IdentityService.CancelEmailChange:input_type -> chronos.identity.v1.CancelEmailChangeRequest
-	14, // 63: chronos.identity.v1.IdentityService.ConfirmEmailChange:input_type -> chronos.identity.v1.ConfirmEmailChangeRequest
-	16, // 64: chronos.identity.v1.IdentityService.RevertEmailChange:input_type -> chronos.identity.v1.RevertEmailChangeRequest
-	54, // 65: chronos.identity.v1.IdentityService.BeginPasskeyRegistration:input_type -> chronos.identity.v1.BeginPasskeyRegistrationRequest
-	56, // 66: chronos.identity.v1.IdentityService.FinishPasskeyRegistration:input_type -> chronos.identity.v1.FinishPasskeyRegistrationRequest
-	58, // 67: chronos.identity.v1.IdentityService.BeginPasskeyLogin:input_type -> chronos.identity.v1.BeginPasskeyLoginRequest
-	60, // 68: chronos.identity.v1.IdentityService.FinishPasskeyLogin:input_type -> chronos.identity.v1.FinishPasskeyLoginRequest
-	62, // 69: chronos.identity.v1.IdentityService.ListPasskeys:input_type -> chronos.identity.v1.ListPasskeysRequest
-	65, // 70: chronos.identity.v1.IdentityService.RemovePasskey:input_type -> chronos.identity.v1.RemovePasskeyRequest
-	77, // 71: chronos.identity.v1.IdentityService.ListFederatedProviders:input_type -> chronos.identity.v1.ListFederatedProvidersRequest
-	67, // 72: chronos.identity.v1.IdentityService.BeginFederatedSignIn:input_type -> chronos.identity.v1.BeginFederatedSignInRequest
-	69, // 73: chronos.identity.v1.IdentityService.FinishFederatedSignIn:input_type -> chronos.identity.v1.FinishFederatedSignInRequest
-	71, // 74: chronos.identity.v1.IdentityService.BeginFederatedLink:input_type -> chronos.identity.v1.BeginFederatedLinkRequest
-	73, // 75: chronos.identity.v1.IdentityService.FinishFederatedLink:input_type -> chronos.identity.v1.FinishFederatedLinkRequest
-	75, // 76: chronos.identity.v1.IdentityService.UnlinkFederatedIdentity:input_type -> chronos.identity.v1.UnlinkFederatedIdentityRequest
-	4,  // 77: chronos.identity.v1.IdentityService.Register:output_type -> chronos.identity.v1.RegisterResponse
-	6,  // 78: chronos.identity.v1.IdentityService.VerifyEmail:output_type -> chronos.identity.v1.VerifyEmailResponse
-	8,  // 79: chronos.identity.v1.IdentityService.ResendEmailVerification:output_type -> chronos.identity.v1.ResendEmailVerificationResponse
-	28, // 80: chronos.identity.v1.IdentityService.CheckUsernameAvailability:output_type -> chronos.identity.v1.CheckUsernameAvailabilityResponse
-	18, // 81: chronos.identity.v1.IdentityService.RequestPasswordReset:output_type -> chronos.identity.v1.RequestPasswordResetResponse
-	20, // 82: chronos.identity.v1.IdentityService.ResetPassword:output_type -> chronos.identity.v1.ResetPasswordResponse
-	22, // 83: chronos.identity.v1.IdentityService.Authenticate:output_type -> chronos.identity.v1.AuthenticateResponse
-	24, // 84: chronos.identity.v1.IdentityService.CreateSession:output_type -> chronos.identity.v1.CreateSessionResponse
-	26, // 85: chronos.identity.v1.IdentityService.GetUser:output_type -> chronos.identity.v1.GetUserResponse
-	31, // 86: chronos.identity.v1.IdentityService.ListSessions:output_type -> chronos.identity.v1.ListSessionsResponse
-	34, // 87: chronos.identity.v1.IdentityService.ListMethods:output_type -> chronos.identity.v1.ListMethodsResponse
-	37, // 88: chronos.identity.v1.IdentityService.ListLoginHistory:output_type -> chronos.identity.v1.ListLoginHistoryResponse
-	39, // 89: chronos.identity.v1.IdentityService.EnrollTotp:output_type -> chronos.identity.v1.EnrollTotpResponse
-	41, // 90: chronos.identity.v1.IdentityService.ConfirmTotp:output_type -> chronos.identity.v1.ConfirmTotpResponse
-	43, // 91: chronos.identity.v1.IdentityService.GenerateRecoveryCodes:output_type -> chronos.identity.v1.GenerateRecoveryCodesResponse
-	45, // 92: chronos.identity.v1.IdentityService.RevokeSession:output_type -> chronos.identity.v1.RevokeSessionResponse
-	47, // 93: chronos.identity.v1.IdentityService.RevokeAllSessions:output_type -> chronos.identity.v1.RevokeAllSessionsResponse
-	49, // 94: chronos.identity.v1.IdentityService.DeactivateAccount:output_type -> chronos.identity.v1.DeactivateAccountResponse
-	53, // 95: chronos.identity.v1.IdentityService.RequestAccountDeletion:output_type -> chronos.identity.v1.RequestAccountDeletionResponse
-	52, // 96: chronos.identity.v1.IdentityService.CancelAccountDeletion:output_type -> chronos.identity.v1.CancelAccountDeletionResponse
-	11, // 97: chronos.identity.v1.IdentityService.RequestEmailChange:output_type -> chronos.identity.v1.RequestEmailChangeResponse
-	13, // 98: chronos.identity.v1.IdentityService.CancelEmailChange:output_type -> chronos.identity.v1.CancelEmailChangeResponse
-	15, // 99: chronos.identity.v1.IdentityService.ConfirmEmailChange:output_type -> chronos.identity.v1.ConfirmEmailChangeResponse
-	17, // 100: chronos.identity.v1.IdentityService.RevertEmailChange:output_type -> chronos.identity.v1.RevertEmailChangeResponse
-	55, // 101: chronos.identity.v1.IdentityService.BeginPasskeyRegistration:output_type -> chronos.identity.v1.BeginPasskeyRegistrationResponse
-	57, // 102: chronos.identity.v1.IdentityService.FinishPasskeyRegistration:output_type -> chronos.identity.v1.FinishPasskeyRegistrationResponse
-	59, // 103: chronos.identity.v1.IdentityService.BeginPasskeyLogin:output_type -> chronos.identity.v1.BeginPasskeyLoginResponse
-	61, // 104: chronos.identity.v1.IdentityService.FinishPasskeyLogin:output_type -> chronos.identity.v1.FinishPasskeyLoginResponse
-	64, // 105: chronos.identity.v1.IdentityService.ListPasskeys:output_type -> chronos.identity.v1.ListPasskeysResponse
-	66, // 106: chronos.identity.v1.IdentityService.RemovePasskey:output_type -> chronos.identity.v1.RemovePasskeyResponse
-	78, // 107: chronos.identity.v1.IdentityService.ListFederatedProviders:output_type -> chronos.identity.v1.ListFederatedProvidersResponse
-	68, // 108: chronos.identity.v1.IdentityService.BeginFederatedSignIn:output_type -> chronos.identity.v1.BeginFederatedSignInResponse
-	70, // 109: chronos.identity.v1.IdentityService.FinishFederatedSignIn:output_type -> chronos.identity.v1.FinishFederatedSignInResponse
-	72, // 110: chronos.identity.v1.IdentityService.BeginFederatedLink:output_type -> chronos.identity.v1.BeginFederatedLinkResponse
-	74, // 111: chronos.identity.v1.IdentityService.FinishFederatedLink:output_type -> chronos.identity.v1.FinishFederatedLinkResponse
-	76, // 112: chronos.identity.v1.IdentityService.UnlinkFederatedIdentity:output_type -> chronos.identity.v1.UnlinkFederatedIdentityResponse
-	77, // [77:113] is the sub-list for method output_type
-	41, // [41:77] is the sub-list for method input_type
-	41, // [41:41] is the sub-list for extension type_name
-	41, // [41:41] is the sub-list for extension extendee
-	0,  // [0:41] is the sub-list for field type_name
+	94, // 24: chronos.identity.v1.LoginAttempt.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
+	95, // 25: chronos.identity.v1.LoginAttempt.occurred_at:type_name -> google.protobuf.Timestamp
+	37, // 26: chronos.identity.v1.ListLoginHistoryResponse.attempts:type_name -> chronos.identity.v1.LoginAttempt
+	95, // 27: chronos.identity.v1.EnrollTotpResponse.expires_at:type_name -> google.protobuf.Timestamp
+	95, // 28: chronos.identity.v1.RequestAccountDeletionResponse.scheduled_for:type_name -> google.protobuf.Timestamp
+	95, // 29: chronos.identity.v1.BeginPasskeyRegistrationResponse.expires_at:type_name -> google.protobuf.Timestamp
+	95, // 30: chronos.identity.v1.BeginPasskeyLoginResponse.expires_at:type_name -> google.protobuf.Timestamp
+	94, // 31: chronos.identity.v1.FinishPasskeyLoginResponse.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
+	95, // 32: chronos.identity.v1.FinishPasskeyLoginResponse.expires_at:type_name -> google.protobuf.Timestamp
+	95, // 33: chronos.identity.v1.Passkey.created_at:type_name -> google.protobuf.Timestamp
+	95, // 34: chronos.identity.v1.Passkey.last_used_at:type_name -> google.protobuf.Timestamp
+	95, // 35: chronos.identity.v1.Passkey.clone_warned_at:type_name -> google.protobuf.Timestamp
+	64, // 36: chronos.identity.v1.ListPasskeysResponse.passkeys:type_name -> chronos.identity.v1.Passkey
+	95, // 37: chronos.identity.v1.BeginFederatedSignInResponse.expires_at:type_name -> google.protobuf.Timestamp
+	94, // 38: chronos.identity.v1.FinishFederatedSignInResponse.assurance_level:type_name -> chronos.options.v1.AssuranceLevel
+	95, // 39: chronos.identity.v1.FinishFederatedSignInResponse.expires_at:type_name -> google.protobuf.Timestamp
+	95, // 40: chronos.identity.v1.BeginFederatedLinkResponse.expires_at:type_name -> google.protobuf.Timestamp
+	95, // 41: chronos.identity.v1.CreateServiceAccountResponse.created_at:type_name -> google.protobuf.Timestamp
+	95, // 42: chronos.identity.v1.ServiceAccount.created_at:type_name -> google.protobuf.Timestamp
+	83, // 43: chronos.identity.v1.ListServiceAccountsResponse.service_accounts:type_name -> chronos.identity.v1.ServiceAccount
+	3,  // 44: chronos.identity.v1.CreateApiKeyResponse.owner_kind:type_name -> chronos.identity.v1.ApiKeyOwnerKind
+	95, // 45: chronos.identity.v1.CreateApiKeyResponse.expires_at:type_name -> google.protobuf.Timestamp
+	95, // 46: chronos.identity.v1.RotateApiKeyResponse.previous_retires_at:type_name -> google.protobuf.Timestamp
+	95, // 47: chronos.identity.v1.RotateApiKeyResponse.expires_at:type_name -> google.protobuf.Timestamp
+	3,  // 48: chronos.identity.v1.ApiKey.owner_kind:type_name -> chronos.identity.v1.ApiKeyOwnerKind
+	95, // 49: chronos.identity.v1.ApiKey.expires_at:type_name -> google.protobuf.Timestamp
+	95, // 50: chronos.identity.v1.ApiKey.revoked_at:type_name -> google.protobuf.Timestamp
+	95, // 51: chronos.identity.v1.ApiKey.rotated_at:type_name -> google.protobuf.Timestamp
+	95, // 52: chronos.identity.v1.ApiKey.last_used_at:type_name -> google.protobuf.Timestamp
+	95, // 53: chronos.identity.v1.ApiKey.created_at:type_name -> google.protobuf.Timestamp
+	92, // 54: chronos.identity.v1.ListApiKeysResponse.api_keys:type_name -> chronos.identity.v1.ApiKey
+	4,  // 55: chronos.identity.v1.IdentityService.Register:input_type -> chronos.identity.v1.RegisterRequest
+	6,  // 56: chronos.identity.v1.IdentityService.VerifyEmail:input_type -> chronos.identity.v1.VerifyEmailRequest
+	8,  // 57: chronos.identity.v1.IdentityService.ResendEmailVerification:input_type -> chronos.identity.v1.ResendEmailVerificationRequest
+	28, // 58: chronos.identity.v1.IdentityService.CheckUsernameAvailability:input_type -> chronos.identity.v1.CheckUsernameAvailabilityRequest
+	10, // 59: chronos.identity.v1.IdentityService.RequestPasswordReset:input_type -> chronos.identity.v1.RequestPasswordResetRequest
+	20, // 60: chronos.identity.v1.IdentityService.ResetPassword:input_type -> chronos.identity.v1.ResetPasswordRequest
+	22, // 61: chronos.identity.v1.IdentityService.Authenticate:input_type -> chronos.identity.v1.AuthenticateRequest
+	24, // 62: chronos.identity.v1.IdentityService.CreateSession:input_type -> chronos.identity.v1.CreateSessionRequest
+	26, // 63: chronos.identity.v1.IdentityService.GetUser:input_type -> chronos.identity.v1.GetUserRequest
+	30, // 64: chronos.identity.v1.IdentityService.ListSessions:input_type -> chronos.identity.v1.ListSessionsRequest
+	33, // 65: chronos.identity.v1.IdentityService.ListMethods:input_type -> chronos.identity.v1.ListMethodsRequest
+	36, // 66: chronos.identity.v1.IdentityService.ListLoginHistory:input_type -> chronos.identity.v1.ListLoginHistoryRequest
+	39, // 67: chronos.identity.v1.IdentityService.EnrollTotp:input_type -> chronos.identity.v1.EnrollTotpRequest
+	41, // 68: chronos.identity.v1.IdentityService.ConfirmTotp:input_type -> chronos.identity.v1.ConfirmTotpRequest
+	43, // 69: chronos.identity.v1.IdentityService.GenerateRecoveryCodes:input_type -> chronos.identity.v1.GenerateRecoveryCodesRequest
+	45, // 70: chronos.identity.v1.IdentityService.RevokeSession:input_type -> chronos.identity.v1.RevokeSessionRequest
+	47, // 71: chronos.identity.v1.IdentityService.RevokeAllSessions:input_type -> chronos.identity.v1.RevokeAllSessionsRequest
+	49, // 72: chronos.identity.v1.IdentityService.DeactivateAccount:input_type -> chronos.identity.v1.DeactivateAccountRequest
+	51, // 73: chronos.identity.v1.IdentityService.RequestAccountDeletion:input_type -> chronos.identity.v1.RequestAccountDeletionRequest
+	52, // 74: chronos.identity.v1.IdentityService.CancelAccountDeletion:input_type -> chronos.identity.v1.CancelAccountDeletionRequest
+	11, // 75: chronos.identity.v1.IdentityService.RequestEmailChange:input_type -> chronos.identity.v1.RequestEmailChangeRequest
+	13, // 76: chronos.identity.v1.IdentityService.CancelEmailChange:input_type -> chronos.identity.v1.CancelEmailChangeRequest
+	15, // 77: chronos.identity.v1.IdentityService.ConfirmEmailChange:input_type -> chronos.identity.v1.ConfirmEmailChangeRequest
+	17, // 78: chronos.identity.v1.IdentityService.RevertEmailChange:input_type -> chronos.identity.v1.RevertEmailChangeRequest
+	55, // 79: chronos.identity.v1.IdentityService.BeginPasskeyRegistration:input_type -> chronos.identity.v1.BeginPasskeyRegistrationRequest
+	57, // 80: chronos.identity.v1.IdentityService.FinishPasskeyRegistration:input_type -> chronos.identity.v1.FinishPasskeyRegistrationRequest
+	59, // 81: chronos.identity.v1.IdentityService.BeginPasskeyLogin:input_type -> chronos.identity.v1.BeginPasskeyLoginRequest
+	61, // 82: chronos.identity.v1.IdentityService.FinishPasskeyLogin:input_type -> chronos.identity.v1.FinishPasskeyLoginRequest
+	63, // 83: chronos.identity.v1.IdentityService.ListPasskeys:input_type -> chronos.identity.v1.ListPasskeysRequest
+	66, // 84: chronos.identity.v1.IdentityService.RemovePasskey:input_type -> chronos.identity.v1.RemovePasskeyRequest
+	78, // 85: chronos.identity.v1.IdentityService.ListFederatedProviders:input_type -> chronos.identity.v1.ListFederatedProvidersRequest
+	68, // 86: chronos.identity.v1.IdentityService.BeginFederatedSignIn:input_type -> chronos.identity.v1.BeginFederatedSignInRequest
+	70, // 87: chronos.identity.v1.IdentityService.FinishFederatedSignIn:input_type -> chronos.identity.v1.FinishFederatedSignInRequest
+	72, // 88: chronos.identity.v1.IdentityService.BeginFederatedLink:input_type -> chronos.identity.v1.BeginFederatedLinkRequest
+	74, // 89: chronos.identity.v1.IdentityService.FinishFederatedLink:input_type -> chronos.identity.v1.FinishFederatedLinkRequest
+	76, // 90: chronos.identity.v1.IdentityService.UnlinkFederatedIdentity:input_type -> chronos.identity.v1.UnlinkFederatedIdentityRequest
+	80, // 91: chronos.identity.v1.IdentityService.CreateServiceAccount:input_type -> chronos.identity.v1.CreateServiceAccountRequest
+	82, // 92: chronos.identity.v1.IdentityService.ListServiceAccounts:input_type -> chronos.identity.v1.ListServiceAccountsRequest
+	85, // 93: chronos.identity.v1.IdentityService.CreateApiKey:input_type -> chronos.identity.v1.CreateApiKeyRequest
+	87, // 94: chronos.identity.v1.IdentityService.RotateApiKey:input_type -> chronos.identity.v1.RotateApiKeyRequest
+	89, // 95: chronos.identity.v1.IdentityService.RevokeApiKey:input_type -> chronos.identity.v1.RevokeApiKeyRequest
+	91, // 96: chronos.identity.v1.IdentityService.ListApiKeys:input_type -> chronos.identity.v1.ListApiKeysRequest
+	5,  // 97: chronos.identity.v1.IdentityService.Register:output_type -> chronos.identity.v1.RegisterResponse
+	7,  // 98: chronos.identity.v1.IdentityService.VerifyEmail:output_type -> chronos.identity.v1.VerifyEmailResponse
+	9,  // 99: chronos.identity.v1.IdentityService.ResendEmailVerification:output_type -> chronos.identity.v1.ResendEmailVerificationResponse
+	29, // 100: chronos.identity.v1.IdentityService.CheckUsernameAvailability:output_type -> chronos.identity.v1.CheckUsernameAvailabilityResponse
+	19, // 101: chronos.identity.v1.IdentityService.RequestPasswordReset:output_type -> chronos.identity.v1.RequestPasswordResetResponse
+	21, // 102: chronos.identity.v1.IdentityService.ResetPassword:output_type -> chronos.identity.v1.ResetPasswordResponse
+	23, // 103: chronos.identity.v1.IdentityService.Authenticate:output_type -> chronos.identity.v1.AuthenticateResponse
+	25, // 104: chronos.identity.v1.IdentityService.CreateSession:output_type -> chronos.identity.v1.CreateSessionResponse
+	27, // 105: chronos.identity.v1.IdentityService.GetUser:output_type -> chronos.identity.v1.GetUserResponse
+	32, // 106: chronos.identity.v1.IdentityService.ListSessions:output_type -> chronos.identity.v1.ListSessionsResponse
+	35, // 107: chronos.identity.v1.IdentityService.ListMethods:output_type -> chronos.identity.v1.ListMethodsResponse
+	38, // 108: chronos.identity.v1.IdentityService.ListLoginHistory:output_type -> chronos.identity.v1.ListLoginHistoryResponse
+	40, // 109: chronos.identity.v1.IdentityService.EnrollTotp:output_type -> chronos.identity.v1.EnrollTotpResponse
+	42, // 110: chronos.identity.v1.IdentityService.ConfirmTotp:output_type -> chronos.identity.v1.ConfirmTotpResponse
+	44, // 111: chronos.identity.v1.IdentityService.GenerateRecoveryCodes:output_type -> chronos.identity.v1.GenerateRecoveryCodesResponse
+	46, // 112: chronos.identity.v1.IdentityService.RevokeSession:output_type -> chronos.identity.v1.RevokeSessionResponse
+	48, // 113: chronos.identity.v1.IdentityService.RevokeAllSessions:output_type -> chronos.identity.v1.RevokeAllSessionsResponse
+	50, // 114: chronos.identity.v1.IdentityService.DeactivateAccount:output_type -> chronos.identity.v1.DeactivateAccountResponse
+	54, // 115: chronos.identity.v1.IdentityService.RequestAccountDeletion:output_type -> chronos.identity.v1.RequestAccountDeletionResponse
+	53, // 116: chronos.identity.v1.IdentityService.CancelAccountDeletion:output_type -> chronos.identity.v1.CancelAccountDeletionResponse
+	12, // 117: chronos.identity.v1.IdentityService.RequestEmailChange:output_type -> chronos.identity.v1.RequestEmailChangeResponse
+	14, // 118: chronos.identity.v1.IdentityService.CancelEmailChange:output_type -> chronos.identity.v1.CancelEmailChangeResponse
+	16, // 119: chronos.identity.v1.IdentityService.ConfirmEmailChange:output_type -> chronos.identity.v1.ConfirmEmailChangeResponse
+	18, // 120: chronos.identity.v1.IdentityService.RevertEmailChange:output_type -> chronos.identity.v1.RevertEmailChangeResponse
+	56, // 121: chronos.identity.v1.IdentityService.BeginPasskeyRegistration:output_type -> chronos.identity.v1.BeginPasskeyRegistrationResponse
+	58, // 122: chronos.identity.v1.IdentityService.FinishPasskeyRegistration:output_type -> chronos.identity.v1.FinishPasskeyRegistrationResponse
+	60, // 123: chronos.identity.v1.IdentityService.BeginPasskeyLogin:output_type -> chronos.identity.v1.BeginPasskeyLoginResponse
+	62, // 124: chronos.identity.v1.IdentityService.FinishPasskeyLogin:output_type -> chronos.identity.v1.FinishPasskeyLoginResponse
+	65, // 125: chronos.identity.v1.IdentityService.ListPasskeys:output_type -> chronos.identity.v1.ListPasskeysResponse
+	67, // 126: chronos.identity.v1.IdentityService.RemovePasskey:output_type -> chronos.identity.v1.RemovePasskeyResponse
+	79, // 127: chronos.identity.v1.IdentityService.ListFederatedProviders:output_type -> chronos.identity.v1.ListFederatedProvidersResponse
+	69, // 128: chronos.identity.v1.IdentityService.BeginFederatedSignIn:output_type -> chronos.identity.v1.BeginFederatedSignInResponse
+	71, // 129: chronos.identity.v1.IdentityService.FinishFederatedSignIn:output_type -> chronos.identity.v1.FinishFederatedSignInResponse
+	73, // 130: chronos.identity.v1.IdentityService.BeginFederatedLink:output_type -> chronos.identity.v1.BeginFederatedLinkResponse
+	75, // 131: chronos.identity.v1.IdentityService.FinishFederatedLink:output_type -> chronos.identity.v1.FinishFederatedLinkResponse
+	77, // 132: chronos.identity.v1.IdentityService.UnlinkFederatedIdentity:output_type -> chronos.identity.v1.UnlinkFederatedIdentityResponse
+	81, // 133: chronos.identity.v1.IdentityService.CreateServiceAccount:output_type -> chronos.identity.v1.CreateServiceAccountResponse
+	84, // 134: chronos.identity.v1.IdentityService.ListServiceAccounts:output_type -> chronos.identity.v1.ListServiceAccountsResponse
+	86, // 135: chronos.identity.v1.IdentityService.CreateApiKey:output_type -> chronos.identity.v1.CreateApiKeyResponse
+	88, // 136: chronos.identity.v1.IdentityService.RotateApiKey:output_type -> chronos.identity.v1.RotateApiKeyResponse
+	90, // 137: chronos.identity.v1.IdentityService.RevokeApiKey:output_type -> chronos.identity.v1.RevokeApiKeyResponse
+	93, // 138: chronos.identity.v1.IdentityService.ListApiKeys:output_type -> chronos.identity.v1.ListApiKeysResponse
+	97, // [97:139] is the sub-list for method output_type
+	55, // [55:97] is the sub-list for method input_type
+	55, // [55:55] is the sub-list for extension type_name
+	55, // [55:55] is the sub-list for extension extendee
+	0,  // [0:55] is the sub-list for field type_name
 }
 
 func init() { file_chronos_identity_v1_identity_proto_init() }
@@ -6510,8 +7808,8 @@ func file_chronos_identity_v1_identity_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chronos_identity_v1_identity_proto_rawDesc), len(file_chronos_identity_v1_identity_proto_rawDesc)),
-			NumEnums:      3,
-			NumMessages:   76,
+			NumEnums:      4,
+			NumMessages:   90,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

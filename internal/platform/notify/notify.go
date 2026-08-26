@@ -82,6 +82,53 @@ func (c Class) SuppressibleByRead() bool { return c == Activity }
 // RequiresUnsubscribe reports whether delivery must offer an opt-out.
 func (c Class) RequiresUnsubscribe() bool { return c == Activity || c == Product }
 
+// Purpose names of the processing this system does that rests on LEGITIMATE
+// INTERESTS, and can therefore be objected to under Article 21.
+//
+// # They are strings here and constants in compliance's domain, deliberately
+//
+// The kernel may not import a module (depguard: platform-is-pure) and the
+// vocabulary belongs to compliance. Restating the two values here is a copy, and
+// copies drift — so `TestEveryObjectionablePurposeIsADomainPurpose` in the
+// compliance module asserts the two agree, in the module that is allowed to see
+// both. That is the same arrangement `identity_token.purpose`'s CHECK constraint
+// has with `app.TokenPurpose`, and it exists for the same reason: the boundary
+// cannot reference the constant, so a test holds them together.
+const (
+	// PurposeActivityNotifications is the Activity class's legal ground.
+	PurposeActivityNotifications = "activity_notifications"
+
+	// PurposeProductUpdates is the Product class's.
+	PurposeProductUpdates = "product_updates"
+)
+
+// ObjectionablePurpose reports the Article 21 purpose this class rests on.
+//
+// # Security, Transactional and Operator return false, and that is the article
+//
+// Article 21 reaches processing grounded in Article 6(1)(e) or 6(1)(f). Security
+// alerts and transactional mail rest on contract and on the controller's own
+// legal obligations, so the right does not reach them — this is a statement
+// about the legal basis, not a product carve-out, and it is the same conclusion
+// the restriction gate reaches by a different route (Article 18(2)).
+//
+// It also means an objection can never silence a password-changed alert, which
+// matters for the reason every control on this path matters: a setting a session
+// holder can flip to stop a security message is the tripwire disabled by the
+// takeover itself.
+//
+// Operator is not tenant-facing at all and has no data subject to object.
+func (c Class) ObjectionablePurpose() (string, bool) {
+	switch c {
+	case Activity:
+		return PurposeActivityNotifications, true
+	case Product:
+		return PurposeProductUpdates, true
+	default:
+		return "", false
+	}
+}
+
 // Channel is a way of reaching someone.
 type Channel string
 

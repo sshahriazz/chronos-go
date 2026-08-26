@@ -1,0 +1,13 @@
+{{define "title"}}An API key was revoked{{end}}
+{{define "content"}}
+{{/*
+  A revocation is a Security-class message for PasskeyRemoved's reason: a way in
+  was taken away. One the reader did not perform breaks an integration with no
+  error anybody owns — the consumer simply starts failing — and it is also how an
+  attacker covers a track or forces a fallback to a weaker credential.
+*/}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 20px;">An API key in your Chronos organization was revoked{{if .KeyID}} (<code>{{.KeyID}}</code>){{end}}{{if .Reason}}, recorded as <code>{{.Reason}}</code>{{end}}.</p>
+<p style="margin:0 0 20px;">It stopped working immediately, and so did every secret it had ever been issued. Anything that was using it is failing now.</p>
+<p style="margin:0;color:#6b7280;font-size:13px;"><strong>If you did not do this</strong>, an integration has been switched off without warning. Check who has administrative access to the organization.</p>
+{{end}}

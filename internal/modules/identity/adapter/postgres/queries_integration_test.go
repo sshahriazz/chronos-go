@@ -48,8 +48,25 @@ func newReadModel(t *testing.T, pool *pgxpool.Pool) *identitypg.ReadModel {
 func newReadSide(t *testing.T, pool *pgxpool.Pool) *app.Queries {
 	t.Helper()
 	rm := newReadModel(t, pool)
+	// The REAL API key directory, not a stub.
+	//
+	// Every other port here is the real read model, for the reason this file's
+	// header gives: a test of any single layer leaves the joins between them
+	// unexercised, and that is where a pagination bug lives. A stubbed key
+	// directory would make this harness the one place the read side is built
+	// from something that is not what production builds it from.
+	//
+	// It takes both transaction kinds because its two tables differ:
+	// api_key_secret carries no row-level security (the authenticator reads it
+	// before any organization is known) while api_key_view and
+	// service_account_view do.
+	keys, err := identitypg.NewAPIKeys(pgadapter.New(pool), pgadapter.New(pool))
+	if err != nil {
+		t.Fatalf("building the API key directory: %v", err)
+	}
+
 	q, err := app.NewQueries(app.QueriesDeps{
-		Accounts: rm, Sessions: rm, Methods: rm, History: rm,
+		Accounts: rm, Sessions: rm, Methods: rm, History: rm, Keys: keys,
 	})
 	if err != nil {
 		t.Fatalf("building the read side: %v", err)

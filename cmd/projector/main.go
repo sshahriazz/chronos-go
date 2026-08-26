@@ -272,6 +272,14 @@ func projections(codec *eventcodec.JSON) []projection.Projection {
 		// processing resumes for exactly the people who asked it to stop.
 		complianceprojection.NewRestrictions(codec),
 
+		// Article 21 objections. Its absence fails in the same direction as the
+		// restriction above and is easier to miss, because it costs less when it
+		// happens: an empty table reads as "nobody has objected", so activity and
+		// product mail resumes for the people who stopped it. Nothing errors, no
+		// metric moves, and the only signal is a complaint from somebody who
+		// already told us once.
+		complianceprojection.NewObjections(codec),
+
 		// Data-subject export requests. Its absence is silent in a different
 		// direction from the one above: the workflow still builds the bundle and
 		// still records the outcome in the log, but the subject's poll finds no
@@ -292,6 +300,15 @@ func projections(codec *eventcodec.JSON) []projection.Projection {
 		identityprojection.NewUser(codec),
 		identityprojection.NewSession(codec),
 		identityprojection.NewReservation(codec),
+
+		// Service accounts and API keys (identity.md §10). ORG-SCOPED, unlike
+		// every other identity projection: its two tables carry row-level
+		// security, so every statement it queues runs under the tenant scope taken
+		// from the event.s own metadata (projection.ScopeOf). An API key event
+		// appended without an OrgID would stop this projection on the policy.s
+		// WITH CHECK rather than be projected into no tenant, which is the correct
+		// direction for that mistake to fail in.
+		identityprojection.NewAPIKey(codec),
 	}
 }
 

@@ -1,0 +1,16 @@
+{{define "title"}}An API key was created for your organization{{end}}
+{{define "content"}}
+{{/*
+  The KEY ID is named and the token never is. The id is not secret — it travels
+  in the token's own public segment precisely so a leaked credential can be
+  attributed and revoked without anybody presenting the secret — and naming it is
+  what lets the reader act on this mail instead of going hunting.
+*/}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 20px;">An API key was created in your Chronos organization{{if .KeyID}} (<code>{{.KeyID}}</code>){{end}}.</p>
+{{if .Scopes}}<p style="margin:0 0 8px;">It can do the following, and nothing more:</p>
+<ul style="margin:0 0 20px;padding-left:20px;">{{range .Scopes}}<li><code>{{.}}</code></li>{{end}}</ul>{{end}}
+{{if .ExpiresAt}}<p style="margin:0 0 20px;">It stops working on {{.ExpiresAt.Format "2 January 2006"}}.</p>{{end}}
+{{if .Durable}}<p style="margin:0 0 20px;">This key belongs to a <strong>service account</strong>, so it keeps working after anybody leaves the organization. Only revoking it stops it.</p>{{else}}<p style="margin:0 0 20px;">This key acts as you, so it can reach what you can reach and nothing more. It stops working if your account is closed.</p>{{end}}
+<p style="margin:0;color:#6b7280;font-size:13px;"><strong>If you did not create it</strong>, revoke it now from the API keys screen. A key survives a password change and a sign-out-everywhere, so revoking it is the only thing that stops it.</p>
+{{end}}

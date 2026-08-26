@@ -2595,6 +2595,570 @@ message ListFederatedProvidersResponse {
   ];
 }
 
+// ---------------------------------------------------------------------------
+// Service accounts and API keys (identity.md §10)
+//
+// These are the only messages in this file that are ORGANIZATION-scoped. Every
+// other RPC here acts on the caller's own account with `relation: "self"`; a key
+// is a credential that acts inside a TENANT, so these declare `admin` on
+// `organization` and run gates 1, 2 and 3 like any other org-scoped write.
+//
+// No request names an organization, and that is the same property the
+// self-scoped messages have for the same reason: the tenant comes from the
+// resolved scope, so a field naming one would make every call an existence
+// probe for organization ids — and would let a member of one organization mint
+// a credential inside another.
+// ---------------------------------------------------------------------------
+
+// ApiKeyOwnerKind is the sort of principal an API key acts as.
+//
+// A tagged pair with the owner id rather than two optional id fields. Two
+// optional fields admit "both set" and "neither set", and both of those have to
+// be interpreted by whoever reads them — which puts the interpretation in every
+// client instead of in the schema.
+enum ApiKeyOwnerKind {
+  // Unset. Never returned by the server: a stored key always has exactly one
+  // owner of a known kind, and a value here would mean a row this build cannot
+  // interpret.
+  API_KEY_OWNER_KIND_UNSPECIFIED = 0;
+
+  // A personal access token. It acts as the person who created it, narrowed by
+  // its scopes, and it dies with their account — which is what makes it the
+  // wrong choice for anything a team depends on.
+  API_KEY_OWNER_KIND_USER = 1;
+
+  // An integration credential. It acts as a service account owned by the
+  // organization, so it survives the departure of whoever created it.
+  API_KEY_OWNER_KIND_SERVICE_ACCOUNT = 2;
+}
+
+// CreateServiceAccountRequest names a new non-human principal.
+message CreateServiceAccountRequest {
+  // A machine-readable label, unique within the organization.
+  //
+  // Lower-case snake, and the pattern is an ADR-002 control rather than a
+  // formatting preference: this value enters the event log in cleartext, the log
+  // is append-only, and free text is exactly where personal data arrives in a
+  // field like this — "alice's deploy bot" would put a colleague's name into a
+  // record erasure can never reach. `deploy_bot` cannot hold a sentence.
+  //
+  // The same rule already governs every `reason` field in this file.
+  string name = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "deploy_bot"}},
+    (buf.validate.field) = {
+      required: true
+      string: {
+        max_len: 64
+        pattern: "^[a-z][a-z0-9_]*$"
+      }
+    }
+  ];
+}
+
+// CreateServiceAccountResponse is the principal that now exists, and holds no
+// credential.
+//
+// There is deliberately no token here. Creating a principal and giving it a way
+// in are two decisions, the second is the one that changes what can happen, and
+// an incident timeline has to be able to tell them apart. Call CreateApiKey.
+message CreateServiceAccountResponse {
+  // The principal's identifier. It is BOTH the account id and the id that
+  // appears in events, in tuples and in an API key's owner field — a service
+  // account has no personal data, so it needs no pseudonym to stand in for any.
+  string service_account_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "svc_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^svc_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // The name, echoed so a client can render the row it just created without a
+  // second call.
+  string name = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "deploy_bot"}},
+    (buf.validate.field).string = {
+      max_len: 64
+      pattern: "^$|^[a-z][a-z0-9_]*$"
+    }
+  ];
+
+  // When it was created, UTC.
+  google.protobuf.Timestamp created_at = 3;
+}
+
+// ListServiceAccountsRequest is one page of the organization's non-human
+// principals.
+message ListServiceAccountsRequest {
+  // How many entries to return. Zero means the server's default (50), and the
+  // server CLAMPS anything above its maximum (200) rather than refusing it, so a
+  // client must read the returned page's length rather than assume it got what
+  // it asked for. See ListSessionsRequest.page_size for why the ceiling is an
+  // annotation and only the negative half is a rule.
+  int32 page_size = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "50"}
+      maximum: 200
+    },
+    (buf.validate.field).int32.gte = 0
+  ];
+
+  // An opaque cursor from a previous response's next_page_token. Empty starts at
+  // the beginning; a token from a different list is an error rather than a
+  // silent restart.
+  string page_token = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-opaque-cursor-from-a-previous-response"}},
+    (buf.validate.field).string = {
+      max_len: 1024
+      pattern: "^[A-Za-z0-9_-]*$"
+    }
+  ];
+}
+
+// ServiceAccount is one non-human principal, as a management screen shows it.
+message ServiceAccount {
+  // The principal's identifier, and what CreateApiKey names as an owner.
+  string service_account_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "svc_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^svc_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // The machine-readable label, unique within the organization.
+  string name = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "deploy_bot"}},
+    (buf.validate.field).string = {
+      max_len: 64
+      pattern: "^$|^[a-z][a-z0-9_]*$"
+    }
+  ];
+
+  // The pseudonym of the admin who created it. A pseudonym and never a name: the
+  // projection holds no personal data, and a client renders a person by asking
+  // the profile service for this subject (ADR-002, compliance.md §1).
+  string created_by = 3 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "subj_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^$|^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // When it was created, UTC. The list is ordered by it, so a caller cannot page
+  // without the server having sorted on something stable.
+  google.protobuf.Timestamp created_at = 4;
+}
+
+// ListServiceAccountsResponse is one page, newest first.
+message ListServiceAccountsResponse {
+  // The page, newest first. The ceiling is the page size the server clamps to.
+  repeated ServiceAccount service_accounts = 1 [(buf.validate.field).repeated.max_items = 200];
+
+  // The cursor for the next page. EMPTY MEANS DONE — a client must not infer the
+  // end from a short page, because a clamped page size makes short pages
+  // ordinary.
+  string next_page_token = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-opaque-cursor-for-the-next-page"}},
+    (buf.validate.field).string = {
+      max_len: 1024
+      pattern: "^[A-Za-z0-9_-]*$"
+    }
+  ];
+}
+
+// CreateApiKeyRequest mints a machine credential in the caller's organization.
+message CreateApiKeyRequest {
+  // The service account this key acts as. EMPTY means the key is a personal
+  // access token owned by the caller.
+  //
+  // The default is deliberately the NARROWER of the two: a key that defaulted to
+  // a service account would be a durable, organization-owned credential created
+  // by a client that simply did not send the field, and it would outlive the
+  // person who created it.
+  //
+  // There is deliberately NO field naming a user as the owner. A personal token
+  // is always the caller's own — an admin able to name a colleague could mint a
+  // credential that acts as them, which is impersonation with an audit trail
+  // saying the colleague did it.
+  string service_account_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "svc_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^$|^svc_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // The coarse capability list, `<resource type>:read` or
+  // `<resource type>:write`.
+  //
+  // A key's effective permission is the INTERSECTION of these and its owner's
+  // access (access.md §4), so a scope can only ever NARROW — a key can never
+  // exceed the principal it acts as, and narrowing the owner narrows every key
+  // they hold. `:write` implies `:read` on the same resource type; nothing else
+  // is implied.
+  //
+  // Required and non-empty. A key with no scopes can do nothing, which is
+  // useless rather than dangerous — but it is also exactly what a list dropped
+  // between the client and the server looks like, and the second reading is the
+  // one worth refusing.
+  //
+  // Fine-grained, per-resource permission is NOT expressible here and never will
+  // be: that is OpenFGA's, and a scope vocabulary that grew a third axis would
+  // be a second authorization model evaluated in Go, drifting from the first.
+  repeated string scopes = 2 [(buf.validate.field).repeated = {
+    min_items: 1
+    max_items: 32
+    unique: true
+    items: {
+      string: {
+        max_len: 64
+        pattern: "^[a-z][a-z0-9_]*:(read|write)$"
+      }
+    }
+  }];
+
+  // How long the key lives, in seconds. Zero means the server's default
+  // (90 days).
+  //
+  // Expiry is MANDATORY — identity.md §10 makes it a requirement rather than an
+  // option — and the ceiling is one year. Both ends are REFUSED rather than
+  // clamped, unlike a page size: an over-long lifetime is not a request the
+  // server can satisfy with less, because the caller would then hold a
+  // credential that dies at a date they were never told.
+  int64 lifetime_seconds = 3 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "7776000"}},
+    (buf.validate.field).int64 = {
+      gte: 0
+      lte: 31536000
+    }
+  ];
+}
+
+// CreateApiKeyResponse carries the token back ONCE.
+//
+// Only the digest is stored, so this is the only moment the token exists
+// anywhere this system can reach. A caller that loses it rotates the key, which
+// is the correct outcome — an endpoint that could re-display it would turn a
+// stolen admin session into a permanent copy of every credential the
+// organization holds, which is exactly what GenerateRecoveryCodesResponse
+// refuses for the same reason.
+message CreateApiKeyResponse {
+  // The key's public identifier. It is what RotateApiKey and RevokeApiKey name,
+  // and it is NOT secret: it travels inside the token's own public segment so a
+  // leaked credential can be attributed and revoked without anybody presenting
+  // the secret.
+  string key_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "key_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^key_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // The credential. Returned ONLY here. Never log it, never store it in a
+  // repository, and show it once.
+  //
+  // `chr_<env>_<key id>_<secret>`. The `chr_` prefix is there so secret scanners
+  // — GitHub's, a pre-commit hook, a log scrubber — can recognise one of these
+  // in a paste without knowing anything else about it, which is the whole of
+  // identity.md §10's leak-response story.
+  //
+  // The bound is published rather than enforced: this is a response field, and
+  // stating a length a client can size a buffer from is the point. The secret is
+  // 43 characters of unpadded base64url over 256 bits of entropy.
+  string token = 2 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "chr_live_key_01ARZ3NDEKTSV4RRFFQ69G5FAV_PLACEHOLDERPLACEHOLDERPLACEHOLDERPLACEHOLDER"}
+    max_length: 128
+    pattern: "^chr_[a-z][a-z0-9]{0,15}_key_[0-7][0-9A-HJKMNP-TV-Z]{25}_[A-Za-z0-9_-]{43}$"
+  }];
+
+  // What the key acts as.
+  ApiKeyOwnerKind owner_kind = 3;
+
+  // The principal it acts as: a `svc_` service account, or the caller's own
+  // `subj_` pseudonym for a personal access token.
+  string owner_id = 4 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "svc_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+    max_length: 31
+    pattern: "^(svc|subj)_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+  }];
+
+  // The capability list as stored: sorted and deduplicated, which is why it may
+  // not be the order it was sent in.
+  repeated string scopes = 5 [(buf.validate.field).repeated = {
+    max_items: 32
+    items: {
+      string: {
+        max_len: 64
+        pattern: "^[a-z][a-z0-9_]*:(read|write)$"
+      }
+    }
+  }];
+
+  // When the key stops working, UTC. Mandatory and never zero.
+  google.protobuf.Timestamp expires_at = 6;
+}
+
+// RotateApiKeyRequest replaces a key's secret without replacing the key.
+//
+// The identifier, the scopes, the organization binding and every grant that
+// names the owner are unchanged. That is the point: a rotation that produced a
+// new key id would require every consumer to be reconfigured, which is the cost
+// rotation exists to avoid — and a system whose rotation is expensive is a
+// system whose secrets are never rotated.
+message RotateApiKeyRequest {
+  // The key to rotate. A key in another organization answers exactly as one that
+  // does not exist: a key id is not a secret, so telling the two apart would
+  // turn this into a probe for which key ids exist across every tenant.
+  string key_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "key_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field) = {
+      required: true
+      string: {
+        max_len: 30
+        pattern: "^key_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+      }
+    }
+  ];
+
+  // How long the SUPERSEDED secret keeps working, in seconds. Zero means the
+  // server's default (24 hours) unless `immediate` is set.
+  //
+  // The overlap is what makes rotation something anybody actually does. Without
+  // one, revoke-then-issue leaves a window in which neither secret works and
+  // every consumer of the key fails — so rotation becomes an outage that has to
+  // be scheduled, which means it does not happen. With an UNBOUNDED one the old
+  // secret is live forever, because nobody remembers to remove it, and a
+  // rotation performed BECAUSE a secret leaked would not have removed the leaked
+  // secret. So it is a recorded DEADLINE, capped at seven days.
+  int64 overlap_seconds = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "86400"}},
+    (buf.validate.field).int64 = {
+      gte: 0
+      lte: 604800
+    }
+  ];
+
+  // Retire the old secret AT ONCE. This is the leak response.
+  //
+  // A separate flag rather than "overlap_seconds = 0", because a zero has two
+  // readings with opposite consequences — the default keeps a leaked secret
+  // alive for a day, and zero breaks every consumer that has not reconfigured —
+  // and an unset field would resolve to whichever the implementation happened to
+  // pick.
+  bool immediate = 3;
+
+  // How long the NEW secret lives, in seconds. Zero means the server's default
+  // (90 days), capped at one year exactly as CreateApiKeyRequest is.
+  //
+  // Rotation re-arms the expiry clock rather than inheriting the old deadline: a
+  // key rotated on its last day that kept the old one would expire hours after
+  // everybody had reconfigured for it.
+  int64 lifetime_seconds = 4 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "7776000"}},
+    (buf.validate.field).int64 = {
+      gte: 0
+      lte: 31536000
+    }
+  ];
+}
+
+// RotateApiKeyResponse carries the new token back once, and says when the old
+// one dies.
+message RotateApiKeyResponse {
+  // The new credential. Returned ONLY here — see CreateApiKeyResponse.token.
+  string token = 1 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "chr_live_key_01ARZ3NDEKTSV4RRFFQ69G5FAV_PLACEHOLDERPLACEHOLDERPLACEHOLDERPLACEHOLDER"}
+    max_length: 128
+    pattern: "^chr_[a-z][a-z0-9]{0,15}_key_[0-7][0-9A-HJKMNP-TV-Z]{25}_[A-Za-z0-9_-]{43}$"
+  }];
+
+  // When the SUPERSEDED secret stops working, UTC. Equal to the rotation instant
+  // for an immediate rotation.
+  //
+  // Returned so a client can show it. "Your old key works until 14:02 tomorrow"
+  // is the sentence that makes a rotation safe to perform, and a client that had
+  // to compute it from a policy constant would be computing a number this server
+  // is free to change.
+  google.protobuf.Timestamp previous_retires_at = 2;
+
+  // When the NEW secret stops working, UTC.
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+// RevokeApiKeyRequest ends a key and every secret it ever had.
+message RevokeApiKeyRequest {
+  // The key to revoke. A key in another organization answers as one that does
+  // not exist — see RotateApiKeyRequest.key_id.
+  string key_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "key_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field) = {
+      required: true
+      string: {
+        max_len: 30
+        pattern: "^key_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+      }
+    }
+  ];
+
+  // A short machine-readable label recorded with the revocation, for example
+  // `leaked` or `owner_left`. Optional.
+  //
+  // It enters an event, so the pattern is what makes "machine-readable" and "no
+  // free text" true rather than merely stated: lower-case snake, so a sentence
+  // somebody typed — which is where personal data arrives in a field like this —
+  // cannot reach an append-only log (ADR-002).
+  string reason = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "leaked"}},
+    (buf.validate.field).string = {
+      max_len: 64
+      pattern: "^$|^[a-z][a-z0-9_]*$"
+    }
+  ];
+}
+
+// RevokeApiKeyResponse reports what the revocation did.
+message RevokeApiKeyResponse {
+  // False when the key was already revoked. Nothing was appended, and it is NOT
+  // an error: the caller wanted the key unusable and it is.
+  bool changed = 1;
+
+  // How many stored secrets were destroyed. Usually one, or two during a
+  // rotation overlap, and zero for a key whose secrets had already been swept.
+  //
+  // It is reported rather than hidden because it is the evidence that the
+  // IMMEDIATE half of the revocation ran. The event alone would leave the key
+  // usable until the projector caught up, which for a credential with no
+  // short-lived access token in front of it is far too long.
+  int32 secrets_destroyed = 2 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "1"}
+      maximum: 2147483647
+    },
+    // The floor is a RULE and not an annotation: `minimum: 0` is proto3's zero
+    // value for that field and is indistinguishable from unset, so the generator
+    // never sees it. `gte` survives, and on a response message it refuses
+    // nothing — the interceptor validates requests.
+    (buf.validate.field).int32.gte = 0
+  ];
+}
+
+// ListApiKeysRequest is one page of the organization's keys.
+message ListApiKeysRequest {
+  // How many entries to return. Zero means the server's default (50), clamped at
+  // 200 — see ListSessionsRequest.page_size.
+  int32 page_size = 1 [
+    (gnostic.openapi.v3.property) = {
+      example: {yaml: "50"}
+      maximum: 200
+    },
+    (buf.validate.field).int32.gte = 0
+  ];
+
+  // An opaque cursor from a previous response's next_page_token. Empty starts at
+  // the beginning.
+  string page_token = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-opaque-cursor-from-a-previous-response"}},
+    (buf.validate.field).string = {
+      max_len: 1024
+      pattern: "^[A-Za-z0-9_-]*$"
+    }
+  ];
+}
+
+// ApiKey is one machine credential, as a management screen shows it.
+//
+// There is no token and no digest, and no field this message could grow that
+// would hold one: the statement behind it selects no secret column. A key list
+// that returned anything derived from the credential would put it on the one
+// screen whose entire purpose is to let somebody revoke it — the same rule the
+// device list follows.
+message ApiKey {
+  // The key's public identifier.
+  string key_id = 1 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "key_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 30
+      pattern: "^key_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // What the key acts as.
+  ApiKeyOwnerKind owner_kind = 2;
+
+  // The principal it acts as: a `svc_` service account, or a `subj_` pseudonym
+  // for a personal access token.
+  string owner_id = 3 [(gnostic.openapi.v3.property) = {
+    example: {yaml: "svc_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+    max_length: 31
+    pattern: "^$|^(svc|subj)_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+  }];
+
+  // The capability list, sorted.
+  repeated string scopes = 4 [(buf.validate.field).repeated = {
+    max_items: 32
+    items: {
+      string: {
+        max_len: 64
+        pattern: "^[a-z][a-z0-9_]*:(read|write)$"
+      }
+    }
+  }];
+
+  // When the key stops working, UTC.
+  google.protobuf.Timestamp expires_at = 5;
+
+  // When it was revoked, UTC. Unset for a live key.
+  //
+  // Revoked keys are LISTED, deliberately. The screen's question is "what
+  // credentials exist against this organization, and what happened to them" —
+  // hiding the revoked ones would remove the evidence that a revocation took
+  // effect, which is what somebody checks immediately after performing one.
+  google.protobuf.Timestamp revoked_at = 6;
+
+  // When its secret was last replaced, UTC. Unset for a key never rotated.
+  google.protobuf.Timestamp rotated_at = 7;
+
+  // When a request last presented this key, UTC. Unset for a key never used.
+  //
+  // DELIBERATELY APPROXIMATE: it advances at most once per key per minute, and
+  // there is no event behind it. An event per REQUEST would make the log grow
+  // with traffic rather than with state, and the cost would land at rebuild time
+  // — the recovery procedure for every projection (identity.md §13). "Last used
+  // about a minute ago" is the whole requirement, and a projection rebuild
+  // clears this column, which loses a hint and no fact.
+  google.protobuf.Timestamp last_used_at = 8;
+
+  // The pseudonym of the admin who minted it. A pseudonym and never a name.
+  string created_by = 9 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "subj_01ARZ3NDEKTSV4RRFFQ69G5FAV"}},
+    (buf.validate.field).string = {
+      max_len: 31
+      pattern: "^$|^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // When it was minted, UTC. The list is ordered by it.
+  google.protobuf.Timestamp created_at = 10;
+}
+
+// ListApiKeysResponse is one page, newest first, revoked keys included.
+message ListApiKeysResponse {
+  // The page, newest first. The ceiling is the page size the server clamps to.
+  repeated ApiKey api_keys = 1 [(buf.validate.field).repeated.max_items = 200];
+
+  // The cursor for the next page. EMPTY MEANS DONE.
+  string next_page_token = 2 [
+    (gnostic.openapi.v3.property) = {example: {yaml: "PLACEHOLDER-opaque-cursor-for-the-next-page"}},
+    (buf.validate.field).string = {
+      max_len: 1024
+      pattern: "^[A-Za-z0-9_-]*$"
+    }
+  ];
+}
+
 // IdentityService is registration, authentication, sessions and credentials.
 service IdentityService {
   // Register claims an address and creates the account that claims it.
@@ -4673,5 +5237,209 @@ service IdentityService {
         }
       ]
     };
+  }
+
+  // ---------------------------------------------------------------------
+  // Service accounts and API keys (identity.md §10)
+  //
+  // # These are the only ORGANIZATION-scoped methods in this service
+  //
+  // Everything above declares `relation: "self"` on `user`, which answers gate
+  // 2 locally from the principal and skips gates 1 and 3 — because a person
+  // exists before any organization and an org whose payment lapsed must not
+  // stop somebody signing out of a stolen device.
+  //
+  // A key is different in kind. It is a credential that acts INSIDE a tenant,
+  // it is bound to one organization immutably at creation (identity.md §10,
+  // review D2), and it is administered by that organization's admins rather
+  // than by its owner alone. So these declare `admin` on `organization` and run
+  // the whole pipeline: gate 1 resolves and VERIFIES the tenant, gate 2 asks
+  // OpenFGA, gate 3 applies the org's lifecycle, and gate 5 claims the
+  // idempotency key.
+  //
+  // # Every mutation requires AAL2, and that is what stops a key minting a key
+  //
+  // A machine cannot present a second factor, so a key-authenticated request
+  // carries AAL1 permanently and can never be elevated — there is no step-up
+  // ceremony a program can perform. `min_aal = ASSURANCE_LEVEL_2` on all four
+  // mutations therefore means a machine credential can never create, rotate or
+  // revoke one, which closes the self-perpetuation route: an attacker who
+  // steals a key cannot use it to mint a second, quieter one, and cannot use it
+  // to cover a track by revoking the first.
+  //
+  // It also matches what the level is FOR. Minting a credential that survives a
+  // password change, a second-factor re-enrolment and a sign-out-everywhere is
+  // exactly the kind of durable-access decision identity.md §2 lists step-up
+  // for, beside MFA disable and account deletion.
+  //
+  // No bootstrap exemption on any of them. The exemption exists so an account
+  // with no second factor can enrol its first (chronos.options.v1.
+  // bootstrap_min_aal); minting an API key is not a way to enrol one, and an
+  // account that has not finished enrolling has no business creating machine
+  // credentials for an organization.
+  //
+  // GROW rather than WRITE is deliberately NOT used. A key is not a seat and
+  // consumes no quota, and classing it as GROW would refuse key management to a
+  // past-due organization — which is the moment its owner most needs to be able
+  // to revoke a leaked credential.
+
+  // CreateServiceAccount opens a non-human principal in the caller's
+  // organization.
+  //
+  // It mints NO credential. A service account that has just been created can
+  // authenticate nothing at all; CreateApiKey is a separate decision that
+  // separately notifies, and keeping them apart is what lets an incident
+  // timeline distinguish "somebody created a principal" from "somebody gave a
+  // principal a way in".
+  rpc CreateServiceAccount(CreateServiceAccountRequest) returns (CreateServiceAccountResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "admin"
+      resource_type: "organization"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+    option (chronos.options.v1.min_aal) = ASSURANCE_LEVEL_2;
+
+    // A MUTATION, so it carries an Idempotency-Key. The header is described
+    // once, in proto/openapi.base.yaml's components, and every operation that
+    // requires it references that one description.
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // ListServiceAccounts shows the organization's non-human principals.
+  //
+  // READ, so it is permitted in every organization state including Suspended
+  // and Closed — a tenant that has stopped paying may still see what
+  // authenticates against it.
+  rpc ListServiceAccounts(ListServiceAccountsRequest) returns (ListServiceAccountsResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "admin"
+      resource_type: "organization"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_READ;
+  }
+
+  // CreateApiKey mints a machine credential and returns it exactly once.
+  //
+  // The token is in the response and nowhere else: only its digest is stored,
+  // so this is the only moment it exists anywhere this system can reach. A
+  // caller that loses it rotates the key.
+  //
+  // The key is bound to the caller's organization IMMUTABLY. Without that
+  // binding a key silently inherits every organization its owner belongs to,
+  // and a token leaked from one customer's CI reaches another customer's data —
+  // a cross-tenant breach originating in a feature nobody thought was
+  // tenant-scoped (identity.md §10, review D2).
+  rpc CreateApiKey(CreateApiKeyRequest) returns (CreateApiKeyResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "admin"
+      resource_type: "organization"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+    option (chronos.options.v1.min_aal) = ASSURANCE_LEVEL_2;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // RotateApiKey replaces a key's secret without replacing the key.
+  //
+  // The key id, the scopes, the organization binding and every grant that names
+  // the owner are unchanged, so no consumer has to be reconfigured beyond the
+  // secret itself — which is what makes rotation something anybody actually
+  // performs.
+  //
+  // The superseded secret keeps working for a bounded, RECORDED window, so
+  // there is no instant in which neither secret resolves and no path by which
+  // the old one lives forever. `immediate` collapses the window to nothing,
+  // which is the leak response.
+  rpc RotateApiKey(RotateApiKeyRequest) returns (RotateApiKeyResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "admin"
+      resource_type: "organization"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+    option (chronos.options.v1.min_aal) = ASSURANCE_LEVEL_2;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // RevokeApiKey ends a key and destroys every secret it ever had.
+  //
+  // IMMEDIATE, and not eventually: the stored digests are deleted in the same
+  // request, and the event is what makes the projection and the audit trail
+  // agree. Neither half is enough alone — the event alone leaves the credential
+  // usable until the projector catches up, and the delete alone leaves nothing
+  // in the log saying why the key stopped working, so a rebuild would show it
+  // as live while it resolved nothing.
+  //
+  // Idempotent: revoking an already-revoked key appends nothing, reports
+  // `changed = false`, and STILL sweeps secrets — a second call is what
+  // somebody makes when they are not sure the first took.
+  rpc RevokeApiKey(RevokeApiKeyRequest) returns (RevokeApiKeyResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "admin"
+      resource_type: "organization"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_WRITE;
+    option (chronos.options.v1.min_aal) = ASSURANCE_LEVEL_2;
+
+    option (gnostic.openapi.v3.operation) = {
+      parameters: [
+        {
+          parameter: {
+            name: "Idempotency-Key"
+            in: "header"
+            required: true
+            schema: {reference: {_ref: "#/components/schemas/idempotency-key"}}
+          }
+        }
+      ]
+    };
+  }
+
+  // ListApiKeys shows the organization's machine credentials, revoked ones
+  // included.
+  //
+  // No token and no digest comes back, and no field of the response could hold
+  // one. Revoked keys are listed on purpose: the evidence that a revocation
+  // took effect is what somebody checks immediately after performing one.
+  rpc ListApiKeys(ListApiKeysRequest) returns (ListApiKeysResponse) {
+    option (chronos.options.v1.authz) = {
+      relation: "admin"
+      resource_type: "organization"
+    };
+    option (chronos.options.v1.operation) = OPERATION_CLASS_READ;
   }
 }

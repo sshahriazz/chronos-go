@@ -343,9 +343,14 @@ func TestIdentityTypedNilGuardsReturnNilInterfaces(t *testing.T) {
 	if v := vaultOrNil(nil); v != nil {
 		t.Errorf("vaultOrNil(nil) returned a non-nil interface (%T)", v)
 	}
-	if a := authenticatorOrNil(nil); a != nil {
-		t.Errorf("authenticatorOrNil(nil) returned a non-nil interface (%T): the authn gate "+
-			"would panic instead of refusing the request", a)
+	// The bearer composer replaced authenticatorOrNil, and it carries the same
+	// obligation: a nil *SessionAuthenticator placed directly into
+	// interceptor.Authenticator is NOT == nil, so the authn gate would call
+	// through it and PANIC rather than refusing the request. Returning an untyped
+	// nil is what makes Gates.Missing report the gate instead.
+	if a := composeAuthenticator(&dependencies{}, nil, slog.New(slog.DiscardHandler)); a != nil {
+		t.Errorf("composeAuthenticator with no session resolver returned a non-nil "+
+			"interface (%T): the authn gate would panic instead of refusing the request", a)
 	}
 }
 

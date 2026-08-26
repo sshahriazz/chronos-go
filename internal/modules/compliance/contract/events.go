@@ -293,3 +293,144 @@ type ErasureResumed struct {
 }
 
 func (*ErasureResumed) EventType() string { return "compliance.ErasureResumed.v1" }
+
+// ---------------------------------------------------------------------------
+// Rectification (Article 16, compliance.md §3 and §6)
+// ---------------------------------------------------------------------------
+
+// PersonalDataCorrected records that a data subject exercised Article 16.
+//
+// # It records the RIGHT, not the write
+//
+// The value itself is changed by whichever module owns the field —
+// `profile.ProfileUpdated.v1` is appended by the same call, from profile's own
+// stream, because compliance does not write another module's data
+// (compliance.md §15). So there are two events for one request, and they say
+// different things.
+//
+// `ProfileUpdated` says a profile changed. This says a person told us what we
+// hold about them is INACCURATE and required its correction — which is a
+// statutory request with Article 12(3)'s one-month clock attached and
+// Article 19's duty to pass the correction on to whoever the data was disclosed
+// to. A controller asked to evidence its Article 16 handling cannot answer with
+// a list of settings saves, and could not tell one from the other if this event
+// did not exist.
+//
+// # No values, and not even a before-and-after
+//
+// ADR-002. The fields are named; what they said is in the vault, which is the
+// only place personal data may live. A "corrected from X to Y" payload is the
+// most natural shape for this event and the most damaging: it would put BOTH
+// versions of somebody's name permanently in the log, and the old one is
+// precisely the value they have just told us is wrong about them.
+//
+// compliance.md §6: "a correction is a new event, and the projection reflects
+// the corrected value. The historical record remains truthful: it recorded what
+// we believed at the time, and when we learned otherwise." The learning is what
+// this event is.
+type PersonalDataCorrected struct {
+	SubjectID string
+
+	// Fields names what the subject asked to have corrected, in the request's
+	// own vocabulary — `display_name`, `locale`, `timezone`.
+	//
+	// # Named, not diffed, and it is the ASSERTION rather than the delta
+	//
+	// A field appears here because the person said it was wrong, not because the
+	// stored value turned out to differ. Those come apart when somebody corrects
+	// a field to what it already said — a re-submitted form, a value we had
+	// fixed from another source — and Article 16 was still exercised in that
+	// case. Recording only the delta would lose the request, which is the thing
+	// with a statutory clock on it.
+	//
+	// The names are the WIRE vocabulary rather than the vault's own field names
+	// deliberately: this event is read by whoever answers a data subject's
+	// question about their own request, and "display_name" is the word they were
+	// shown. The mapping to a vault field is an implementation detail that has
+	// already changed once.
+	Fields []string
+
+	// ActorID is who asked. Always the subject today — the endpoint takes no
+	// subject and cannot — and carried anyway so that an operator-assisted
+	// correction, when one exists, is distinguishable from a self-service one
+	// without an upcaster.
+	ActorID string
+
+	CorrectedAt time.Time
+}
+
+func (*PersonalDataCorrected) EventType() string { return "compliance.PersonalDataCorrected.v1" }
+
+// ---------------------------------------------------------------------------
+// Objection (Article 21, compliance.md §3)
+// ---------------------------------------------------------------------------
+
+// ProcessingObjected records that a data subject objected to one purpose.
+//
+// # Why this is not ProcessingRestricted with a narrower blast radius
+//
+// The two rights are different in kind, and the difference is observable rather
+// than doctrinal.
+//
+// Article 18 restriction is TOTAL and TEMPORARY. It halts everything except
+// storage — transactional receipts included — while a dispute about the data
+// runs, and it ends when the dispute is settled. Article 21 objection is
+// PER-PURPOSE and open-ended: the account keeps working, receipts and
+// verification links keep arriving, and exactly one purpose stops until the
+// person withdraws the objection.
+//
+// They also differ in who may end them. A restriction can be lifted by either
+// side once the dispute is resolved. An objection binds the controller until its
+// AUTHOR releases it, which is why it is a separate record from a notification
+// preference — a preference is a setting we may reasonably re-solicit, and this
+// is not.
+//
+// If this event ever came to mean "stop everything", it would be a duplicate of
+// ProcessingRestricted and should be deleted rather than kept as a synonym.
+//
+// # No reason field
+//
+// Article 21(1) requires the objection to be "on grounds relating to his or her
+// particular situation", so there is an obvious place to put one. It is
+// deliberately absent, for ProcessingRestricted's reason: a person's account of
+// their own situation is free text about themselves, which ADR-002 keeps out of
+// a permanent replicated log, and nothing here branches on it.
+//
+// The absence is only tenable because the controller's override is not
+// implemented — see the RPC. An override needs the grounds to weigh against,
+// and building one means finding somewhere other than this event to keep them.
+type ProcessingObjected struct {
+	SubjectID string
+
+	// Purpose is which processing stops. One of domain.Purposes(), and a
+	// PERMANENT string: it is stored, replayed, and compared against a Go
+	// constant on every notification for a subject who has one.
+	Purpose string
+
+	// ActorID is who objected. The subject; carried for the reason
+	// PersonalDataCorrected carries it.
+	ActorID string
+
+	ObjectedAt time.Time
+}
+
+func (*ProcessingObjected) EventType() string { return "compliance.ProcessingObjected.v1" }
+
+// ProcessingObjectionWithdrawn records that the subject released one objection.
+//
+// Only the subject can produce it. That asymmetry with LegalHoldLifted — which
+// an operator produces — is the whole distinction between an instruction and a
+// setting: a hold is ours to place and lift, and an objection is theirs.
+type ProcessingObjectionWithdrawn struct {
+	SubjectID string
+
+	Purpose string
+
+	ActorID string
+
+	WithdrawnAt time.Time
+}
+
+func (*ProcessingObjectionWithdrawn) EventType() string {
+	return "compliance.ProcessingObjectionWithdrawn.v1"
+}

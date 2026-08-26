@@ -62,6 +62,24 @@ type (
 	// than once and each answer is its own artefact.
 	DataExport struct{}
 
+	// ServiceAccount is a non-human principal owned by an organization
+	// (identity.md §10). It is a SEPARATE kind from User for the reason the
+	// operator plane made Operator separate from User, and it is the same
+	// reason: "a boolean that grants X is exactly the field that gets set by an
+	// injection bug". A `is_service_account` column on an account row would make
+	// every human account one flipped bit away from being a machine principal
+	// that survives its owner's departure, and nothing in the type system would
+	// object. A distinct id type means the wrong identifier does not compile,
+	// and the wrong identifier ON THE WIRE does not parse.
+	//
+	// It carries no SubjectID pseudonym and needs none. A pseudonym exists to
+	// stand in for personal data the vault holds (ADR-002); a service account
+	// has no mailbox, no name a person chose for themselves and nothing to
+	// shred, so a second identifier for it would be indirection to an empty
+	// vault entry. `svc_…` is therefore both the aggregate id and the principal
+	// id, and it is what appears in events, projections and OpenFGA tuples.
+	ServiceAccount struct{}
+
 	// Operator is an employee of ours, on the operator plane (ADR-024). It is a
 	// SEPARATE kind from User and that is the point: operators are "not tenant
 	// users and must never be modelled as one with a flag" (operator.md §3),
@@ -102,6 +120,13 @@ func (Notification) Prefix() string { return "notif" }
 func (Event) Prefix() string        { return "evt" }
 func (Subject) Prefix() string      { return "subj" } // pseudonym; appears in every event (ADR-002)
 
+// ServiceAccount's prefix is deliberately unlike User's. A log line, an OpenFGA
+// tuple and an audit record all render a principal as a bare string, and
+// "svc_…" against "usr_…" is the difference between "a machine did this" and "a
+// person did this" at a glance — which is the fact somebody reading an incident
+// timeline needs first.
+func (ServiceAccount) Prefix() string { return "svc" }
+
 // PushSubscription's id is DERIVED from the organization and the endpoint
 // rather than minted at random, so the same browser re-registering in the same
 // organization resolves to the same subscription and a second organization
@@ -139,6 +164,7 @@ func Registry() map[string]string {
 		"Plan": Plan{}.Prefix(), "PlanVersion": PlanVersion{}.Prefix(),
 		"Notification": Notification{}.Prefix(), "Event": Event{}.Prefix(),
 		"Subject":          Subject{}.Prefix(),
+		"ServiceAccount":   ServiceAccount{}.Prefix(),
 		"PushSubscription": PushSubscription{}.Prefix(),
 		"DataExport":       DataExport{}.Prefix(),
 		"Operator":         Operator{}.Prefix(),
@@ -245,6 +271,11 @@ type (
 	NotificationID = ID[Notification]
 	EventID        = ID[Event]
 	SubjectID      = ID[Subject]
+
+	// ServiceAccountID names a non-human principal. Distinct from UserID by
+	// construction, so a handler that reads a service account where it meant an
+	// account holder does not compile.
+	ServiceAccountID = ID[ServiceAccount]
 
 	// PushSubscriptionID is deliberately not abbreviated to PushID: the thing it
 	// names is a subscription held by a push service, not a push that was sent.

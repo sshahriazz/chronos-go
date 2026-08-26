@@ -1,0 +1,9 @@
+Hello{{if .Name}} {{.Name}}{{end}},
+
+An API key in your Chronos organization was revoked{{if .KeyID}} ({{.KeyID}}){{end}}{{if .Reason}}, recorded as "{{.Reason}}"{{end}}.
+
+It stopped working immediately, and so did every secret it had ever been issued.
+Anything that was using it is failing now.
+
+IF YOU DID NOT DO THIS, an integration has been switched off without warning.
+Check who has administrative access to the organization.

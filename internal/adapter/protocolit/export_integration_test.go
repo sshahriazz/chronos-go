@@ -479,7 +479,16 @@ func (hh *harness) exportRuns(t *testing.T) *complianceapp.ExportRuns {
 		Store:        hh.blobs,
 		Prefix:       profiledomain.AvatarPrefix,
 		Restrictions: restrictions,
-		Now:          time.Now,
+		// The REAL resolver against the REAL schedule, built exactly as
+		// cmd/worker does — not a fake.
+		//
+		// The point of this suite is that a bundle produced against live
+		// infrastructure says what a bundle produced in production says. A
+		// stubbed exemptions resolver would leave the one part of the manifest
+		// that makes a legal claim — "these classes are retained, under this
+		// article" — asserted only against a fixture.
+		Exemptions: realExemptions(t),
+		Now:        time.Now,
 	})
 	if err != nil {
 		t.Fatalf("NewExportRuns: %v", err)
@@ -664,4 +673,29 @@ func TestTheBundleReferencesTheSubjectsFilesWithWorkingLinks(t *testing.T) {
 		t.Errorf("the manifest lists %d objects and the poll reported %d",
 			len(bundle.Objects), len(got.GetFiles()))
 	}
+}
+
+// realExemptions builds the retention resolver exactly as cmd/worker does.
+//
+// # Real, not a fake, and that is the point of this suite
+//
+// A bundle produced here must say what a bundle produced in production says.
+// The manifest's retained-records section is the one part of it that makes a
+// LEGAL claim — "these classes are retained, on this article" — and asserting
+// it against a fixture would test the fixture.
+//
+// `AssumeRecordsExist` is the same placeholder the composition roots wire, and
+// it is the honest one to use here for the same reason: nothing can yet ask
+// billing whether a given subject appears on an invoice, so the resolver
+// resolves toward STATING the class. Over-stating is the smaller wrong;
+// compliance.md §7 names under-stating as the misleading answer.
+func realExemptions(t *testing.T) *complianceapp.Exemptions {
+	t.Helper()
+	ex, err := complianceapp.NewExemptions(complianceapp.ExemptionsDeps{
+		Records: complianceapp.AssumeRecordsExist{},
+	})
+	if err != nil {
+		t.Fatalf("building the retention exemptions: %v", err)
+	}
+	return ex
 }

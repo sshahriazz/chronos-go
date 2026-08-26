@@ -291,3 +291,75 @@ func numberBranch(spec map[string]any, message, property string) map[string]any 
 	}
 	return s
 }
+
+// A credential is not an identifier, and the identifier gate must not claim it
+// is.
+//
+// The API key token is published as `^chr_<env>_<key id>_<secret>$`, which the
+// prefix heuristic matched: the gate demanded a `chr` Kind in
+// internal/platform/ids. Registering one would have been a lie — a credential is
+// not a prefixed ULID, nothing parses one through ids.Parse, and the registry is
+// what ids.PatternFor is the authority for.
+//
+// The distinguishing property is structural: an identifier is ONE prefixed
+// segment. This asserts both directions, because a narrowing that let real
+// identifiers through would be far worse than the false positive it removed.
+func TestIsIdentifierShaped(t *testing.T) {
+	cases := []struct {
+		name    string
+		pattern string
+		want    bool
+	}{
+		{
+			name:    "a prefixed ULID",
+			pattern: "^sess_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+			want:    true,
+		},
+		{
+			name: "an identifier whose body drifted is STILL an identifier",
+			// The uppercase-only, 26-character drift that motivated the gate. If
+			// the narrowing let this through, the defect the gate exists for would
+			// come back.
+			pattern: "^sess_[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}$",
+			want:    true,
+		},
+		{
+			name:    "an API key token is not an identifier",
+			pattern: "^chr_[a-z][a-z0-9]{0,15}_key_[0-7][0-9A-HJKMNP-TV-Z]{25}_[A-Za-z0-9_-]{43}$",
+			want:    false,
+		},
+		{
+			name: "an underscore inside a character class does not separate",
+			// base64url's alphabet contains '_'. Treating it as a separator would
+			// exempt exactly the kind of pattern this gate exists to check.
+			pattern: "^tok_[A-Za-z0-9_-]{43}$",
+			want:    true,
+		},
+		{
+			name:    "an escaped underscore does not separate",
+			pattern: `^tok_[0-7]\_[A-Z]{4}$`,
+			want:    true,
+		},
+		{
+			name:    "a media type",
+			pattern: "^image/(png|jpeg)$",
+			want:    false,
+		},
+		{
+			name:    "a handle, which starts with a class",
+			pattern: "^[a-z][a-z0-9_]{2,29}$",
+			want:    false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isIdentifierShaped(tc.pattern); got != tc.want {
+				verdict := map[bool]string{true: "an identifier", false: "not an identifier"}
+				t.Fatalf("%q was read as %s, want %s; the gate holds identifiers to "+
+					"ids.PatternFor, so a false positive demands a Kind that should not "+
+					"exist and a false negative lets a drifted identifier through",
+					tc.pattern, verdict[got], verdict[tc.want])
+			}
+		})
+	}
+}

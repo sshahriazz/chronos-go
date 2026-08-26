@@ -371,6 +371,47 @@ func TestAccountSafetyAlertsCannotBeSwitchedOff(t *testing.T) {
 		"identity.EmailVerified.v1": "the welcome message; NOTIFICATIONS §5 marks it Txn ★",
 	}
 
+	// The audience rule needs its own exception table, and API keys are why.
+	//
+	// # The rule and its reason
+	//
+	// "An identity alert concerns one account and goes to the person whose
+	// account it is" — AudienceSubject, resolved from the event's SubjectIDs. It
+	// is what stops an alert being addressed anywhere but the account it is
+	// about.
+	//
+	// # Why an API key cannot obey it
+	//
+	// A key may be owned by a SERVICE ACCOUNT, which is a distinct principal
+	// kind with no SubjectID at all — deliberately, because a pseudonym stands
+	// in for vault data and a machine has none to shred. So AudienceSubject on
+	// these three events resolves to an EMPTY recipient list, and the reactor
+	// sends nothing. Silently. On the highest-value alert identity carries: a
+	// key is the credential that survives the password change, the second-factor
+	// re-enrolment and the sign-out-everywhere that follow a compromise.
+	//
+	// AudienceActor resolves from ActorID — the human who minted it — which is
+	// the person who needs the message in both cases. For a personal key the
+	// actor IS the subject, so nothing is lost; for a service-account key it is
+	// the only mailbox that exists.
+	//
+	// # Why this does not reopen the hole the rule closed
+	//
+	// The reactor resolves AudienceActor from Meta.ActorID and REFUSES an event
+	// that records none — it never falls back to "the first subject", precisely
+	// so an admin acting on somebody else's account cannot have the alert
+	// delivered to themselves. The recipient is still a single, server-recorded
+	// principal that no request field controls.
+	//
+	// The class rule is untouched: all three remain Security, so no preference
+	// can silence them.
+	actorByNecessity := map[string]string{
+		"identity.ApiKeyCreated.v1": "a key may be owned by a service account, which has " +
+			"no SubjectID; AudienceSubject would resolve to nobody and send nothing",
+		"identity.ApiKeyRotated.v1": "same owner problem",
+		"identity.ApiKeyRevoked.v1": "same owner problem",
+	}
+
 	for _, event := range cat.Events() {
 		if !strings.HasPrefix(event, "identity.") {
 			continue
@@ -392,6 +433,14 @@ func TestAccountSafetyAlertsCannotBeSwitchedOff(t *testing.T) {
 				"alert unless transactionalByDesign says why not, because %s respects the "+
 				"recipient's preferences — so this one can be switched off by whoever "+
 				"reached the account", event, spec.Class, spec.Class)
+		}
+		if _, actor := actorByNecessity[event]; actor {
+			if spec.Audience != notify.AudienceActor {
+				t.Errorf("%s is named in actorByNecessity but notifies the %s audience; "+
+					"remove it from that table rather than leaving a stale exemption",
+					event, spec.Audience)
+			}
+			continue
 		}
 		if spec.Audience != notify.AudienceSubject {
 			t.Errorf("%s notifies the %s audience; an identity alert concerns one "+

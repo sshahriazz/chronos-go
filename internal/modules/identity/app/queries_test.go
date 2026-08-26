@@ -158,6 +158,9 @@ func newQueries(t *testing.T, deps QueriesDeps) *Queries {
 	if deps.History == nil {
 		deps.History = &fakeHistory{}
 	}
+	if deps.Keys == nil {
+		deps.Keys = fakeKeys{}
+	}
 	q, err := NewQueries(deps)
 	if err != nil {
 		t.Fatalf("building the read side: %v", err)
@@ -177,6 +180,24 @@ func sessionAt(t *testing.T, at time.Time) SessionSummary {
 	}
 }
 
+// fakeKeys is the API key read side.
+//
+// It answers EMPTY rather than refusing, because every test in this file is
+// about a different port and an empty directory is a real state — an account
+// that has minted no keys. A fake that errored would make each of them fail for
+// a reason none of them is testing.
+type fakeKeys struct{}
+
+func (fakeKeys) Keys(context.Context, page.Keyset, int32) ([]APIKeySummary, error) {
+	return nil, nil
+}
+
+func (fakeKeys) ServiceAccounts(
+	context.Context, page.Keyset, int32,
+) ([]ServiceAccountSummary, error) {
+	return nil, nil
+}
+
 // ---------------------------------------------------------------------------
 // Construction
 // ---------------------------------------------------------------------------
@@ -185,6 +206,7 @@ func TestNewQueries_RefusesAPartialReadSide(t *testing.T) {
 	full := QueriesDeps{
 		Accounts: &fakeAccounts{}, Sessions: &fakeSessions{},
 		Methods: &fakeMethods{}, History: &fakeHistory{},
+		Keys: fakeKeys{},
 	}
 	if _, err := NewQueries(full); err != nil {
 		t.Fatalf("a complete read side must build: %v", err)
@@ -198,6 +220,11 @@ func TestNewQueries_RefusesAPartialReadSide(t *testing.T) {
 		{"sessions", func(d *QueriesDeps) { d.Sessions = nil }},
 		{"methods", func(d *QueriesDeps) { d.Methods = nil }},
 		{"history", func(d *QueriesDeps) { d.History = nil }},
+		// A read side missing the key directory would answer every OTHER
+		// question and silently report that an account holds no API keys —
+		// which is the answer somebody checking for a leaked credential would
+		// act on.
+		{"keys", func(d *QueriesDeps) { d.Keys = nil }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			deps := full

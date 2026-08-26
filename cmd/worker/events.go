@@ -751,6 +751,60 @@ func identityNotifications(cat *notify.Catalogue) {
 		"the person who lifted it did so deliberately and is looking at the screen that " +
 			"did it")
 
+	// ── rectification (Article 16) ─────────────────────────────────────────
+	//
+	// # Silent, and the reason is that the OTHER event already mails
+	//
+	// A rectification is two appends for one request: `profile.ProfileUpdated.v1`
+	// from the module that owns the field, and this one from compliance. The
+	// first is already a SECURITY-class alert naming the fields that changed —
+	// which exists precisely so that a change nobody made is reported to the
+	// person it was made about.
+	//
+	// An entry here would send a second mail about the same act, minutes apart,
+	// saying the same thing in different words. NOTIFICATIONS §4's rule against
+	// two messages for one event is the general form; this is the specific case
+	// where the two messages would come from two modules and neither would know
+	// about the other.
+	//
+	// What is NOT covered by that alert is Article 19 — telling the recipients
+	// the data was disclosed to that it has been corrected. That is a
+	// controller-to-controller obligation with no data subject in the audience,
+	// so it is not a notification at all; it needs a recipient register, which
+	// compliance.md §10 lists and this build does not have.
+	cat.Silent[complianceevents.PersonalDataCorrected](
+		"the correction's own profile.ProfileUpdated.v1 is already a Security-class alert " +
+			"naming the fields that changed, sent for exactly the reason a mail here " +
+			"would be — a change the person did not make is reported to them. A second " +
+			"message minutes later, from a second module, about the same act, is two " +
+			"messages for one event. Article 19's duty to tell the RECIPIENTS is a " +
+			"different obligation with no data subject in its audience, and needs the " +
+			"recipient register compliance.md §10 describes")
+
+	// ── objection (Article 21) ─────────────────────────────────────────────
+	//
+	// Silent in both directions, and the first is the interesting one.
+	//
+	// An objection stops a purpose. Mailing "we have stopped sending you activity
+	// notifications" is a message the person did not ask for, sent to confirm
+	// that they will receive fewer messages — and it would be Activity or Product
+	// class if it were about anything else, which is exactly what they just
+	// objected to. The screen that recorded the objection is what tells them.
+	//
+	// It differs from the restriction pair only in that the dispatcher would NOT
+	// suppress this one for them: a confirmation is not the objected-to purpose,
+	// so nothing downstream would catch the mistake. The decision has to be made
+	// here.
+	cat.Silent[complianceevents.ProcessingObjected](
+		"an objection stops a purpose; a mail confirming it is a message the person did " +
+			"not ask for, sent to tell them they will receive fewer messages. The screen " +
+			"that recorded it is what tells them — and unlike a restriction, the " +
+			"dispatcher would not suppress this one, so the decision has to be made here")
+	cat.Silent[complianceevents.ProcessingObjectionWithdrawn](
+		"the person who withdrew it did so deliberately and is looking at the screen that " +
+			"did it, which is the reason lifting a restriction is silent. What they " +
+			"notice next is the processing resuming, which is what they asked for")
+
 	// ---- Data export (Articles 15 and 20, compliance.md §5) ------------------
 	cat.Silent[complianceevents.DataExportRequested](
 		"the person is looking at the screen that asked. What is worth a message is the " +
@@ -1029,6 +1083,101 @@ func identityNotifications(cat *notify.Catalogue) {
 		Class:    notify.Security,
 		Audience: notify.AudienceSubject,
 	}, nil)
+
+	// ---------------------------------------------------------------------
+	// Service accounts and API keys (identity.md §10)
+	//
+	// # The audience here is the ACTOR, and it is the only one of these that
+	// # exists
+	//
+	// Every other identity alert goes to AudienceSubject — the person the event
+	// is about. These events are about a KEY and a machine principal, and
+	// neither is a data subject: there is no personal data in either, nothing
+	// for a pseudonym to stand in for, and `AudienceSubject` would resolve to
+	// nobody. The reactor would park each one rather than send it, which is a
+	// security alert silently not delivered.
+	//
+	// AudienceActor is not a fallback for that. It is the RIGHT recipient, and
+	// the reason is what these alerts are for: an attacker holding a stolen
+	// admin session mints a durable machine credential, because a key survives
+	// the password change and the sign-out-everywhere that follow the discovery
+	// of a compromise. The one person who can look at "a key was created" and
+	// say "I did not do that" is the admin whose authority was used.
+	//
+	// The org-admin SET would be the wider and better audience — the same
+	// audience every organization event below is waiting for — and it needs a
+	// membership read model notify does not have. When it lands these become
+	// two-audience messages rather than moving.
+
+	cat.Silent[identityevents.ServiceAccountCreated](
+		"a service account holds NO credential: it is created empty and can authenticate " +
+			"nothing at all until a key is minted for it, which is a separate command " +
+			"that separately notifies. Mailing both is two messages about one intent, " +
+			"and the second one is the one that changes what can happen — the same call " +
+			"TotpEnrollmentStarted gets against TotpEnabled. It becomes an On the day a " +
+			"service account can be granted anything without a key")
+
+	cat.On[identityevents.ApiKeyCreated](notify.Spec{
+		Template: "identity.api_key_created",
+		// SECURITY, and it is the highest-value alert this pair carries. A key is
+		// a credential that survives the password change, the second-factor
+		// re-enrolment and the sign-out-everywhere that follow the discovery of a
+		// compromise — so minting one is how an attacker makes their access
+		// durable, and this mail is what interrupts it.
+		Class:    notify.Security,
+		Audience: notify.AudienceActor,
+	}, func(e *identityevents.ApiKeyCreated) map[string]any {
+		return map[string]any{
+			// The key id, which is NOT secret — it travels in the token's own
+			// public segment precisely so a leaked credential can be attributed
+			// and revoked without anybody presenting the secret. Naming it is what
+			// lets the reader act on the mail rather than go hunting.
+			"KeyID": e.KeyID,
+			// Whether the credential outlives its creator, which is the fact that
+			// changes what "I did not do that" costs: a personal token dies with
+			// the account, a service-account key does not.
+			"Durable": e.OwnerKind == identityevents.OwnerServiceAccount,
+			// The capability list and the deadline. Both are bounded, machine-
+			// readable and contain no personal data by construction — a scope
+			// matches `<resource type>:<read|write>` and nothing else.
+			"Scopes":    e.Scopes,
+			"ExpiresAt": e.ExpiresAt,
+		}
+	})
+
+	cat.On[identityevents.ApiKeyRotated](notify.Spec{
+		Template: "identity.api_key_rotated",
+		// SECURITY, for the mirror of the reason above: a rotation hands a NEW
+		// working secret to whoever asked for it, so it is the quieter way to
+		// take a credential that already exists — no new key appears on any
+		// screen, and the key's id, scopes and grants are unchanged.
+		Class:    notify.Security,
+		Audience: notify.AudienceActor,
+	}, func(e *identityevents.ApiKeyRotated) map[string]any {
+		return map[string]any{
+			"KeyID": e.KeyID,
+			// When the OLD secret dies. It is the operationally useful half — the
+			// reader has until then to reconfigure — and it is also the security
+			// half: an immediate retirement is a leak response, and one the reader
+			// did not perform is worth a phone call.
+			"PreviousRetiresAt": e.PreviousRetiresAt,
+			"Immediate":         !e.PreviousRetiresAt.After(e.RotatedAt),
+			"ExpiresAt":         e.ExpiresAt,
+		}
+	})
+
+	cat.On[identityevents.ApiKeyRevoked](notify.Spec{
+		Template: "identity.api_key_revoked",
+		// SECURITY for PasskeyRemoved's reason: a way in was taken away. A
+		// revocation somebody did not perform breaks an integration with no
+		// error anybody owns — the consumer simply starts failing — and it is
+		// also how an attacker covers a track or forces a fallback to a weaker
+		// credential.
+		Class:    notify.Security,
+		Audience: notify.AudienceActor,
+	}, func(e *identityevents.ApiKeyRevoked) map[string]any {
+		return map[string]any{"KeyID": e.KeyID, "Reason": e.Reason}
+	})
 }
 
 // notificationModuleNotifications covers the notification module's OWN events.

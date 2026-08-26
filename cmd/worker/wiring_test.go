@@ -64,6 +64,43 @@ func TestPreferencesAndArbitrationAreWired(t *testing.T) {
 	}
 }
 
+// THE TWO DATA-SUBJECT RIGHTS ARE WIRED INTO THE SENDING PATH.
+//
+// # A nil port here is not merely permissive; it is a legal obligation nobody
+// # enforces
+//
+// The preference ports above fail safe when they are absent: a toggle does
+// nothing and a security alert still arrives. These two do not. A nil
+// Restrictions port sends mail to somebody who invoked Article 18; a nil
+// Objections port processes a purpose somebody stopped under Article 21. Both
+// are silent — the aggregate recorded the instruction, the projection holds the
+// row, and the dispatcher never asks.
+//
+// That is exactly the shape this repository has already shipped: three
+// notification channels fully built, fully tested and constructed by no binary.
+// Only a composition-root test can catch it, because every unit test below these
+// ports constructs its own dispatcher and passes either way.
+//
+// They are asserted TOGETHER and separately, because the two rights suppress
+// different things and a single port serving both would mean the narrower one
+// has silently become the wider one.
+func TestBothDataSubjectRightsAreWiredIntoTheSendingPath(t *testing.T) {
+	cfg := testConfig(t)
+	d, closeAll := newDependencies(cfg, slog.New(slog.DiscardHandler), newCodec())
+	defer closeAll()
+
+	if !d.notify.HasRestrictions() {
+		t.Error("no Article 18 restriction lookup is wired: a person who halted " +
+			"processing of their own data is contacted anyway, and nothing reports it")
+	}
+	if !d.notify.HasObjections() {
+		t.Error("no Article 21 objection lookup is wired: activity and product mail " +
+			"reaches every person who objected to it. The objection is recorded, the row " +
+			"is projected, and the dispatcher never asks — so the only signal is a " +
+			"complaint from somebody who already told us once")
+	}
+}
+
 func testConfig(t *testing.T) *config.Config {
 	t.Helper()
 	for k, v := range map[string]string{

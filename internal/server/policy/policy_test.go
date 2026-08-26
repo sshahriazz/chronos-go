@@ -644,13 +644,50 @@ func TestTheRealEnrolmentPathIsReachableExactlyOnceAndNoWider(t *testing.T) {
 	}
 }
 
-// The real identity service is self-scoped on every method that is not public.
+// The real identity service is self-scoped on every method that is not public,
+// EXCEPT the ones that manage machine credentials.
 //
-// This is the annotation the gate depends on. If a method ever declares an
-// org-scoped policy instead, it becomes unreachable — identity has no
-// organization to resolve — and the failure is an INTERNAL error at request
-// time rather than anything visible at build time.
+// This is the annotation the gate depends on. A method that declares an
+// org-scoped policy by accident — copied from workspace, say — would start
+// asking OpenFGA about an organization the caller never named, and the failure
+// is a refusal at request time rather than anything visible at build time.
+//
+// # Why the exceptions exist, and why the rule was not simply dropped
+//
+// The rule's original reasoning said identity "has no organization to resolve".
+// That was a claim about identity's METHODS, not about the gate, and it stopped
+// being true when API keys arrived.
+//
+// Gate 1 is global: cmd/api builds one interceptor pipeline in `handlerOptions`
+// and registers EVERY service with it, and the resolver takes the organization
+// from the caller's header or from their single membership — nothing about it
+// is tied to the organization service. Billing and workspace already declare
+// `resource_type: "organization"` and work.
+//
+// An API key genuinely belongs to an organization: identity.md §10 binds it to
+// one immutably at mint time, and §14 says a key is revoked when its owner
+// leaves. Making these self-scoped would mean any member could mint a
+// credential for the whole tenant, which is the opposite of what `admin` says.
+//
+// So the exceptions are named rather than the rule relaxed. Everything about a
+// person's own account — their password, their sessions, their second factors,
+// their deactivation — must still be self-scoped, and a new one that is not
+// still fails here.
 func TestEveryNonPublicIdentityMethodIsSelfScoped(t *testing.T) {
+	// Machine-credential management, org-scoped by design.
+	//
+	// Each is `admin` on `organization`, which is what makes minting a key an
+	// administrative act rather than something any member can do to the whole
+	// tenant.
+	orgScopedByDesign := map[string]string{
+		"CreateServiceAccount": "a service account is a tenant-wide principal; §10 binds it to one org",
+		"ListServiceAccounts":  "the roster of a tenant's non-human principals",
+		"CreateApiKey":         "a key is bound to one organization immutably at mint time (§10)",
+		"RotateApiKey":         "same key, same organization",
+		"RevokeApiKey":         "same key, same organization",
+		"ListApiKeys":          "the tenant's credentials, not the caller's own account",
+	}
+
 	set, err := policy.Load(services...)
 	if err != nil {
 		t.Fatalf("policy.Load: %v", err)
@@ -668,10 +705,24 @@ func TestEveryNonPublicIdentityMethodIsSelfScoped(t *testing.T) {
 		if p.Public {
 			continue
 		}
+		if _, byDesign := orgScopedByDesign[string(methods.Get(i).Name())]; byDesign {
+			if p.SelfScoped() {
+				t.Errorf("%s is named in orgScopedByDesign and is SELF-SCOPED; any member "+
+					"could then mint a credential for the whole tenant. Remove it from "+
+					"that table rather than leaving a stale exemption", name)
+			}
+			if p.ResourceType != "organization" {
+				t.Errorf("%s is org-scoped by design but declares resource type %q",
+					name, p.ResourceType)
+			}
+			continue
+		}
 		if !p.SelfScoped() {
-			t.Errorf("%s is neither public nor self-scoped (relation %q, type %q, field %q), "+
-				"so it is org-scoped — and identity has no organization to resolve, which "+
-				"makes it unreachable", name, p.Relation, p.ResourceType, p.ResourceIDField)
+			t.Errorf("%s is neither public nor self-scoped (relation %q, type %q, field %q). "+
+				"Everything about a person's own account must be self-scoped; if this "+
+				"method genuinely belongs to an organization, name it in "+
+				"orgScopedByDesign with the reason",
+				name, p.Relation, p.ResourceType, p.ResourceIDField)
 			continue
 		}
 		selfScoped++

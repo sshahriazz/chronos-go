@@ -815,6 +815,209 @@ components:
          It carries NO links. Minting one per file of every past export would turn a
          list screen into a bulk issuance of bearer capabilities for everything the
          person has ever exported; the caller opens the one they want.
+    chronos.compliance.v1.ListProcessingObjectionsRequest:
+      type: object
+      title: ListProcessingObjectionsRequest
+      additionalProperties: false
+      description: ListProcessingObjectionsRequest asks what the caller has objected to.
+    chronos.compliance.v1.ListProcessingObjectionsResponse:
+      type: object
+      properties:
+        objections:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.compliance.v1.ProcessingObjection'
+          title: objections
+          maxItems: 8
+          description: |-
+            The caller's own objections. Bounded by the enum: there cannot be more of
+             these than there are purposes.
+      title: ListProcessingObjectionsResponse
+      additionalProperties: false
+      description: |-
+        ListProcessingObjectionsResponse is every objection the caller currently
+         holds.
+    chronos.compliance.v1.ObjectToProcessingRequest:
+      type: object
+      properties:
+        purpose:
+          not:
+            type: string
+            enum:
+              - PROCESSING_PURPOSE_UNSPECIFIED
+          title: purpose
+          description: |-
+            Which processing to stop. Exactly one per call.
+
+             One purpose per request rather than a list, because Article 21 is a
+             per-purpose right and a partial failure over a list would leave the caller
+             unable to tell which half took effect.
+          allOf:
+            - $ref: '#/components/schemas/chronos.compliance.v1.ProcessingPurpose'
+      title: ObjectToProcessingRequest
+      additionalProperties: false
+      description: ObjectToProcessingRequest stops one purpose for the caller (Article 21).
+    chronos.compliance.v1.ObjectToProcessingResponse:
+      type: object
+      properties:
+        changed:
+          type: boolean
+          title: changed
+          description: |-
+            Whether this call changed anything. False means the objection already
+             stood, which is a success: the caller asked for a state that holds.
+        objectedSince:
+          title: objected_since
+          description: |-
+            When the objection was first made — not this call. A repeated request must
+             not move a date the person has been given.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: ObjectToProcessingResponse
+      additionalProperties: false
+      description: ObjectToProcessingResponse reports the state after the call.
+    chronos.compliance.v1.ProcessingObjection:
+      type: object
+      properties:
+        purpose:
+          title: purpose
+          description: The purpose that is stopped.
+          allOf:
+            - $ref: '#/components/schemas/chronos.compliance.v1.ProcessingPurpose'
+        objectedSince:
+          title: objected_since
+          description: When the objection was made.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: ProcessingObjection
+      additionalProperties: false
+      description: ProcessingObjection is one purpose the caller has stopped.
+    chronos.compliance.v1.ProcessingPurpose:
+      type: string
+      title: ProcessingPurpose
+      enum:
+        - PROCESSING_PURPOSE_UNSPECIFIED
+        - PROCESSING_PURPOSE_ACTIVITY_NOTIFICATIONS
+        - PROCESSING_PURPOSE_PRODUCT_UPDATES
+      description: |-
+        ProcessingPurpose is one purpose this system processes personal data for that
+         rests on LEGITIMATE INTERESTS, and can therefore be objected to (Article 21).
+
+         # Why the list is short, and why it is not the list of everything we do
+
+         Article 21 reaches processing grounded in Article 6(1)(e) or 6(1)(f). It does
+         not reach processing grounded in contract or in a legal obligation, which is
+         most of what this system does: a password-changed alert, a verification link
+         and an invoice are none of them objectionable, and offering to stop them would
+         be offering something we would then have to refuse.
+
+         So this enum contains only purposes the system can actually STOP, and each is
+         a purpose an entry in the notification catalogue rests on. A purpose nobody
+         can enforce is a promise, and a right implemented as a promise is worse than
+         one that is honestly absent.
+    chronos.compliance.v1.RectifyMyDataRequest:
+      type: object
+      properties:
+        displayName:
+          type:
+            - string
+            - "null"
+          title: display_name
+          maxLength: 80
+          minLength: 1
+          pattern: ^\S(.*\S)?$
+          description: |-
+            The name other people read.
+
+             Bounds are `chronos.profile.v1.UpdateProfileRequest.display_name`'s, and
+             must stay equal to them: the correction is executed by the same use case
+             that serves the settings screen, so a bound that differed here would refuse
+             at this boundary a value that boundary accepts — or accept one the handler
+             then rejects, which is the worse direction because the person is exercising
+             a right rather than editing a preference.
+        locale:
+          type:
+            - string
+            - "null"
+          title: locale
+          maxLength: 35
+          pattern: ^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$
+          description: |-
+            The language to render wording in, as a BCP-47 tag: `en`, `en-GB`,
+             `zh-Hans`, `de-AT`.
+        timezone:
+          type:
+            - string
+            - "null"
+          title: timezone
+          maxLength: 64
+          pattern: ^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+.-]+)*$
+          description: The IANA zone to render timestamps in, e.g. `Europe/Berlin`, `UTC`.
+      title: RectifyMyDataRequest
+      additionalProperties: false
+      description: |-
+        RectifyMyDataRequest corrects inaccurate personal data about the caller
+         (Article 16).
+
+         # Sparse, and it names no subject
+
+         Every field has EXPLICIT PRESENCE, exactly as `UpdateProfileRequest` does: an
+         omitted field is "do not touch this", not "make this empty". The two are
+         different requests and a client must be able to tell them apart.
+
+         # The email address is deliberately absent, and this is the decision worth
+         # reading
+
+         Article 16 covers every inaccurate field, and an email address is the field a
+         person is most likely to have wrong. It is still not here, because identity
+         owns the email-change flow (identity.md §12) and that flow's whole substance
+         is PROOF: a token mailed to the new address, a revert token mailed to the old
+         one, and a revert window during which a hijacked change can be undone.
+
+         A rectification field for `email` would be a second path to the same value
+         with none of that — an authenticated session could move the login identifier
+         to an attacker's mailbox in one call, and the account-recovery path with it.
+         A statutory right cannot be a bypass of an authentication control, and
+         Article 16 does not require that the correction be UNVERIFIED; it requires
+         that it be possible, which `ChangeEmail` already makes it.
+
+         So the refusal is explicit rather than silent: `RectifyMyData` rejects a
+         request naming an address and says where the verified flow is. See the RPC.
+    chronos.compliance.v1.RectifyMyDataResponse:
+      type: object
+      properties:
+        correctedFields:
+          type: array
+          examples:
+            - - display_name
+          items:
+            type: string
+            examples:
+              - - display_name
+            maxLength: 16
+            pattern: ^(display_name|locale|timezone)$
+          title: corrected_fields
+          maxLength: 16
+          pattern: ^(display_name|locale|timezone)$
+          maxItems: 3
+          description: |-
+            The field names this call actually changed, in the order this schema
+             declares them. Empty when every field named was already correct, which is a
+             success: the record already says what the person asked it to say.
+        correctedAt:
+          title: corrected_at
+          description: When the correction was recorded, UTC. Unset when nothing changed.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: RectifyMyDataResponse
+      additionalProperties: false
+      description: |-
+        RectifyMyDataResponse names what was corrected, and never what it now says.
+
+         The VALUES are absent on purpose. A response echoing the corrected name would
+         be personal data in a place that is logged by proxies, cached by clients and
+         captured in support screenshots — and the caller already knows what they sent.
+         `GetProfile` renders the state.
     chronos.compliance.v1.RestrictProcessingRequest:
       type: object
       title: RestrictProcessingRequest
@@ -839,6 +1042,34 @@ components:
       title: RestrictProcessingResponse
       additionalProperties: false
       description: RestrictProcessingResponse reports the state after the call.
+    chronos.compliance.v1.WithdrawProcessingObjectionRequest:
+      type: object
+      properties:
+        purpose:
+          not:
+            type: string
+            enum:
+              - PROCESSING_PURPOSE_UNSPECIFIED
+          title: purpose
+          description: Which processing to resume.
+          allOf:
+            - $ref: '#/components/schemas/chronos.compliance.v1.ProcessingPurpose'
+      title: WithdrawProcessingObjectionRequest
+      additionalProperties: false
+      description: WithdrawProcessingObjectionRequest resumes one purpose the caller stopped.
+    chronos.compliance.v1.WithdrawProcessingObjectionResponse:
+      type: object
+      properties:
+        changed:
+          type: boolean
+          title: changed
+          description: |-
+            False means nothing was objected to, which is a success for the reason
+             every cancel path here is: the control is clicked twice, and neither click
+             is wrong.
+      title: WithdrawProcessingObjectionResponse
+      additionalProperties: false
+      description: WithdrawProcessingObjectionResponse reports the state after the call.
     chronos.errors.v1.ErrorDetail:
       type: object
       title: Error detail
@@ -925,6 +1156,112 @@ components:
          Deactivated and Suspended look identical from outside and are kept apart
          because they behave differently: the holder may reverse the first and may
          never reverse the second. Collapsing them would make suspension decorative.
+    chronos.identity.v1.ApiKey:
+      type: object
+      properties:
+        keyId:
+          type: string
+          examples:
+            - key_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: key_id
+          maxLength: 30
+          pattern: ^key_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: The key's public identifier.
+        ownerKind:
+          title: owner_kind
+          description: What the key acts as.
+          allOf:
+            - $ref: '#/components/schemas/chronos.identity.v1.ApiKeyOwnerKind'
+        ownerId:
+          type: string
+          examples:
+            - svc_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: owner_id
+          maxLength: 31
+          pattern: ^$|^(svc|subj)_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            The principal it acts as: a `svc_` service account, or a `subj_` pseudonym
+             for a personal access token.
+        scopes:
+          type: array
+          items:
+            type: string
+            maxLength: 64
+            pattern: ^[a-z][a-z0-9_]*:(read|write)$
+          title: scopes
+          maxItems: 32
+          description: The capability list, sorted.
+        expiresAt:
+          title: expires_at
+          description: When the key stops working, UTC.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+        revokedAt:
+          title: revoked_at
+          description: |-
+            When it was revoked, UTC. Unset for a live key.
+
+             Revoked keys are LISTED, deliberately. The screen's question is "what
+             credentials exist against this organization, and what happened to them" —
+             hiding the revoked ones would remove the evidence that a revocation took
+             effect, which is what somebody checks immediately after performing one.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+        rotatedAt:
+          title: rotated_at
+          description: When its secret was last replaced, UTC. Unset for a key never rotated.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+        lastUsedAt:
+          title: last_used_at
+          description: |-
+            When a request last presented this key, UTC. Unset for a key never used.
+
+             DELIBERATELY APPROXIMATE: it advances at most once per key per minute, and
+             there is no event behind it. An event per REQUEST would make the log grow
+             with traffic rather than with state, and the cost would land at rebuild time
+             — the recovery procedure for every projection (identity.md §13). "Last used
+             about a minute ago" is the whole requirement, and a projection rebuild
+             clears this column, which loses a hint and no fact.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+        createdBy:
+          type: string
+          examples:
+            - subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: created_by
+          maxLength: 31
+          pattern: ^$|^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: The pseudonym of the admin who minted it. A pseudonym and never a name.
+        createdAt:
+          title: created_at
+          description: When it was minted, UTC. The list is ordered by it.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: ApiKey
+      additionalProperties: false
+      description: |-
+        ApiKey is one machine credential, as a management screen shows it.
+
+         There is no token and no digest, and no field this message could grow that
+         would hold one: the statement behind it selects no secret column. A key list
+         that returned anything derived from the credential would put it on the one
+         screen whose entire purpose is to let somebody revoke it — the same rule the
+         device list follows.
+    chronos.identity.v1.ApiKeyOwnerKind:
+      type: string
+      title: ApiKeyOwnerKind
+      enum:
+        - API_KEY_OWNER_KIND_UNSPECIFIED
+        - API_KEY_OWNER_KIND_USER
+        - API_KEY_OWNER_KIND_SERVICE_ACCOUNT
+      description: |-
+        ApiKeyOwnerKind is the sort of principal an API key acts as.
+
+         A tagged pair with the owner id rather than two optional id fields. Two
+         optional fields admit "both set" and "neither set", and both of those have to
+         be interpreted by whoever reads them — which puts the interpretation in every
+         client instead of in the schema.
     chronos.identity.v1.AuthMethod:
       type: object
       properties:
@@ -1581,6 +1918,220 @@ components:
       title: ConfirmTotpResponse
       additionalProperties: false
       description: ConfirmTotpResponse reports what the confirmation produced.
+    chronos.identity.v1.CreateApiKeyRequest:
+      type: object
+      properties:
+        serviceAccountId:
+          type: string
+          examples:
+            - svc_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: service_account_id
+          maxLength: 30
+          pattern: ^$|^svc_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            The service account this key acts as. EMPTY means the key is a personal
+             access token owned by the caller.
+
+             The default is deliberately the NARROWER of the two: a key that defaulted to
+             a service account would be a durable, organization-owned credential created
+             by a client that simply did not send the field, and it would outlive the
+             person who created it.
+
+             There is deliberately NO field naming a user as the owner. A personal token
+             is always the caller's own — an admin able to name a colleague could mint a
+             credential that acts as them, which is impersonation with an audit trail
+             saying the colleague did it.
+        scopes:
+          type: array
+          items:
+            type: string
+            maxLength: 64
+            pattern: ^[a-z][a-z0-9_]*:(read|write)$
+          title: scopes
+          maxItems: 32
+          minItems: 1
+          uniqueItems: true
+          description: |-
+            The coarse capability list, `<resource type>:read` or
+             `<resource type>:write`.
+
+             A key's effective permission is the INTERSECTION of these and its owner's
+             access (access.md §4), so a scope can only ever NARROW — a key can never
+             exceed the principal it acts as, and narrowing the owner narrows every key
+             they hold. `:write` implies `:read` on the same resource type; nothing else
+             is implied.
+
+             Required and non-empty. A key with no scopes can do nothing, which is
+             useless rather than dangerous — but it is also exactly what a list dropped
+             between the client and the server looks like, and the second reading is the
+             one worth refusing.
+
+             Fine-grained, per-resource permission is NOT expressible here and never will
+             be: that is OpenFGA's, and a scope vocabulary that grew a third axis would
+             be a second authorization model evaluated in Go, drifting from the first.
+        lifetimeSeconds:
+          examples:
+            - "7776000"
+          title: lifetime_seconds
+          description: |-
+            How long the key lives, in seconds. Zero means the server's default
+             (90 days).
+
+             Expiry is MANDATORY — identity.md §10 makes it a requirement rather than an
+             option — and the ceiling is one year. Both ends are REFUSED rather than
+             clamped, unlike a page size: an over-long lifetime is not a request the
+             server can satisfy with less, because the caller would then hold a
+             credential that dies at a date they were never told.
+          oneOf:
+            - type: integer
+              format: int64
+              minimum: 0
+              maximum: 31536000
+            - type: string
+              pattern: ^-?[0-9]+$
+              maxLength: 20
+      title: CreateApiKeyRequest
+      additionalProperties: false
+      description: CreateApiKeyRequest mints a machine credential in the caller's organization.
+    chronos.identity.v1.CreateApiKeyResponse:
+      type: object
+      properties:
+        keyId:
+          type: string
+          examples:
+            - key_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: key_id
+          maxLength: 30
+          pattern: ^key_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            The key's public identifier. It is what RotateApiKey and RevokeApiKey name,
+             and it is NOT secret: it travels inside the token's own public segment so a
+             leaked credential can be attributed and revoked without anybody presenting
+             the secret.
+        token:
+          type: string
+          examples:
+            - chr_live_key_01ARZ3NDEKTSV4RRFFQ69G5FAV_PLACEHOLDERPLACEHOLDERPLACEHOLDERPLACEHOLDER
+          title: token
+          maxLength: 128
+          pattern: ^chr_[a-z][a-z0-9]{0,15}_key_[0-7][0-9A-HJKMNP-TV-Z]{25}_[A-Za-z0-9_-]{43}$
+          description: |-
+            The credential. Returned ONLY here. Never log it, never store it in a
+             repository, and show it once.
+
+             `chr_<env>_<key id>_<secret>`. The `chr_` prefix is there so secret scanners
+             — GitHub's, a pre-commit hook, a log scrubber — can recognise one of these
+             in a paste without knowing anything else about it, which is the whole of
+             identity.md §10's leak-response story.
+
+             The bound is published rather than enforced: this is a response field, and
+             stating a length a client can size a buffer from is the point. The secret is
+             43 characters of unpadded base64url over 256 bits of entropy.
+        ownerKind:
+          title: owner_kind
+          description: What the key acts as.
+          allOf:
+            - $ref: '#/components/schemas/chronos.identity.v1.ApiKeyOwnerKind'
+        ownerId:
+          type: string
+          examples:
+            - svc_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: owner_id
+          maxLength: 31
+          pattern: ^(svc|subj)_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            The principal it acts as: a `svc_` service account, or the caller's own
+             `subj_` pseudonym for a personal access token.
+        scopes:
+          type: array
+          items:
+            type: string
+            maxLength: 64
+            pattern: ^[a-z][a-z0-9_]*:(read|write)$
+          title: scopes
+          maxItems: 32
+          description: |-
+            The capability list as stored: sorted and deduplicated, which is why it may
+             not be the order it was sent in.
+        expiresAt:
+          title: expires_at
+          description: When the key stops working, UTC. Mandatory and never zero.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: CreateApiKeyResponse
+      additionalProperties: false
+      description: |-
+        CreateApiKeyResponse carries the token back ONCE.
+
+         Only the digest is stored, so this is the only moment the token exists
+         anywhere this system can reach. A caller that loses it rotates the key, which
+         is the correct outcome — an endpoint that could re-display it would turn a
+         stolen admin session into a permanent copy of every credential the
+         organization holds, which is exactly what GenerateRecoveryCodesResponse
+         refuses for the same reason.
+    chronos.identity.v1.CreateServiceAccountRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          examples:
+            - deploy_bot
+          title: name
+          maxLength: 64
+          pattern: ^[a-z][a-z0-9_]*$
+          description: |-
+            A machine-readable label, unique within the organization.
+
+             Lower-case snake, and the pattern is an ADR-002 control rather than a
+             formatting preference: this value enters the event log in cleartext, the log
+             is append-only, and free text is exactly where personal data arrives in a
+             field like this — "alice's deploy bot" would put a colleague's name into a
+             record erasure can never reach. `deploy_bot` cannot hold a sentence.
+
+             The same rule already governs every `reason` field in this file.
+      title: CreateServiceAccountRequest
+      required:
+        - name
+      additionalProperties: false
+      description: CreateServiceAccountRequest names a new non-human principal.
+    chronos.identity.v1.CreateServiceAccountResponse:
+      type: object
+      properties:
+        serviceAccountId:
+          type: string
+          examples:
+            - svc_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: service_account_id
+          maxLength: 30
+          pattern: ^svc_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            The principal's identifier. It is BOTH the account id and the id that
+             appears in events, in tuples and in an API key's owner field — a service
+             account has no personal data, so it needs no pseudonym to stand in for any.
+        name:
+          type: string
+          examples:
+            - deploy_bot
+          title: name
+          maxLength: 64
+          pattern: ^$|^[a-z][a-z0-9_]*$
+          description: |-
+            The name, echoed so a client can render the row it just created without a
+             second call.
+        createdAt:
+          title: created_at
+          description: When it was created, UTC.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: CreateServiceAccountResponse
+      additionalProperties: false
+      description: |-
+        CreateServiceAccountResponse is the principal that now exists, and holds no
+         credential.
+
+         There is deliberately no token here. Creating a principal and giving it a way
+         in are two decisions, the second is the one that changes what can happen, and
+         an incident timeline has to be able to tell them apart. Call CreateApiKey.
     chronos.identity.v1.CreateSessionRequest:
       type: object
       properties:
@@ -2415,6 +2966,54 @@ components:
          holds a subject id and resolves it against the vault, which is what keeps
          erasure a key destruction rather than a sweep across every projection that
          ever copied an address (ADR-002).
+    chronos.identity.v1.ListApiKeysRequest:
+      type: object
+      properties:
+        pageSize:
+          type: integer
+          examples:
+            - "50"
+          title: page_size
+          maximum: 200
+          minimum: 0
+          format: int32
+          description: |-
+            How many entries to return. Zero means the server's default (50), clamped at
+             200 — see ListSessionsRequest.page_size.
+        pageToken:
+          type: string
+          examples:
+            - PLACEHOLDER-opaque-cursor-from-a-previous-response
+          title: page_token
+          maxLength: 1024
+          pattern: ^[A-Za-z0-9_-]*$
+          description: |-
+            An opaque cursor from a previous response's next_page_token. Empty starts at
+             the beginning.
+      title: ListApiKeysRequest
+      additionalProperties: false
+      description: ListApiKeysRequest is one page of the organization's keys.
+    chronos.identity.v1.ListApiKeysResponse:
+      type: object
+      properties:
+        apiKeys:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.identity.v1.ApiKey'
+          title: api_keys
+          maxItems: 200
+          description: The page, newest first. The ceiling is the page size the server clamps to.
+        nextPageToken:
+          type: string
+          examples:
+            - PLACEHOLDER-opaque-cursor-for-the-next-page
+          title: next_page_token
+          maxLength: 1024
+          pattern: ^[A-Za-z0-9_-]*$
+          description: The cursor for the next page. EMPTY MEANS DONE.
+      title: ListApiKeysResponse
+      additionalProperties: false
+      description: ListApiKeysResponse is one page, newest first, revoked keys included.
     chronos.identity.v1.ListFederatedProvidersRequest:
       type: object
       title: ListFederatedProvidersRequest
@@ -2547,6 +3146,63 @@ components:
       title: ListPasskeysResponse
       additionalProperties: false
       description: ListPasskeysResponse is the caller's own authenticators, newest first.
+    chronos.identity.v1.ListServiceAccountsRequest:
+      type: object
+      properties:
+        pageSize:
+          type: integer
+          examples:
+            - "50"
+          title: page_size
+          maximum: 200
+          minimum: 0
+          format: int32
+          description: |-
+            How many entries to return. Zero means the server's default (50), and the
+             server CLAMPS anything above its maximum (200) rather than refusing it, so a
+             client must read the returned page's length rather than assume it got what
+             it asked for. See ListSessionsRequest.page_size for why the ceiling is an
+             annotation and only the negative half is a rule.
+        pageToken:
+          type: string
+          examples:
+            - PLACEHOLDER-opaque-cursor-from-a-previous-response
+          title: page_token
+          maxLength: 1024
+          pattern: ^[A-Za-z0-9_-]*$
+          description: |-
+            An opaque cursor from a previous response's next_page_token. Empty starts at
+             the beginning; a token from a different list is an error rather than a
+             silent restart.
+      title: ListServiceAccountsRequest
+      additionalProperties: false
+      description: |-
+        ListServiceAccountsRequest is one page of the organization's non-human
+         principals.
+    chronos.identity.v1.ListServiceAccountsResponse:
+      type: object
+      properties:
+        serviceAccounts:
+          type: array
+          items:
+            $ref: '#/components/schemas/chronos.identity.v1.ServiceAccount'
+          title: service_accounts
+          maxItems: 200
+          description: The page, newest first. The ceiling is the page size the server clamps to.
+        nextPageToken:
+          type: string
+          examples:
+            - PLACEHOLDER-opaque-cursor-for-the-next-page
+          title: next_page_token
+          maxLength: 1024
+          pattern: ^[A-Za-z0-9_-]*$
+          description: |-
+            The cursor for the next page. EMPTY MEANS DONE — a client must not infer the
+             end from a short page, because a clamped page size makes short pages
+             ordinary.
+      title: ListServiceAccountsResponse
+      additionalProperties: false
+      description: ListServiceAccountsResponse is one page, newest first.
     chronos.identity.v1.ListSessionsRequest:
       type: object
       properties:
@@ -3247,6 +3903,67 @@ components:
          The whole operation is one atomic append: "sign out everywhere" that half
          happened is worse than one that failed, because the user is told every device
          is signed out, one is not, and nothing in the system disagrees with them.
+    chronos.identity.v1.RevokeApiKeyRequest:
+      type: object
+      properties:
+        keyId:
+          type: string
+          examples:
+            - key_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: key_id
+          maxLength: 30
+          pattern: ^key_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            The key to revoke. A key in another organization answers as one that does
+             not exist — see RotateApiKeyRequest.key_id.
+        reason:
+          type: string
+          examples:
+            - leaked
+          title: reason
+          maxLength: 64
+          pattern: ^$|^[a-z][a-z0-9_]*$
+          description: |-
+            A short machine-readable label recorded with the revocation, for example
+             `leaked` or `owner_left`. Optional.
+
+             It enters an event, so the pattern is what makes "machine-readable" and "no
+             free text" true rather than merely stated: lower-case snake, so a sentence
+             somebody typed — which is where personal data arrives in a field like this —
+             cannot reach an append-only log (ADR-002).
+      title: RevokeApiKeyRequest
+      required:
+        - keyId
+      additionalProperties: false
+      description: RevokeApiKeyRequest ends a key and every secret it ever had.
+    chronos.identity.v1.RevokeApiKeyResponse:
+      type: object
+      properties:
+        changed:
+          type: boolean
+          title: changed
+          description: |-
+            False when the key was already revoked. Nothing was appended, and it is NOT
+             an error: the caller wanted the key unusable and it is.
+        secretsDestroyed:
+          type: integer
+          examples:
+            - "1"
+          title: secrets_destroyed
+          maximum: 2147483647
+          minimum: 0
+          format: int32
+          description: |-
+            How many stored secrets were destroyed. Usually one, or two during a
+             rotation overlap, and zero for a key whose secrets had already been swept.
+
+             It is reported rather than hidden because it is the evidence that the
+             IMMEDIATE half of the revocation ran. The event alone would leave the key
+             usable until the projector caught up, which for a credential with no
+             short-lived access token in front of it is far too long.
+      title: RevokeApiKeyResponse
+      additionalProperties: false
+      description: RevokeApiKeyResponse reports what the revocation did.
     chronos.identity.v1.RevokeSessionRequest:
       type: object
       properties:
@@ -3303,6 +4020,158 @@ components:
       title: RevokeSessionResponse
       additionalProperties: false
       description: RevokeSessionResponse reports what the revocation did.
+    chronos.identity.v1.RotateApiKeyRequest:
+      type: object
+      properties:
+        keyId:
+          type: string
+          examples:
+            - key_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: key_id
+          maxLength: 30
+          pattern: ^key_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            The key to rotate. A key in another organization answers exactly as one that
+             does not exist: a key id is not a secret, so telling the two apart would
+             turn this into a probe for which key ids exist across every tenant.
+        overlapSeconds:
+          examples:
+            - "86400"
+          title: overlap_seconds
+          description: |-
+            How long the SUPERSEDED secret keeps working, in seconds. Zero means the
+             server's default (24 hours) unless `immediate` is set.
+
+             The overlap is what makes rotation something anybody actually does. Without
+             one, revoke-then-issue leaves a window in which neither secret works and
+             every consumer of the key fails — so rotation becomes an outage that has to
+             be scheduled, which means it does not happen. With an UNBOUNDED one the old
+             secret is live forever, because nobody remembers to remove it, and a
+             rotation performed BECAUSE a secret leaked would not have removed the leaked
+             secret. So it is a recorded DEADLINE, capped at seven days.
+          oneOf:
+            - type: integer
+              format: int64
+              minimum: 0
+              maximum: 604800
+            - type: string
+              pattern: ^-?[0-9]+$
+              maxLength: 20
+        immediate:
+          type: boolean
+          title: immediate
+          description: |-
+            Retire the old secret AT ONCE. This is the leak response.
+
+             A separate flag rather than "overlap_seconds = 0", because a zero has two
+             readings with opposite consequences — the default keeps a leaked secret
+             alive for a day, and zero breaks every consumer that has not reconfigured —
+             and an unset field would resolve to whichever the implementation happened to
+             pick.
+        lifetimeSeconds:
+          examples:
+            - "7776000"
+          title: lifetime_seconds
+          description: |-
+            How long the NEW secret lives, in seconds. Zero means the server's default
+             (90 days), capped at one year exactly as CreateApiKeyRequest is.
+
+             Rotation re-arms the expiry clock rather than inheriting the old deadline: a
+             key rotated on its last day that kept the old one would expire hours after
+             everybody had reconfigured for it.
+          oneOf:
+            - type: integer
+              format: int64
+              minimum: 0
+              maximum: 31536000
+            - type: string
+              pattern: ^-?[0-9]+$
+              maxLength: 20
+      title: RotateApiKeyRequest
+      required:
+        - keyId
+      additionalProperties: false
+      description: |-
+        RotateApiKeyRequest replaces a key's secret without replacing the key.
+
+         The identifier, the scopes, the organization binding and every grant that
+         names the owner are unchanged. That is the point: a rotation that produced a
+         new key id would require every consumer to be reconfigured, which is the cost
+         rotation exists to avoid — and a system whose rotation is expensive is a
+         system whose secrets are never rotated.
+    chronos.identity.v1.RotateApiKeyResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          examples:
+            - chr_live_key_01ARZ3NDEKTSV4RRFFQ69G5FAV_PLACEHOLDERPLACEHOLDERPLACEHOLDERPLACEHOLDER
+          title: token
+          maxLength: 128
+          pattern: ^chr_[a-z][a-z0-9]{0,15}_key_[0-7][0-9A-HJKMNP-TV-Z]{25}_[A-Za-z0-9_-]{43}$
+          description: The new credential. Returned ONLY here — see CreateApiKeyResponse.token.
+        previousRetiresAt:
+          title: previous_retires_at
+          description: |-
+            When the SUPERSEDED secret stops working, UTC. Equal to the rotation instant
+             for an immediate rotation.
+
+             Returned so a client can show it. "Your old key works until 14:02 tomorrow"
+             is the sentence that makes a rotation safe to perform, and a client that had
+             to compute it from a policy constant would be computing a number this server
+             is free to change.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+        expiresAt:
+          title: expires_at
+          description: When the NEW secret stops working, UTC.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: RotateApiKeyResponse
+      additionalProperties: false
+      description: |-
+        RotateApiKeyResponse carries the new token back once, and says when the old
+         one dies.
+    chronos.identity.v1.ServiceAccount:
+      type: object
+      properties:
+        serviceAccountId:
+          type: string
+          examples:
+            - svc_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: service_account_id
+          maxLength: 30
+          pattern: ^svc_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: The principal's identifier, and what CreateApiKey names as an owner.
+        name:
+          type: string
+          examples:
+            - deploy_bot
+          title: name
+          maxLength: 64
+          pattern: ^$|^[a-z][a-z0-9_]*$
+          description: The machine-readable label, unique within the organization.
+        createdBy:
+          type: string
+          examples:
+            - subj_01ARZ3NDEKTSV4RRFFQ69G5FAV
+          title: created_by
+          maxLength: 31
+          pattern: ^$|^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: |-
+            The pseudonym of the admin who created it. A pseudonym and never a name: the
+             projection holds no personal data, and a client renders a person by asking
+             the profile service for this subject (ADR-002, compliance.md §1).
+        createdAt:
+          title: created_at
+          description: |-
+            When it was created, UTC. The list is ordered by it, so a caller cannot page
+             without the server having sorted on something stable.
+          allOf:
+            - $ref: '#/components/schemas/google.protobuf.Timestamp'
+      title: ServiceAccount
+      additionalProperties: false
+      description: ServiceAccount is one non-human principal, as a management screen shows it.
     chronos.identity.v1.Session:
       type: object
       properties:
@@ -6518,6 +7387,230 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.compliance.v1.ListDataExportsResponse'
+  /chronos.compliance.v1.ComplianceService/ListProcessingObjections:
+    post:
+      tags:
+        - ComplianceService
+      summary: ListProcessingObjections returns every objection the caller holds.
+      description: |-
+        A READ, and AAL1, for GetProcessingRestriction's reason: somebody must be
+         able to see the state of their own instruction from an ordinary session, or
+         the instruction is hard to verify and easy to forget.
+
+         Read from the caller's own stream rather than a projection, so a person who
+         has just objected is not told the objection has not taken effect while a
+         projector catches up.
+      operationId: ComplianceService_ListProcessingObjections
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.compliance.v1.ListProcessingObjectionsRequest'
+            example: {}
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.compliance.v1.ListProcessingObjectionsResponse'
+  /chronos.compliance.v1.ComplianceService/ObjectToProcessing:
+    post:
+      tags:
+        - ComplianceService
+      summary: |-
+        ObjectToProcessing stops one purpose that rests on legitimate interests
+         (Article 21).
+      description: |-
+        # It is NOT a narrower restriction, and the difference is enforceable
+
+         Article 18 restriction is TOTAL and TEMPORARY: it halts everything except
+         storage — transactional receipts included — while a dispute runs, and it is
+         lifted when the dispute settles. Article 21 objection is PER-PURPOSE and
+         stands until the person withdraws it: the account keeps working, receipts
+         and verification links keep arriving, and exactly one purpose stops.
+
+         The two therefore differ in what a caller can observe: a restricted subject
+         receives no invoice mail, an objecting subject still does. If this endpoint
+         ever came to mean "stop everything", it would be a duplicate of
+         RestrictProcessing and should be deleted rather than kept as a synonym.
+
+         # It is also not a notification preference
+
+         A preference is ours to interpret and is expressed per channel: mute email,
+         keep in-app. An objection is a legal instruction about a PURPOSE, so it
+         stops that processing on every channel at once, and no product control may
+         clear it — only the person who made it. That is why it is a separate record
+         from `ChannelPreferenceSet` rather than a flag on one.
+
+         # What it can never silence
+
+         Security and transactional messages. They rest on contract and on the
+         controller's own legal obligations, not on legitimate interests, so
+         Article 21 does not reach them — and a control a session holder could set to
+         stop a password-changed alert is the tripwire disabled by the takeover
+         itself. The purposes offered are exactly those that can be stopped, and no
+         more.
+
+         # Article 21(1)'s override is NOT implemented, deliberately
+
+         The controller may continue processing where it demonstrates compelling
+         legitimate grounds that override the subject's interests. Demonstrating that
+         is a documented balancing test performed by a person, and the burden is on
+         the controller. Until there is an operator workflow that records one, an
+         objection is honoured unconditionally — which is the safe direction, and is
+         the correct behaviour in the absence of the assessment the exception
+         requires.
+
+         AAL1: what an objection can stop is exactly what a notification preference
+         can already stop from an ordinary session, and it can never reach a security
+         alert. Requiring step-up would make the statutory right harder to exercise
+         than the product control with the same effect.
+
+         Idempotent: a second call reports `changed: false` and the ORIGINAL instant.
+      operationId: ComplianceService_ObjectToProcessing
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.compliance.v1.ObjectToProcessingRequest'
+            example: {}
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.compliance.v1.ObjectToProcessingResponse'
+  /chronos.compliance.v1.ComplianceService/RectifyMyData:
+    post:
+      tags:
+        - ComplianceService
+      summary: |-
+        RectifyMyData corrects inaccurate personal data about the caller
+         (Article 16).
+      description: |-
+        # What this adds over the settings screen, which performs the same write
+
+         `ProfileService.UpdateProfile` already changes a display name, and this
+         endpoint executes the correction THROUGH IT rather than beside it — one
+         write path to the vault, one `profile.ProfileUpdated.v1`, one projection.
+         A second writer would give the vault and the profile's own history two
+         accounts of when a name changed, and support conversations about
+         impersonation are settled from that history.
+
+         What this adds is the RECORD THAT A RIGHT WAS EXERCISED. "Somebody edited
+         their profile" and "a data subject asserted that what we hold about them is
+         inaccurate and required its correction" are different legal facts with
+         different obligations attached — Article 12(3)'s one-month clock, and
+         Article 19's duty to tell the recipients the data was disclosed to. Only the
+         second is answerable from `compliance.PersonalDataCorrected.v1`, and a
+         controller asked to evidence its Article 16 handling cannot answer with a
+         list of profile saves.
+
+         # The email address is not a field here
+
+         identity.md §12 owns it, with a token to the new address, a revert token to
+         the old one, and a window. A rectification path for `email` would move a
+         login identifier — and the account-recovery route with it — on one
+         authenticated call with no proof of the new mailbox. A request naming an
+         address is refused with a pointer to `ChangeEmail`; see
+         RectifyMyDataRequest.
+
+         # AAL1, matching UpdateProfile
+
+         Requiring step-up here and not there would make the statutory right harder
+         to exercise than the product control that performs the identical write,
+         which is the friction Article 12(2) tells a controller not to introduce. The
+         write is also self-announcing: `ProfileUpdated` is a Security-class
+         notification, so a correction nobody made is reported to the person it was
+         made about.
+
+         A call naming no field is refused. It records nothing, and an event
+         asserting that nothing was corrected is evidence of nothing.
+      operationId: ComplianceService_RectifyMyData
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.compliance.v1.RectifyMyDataRequest'
+            example: {}
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.compliance.v1.RectifyMyDataResponse'
   /chronos.compliance.v1.ComplianceService/RestrictProcessing:
     post:
       tags:
@@ -6588,6 +7681,57 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.compliance.v1.RestrictProcessingResponse'
+  /chronos.compliance.v1.ComplianceService/WithdrawProcessingObjection:
+    post:
+      tags:
+        - ComplianceService
+      summary: WithdrawProcessingObjection resumes one purpose the caller had stopped.
+      description: |-
+        Only the person who objected may withdraw it. That asymmetry is the whole
+         reason an objection is not a preference: a preference is a setting either
+         side may reasonably change, and an objection is an instruction that binds
+         the controller until its author releases it.
+
+         Withdrawing nothing succeeds and reports `changed: false`.
+      operationId: ComplianceService_WithdrawProcessingObjection
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.compliance.v1.WithdrawProcessingObjectionRequest'
+            example: {}
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.compliance.v1.WithdrawProcessingObjectionResponse'
   /chronos.identity.v1.IdentityService/Authenticate:
     post:
       tags:
@@ -7227,6 +8371,115 @@ paths:
                 credentialId: cred_01ARZ3NDEKTSV4RRFFQ69G5FB2
                 activated: true
                 changed: true
+  /chronos.identity.v1.IdentityService/CreateApiKey:
+    post:
+      tags:
+        - IdentityService
+      summary: CreateApiKey mints a machine credential and returns it exactly once.
+      description: |-
+        The token is in the response and nowhere else: only its digest is stored,
+         so this is the only moment it exists anywhere this system can reach. A
+         caller that loses it rotates the key.
+
+         The key is bound to the caller's organization IMMUTABLY. Without that
+         binding a key silently inherits every organization its owner belongs to,
+         and a token leaked from one customer's CI reaches another customer's data —
+         a cross-tenant breach originating in a feature nobody thought was
+         tenant-scoped (identity.md §10, review D2).
+      operationId: IdentityService_CreateApiKey
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.CreateApiKeyRequest'
+            example:
+              serviceAccountId: svc_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              lifetimeSeconds: "7776000"
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.CreateApiKeyResponse'
+  /chronos.identity.v1.IdentityService/CreateServiceAccount:
+    post:
+      tags:
+        - IdentityService
+      summary: |-
+        CreateServiceAccount opens a non-human principal in the caller's
+         organization.
+      description: |-
+        It mints NO credential. A service account that has just been created can
+         authenticate nothing at all; CreateApiKey is a separate decision that
+         separately notifies, and keeping them apart is what lets an incident
+         timeline distinguish "somebody created a principal" from "somebody gave a
+         principal a way in".
+      operationId: IdentityService_CreateServiceAccount
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.CreateServiceAccountRequest'
+            example:
+              name: deploy_bot
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.CreateServiceAccountResponse'
   /chronos.identity.v1.IdentityService/CreateSession:
     post:
       tags:
@@ -7931,6 +9184,52 @@ paths:
                 emailVerified: true
                 registeredAt: '2026-07-02T08:15:00Z'
                 activatedAt: '2026-07-02T08:19:41Z'
+  /chronos.identity.v1.IdentityService/ListApiKeys:
+    post:
+      tags:
+        - IdentityService
+      summary: |-
+        ListApiKeys shows the organization's machine credentials, revoked ones
+         included.
+      description: |-
+        No token and no digest comes back, and no field of the response could hold
+         one. Revoked keys are listed on purpose: the evidence that a revocation
+         took effect is what somebody checks immediately after performing one.
+      operationId: IdentityService_ListApiKeys
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.ListApiKeysRequest'
+            example:
+              pageSize: "50"
+              pageToken: PLACEHOLDER-opaque-cursor-from-a-previous-response
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.ListApiKeysResponse'
   /chronos.identity.v1.IdentityService/ListFederatedProviders:
     post:
       tags:
@@ -8376,6 +9675,50 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/chronos.identity.v1.ListPasskeysResponse'
+  /chronos.identity.v1.IdentityService/ListServiceAccounts:
+    post:
+      tags:
+        - IdentityService
+      summary: ListServiceAccounts shows the organization's non-human principals.
+      description: |-
+        READ, so it is permitted in every organization state including Suspended
+         and Closed — a tenant that has stopped paying may still see what
+         authenticates against it.
+      operationId: IdentityService_ListServiceAccounts
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.ListServiceAccountsRequest'
+            example:
+              pageSize: "50"
+              pageToken: PLACEHOLDER-opaque-cursor-from-a-previous-response
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.ListServiceAccountsResponse'
   /chronos.identity.v1.IdentityService/ListSessions:
     get:
       tags:
@@ -9139,6 +10482,63 @@ paths:
               example:
                 revoked: 3
                 scanned: 4
+  /chronos.identity.v1.IdentityService/RevokeApiKey:
+    post:
+      tags:
+        - IdentityService
+      summary: RevokeApiKey ends a key and destroys every secret it ever had.
+      description: |-
+        IMMEDIATE, and not eventually: the stored digests are deleted in the same
+         request, and the event is what makes the projection and the audit trail
+         agree. Neither half is enough alone — the event alone leaves the credential
+         usable until the projector catches up, and the delete alone leaves nothing
+         in the log saying why the key stopped working, so a rebuild would show it
+         as live while it resolved nothing.
+
+         Idempotent: revoking an already-revoked key appends nothing, reports
+         `changed = false`, and STILL sweeps secrets — a second call is what
+         somebody makes when they are not sure the first took.
+      operationId: IdentityService_RevokeApiKey
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.RevokeApiKeyRequest'
+            example:
+              keyId: key_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              reason: leaked
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.RevokeApiKeyResponse'
   /chronos.identity.v1.IdentityService/RevokeSession:
     post:
       tags:
@@ -9202,6 +10602,63 @@ paths:
                 $ref: '#/components/schemas/chronos.identity.v1.RevokeSessionResponse'
               example:
                 changed: true
+  /chronos.identity.v1.IdentityService/RotateApiKey:
+    post:
+      tags:
+        - IdentityService
+      summary: RotateApiKey replaces a key's secret without replacing the key.
+      description: |-
+        The key id, the scopes, the organization binding and every grant that names
+         the owner are unchanged, so no consumer has to be reconfigured beyond the
+         secret itself — which is what makes rotation something anybody actually
+         performs.
+
+         The superseded secret keeps working for a bounded, RECORDED window, so
+         there is no instant in which neither secret resolves and no path by which
+         the old one lives forever. `immediate` collapses the window to nothing,
+         which is the leak response.
+      operationId: IdentityService_RotateApiKey
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          required: true
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: "1"
+        - name: Connect-Timeout-Ms
+          in: header
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: "5000"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          explode: false
+          schema:
+            $ref: '#/components/schemas/idempotency-key'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/chronos.identity.v1.RotateApiKeyRequest'
+            example:
+              keyId: key_01ARZ3NDEKTSV4RRFFQ69G5FAV
+              overlapSeconds: "86400"
+              lifetimeSeconds: "7776000"
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/chronos.identity.v1.RotateApiKeyResponse'
   /chronos.identity.v1.IdentityService/UnlinkFederatedIdentity:
     post:
       tags:

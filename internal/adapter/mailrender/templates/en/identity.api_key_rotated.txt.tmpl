@@ -1,0 +1,14 @@
+Hello{{if .Name}} {{.Name}}{{end}},
+
+The secret behind one of your Chronos API keys was replaced{{if .KeyID}} ({{.KeyID}}){{end}}.
+The key itself is unchanged: same id, same permissions, same organization.
+{{if .Immediate}}
+THE PREVIOUS SECRET STOPPED WORKING IMMEDIATELY. Anything still using it is
+failing now.
+{{else if .PreviousRetiresAt}}
+The previous secret keeps working until {{.PreviousRetiresAt.Format "2 January 2006, 15:04 UTC"}}.
+Reconfigure anything using it before then.
+{{end}}
+IF YOU DID NOT DO THIS, somebody else now holds a working credential for this
+key. Revoke the key from the API keys screen — rotating it again would only hand
+them another one.

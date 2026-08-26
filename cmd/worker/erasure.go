@@ -138,15 +138,36 @@ func newErasure(d *dependencies, log *slog.Logger) (*complianceapp.Erasure, erro
 		return nil, fmt.Errorf("erasure deferrals: %w", err)
 	}
 
+	// compliance.md §4 step 3 and §7: "resolve retention exemptions". Until this
+	// existed the confirmation carried a hand-written list of sentences that
+	// nothing compared against the published schedule — so a data class gaining
+	// a statutory retention would have left the mail saying what it always said
+	// while a new category of record quietly survived the erasure.
+	//
+	// AssumeRecordsExist is the honest placeholder and it is wired HERE rather
+	// than defaulted inside the resolver, so that the day billing can answer
+	// "does this subject appear on an invoice" the change is this line and its
+	// twin in cmd/api. It is over-inclusive, which is the safe direction: telling
+	// somebody their invoices may be retained when they have none is a smaller
+	// wrong than implying total deletion when tax records survive.
+	exemptions, err := complianceapp.NewExemptions(complianceapp.ExemptionsDeps{
+		Records: complianceapp.AssumeRecordsExist{},
+		Log:     log,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("retention exemptions: %w", err)
+	}
+
 	return complianceapp.NewErasure(complianceapp.ErasureDeps{
-		Vault:     vaultEraser{vault: d.piiVault},
-		Accounts:  accountEraser{accounts: d.accountErasure},
-		Objects:   objects,
-		Confirm:   confirmation,
-		Holds:     holds,
-		Deferrals: deferrals,
-		Log:       log,
-		Now:       clock.System{}.Now,
+		Vault:      vaultEraser{vault: d.piiVault},
+		Accounts:   accountEraser{accounts: d.accountErasure},
+		Objects:    objects,
+		Confirm:    confirmation,
+		Holds:      holds,
+		Deferrals:  deferrals,
+		Exemptions: exemptions,
+		Log:        log,
+		Now:        clock.System{}.Now,
 	})
 }
 

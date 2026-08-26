@@ -209,7 +209,30 @@ type FederationFlow interface {
 	Unlink(ctx context.Context, cmd app.UnlinkFederatedCommand) error
 }
 
-// Queries is identity's read side.
+// APIKeyCommands is identity.md §10: service accounts and the machine
+// credentials that act as them.
+//
+// A port of its own rather than methods on Authentication, and the split is the
+// one every other port here is drawn on plus one more that matters: these are
+// the only ORGANIZATION-scoped commands in the module. Every other handler acts
+// on the caller.s own account; a handler holding this interface acts inside a
+// tenant, and keeping it separate is what stops a self-scoped handler acquiring
+// the ability to mint a credential for an organization as a side effect.
+//
+// OPTIONAL at the composition root, like PasskeyFlow and FederationFlow, and for
+// the same kind of reason: the token environment segment cannot be defaulted
+// without making a staging token and a production token the same shape. Nil
+// means the four key RPCs answer NOT_FOUND naming the variable to set.
+type APIKeyCommands interface {
+	CreateServiceAccount(
+		ctx context.Context, cmd app.CreateServiceAccountCommand,
+	) (app.CreateServiceAccountResult, error)
+	CreateAPIKey(ctx context.Context, cmd app.CreateAPIKeyCommand) (app.CreateAPIKeyResult, error)
+	RotateAPIKey(ctx context.Context, cmd app.RotateAPIKeyCommand) (app.RotateAPIKeyResult, error)
+	RevokeAPIKey(ctx context.Context, cmd app.RevokeAPIKeyCommand) (app.RevokeAPIKeyResult, error)
+}
+
+// Queries is identity.s read side.
 type Queries interface {
 	GetUser(ctx context.Context, subjectID string) (app.AccountView, error)
 	ListSessions(
@@ -219,6 +242,16 @@ type Queries interface {
 	ListLoginHistory(
 		ctx context.Context, subjectID string, pageToken page.Token, pageSize int,
 	) (page.Page[app.LoginRecord], error)
+
+	// The two ORG-scoped reads. They take an organization rather than a subject,
+	// because the rows they return belong to a tenant rather than to a person —
+	// and the organization is the one gate 1 resolved, never one the caller named.
+	ListAPIKeys(
+		ctx context.Context, orgID string, pageToken page.Token, pageSize int,
+	) (page.Page[app.APIKeySummary], error)
+	ListServiceAccounts(
+		ctx context.Context, orgID string, pageToken page.Token, pageSize int,
+	) (page.Page[app.ServiceAccountSummary], error)
 }
 
 // Deps is everything a handler needs, one field per collaborator.
@@ -269,6 +302,16 @@ type Deps struct {
 
 	Queries Queries
 
+	// APIKeys is identity.md §10.s command side, and is OPTIONAL for the reason
+	// Passkeys is: it needs a token environment name that cannot be defaulted
+	// without making a staging credential and a production credential
+	// indistinguishable.
+	//
+	// Nil means the four key RPCs answer NOT_FOUND naming the variable to set,
+	// and the rest of identity serves normally — never that a key is silently
+	// minted without one.
+	APIKeys APIKeyCommands
+
 	// Directory turns the caller's pseudonym into the account id the second-factor
 	// commands are keyed by. See Service.callerUser for why it is here.
 	Directory app.UserDirectory
@@ -299,6 +342,7 @@ type Service struct {
 	emails       EmailChanges
 	passkeys     PasskeyFlow
 	federation   FederationFlow
+	apiKeys      APIKeyCommands
 	queries      Queries
 	directory    app.UserDirectory
 	callerScope  clientip.Resolver
@@ -373,6 +417,7 @@ func New(deps Deps) (*Service, error) {
 		// each passkey RPC answers NOT_FOUND rather than panicking.
 		passkeys:    deps.Passkeys,
 		federation:  deps.Federation,
+		apiKeys:     deps.APIKeys,
 		queries:     deps.Queries,
 		directory:   deps.Directory,
 		callerScope: deps.CallerScope,
@@ -516,4 +561,5 @@ var (
 	_ SecondFactor   = (*app.SecondFactor)(nil)
 	_ Lifecycle      = (*app.Lifecycle)(nil)
 	_ Queries        = (*app.Queries)(nil)
+	_ APIKeyCommands = (*app.APIKeys)(nil)
 )

@@ -1,0 +1,12 @@
+{{define "title"}}An API key's secret was replaced{{end}}
+{{define "content"}}
+{{/*
+  The RETIREMENT DEADLINE is the operationally useful half — the reader has until
+  then to reconfigure — and it is also the security half: an immediate retirement
+  is a leak response, and one the reader did not perform is worth a phone call.
+*/}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 20px;">The secret behind one of your Chronos API keys was replaced{{if .KeyID}} (<code>{{.KeyID}}</code>){{end}}. The key itself is unchanged: same id, same permissions, same organization.</p>
+{{if .Immediate}}<p style="margin:0 0 20px;"><strong>The previous secret stopped working immediately.</strong> Anything still using it is failing now.</p>{{else if .PreviousRetiresAt}}<p style="margin:0 0 20px;">The previous secret keeps working until {{.PreviousRetiresAt.Format "2 January 2006, 15:04 UTC"}}. Reconfigure anything using it before then.</p>{{end}}
+<p style="margin:0;color:#6b7280;font-size:13px;"><strong>If you did not do this</strong>, somebody else now holds a working credential for this key. Revoke the key from the API keys screen — rotating it again would only hand them another one.</p>
+{{end}}

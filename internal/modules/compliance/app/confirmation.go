@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/chronos/chronos-go/internal/modules/compliance/domain"
 	"github.com/chronos/chronos-go/internal/platform/notify"
 )
 
@@ -49,11 +50,20 @@ func NewMailConfirmation(notifier Notifier) (*MailConfirmation, error) {
 // Transactional, and it carries no OrgID: by this point the account is being
 // erased and its organization membership is not what the message is about.
 //
-// `Retained` is template data rather than prose in the template, so the list and
-// the reasons live in one place — next to the erasure that knows them — instead
-// of being duplicated across every locale's wording.
+// # The exemptions are template DATA, and they arrive structured
+//
+// The list and the reasons live in one place — the retention schedule the
+// erasure resolved them from — instead of being duplicated across every locale's
+// wording. What changed when the schedule became data is that each entry now
+// carries its period and its ARTICLE separately, so the template renders a legal
+// basis as a legal basis rather than as part of a sentence somebody wrote.
+//
+// compliance.md §7 asks for exactly that: the DSAR response says what is
+// retained and why, "rather than implying total deletion". A translator working
+// from a `[]string` could not have produced the "why" in their own language,
+// because it was inside the English sentence.
 func (m *MailConfirmation) SendErasureComplete(
-	ctx context.Context, subjectID string, retained []string,
+	ctx context.Context, subjectID string, retained []domain.RetentionPolicy,
 ) error {
 	if subjectID == "" {
 		return fmt.Errorf("compliance: an erasure confirmation needs a subject")
@@ -69,6 +79,29 @@ func (m *MailConfirmation) SendErasureComplete(
 		Template:  ConfirmationTemplate,
 		Class:     notify.Transactional,
 		Recipient: notify.Recipient{SubjectID: subjectID},
-		Data:      map[string]any{"Retained": retained},
+		Data:      map[string]any{"Retained": retainedForTemplate(retained)},
 	})
+}
+
+// retainedForTemplate flattens the policies into what a template ranges over.
+//
+// A map per entry rather than the domain type itself, and the reason is the same
+// one that keeps proto out of `domain`: a template is a wire format. Handing it
+// the aggregate's own type would make every future field of RetentionPolicy —
+// an internal note, a jurisdiction filter, a review date — reachable from a
+// `.tmpl` file that nobody reviews as code, and the first one that should not
+// reach a data subject would reach them.
+//
+// So the four fields a person is entitled to read are named here, once.
+func retainedForTemplate(retained []domain.RetentionPolicy) []map[string]string {
+	out := make([]map[string]string, 0, len(retained))
+	for _, p := range retained {
+		out = append(out, map[string]string{
+			"DataClass":  string(p.Class),
+			"Period":     p.Period,
+			"LegalBasis": p.LegalBasis,
+			"Reason":     p.Reason,
+		})
+	}
+	return out
 }

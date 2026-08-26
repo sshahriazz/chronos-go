@@ -189,6 +189,25 @@ type IdentityConfig struct {
 	// phishing resistance that is the reason to prefer passkeys at all.
 	WebauthnOrigins []string `env:"IDENTITY_WEBAUTHN_ORIGINS" envSeparator:","`
 
+	// APIKeyEnvironment is the environment segment every API key this
+	// deployment mints carries: `chr_<env>_<key id>_<secret>` (identity.md §10).
+	//
+	// It is bound into the DIGEST, so a token minted here hashes to a value no
+	// other environment.s table contains — which is what stops a staging
+	// credential, from a system with weaker access controls, working against
+	// production.
+	//
+	// So it has NO DEFAULT, for the reason WebauthnRPID has none: a default
+	// would be the same value in staging and in production, which removes
+	// exactly the separation the segment exists to create, silently, on every
+	// deployment nobody configured. Empty is a SUPPORTED state — the four key
+	// RPCs answer NOT_FOUND naming this variable, and the rest of identity
+	// serves normally.
+	//
+	// Lower-case alphanumeric, at most 16 characters. An underscore would add a
+	// segment and make every token this deployment mints unparseable.
+	APIKeyEnvironment string `env:"IDENTITY_API_KEY_ENVIRONMENT"`
+
 	// FederationProviders names the identity providers to configure, comma
 	// separated (identity.md §7).
 	//
@@ -308,6 +327,14 @@ func (i IdentityConfig) Configured() bool {
 func (i IdentityConfig) PasskeysConfigured() bool {
 	return i.WebauthnRPID != "" && len(i.WebauthnOrigins) > 0
 }
+
+// APIKeysConfigured reports whether machine credentials can be minted here.
+//
+// One value, and it has no usable default — see APIKeyEnvironment. A deployment
+// that has not set it serves the four key RPCs as NOT_FOUND rather than minting
+// credentials whose environment segment is indistinguishable from every other
+// installation.s.
+func (i IdentityConfig) APIKeysConfigured() bool { return i.APIKeyEnvironment != "" }
 
 // GoogleConfigured reports whether the Google provider can be built.
 //

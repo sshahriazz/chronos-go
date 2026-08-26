@@ -10,6 +10,36 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+// AUTHORITATIVE, not a projection. API key digests, which are never in the log. No RLS: the authenticator reads it before any organization is known, and its only key is a 256-bit digest.
+type ApiKeySecret struct {
+	TokenDigest []byte
+	KeyID       string
+	OrgID       string
+	OwnerKind   string
+	OwnerID     string
+	Scopes      []string
+	ExpiresAt   pgtype.Timestamptz
+	// When a superseded secret stops resolving. NULL for the current one. The lookup enforces it, so a rotation bounds the old secret whether or not the sweep has run.
+	RetiresAt pgtype.Timestamptz
+	CreatedAt pgtype.Timestamptz
+}
+
+// PROJECTION. A key's facts: owner, org binding, scopes, expiry, revocation. Holds NO secret — see api_key_secret. Rebuildable from the log, which signs every key out for the duration.
+type ApiKeyView struct {
+	KeyID     string
+	OrgID     string
+	OwnerKind string
+	OwnerID   string
+	Scopes    []string
+	ExpiresAt pgtype.Timestamptz
+	RevokedAt pgtype.Timestamptz
+	CreatedBy string
+	CreatedAt pgtype.Timestamptz
+	RotatedAt pgtype.Timestamptz
+	// Coalesced, at most once per key per minute, approximate by construction, and NOT projected from an event (identity.md §13). A rebuild clears it, which loses a hint and no fact.
+	LastUsedAt pgtype.Timestamptz
+}
+
 // AUTHORITATIVE, not a projection. Verifiers never enter events, so a rebuild cannot restore this.
 type Credential struct {
 	CredentialID string
@@ -311,6 +341,14 @@ type PiiValue struct {
 	UpdatedAt  pgtype.Timestamptz
 }
 
+// Article 21 objections, one row per (subject, purpose). A row IS the objection; withdrawing deletes it. Read on the notification path for Activity and Product class messages only.
+type ProcessingObjectionView struct {
+	SubjectID  string
+	Purpose    string
+	ObjectedAt pgtype.Timestamptz
+	ActorID    string
+}
+
 // Article 18 restrictions. A row IS the restriction; lifting deletes it. Read once per tenant-facing notification.
 type ProcessingRestrictionView struct {
 	SubjectID    string
@@ -389,6 +427,16 @@ type RecoveryCode struct {
 	Digest       []byte
 	ConsumedAt   pgtype.Timestamptz
 	CreatedAt    pgtype.Timestamptz
+}
+
+// PROJECTION. A non-human principal owned by an organization (identity.md §10). Holds no credential — an API key is a separate aggregate. Not a flag on user_view, deliberately.
+type ServiceAccountView struct {
+	ServiceAccountID string
+	OrgID            string
+	// Lower-case snake by CHECK, because this value is in an append-only event log and free text is where personal data arrives (ADR-002).
+	Name      string
+	CreatedBy string
+	CreatedAt pgtype.Timestamptz
 }
 
 // AUTHORITATIVE, not a projection. Bearer-token digests and the idle deadline, which move outside the log.

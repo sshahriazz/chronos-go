@@ -78,7 +78,7 @@ func (d *dependencies) startGates(log *slog.Logger) {
 			log.Error("session authenticator not constructed; every authenticated RPC "+
 				"will be refused", "error", err)
 		} else {
-			d.authn = authn
+			d.authn = composeAuthenticator(d, authn, log)
 		}
 	}
 
@@ -109,12 +109,11 @@ func (d *dependencies) startGates(log *slog.Logger) {
 
 	gates, err := interceptor.NewGates(interceptor.Deps{
 		Policies: policies,
-		// Typed nil is a real hazard here: a nil *SessionAuthenticator inside a
-		// non-nil Authenticator would pass NewGates' own refuseTypedNil check only
-		// because it is not nil, and then deny with a panic instead of an error.
-		// NewGates checks for exactly that, which is why the value is passed
-		// through a helper rather than directly.
-		Authn: authenticatorOrNil(d.authn),
+		// Already an interface, and already nil when nothing could be built —
+		// composeAuthenticator returns an untyped nil rather than a typed one, so
+		// NewGates. refuseTypedNil has nothing to catch here and the gate is
+		// correctly reported as missing.
+		Authn: d.authn,
 		Authz: d.authz,
 
 		// Gate 4. Nil until entitlement is constructed, and the pipeline
@@ -123,11 +122,13 @@ func (d *dependencies) startGates(log *slog.Logger) {
 		Org:           d.orgContext,
 		Subscriptions: d.subscriptions,
 		Entitlements:  d.entitlements,
-		// Org, Subscriptions and Entitlements belong to modules that do not exist
-		// yet. Left nil DELIBERATELY: a method declaring one of those gates is
-		// refused with ErrGateUnavailable, which is the correct answer for an
-		// endpoint whose enforcement has not been built. Identity's own methods
-		// are public or self-scoped and declare none of them.
+		// Entitlements may still be nil, and a method declaring one is then refused
+		// with ErrGateUnavailable — an unwired gate is an error, not a skip.
+		//
+		// Identity.s methods are no longer all public or self-scoped: the six
+		// service-account and API key RPCs are org-scoped, so gates 1, 2 and 3 are
+		// now REACHED by this service and Blocking() would report them as an outage
+		// if any of the three failed to build.
 		Idempotency: d.idempotencyGate,
 	})
 	if err != nil {
@@ -161,13 +162,50 @@ func (d *dependencies) startGates(log *slog.Logger) {
 		"services", gatedServices(), "methods", len(policies.Methods()))
 }
 
-// authenticatorOrNil avoids the typed-nil trap: a nil *SessionAuthenticator
-// placed directly into interceptor.Authenticator produces a value that is NOT
-// == nil, so the authn gate would call through it and panic rather than refusing
-// the request.
-func authenticatorOrNil(a *interceptor.SessionAuthenticator) interceptor.Authenticator {
-	if a == nil {
+// composeAuthenticator adds the API key resolver in front of the session one.
+//
+// # One authn step, two credential kinds
+//
+// The pipeline has exactly one authentication gate, and keeping it that way is
+// the property this function exists to preserve. A second entry point for
+// machine credentials would be a second place every later rule has to be
+// repeated, and the rule that got missed would be the one that leaks. So both
+// kinds resolve to the SAME Principal and face the same gates 1 to 5 — a key
+// differs in what it carries (AAL1 permanently, an immutable organization, a
+// scope list), never in which checks it passes.
+//
+// # A missing key resolver degrades to sessions only, and says so
+//
+// It is not fatal, per ADR-010: every human request still works, and machine
+// requests are refused rather than admitted. But it is logged at ERROR, because
+// an installation whose integrations have all stopped authenticating has one
+// symptom and nothing else in the process would explain it.
+func composeAuthenticator(
+	d *dependencies, sessions *interceptor.SessionAuthenticator, log *slog.Logger,
+) interceptor.Authenticator {
+	if sessions == nil {
 		return nil
 	}
-	return a
+	// The SAME clock identity writes key deadlines with, for the reason the
+	// session authenticator takes it: left to time.Now, expiry and rotation
+	// retirement become untestable through ADR-054.s movable clock and the two
+	// halves of a key.s lifetime sit on different clocks.
+	keys, err := interceptor.NewAPIKeyAuthenticator(interceptor.APIKeyAuthenticatorDeps{
+		TX:  pgadapter.New(d.pool),
+		Log: log,
+		Now: d.clock.Now,
+	})
+	if err != nil {
+		log.Error("API key authenticator not constructed; every request presenting an "+
+			"API key will be refused while session requests keep working", "error", err)
+		return sessions
+	}
+	composite, err := interceptor.NewBearerAuthenticator(sessions, keys)
+	if err != nil {
+		log.Error("bearer authenticator not composed; API keys will not resolve",
+			"error", err)
+		return sessions
+	}
+	log.Info("bearer authenticator composed", "kinds", []string{"session", "api_key"})
+	return composite
 }

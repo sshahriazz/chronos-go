@@ -1513,6 +1513,12 @@ func projectionRegistry(codec *eventcodec.JSON) []projection.Projection {
 		// The drift is the reason a test asserts this list against
 		// cmd/projector's rather than trusting the comment.
 		complianceprojection.NewRestrictions(codec),
+		// Article 21's, added with the right itself rather than after the drift
+		// test caught it. Its absence is the restriction's failure one notch
+		// quieter: an objection could be recorded here and the dispatcher would
+		// never see it, so activity and product mail would keep arriving for a
+		// person who stopped it — with the row written and nobody reading it.
+		complianceprojection.NewObjections(codec),
 		complianceprojection.NewExports(codec),
 	}
 }

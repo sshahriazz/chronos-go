@@ -60,7 +60,33 @@ const (
 	StatementSessionTokens        = "session_token"
 	StatementSessionViews         = "session_view"
 	StatementReleasedReservations = "email_reservation_view"
+
+	// StatementAPIKeySecrets names the API key digest sweep.
+	//
+	// It is GARBAGE COLLECTION and not enforcement, and the distinction is worth
+	// having in the operator-facing name: GetApiKeySecret already refuses an
+	// expired or retired secret, so a row that outlives its deadline is dead
+	// storage rather than live access. A zero here for a week is a table that
+	// needs looking at, never a credential that should have died and did not.
+	StatementAPIKeySecrets = "api_key_secret"
 )
+
+// RetentionStatements is every statement one pass runs, in order.
+//
+// Exported so a test can assert the pass's PROPERTIES — that one failure does
+// not abort the rest — without hardcoding how many there are. A literal count
+// makes adding a table a test edit, and the edit is a place to get the number
+// wrong rather than a place to think.
+func RetentionStatements() []string {
+	return []string{
+		StatementTOTPReplay,
+		StatementTokens,
+		StatementSessionTokens,
+		StatementSessionViews,
+		StatementReleasedReservations,
+		StatementAPIKeySecrets,
+	}
+}
 
 // RetentionStore is the port: identity's five retention statements, each
 // reporting how many rows it removed.
@@ -95,6 +121,18 @@ type RetentionStore interface {
 
 	// DeleteReleasedReservations drops reservation rows released before cutoff.
 	DeleteReleasedReservations(ctx context.Context, cutoff time.Time) (int64, error)
+
+	// SweepAPIKeySecrets drops API key digests past their expiry or their
+	// rotation retirement. No cutoff, for the reason the first three have none:
+	// the lookup already refuses such a row, so it protects nothing and there is
+	// no horizon anybody could reasonably want it kept over.
+	//
+	// It is deliberately NOT paired with a projection sweep the way sessions
+	// are. `api_key_view` keeps revoked and expired keys forever on purpose:
+	// "which credentials existed against this organization, and what happened to
+	// them" is the question a key-management screen exists to answer, and it is
+	// asked hardest immediately after an incident.
+	SweepAPIKeySecrets(ctx context.Context) (int64, error)
 }
 
 // RetentionOutcome is what one statement did, or why it did nothing.
@@ -205,6 +243,12 @@ func (r *Retention) PurgeOnce(ctx context.Context, now time.Time) (RetentionResu
 		{StatementReleasedReservations, func(ctx context.Context) (int64, error) {
 			return r.store.DeleteReleasedReservations(ctx, now.Add(-ReleasedReservationRetention))
 		}},
+		// Last, and order-independent: api_key_secret is found by its own
+		// deadline columns rather than by a join, so nothing above can remove the
+		// route to a row this needs. That is the property SweepSessionTokens does
+		// NOT have, which is why the two sessions statements are pinned to each
+		// other and this one is not pinned to anything.
+		{StatementAPIKeySecrets, r.store.SweepAPIKeySecrets},
 	}
 
 	res := RetentionResult{Outcomes: make([]RetentionOutcome, 0, len(steps))}

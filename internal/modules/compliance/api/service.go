@@ -43,24 +43,51 @@ type ExportViews interface {
 	List(ctx context.Context, subjectID string, limit int) ([]app.ExportView, error)
 }
 
+// Rectifications is compliance's Article 16 use case, narrowed to what this
+// layer calls.
+type Rectifications interface {
+	Rectify(ctx context.Context, cmd app.RectifyCommand) (app.RectifyResult, error)
+}
+
+// Objections is compliance's Article 21 use case, narrowed to what this layer
+// calls.
+type Objections interface {
+	Object(ctx context.Context, cmd app.ObjectionCommand) (app.ObjectionResult, error)
+	Withdraw(ctx context.Context, cmd app.ObjectionCommand) (app.ObjectionResult, error)
+	List(ctx context.Context, subjectID string) ([]app.StandingObjection, error)
+}
+
 // Service serves ComplianceService.
 type Service struct {
 	compliancev1connect.UnimplementedComplianceServiceHandler
 
-	restrictions Restrictions
-	views        ExportViews
-	exports      Exports
+	restrictions   Restrictions
+	views          ExportViews
+	exports        Exports
+	rectifications Rectifications
+	objections     Objections
 }
 
 // Deps is what Service needs.
 type Deps struct {
-	Restrictions Restrictions
-	Exports      Exports
-	ExportViews  ExportViews
+	Restrictions   Restrictions
+	Exports        Exports
+	ExportViews    ExportViews
+	Rectifications Rectifications
+	Objections     Objections
 }
 
 func New(d Deps) (*Service, error) {
 	switch {
+	case d.Rectifications == nil:
+		return nil, fmt.Errorf("compliance: a rectification use case is required; without " +
+			"one Article 16 answers 'unimplemented' and the only record of a correction " +
+			"is a profile save, which cannot be told apart from somebody editing a " +
+			"preference")
+	case d.Objections == nil:
+		return nil, fmt.Errorf("compliance: an objection use case is required; without one " +
+			"Article 21 answers 'unimplemented' and the only way to stop processing that " +
+			"rests on legitimate interests is a preference toggle we may re-solicit")
 	case d.Restrictions == nil:
 		return nil, fmt.Errorf("compliance: a restriction use case is required; without one " +
 			"every Article 18 method answers 'unimplemented' and a person can only halt " +
@@ -75,6 +102,7 @@ func New(d Deps) (*Service, error) {
 	}
 	return &Service{
 		restrictions: d.Restrictions, exports: d.Exports, views: d.ExportViews,
+		rectifications: d.Rectifications, objections: d.Objections,
 	}, nil
 }
 
@@ -264,6 +292,164 @@ func (s *Service) GetProcessingRestriction(
 		Restricted:      !result.Since.IsZero(),
 		RestrictedSince: timestamp(result),
 	}), nil
+}
+
+// RectifyMyData corrects inaccurate personal data about the caller.
+//
+// # It maps a sparse request onto a sparse command, and nothing else
+//
+// No defaulting, no coalescing. A field the client omitted stays nil all the way
+// to the module that owns it, because "leave my timezone alone" and "empty my
+// timezone" are different requests and this layer is where they would be
+// flattened together if anywhere did.
+//
+// The subject is the authenticated caller and there is no field for one. A
+// request that could name a subject is a request to correct somebody else's
+// record — which, for a right whose whole purpose is that the data subject
+// decides what is true about them, is the exact inversion.
+func (s *Service) RectifyMyData(
+	ctx context.Context, req *connect.Request[compliancev1.RectifyMyDataRequest],
+) (*connect.Response[compliancev1.RectifyMyDataResponse], error) {
+	subject, key, err := s.command(ctx, req.Header())
+	if err != nil {
+		return nil, fail(err)
+	}
+
+	result, err := s.rectifications.Rectify(ctx, app.RectifyCommand{
+		SubjectID: subject,
+		// The caller is the actor. There is no delegation convention in this
+		// system, and inventing one at the endpoint that decides what is true
+		// about a person is the wrong place to start.
+		ActorID:        subject,
+		DisplayName:    req.Msg.DisplayName,
+		Locale:         req.Msg.Locale,
+		Timezone:       req.Msg.Timezone,
+		IdempotencyKey: key,
+	})
+	if err != nil {
+		return nil, fail(err)
+	}
+
+	out := &compliancev1.RectifyMyDataResponse{CorrectedFields: result.Fields}
+	if !result.CorrectedAt.IsZero() {
+		out.CorrectedAt = timestamppb.New(result.CorrectedAt.UTC())
+	}
+	return connect.NewResponse(out), nil
+}
+
+// ObjectToProcessing stops one purpose for the caller.
+func (s *Service) ObjectToProcessing(
+	ctx context.Context, req *connect.Request[compliancev1.ObjectToProcessingRequest],
+) (*connect.Response[compliancev1.ObjectToProcessingResponse], error) {
+	subject, key, err := s.command(ctx, req.Header())
+	if err != nil {
+		return nil, fail(err)
+	}
+	purpose, err := domainPurpose(req.Msg.GetPurpose())
+	if err != nil {
+		return nil, fail(err)
+	}
+
+	result, err := s.objections.Object(ctx, app.ObjectionCommand{
+		SubjectID: subject, ActorID: subject, Purpose: purpose, IdempotencyKey: key,
+	})
+	if err != nil {
+		return nil, fail(err)
+	}
+
+	out := &compliancev1.ObjectToProcessingResponse{Changed: result.Changed}
+	if !result.Since.IsZero() {
+		out.ObjectedSince = timestamppb.New(result.Since.UTC())
+	}
+	return connect.NewResponse(out), nil
+}
+
+// WithdrawProcessingObjection resumes one purpose the caller had stopped.
+func (s *Service) WithdrawProcessingObjection(
+	ctx context.Context, req *connect.Request[compliancev1.WithdrawProcessingObjectionRequest],
+) (*connect.Response[compliancev1.WithdrawProcessingObjectionResponse], error) {
+	subject, key, err := s.command(ctx, req.Header())
+	if err != nil {
+		return nil, fail(err)
+	}
+	purpose, err := domainPurpose(req.Msg.GetPurpose())
+	if err != nil {
+		return nil, fail(err)
+	}
+
+	result, err := s.objections.Withdraw(ctx, app.ObjectionCommand{
+		SubjectID: subject, ActorID: subject, Purpose: purpose, IdempotencyKey: key,
+	})
+	if err != nil {
+		return nil, fail(err)
+	}
+	return connect.NewResponse(&compliancev1.WithdrawProcessingObjectionResponse{
+		Changed: result.Changed,
+	}), nil
+}
+
+// ListProcessingObjections returns every objection the caller holds.
+func (s *Service) ListProcessingObjections(
+	ctx context.Context, _ *connect.Request[compliancev1.ListProcessingObjectionsRequest],
+) (*connect.Response[compliancev1.ListProcessingObjectionsResponse], error) {
+	subject, err := callerSubject(ctx)
+	if err != nil {
+		return nil, fail(err)
+	}
+	standing, err := s.objections.List(ctx, subject)
+	if err != nil {
+		return nil, fail(err)
+	}
+
+	out := &compliancev1.ListProcessingObjectionsResponse{
+		Objections: make([]*compliancev1.ProcessingObjection, 0, len(standing)),
+	}
+	for _, o := range standing {
+		// An objection whose purpose this build no longer recognises is rendered
+		// as UNSPECIFIED rather than dropped. The record still stops processing
+		// (domain.Objection.Apply applies it), so omitting it would show somebody
+		// a shorter list than the one being enforced — and they would have no way
+		// to withdraw an instruction they can no longer see.
+		out.Objections = append(out.Objections, &compliancev1.ProcessingObjection{
+			Purpose:       wirePurpose(o.Purpose),
+			ObjectedSince: timestamppb.New(o.Since.UTC()),
+		})
+	}
+	return connect.NewResponse(out), nil
+}
+
+// domainPurpose maps the wire enum onto the domain's vocabulary.
+//
+// UNSPECIFIED is refused HERE as well as by protovalidate, and the duplication
+// is deliberate: the interceptor's rule protects the transport, and this
+// protects the use case from any other caller of it. An objection recorded
+// against an empty purpose would be an instruction nothing enforces.
+func domainPurpose(p compliancev1.ProcessingPurpose) (domain.Purpose, error) {
+	switch p {
+	case compliancev1.ProcessingPurpose_PROCESSING_PURPOSE_ACTIVITY_NOTIFICATIONS:
+		return domain.PurposeActivityNotifications, nil
+	case compliancev1.ProcessingPurpose_PROCESSING_PURPOSE_PRODUCT_UPDATES:
+		return domain.PurposeProductUpdates, nil
+	default:
+		return "", errs.ValidationFailedf(
+			"name a processing purpose to object to; this system can stop %d of them",
+			len(domain.Purposes()))
+	}
+}
+
+// wirePurpose maps the domain's vocabulary back onto the wire enum.
+//
+// An unrecognised purpose becomes UNSPECIFIED rather than being dropped. See
+// ListProcessingObjections for why the list must not shrink.
+func wirePurpose(p domain.Purpose) compliancev1.ProcessingPurpose {
+	switch p {
+	case domain.PurposeActivityNotifications:
+		return compliancev1.ProcessingPurpose_PROCESSING_PURPOSE_ACTIVITY_NOTIFICATIONS
+	case domain.PurposeProductUpdates:
+		return compliancev1.ProcessingPurpose_PROCESSING_PURPOSE_PRODUCT_UPDATES
+	default:
+		return compliancev1.ProcessingPurpose_PROCESSING_PURPOSE_UNSPECIFIED
+	}
 }
 
 // command reads the two things every mutating method here needs.

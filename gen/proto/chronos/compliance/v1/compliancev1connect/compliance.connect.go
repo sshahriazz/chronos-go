@@ -10,8 +10,16 @@
 // like this is one that acts on a person named by whoever asked.
 //
 // The rights are Chapter III of the GDPR. What is here is what is built;
-// compliance.md §3 lists six and this carries one, because shipping an endpoint
-// for a right the system cannot actually deliver is worse than not having it.
+// compliance.md §3 lists six and this carries four — access and portability
+// (15, 20), rectification (16), restriction (18) and objection (21) — because
+// shipping an endpoint for a right the system cannot actually deliver is worse
+// than not having it.
+//
+// The two that are absent are absent for opposite reasons. ERASURE (17) is
+// requested through identity, which owns the account the request ends, and
+// compliance executes it. CONSENT withdrawal (7(3)) has no endpoint because
+// there is no consent record to withdraw yet; the notification classes that
+// would rest on one are opt-in and off (NOTIFICATIONS §3).
 package compliancev1connect
 
 import (
@@ -61,6 +69,18 @@ const (
 	// ComplianceServiceGetProcessingRestrictionProcedure is the fully-qualified name of the
 	// ComplianceService's GetProcessingRestriction RPC.
 	ComplianceServiceGetProcessingRestrictionProcedure = "/chronos.compliance.v1.ComplianceService/GetProcessingRestriction"
+	// ComplianceServiceRectifyMyDataProcedure is the fully-qualified name of the ComplianceService's
+	// RectifyMyData RPC.
+	ComplianceServiceRectifyMyDataProcedure = "/chronos.compliance.v1.ComplianceService/RectifyMyData"
+	// ComplianceServiceObjectToProcessingProcedure is the fully-qualified name of the
+	// ComplianceService's ObjectToProcessing RPC.
+	ComplianceServiceObjectToProcessingProcedure = "/chronos.compliance.v1.ComplianceService/ObjectToProcessing"
+	// ComplianceServiceWithdrawProcessingObjectionProcedure is the fully-qualified name of the
+	// ComplianceService's WithdrawProcessingObjection RPC.
+	ComplianceServiceWithdrawProcessingObjectionProcedure = "/chronos.compliance.v1.ComplianceService/WithdrawProcessingObjection"
+	// ComplianceServiceListProcessingObjectionsProcedure is the fully-qualified name of the
+	// ComplianceService's ListProcessingObjections RPC.
+	ComplianceServiceListProcessingObjectionsProcedure = "/chronos.compliance.v1.ComplianceService/ListProcessingObjections"
 )
 
 // ComplianceServiceClient is a client for the chronos.compliance.v1.ComplianceService service.
@@ -165,6 +185,117 @@ type ComplianceServiceClient interface {
 	// request from an ordinary session. Requiring step-up to read what you already
 	// asked for would make the setting hard to verify and easy to forget.
 	GetProcessingRestriction(context.Context, *connect.Request[v1.GetProcessingRestrictionRequest]) (*connect.Response[v1.GetProcessingRestrictionResponse], error)
+	// RectifyMyData corrects inaccurate personal data about the caller
+	// (Article 16).
+	//
+	// # What this adds over the settings screen, which performs the same write
+	//
+	// `ProfileService.UpdateProfile` already changes a display name, and this
+	// endpoint executes the correction THROUGH IT rather than beside it — one
+	// write path to the vault, one `profile.ProfileUpdated.v1`, one projection.
+	// A second writer would give the vault and the profile's own history two
+	// accounts of when a name changed, and support conversations about
+	// impersonation are settled from that history.
+	//
+	// What this adds is the RECORD THAT A RIGHT WAS EXERCISED. "Somebody edited
+	// their profile" and "a data subject asserted that what we hold about them is
+	// inaccurate and required its correction" are different legal facts with
+	// different obligations attached — Article 12(3)'s one-month clock, and
+	// Article 19's duty to tell the recipients the data was disclosed to. Only the
+	// second is answerable from `compliance.PersonalDataCorrected.v1`, and a
+	// controller asked to evidence its Article 16 handling cannot answer with a
+	// list of profile saves.
+	//
+	// # The email address is not a field here
+	//
+	// identity.md §12 owns it, with a token to the new address, a revert token to
+	// the old one, and a window. A rectification path for `email` would move a
+	// login identifier — and the account-recovery route with it — on one
+	// authenticated call with no proof of the new mailbox. A request naming an
+	// address is refused with a pointer to `ChangeEmail`; see
+	// RectifyMyDataRequest.
+	//
+	// # AAL1, matching UpdateProfile
+	//
+	// Requiring step-up here and not there would make the statutory right harder
+	// to exercise than the product control that performs the identical write,
+	// which is the friction Article 12(2) tells a controller not to introduce. The
+	// write is also self-announcing: `ProfileUpdated` is a Security-class
+	// notification, so a correction nobody made is reported to the person it was
+	// made about.
+	//
+	// A call naming no field is refused. It records nothing, and an event
+	// asserting that nothing was corrected is evidence of nothing.
+	RectifyMyData(context.Context, *connect.Request[v1.RectifyMyDataRequest]) (*connect.Response[v1.RectifyMyDataResponse], error)
+	// ObjectToProcessing stops one purpose that rests on legitimate interests
+	// (Article 21).
+	//
+	// # It is NOT a narrower restriction, and the difference is enforceable
+	//
+	// Article 18 restriction is TOTAL and TEMPORARY: it halts everything except
+	// storage — transactional receipts included — while a dispute runs, and it is
+	// lifted when the dispute settles. Article 21 objection is PER-PURPOSE and
+	// stands until the person withdraws it: the account keeps working, receipts
+	// and verification links keep arriving, and exactly one purpose stops.
+	//
+	// The two therefore differ in what a caller can observe: a restricted subject
+	// receives no invoice mail, an objecting subject still does. If this endpoint
+	// ever came to mean "stop everything", it would be a duplicate of
+	// RestrictProcessing and should be deleted rather than kept as a synonym.
+	//
+	// # It is also not a notification preference
+	//
+	// A preference is ours to interpret and is expressed per channel: mute email,
+	// keep in-app. An objection is a legal instruction about a PURPOSE, so it
+	// stops that processing on every channel at once, and no product control may
+	// clear it — only the person who made it. That is why it is a separate record
+	// from `ChannelPreferenceSet` rather than a flag on one.
+	//
+	// # What it can never silence
+	//
+	// Security and transactional messages. They rest on contract and on the
+	// controller's own legal obligations, not on legitimate interests, so
+	// Article 21 does not reach them — and a control a session holder could set to
+	// stop a password-changed alert is the tripwire disabled by the takeover
+	// itself. The purposes offered are exactly those that can be stopped, and no
+	// more.
+	//
+	// # Article 21(1)'s override is NOT implemented, deliberately
+	//
+	// The controller may continue processing where it demonstrates compelling
+	// legitimate grounds that override the subject's interests. Demonstrating that
+	// is a documented balancing test performed by a person, and the burden is on
+	// the controller. Until there is an operator workflow that records one, an
+	// objection is honoured unconditionally — which is the safe direction, and is
+	// the correct behaviour in the absence of the assessment the exception
+	// requires.
+	//
+	// AAL1: what an objection can stop is exactly what a notification preference
+	// can already stop from an ordinary session, and it can never reach a security
+	// alert. Requiring step-up would make the statutory right harder to exercise
+	// than the product control with the same effect.
+	//
+	// Idempotent: a second call reports `changed: false` and the ORIGINAL instant.
+	ObjectToProcessing(context.Context, *connect.Request[v1.ObjectToProcessingRequest]) (*connect.Response[v1.ObjectToProcessingResponse], error)
+	// WithdrawProcessingObjection resumes one purpose the caller had stopped.
+	//
+	// Only the person who objected may withdraw it. That asymmetry is the whole
+	// reason an objection is not a preference: a preference is a setting either
+	// side may reasonably change, and an objection is an instruction that binds
+	// the controller until its author releases it.
+	//
+	// Withdrawing nothing succeeds and reports `changed: false`.
+	WithdrawProcessingObjection(context.Context, *connect.Request[v1.WithdrawProcessingObjectionRequest]) (*connect.Response[v1.WithdrawProcessingObjectionResponse], error)
+	// ListProcessingObjections returns every objection the caller holds.
+	//
+	// A READ, and AAL1, for GetProcessingRestriction's reason: somebody must be
+	// able to see the state of their own instruction from an ordinary session, or
+	// the instruction is hard to verify and easy to forget.
+	//
+	// Read from the caller's own stream rather than a projection, so a person who
+	// has just objected is not told the objection has not taken effect while a
+	// projector catches up.
+	ListProcessingObjections(context.Context, *connect.Request[v1.ListProcessingObjectionsRequest]) (*connect.Response[v1.ListProcessingObjectionsResponse], error)
 }
 
 // NewComplianceServiceClient constructs a client for the chronos.compliance.v1.ComplianceService
@@ -214,17 +345,45 @@ func NewComplianceServiceClient(httpClient connect.HTTPClient, baseURL string, o
 			connect.WithSchema(complianceServiceMethods.ByName("GetProcessingRestriction")),
 			connect.WithClientOptions(opts...),
 		),
+		rectifyMyData: connect.NewClient[v1.RectifyMyDataRequest, v1.RectifyMyDataResponse](
+			httpClient,
+			baseURL+ComplianceServiceRectifyMyDataProcedure,
+			connect.WithSchema(complianceServiceMethods.ByName("RectifyMyData")),
+			connect.WithClientOptions(opts...),
+		),
+		objectToProcessing: connect.NewClient[v1.ObjectToProcessingRequest, v1.ObjectToProcessingResponse](
+			httpClient,
+			baseURL+ComplianceServiceObjectToProcessingProcedure,
+			connect.WithSchema(complianceServiceMethods.ByName("ObjectToProcessing")),
+			connect.WithClientOptions(opts...),
+		),
+		withdrawProcessingObjection: connect.NewClient[v1.WithdrawProcessingObjectionRequest, v1.WithdrawProcessingObjectionResponse](
+			httpClient,
+			baseURL+ComplianceServiceWithdrawProcessingObjectionProcedure,
+			connect.WithSchema(complianceServiceMethods.ByName("WithdrawProcessingObjection")),
+			connect.WithClientOptions(opts...),
+		),
+		listProcessingObjections: connect.NewClient[v1.ListProcessingObjectionsRequest, v1.ListProcessingObjectionsResponse](
+			httpClient,
+			baseURL+ComplianceServiceListProcessingObjectionsProcedure,
+			connect.WithSchema(complianceServiceMethods.ByName("ListProcessingObjections")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // complianceServiceClient implements ComplianceServiceClient.
 type complianceServiceClient struct {
-	restrictProcessing        *connect.Client[v1.RestrictProcessingRequest, v1.RestrictProcessingResponse]
-	liftProcessingRestriction *connect.Client[v1.LiftProcessingRestrictionRequest, v1.LiftProcessingRestrictionResponse]
-	exportMyData              *connect.Client[v1.ExportMyDataRequest, v1.ExportMyDataResponse]
-	getDataExport             *connect.Client[v1.GetDataExportRequest, v1.GetDataExportResponse]
-	listDataExports           *connect.Client[v1.ListDataExportsRequest, v1.ListDataExportsResponse]
-	getProcessingRestriction  *connect.Client[v1.GetProcessingRestrictionRequest, v1.GetProcessingRestrictionResponse]
+	restrictProcessing          *connect.Client[v1.RestrictProcessingRequest, v1.RestrictProcessingResponse]
+	liftProcessingRestriction   *connect.Client[v1.LiftProcessingRestrictionRequest, v1.LiftProcessingRestrictionResponse]
+	exportMyData                *connect.Client[v1.ExportMyDataRequest, v1.ExportMyDataResponse]
+	getDataExport               *connect.Client[v1.GetDataExportRequest, v1.GetDataExportResponse]
+	listDataExports             *connect.Client[v1.ListDataExportsRequest, v1.ListDataExportsResponse]
+	getProcessingRestriction    *connect.Client[v1.GetProcessingRestrictionRequest, v1.GetProcessingRestrictionResponse]
+	rectifyMyData               *connect.Client[v1.RectifyMyDataRequest, v1.RectifyMyDataResponse]
+	objectToProcessing          *connect.Client[v1.ObjectToProcessingRequest, v1.ObjectToProcessingResponse]
+	withdrawProcessingObjection *connect.Client[v1.WithdrawProcessingObjectionRequest, v1.WithdrawProcessingObjectionResponse]
+	listProcessingObjections    *connect.Client[v1.ListProcessingObjectionsRequest, v1.ListProcessingObjectionsResponse]
 }
 
 // RestrictProcessing calls chronos.compliance.v1.ComplianceService.RestrictProcessing.
@@ -256,6 +415,27 @@ func (c *complianceServiceClient) ListDataExports(ctx context.Context, req *conn
 // GetProcessingRestriction calls chronos.compliance.v1.ComplianceService.GetProcessingRestriction.
 func (c *complianceServiceClient) GetProcessingRestriction(ctx context.Context, req *connect.Request[v1.GetProcessingRestrictionRequest]) (*connect.Response[v1.GetProcessingRestrictionResponse], error) {
 	return c.getProcessingRestriction.CallUnary(ctx, req)
+}
+
+// RectifyMyData calls chronos.compliance.v1.ComplianceService.RectifyMyData.
+func (c *complianceServiceClient) RectifyMyData(ctx context.Context, req *connect.Request[v1.RectifyMyDataRequest]) (*connect.Response[v1.RectifyMyDataResponse], error) {
+	return c.rectifyMyData.CallUnary(ctx, req)
+}
+
+// ObjectToProcessing calls chronos.compliance.v1.ComplianceService.ObjectToProcessing.
+func (c *complianceServiceClient) ObjectToProcessing(ctx context.Context, req *connect.Request[v1.ObjectToProcessingRequest]) (*connect.Response[v1.ObjectToProcessingResponse], error) {
+	return c.objectToProcessing.CallUnary(ctx, req)
+}
+
+// WithdrawProcessingObjection calls
+// chronos.compliance.v1.ComplianceService.WithdrawProcessingObjection.
+func (c *complianceServiceClient) WithdrawProcessingObjection(ctx context.Context, req *connect.Request[v1.WithdrawProcessingObjectionRequest]) (*connect.Response[v1.WithdrawProcessingObjectionResponse], error) {
+	return c.withdrawProcessingObjection.CallUnary(ctx, req)
+}
+
+// ListProcessingObjections calls chronos.compliance.v1.ComplianceService.ListProcessingObjections.
+func (c *complianceServiceClient) ListProcessingObjections(ctx context.Context, req *connect.Request[v1.ListProcessingObjectionsRequest]) (*connect.Response[v1.ListProcessingObjectionsResponse], error) {
+	return c.listProcessingObjections.CallUnary(ctx, req)
 }
 
 // ComplianceServiceHandler is an implementation of the chronos.compliance.v1.ComplianceService
@@ -361,6 +541,117 @@ type ComplianceServiceHandler interface {
 	// request from an ordinary session. Requiring step-up to read what you already
 	// asked for would make the setting hard to verify and easy to forget.
 	GetProcessingRestriction(context.Context, *connect.Request[v1.GetProcessingRestrictionRequest]) (*connect.Response[v1.GetProcessingRestrictionResponse], error)
+	// RectifyMyData corrects inaccurate personal data about the caller
+	// (Article 16).
+	//
+	// # What this adds over the settings screen, which performs the same write
+	//
+	// `ProfileService.UpdateProfile` already changes a display name, and this
+	// endpoint executes the correction THROUGH IT rather than beside it — one
+	// write path to the vault, one `profile.ProfileUpdated.v1`, one projection.
+	// A second writer would give the vault and the profile's own history two
+	// accounts of when a name changed, and support conversations about
+	// impersonation are settled from that history.
+	//
+	// What this adds is the RECORD THAT A RIGHT WAS EXERCISED. "Somebody edited
+	// their profile" and "a data subject asserted that what we hold about them is
+	// inaccurate and required its correction" are different legal facts with
+	// different obligations attached — Article 12(3)'s one-month clock, and
+	// Article 19's duty to tell the recipients the data was disclosed to. Only the
+	// second is answerable from `compliance.PersonalDataCorrected.v1`, and a
+	// controller asked to evidence its Article 16 handling cannot answer with a
+	// list of profile saves.
+	//
+	// # The email address is not a field here
+	//
+	// identity.md §12 owns it, with a token to the new address, a revert token to
+	// the old one, and a window. A rectification path for `email` would move a
+	// login identifier — and the account-recovery route with it — on one
+	// authenticated call with no proof of the new mailbox. A request naming an
+	// address is refused with a pointer to `ChangeEmail`; see
+	// RectifyMyDataRequest.
+	//
+	// # AAL1, matching UpdateProfile
+	//
+	// Requiring step-up here and not there would make the statutory right harder
+	// to exercise than the product control that performs the identical write,
+	// which is the friction Article 12(2) tells a controller not to introduce. The
+	// write is also self-announcing: `ProfileUpdated` is a Security-class
+	// notification, so a correction nobody made is reported to the person it was
+	// made about.
+	//
+	// A call naming no field is refused. It records nothing, and an event
+	// asserting that nothing was corrected is evidence of nothing.
+	RectifyMyData(context.Context, *connect.Request[v1.RectifyMyDataRequest]) (*connect.Response[v1.RectifyMyDataResponse], error)
+	// ObjectToProcessing stops one purpose that rests on legitimate interests
+	// (Article 21).
+	//
+	// # It is NOT a narrower restriction, and the difference is enforceable
+	//
+	// Article 18 restriction is TOTAL and TEMPORARY: it halts everything except
+	// storage — transactional receipts included — while a dispute runs, and it is
+	// lifted when the dispute settles. Article 21 objection is PER-PURPOSE and
+	// stands until the person withdraws it: the account keeps working, receipts
+	// and verification links keep arriving, and exactly one purpose stops.
+	//
+	// The two therefore differ in what a caller can observe: a restricted subject
+	// receives no invoice mail, an objecting subject still does. If this endpoint
+	// ever came to mean "stop everything", it would be a duplicate of
+	// RestrictProcessing and should be deleted rather than kept as a synonym.
+	//
+	// # It is also not a notification preference
+	//
+	// A preference is ours to interpret and is expressed per channel: mute email,
+	// keep in-app. An objection is a legal instruction about a PURPOSE, so it
+	// stops that processing on every channel at once, and no product control may
+	// clear it — only the person who made it. That is why it is a separate record
+	// from `ChannelPreferenceSet` rather than a flag on one.
+	//
+	// # What it can never silence
+	//
+	// Security and transactional messages. They rest on contract and on the
+	// controller's own legal obligations, not on legitimate interests, so
+	// Article 21 does not reach them — and a control a session holder could set to
+	// stop a password-changed alert is the tripwire disabled by the takeover
+	// itself. The purposes offered are exactly those that can be stopped, and no
+	// more.
+	//
+	// # Article 21(1)'s override is NOT implemented, deliberately
+	//
+	// The controller may continue processing where it demonstrates compelling
+	// legitimate grounds that override the subject's interests. Demonstrating that
+	// is a documented balancing test performed by a person, and the burden is on
+	// the controller. Until there is an operator workflow that records one, an
+	// objection is honoured unconditionally — which is the safe direction, and is
+	// the correct behaviour in the absence of the assessment the exception
+	// requires.
+	//
+	// AAL1: what an objection can stop is exactly what a notification preference
+	// can already stop from an ordinary session, and it can never reach a security
+	// alert. Requiring step-up would make the statutory right harder to exercise
+	// than the product control with the same effect.
+	//
+	// Idempotent: a second call reports `changed: false` and the ORIGINAL instant.
+	ObjectToProcessing(context.Context, *connect.Request[v1.ObjectToProcessingRequest]) (*connect.Response[v1.ObjectToProcessingResponse], error)
+	// WithdrawProcessingObjection resumes one purpose the caller had stopped.
+	//
+	// Only the person who objected may withdraw it. That asymmetry is the whole
+	// reason an objection is not a preference: a preference is a setting either
+	// side may reasonably change, and an objection is an instruction that binds
+	// the controller until its author releases it.
+	//
+	// Withdrawing nothing succeeds and reports `changed: false`.
+	WithdrawProcessingObjection(context.Context, *connect.Request[v1.WithdrawProcessingObjectionRequest]) (*connect.Response[v1.WithdrawProcessingObjectionResponse], error)
+	// ListProcessingObjections returns every objection the caller holds.
+	//
+	// A READ, and AAL1, for GetProcessingRestriction's reason: somebody must be
+	// able to see the state of their own instruction from an ordinary session, or
+	// the instruction is hard to verify and easy to forget.
+	//
+	// Read from the caller's own stream rather than a projection, so a person who
+	// has just objected is not told the objection has not taken effect while a
+	// projector catches up.
+	ListProcessingObjections(context.Context, *connect.Request[v1.ListProcessingObjectionsRequest]) (*connect.Response[v1.ListProcessingObjectionsResponse], error)
 }
 
 // NewComplianceServiceHandler builds an HTTP handler from the service implementation. It returns
@@ -406,6 +697,30 @@ func NewComplianceServiceHandler(svc ComplianceServiceHandler, opts ...connect.H
 		connect.WithSchema(complianceServiceMethods.ByName("GetProcessingRestriction")),
 		connect.WithHandlerOptions(opts...),
 	)
+	complianceServiceRectifyMyDataHandler := connect.NewUnaryHandler(
+		ComplianceServiceRectifyMyDataProcedure,
+		svc.RectifyMyData,
+		connect.WithSchema(complianceServiceMethods.ByName("RectifyMyData")),
+		connect.WithHandlerOptions(opts...),
+	)
+	complianceServiceObjectToProcessingHandler := connect.NewUnaryHandler(
+		ComplianceServiceObjectToProcessingProcedure,
+		svc.ObjectToProcessing,
+		connect.WithSchema(complianceServiceMethods.ByName("ObjectToProcessing")),
+		connect.WithHandlerOptions(opts...),
+	)
+	complianceServiceWithdrawProcessingObjectionHandler := connect.NewUnaryHandler(
+		ComplianceServiceWithdrawProcessingObjectionProcedure,
+		svc.WithdrawProcessingObjection,
+		connect.WithSchema(complianceServiceMethods.ByName("WithdrawProcessingObjection")),
+		connect.WithHandlerOptions(opts...),
+	)
+	complianceServiceListProcessingObjectionsHandler := connect.NewUnaryHandler(
+		ComplianceServiceListProcessingObjectionsProcedure,
+		svc.ListProcessingObjections,
+		connect.WithSchema(complianceServiceMethods.ByName("ListProcessingObjections")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/chronos.compliance.v1.ComplianceService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ComplianceServiceRestrictProcessingProcedure:
@@ -420,6 +735,14 @@ func NewComplianceServiceHandler(svc ComplianceServiceHandler, opts ...connect.H
 			complianceServiceListDataExportsHandler.ServeHTTP(w, r)
 		case ComplianceServiceGetProcessingRestrictionProcedure:
 			complianceServiceGetProcessingRestrictionHandler.ServeHTTP(w, r)
+		case ComplianceServiceRectifyMyDataProcedure:
+			complianceServiceRectifyMyDataHandler.ServeHTTP(w, r)
+		case ComplianceServiceObjectToProcessingProcedure:
+			complianceServiceObjectToProcessingHandler.ServeHTTP(w, r)
+		case ComplianceServiceWithdrawProcessingObjectionProcedure:
+			complianceServiceWithdrawProcessingObjectionHandler.ServeHTTP(w, r)
+		case ComplianceServiceListProcessingObjectionsProcedure:
+			complianceServiceListProcessingObjectionsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -451,4 +774,20 @@ func (UnimplementedComplianceServiceHandler) ListDataExports(context.Context, *c
 
 func (UnimplementedComplianceServiceHandler) GetProcessingRestriction(context.Context, *connect.Request[v1.GetProcessingRestrictionRequest]) (*connect.Response[v1.GetProcessingRestrictionResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.compliance.v1.ComplianceService.GetProcessingRestriction is not implemented"))
+}
+
+func (UnimplementedComplianceServiceHandler) RectifyMyData(context.Context, *connect.Request[v1.RectifyMyDataRequest]) (*connect.Response[v1.RectifyMyDataResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.compliance.v1.ComplianceService.RectifyMyData is not implemented"))
+}
+
+func (UnimplementedComplianceServiceHandler) ObjectToProcessing(context.Context, *connect.Request[v1.ObjectToProcessingRequest]) (*connect.Response[v1.ObjectToProcessingResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.compliance.v1.ComplianceService.ObjectToProcessing is not implemented"))
+}
+
+func (UnimplementedComplianceServiceHandler) WithdrawProcessingObjection(context.Context, *connect.Request[v1.WithdrawProcessingObjectionRequest]) (*connect.Response[v1.WithdrawProcessingObjectionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.compliance.v1.ComplianceService.WithdrawProcessingObjection is not implemented"))
+}
+
+func (UnimplementedComplianceServiceHandler) ListProcessingObjections(context.Context, *connect.Request[v1.ListProcessingObjectionsRequest]) (*connect.Response[v1.ListProcessingObjectionsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.compliance.v1.ComplianceService.ListProcessingObjections is not implemented"))
 }

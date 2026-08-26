@@ -80,6 +80,11 @@ func (d *dependencies) buildProfile(
 		return nil, fmt.Errorf("profile updates: %w", err)
 	}
 
+	// Held on the composition root, not only handed to profile's own service:
+	// compliance's Article 16 rectification corrects the fields this use case
+	// owns, and it corrects them THROUGH this instance. See dependencies.
+	d.profileUpdates = updates
+
 	avatars, err := profileapp.NewAvatars(profileapp.AvatarsDeps{Store: d.blobs})
 	if err != nil {
 		return nil, fmt.Errorf("profile avatars: %w", err)
