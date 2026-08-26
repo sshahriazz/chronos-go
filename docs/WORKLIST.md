@@ -778,6 +778,38 @@ operator endpoint whose declared permission is a lie.
 suspension, plan publication, coupons, overrides. Slice 2 is also what unblocks
 legal holds.
 
+### Verified end to end, against real everything
+
+Not "the RPCs return plausible errors". A real Google account, a real
+authenticator, real infrastructure, and the audit trail read back out of
+Postgres afterwards:
+
+    signed_in            —                                —              ::1
+    viewed_customer      ListCustomers                    —              ::1
+    viewed_customer      GetCustomer     org_01M0YD4FKM…  —              ::1
+    viewed_personal_data RevealPersonal… org_01M0YD4EN3…  subj_01M0Y79T… email
+                                                          "to check something"
+    signed_out           —                                —              ::1
+
+Three things in that trail are the design rather than the output:
+
+  - `ListCustomers` names NO org, and `GetCustomer` names one. A page is an
+    aggregate over many tenants and naming one of them would be false.
+  - The personal-data row carries the target, the field list and the
+    justification verbatim — and the database's own CHECK constraint would have
+    refused it without them.
+  - Every row has an origin, which is what evidences the IP restriction held.
+
+The sign-in was a first sign-in, so it enrolled an authenticator through the
+bootstrap window; the next one required it.
+
+Two tools came out of doing this. `internal/tools/operatorlab` is the browser
+harness — two of the three things this plane does can only be exercised by a
+browser, so without a page there is no way to prove the sign-in works.
+`internal/tools/oidcsubject` closes a bootstrap gap the design creates on
+purpose: provisioning matches on the IdP's immutable subject, the plane refuses
+to tell you yours, and on a laptop there was nowhere else to read it from.
+
 ### What the build found that the design did not predict
 
 1. **The tenant plane's `ALTER DEFAULT PRIVILEGES` would have handed
@@ -823,7 +855,35 @@ legal holds.
    test names the skip, because a skip in a completeness guard is otherwise how
    a gap gets in.
 
-6. **`SELECT current_user` tripped the SQL-in-Go ban, and the ban was right.**
+6. **The customer directory's counts did not survive a replay**, and the test
+   that found it was written for a different reason. An empty directory and a
+   broken one look identical, so the test appends real events and watches the
+   row appear — and it read back `workspace_count = 3, member_count = 3` for one
+   workspace and one member. `count = count + 1` applies twice on every replay,
+   and every other field was correct, which is how the bug survives review: the
+   numbers are merely too big.
+
+   The same run exposed a second thing that took a moment to recognise as
+   ordinary rather than as test pollution — the LIVE plane was applying those
+   events to that table too. Two projectors over one table both bumped, which is
+   what any rolling deploy does. Counting a keyed set instead makes them
+   converge.
+
+7. **The network restriction refused every IPv6 caller**, found by starting the
+   binary and calling it. The guard resolved the caller through
+   `clientip.Scope`, which is a rate-limit BUCKET KEY — and for IPv6 that key is
+   a `/64` PREFIX. Every unit test in the guard would have passed, because the
+   bug is in what a neighbouring package returns rather than in what this one
+   does with it. `clientip.Resolver` gained `Address`, which answers the
+   different question under the same hop policy.
+
+8. **protovalidate was never wired into `cmd/operator`.** Every bound in
+   `operator.proto` was a comment: `reason`'s `min_len` of 8 documented a
+   justification requirement while accepting `"x"`. Caught by asking what the
+   binary actually applies rather than what it imports, which is the same
+   question that found three dead notification adapters.
+
+9. **`SELECT current_user` tripped the SQL-in-Go ban, and the ban was right.**
    The role assertion belongs in `internal/adapter/postgres`, beside
    `VerifyNotPrivileged`, which is the same check pointed at the opposite
    failure. The carve-out exists for statements about the CONNECTION rather than
