@@ -737,7 +737,7 @@ already has a name for.
       above. Slice 2 (break-glass, view-as, writes) is what still gates legal
       holds.
 
-## Now — `operator`, slice 2: elevation, and the writes
+## Done — `operator`, slice 2: elevation, and the writes that were buildable
 
 Slice 1 made the plane exist and proved it end to end. It is a VIEWER: every
 method is a read, and operator.md §7's table of eight writes is entirely
@@ -769,15 +769,46 @@ they have been waiting for exactly that pattern.
 - [x] **D · Legal holds** (compliance.md §4 steps 2–3). Unblocked by C. A hold
       has an owner and a recorded justification, and both now have somewhere to
       come from.
-- [ ] **E · The billing writes** (§7). Refunds, coupons, entitlement overrides,
-      trial extension, dispute resolution, and the plan catalogue. Every one is
-      a Stripe mutation behind an operator command, so they are mechanical once
-      C exists — and they are last because each is a real-money action that
-      wants its own review.
-- [ ] **F · View-as** (§6). Read-only, from operator projections, or nothing.
-      Deliberately after the writes: the feature every support team asks for and
-      the one most likely to become a breach, and it is worth building when
-      there is something to view.
+- [ ] **E · The billing writes** (§7) — **BLOCKED BY SCOPE, and my own estimate
+      of it was wrong.** This entry said they were "mechanical once C exists".
+      They are not, and the check that proved it took a minute:
+
+      | §7 row | What it would write through | What exists |
+      | --- | --- | --- |
+      | Issue refund | a refund model | billing has ONE event, `InvoiceRecorded` |
+      | Create / revoke coupon | a `Coupon` aggregate | nothing, anywhere — billing.md §6 is unbuilt |
+      | Grant entitlement override | an override aggregate | entitlement has a catalogue and **no events at all** |
+      | Extend a trial | a command moving `TrialEndsAt` | the org aggregate has `StartTrial` and no way to move the deadline |
+      | Resolve a dispute flag | a dispute model | no dispute exists in any module |
+      | Publish / archive plan version | a catalogue aggregate | the catalogue is `domain.Published()`, COMPILED INTO THE BINARY — publishing a version is a deploy |
+      | Migrate subscribers | all of the above | — |
+
+      Every one needs a TENANT-SIDE domain that does not exist. Building them in
+      the operator plane would mean inventing billing's domain inside the back
+      office, which is precisely the "privileged back-channel that skips domain
+      rules" §7 forbids — and slice 2's whole point was demonstrating the
+      opposite.
+
+      So this is the same finding as `access` grants, reached the same way:
+      blocked by scope rather than by effort, and worth stating rather than
+      producing something that looks like the feature. **The unblocking work is
+      billing's and entitlement's, not the operator plane's** — coupons
+      (billing.md §6), an override model, and a catalogue that is data rather
+      than a compiled function. Each becomes an operator RPC in an afternoon
+      once it exists, following C's pattern exactly.
+
+- [ ] **F · View-as** (§6) — **deferred, and honestly it is nearly a rename
+      today.** §6 permits rendering "a tenant's view FROM OPERATOR
+      PROJECTIONS", and the operator plane has one customer-facing projection:
+      `operator_customer_list`. So a view-as built now would show what
+      `GetCustomer` already shows, wrapped in an impersonation session and two
+      extra events.
+
+      That is not nothing — `OperatorImpersonationStarted` and `…Ended` bound a
+      window the tenant can be shown, which is §6's real requirement — but it
+      is machinery around a view with nothing extra in it. It becomes worth
+      building when there is more to render, which is the same condition E is
+      waiting on.
 
 ---
 
