@@ -16,10 +16,12 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -74,15 +76,22 @@ func run(email string) error {
 	// tool that omitted it would report whichever of two accounts the planner
 	// reached first — which for a diagnostic is worse than no answer.
 	var (
-		subject, userID, gotIndex, state string
-		verified                         bool
-		registered, activated, deact     pgtype.Timestamptz
+		subject, userID, gotIndex, state        string
+		verified                                bool
+		registered, activated, deact, suspended pgtype.Timestamptz
 	)
 	err = pool.QueryRow(ctx, identitydb.GetUserByEmailIndex, string(idx)).
-		Scan(&subject, &userID, &gotIndex, &state, &verified, &registered, &activated, &deact)
-	if err != nil {
+		Scan(&subject, &userID, &gotIndex, &state, &verified,
+			&registered, &activated, &deact, &suspended)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
 		fmt.Println("account:  NONE claims this index")
-		return nil //nolint:nilerr // "no account" is an answer, not a failure
+		return nil
+	case err != nil:
+		// REPORTED, not swallowed. The first version returned "no account" for
+		// every error, so a column list that had drifted from the query read as a
+		// definitive answer — and the whole point of this tool is to be believed.
+		return fmt.Errorf("reading the account: %w", err)
 	}
 	fmt.Printf("account:  %s state=%s verified=%t\n", subject, state, verified)
 

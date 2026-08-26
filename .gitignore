@@ -51,3 +51,10 @@ bin/
 # than by name so the next one somebody downloads is ignored too — a rule that
 # only covers the file you already noticed is a rule that fails the second time.
 client_secret_*.apps.googleusercontent.com.json
+
+# OpenBao's unseal key and root token for local development.
+#
+# It sits beside the data it unseals, which production must never do and a
+# laptop needs. Losing it makes the local vault unreadable; committing it would
+# publish the key that protects every local account's personal data.
+infra/openbao/.bao-credentials.json

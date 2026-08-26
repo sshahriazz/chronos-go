@@ -337,24 +337,40 @@ services:
   # OpenBao — key custody (ADR-028). Holds the KEK that wraps per-subject data
   # keys, so GDPR erasure works by destroying a key (ADR-002).
   #
-  # DEV MODE ONLY here: in-memory, auto-unsealed, fixed root token. Production
-  # runs sealed with file/raft storage and a real unseal procedure — a dev-mode
-  # OpenBao in production would defeat the entire guarantee.
+  # FILE STORAGE, not dev mode, and the difference is data loss.
+  #
+  # Dev mode keeps everything in memory, so a container restart destroys the
+  # key-encryption key — and with it the ability to decrypt every subject's
+  # personal data already in Postgres (ADR-028, ADR-002). The symptom is not an
+  # error: accounts still authenticate, because authentication touches no
+  # personal data, while every notification silently fails to resolve an
+  # address. It cost a real account in this repository before the KEK canary
+  # existed to catch it.
+  #
+  # Still NOT a production configuration — one unseal share, TLS disabled, the
+  # unseal key stored beside the data. What dev borrows from production here is
+  # DURABILITY, not custody. See infra/openbao/config.hcl.
   # ---------------------------------------------------------------------------
   openbao:
     image: ${OPENBAO_IMAGE}
     container_name: chronos-openbao
     <<: [*restart, *logging]
-    command: server -dev -dev-listen-address=0.0.0.0:8200
+    command: server -config=/openbao/config/config.hcl
     environment:
-      BAO_DEV_ROOT_TOKEN_ID: ${OPENBAO_DEV_TOKEN}
       BAO_ADDR: http://127.0.0.1:8200
     ports:
       - "${OPENBAO_PORT}:8200"
+    volumes:
+      - ./infra/openbao/config.hcl:/openbao/config/config.hcl:ro
+      - openbao-data:/openbao/file
     cap_add:
       - IPC_LOCK
     healthcheck:
-      test: ["CMD-SHELL", "bao status -address=http://127.0.0.1:8200 >/dev/null 2>&1 || exit 1"]
+      # `bao status` exits 2 when the server is SEALED, which is reachable and
+      # waiting rather than broken — the bootstrap unseals it a moment later. A
+      # check that failed on 2 would keep the container unhealthy forever and
+      # nothing would ever run the unseal.
+      test: ["CMD-SHELL", "bao status -address=http://127.0.0.1:8200 >/dev/null 2>&1; [ $$? -ne 1 ]"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -507,6 +523,11 @@ networks:
 
 volumes:
   postgres-data:
+  # The KEK lives here. Destroying this volume destroys every subject's personal
+  # data as surely as a DROP TABLE would — `make nuke` does exactly that, on
+  # purpose, and the KEK canary is what stops a rebuilt one being served
+  # silently.
+  openbao-data:
   kurrentdb-data:
   kurrentdb-logs:
   seaweedfs-data:

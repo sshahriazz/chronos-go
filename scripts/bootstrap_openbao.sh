@@ -22,17 +22,83 @@ KV="${OPENBAO_KV_MOUNT:-secret}"
 STRIPE_PATH="${OPENBAO_STRIPE_PATH:-chronos/stripe}"
 G="\033[32m"; Y="\033[33m"; R="\033[31m"; X="\033[0m"
 
-if [ -z "$TOKEN" ]; then
-  echo -e "  ${Y}skip${X}  OPENBAO_DEV_TOKEN is not set"
-  exit 0
-fi
+# Where the unseal key and root token live once this installation is initialised.
+#
+# Gitignored, and beside the data it unseals — which is exactly what production
+# must never do and exactly what a laptop needs. See infra/openbao/config.hcl.
+CREDS="infra/openbao/.bao-credentials.json"
 
 for i in $(seq 1 30); do
   code=$(curl -s -o /dev/null -w '%{http_code}' "$ADDR/v1/sys/health" || true)
+  # 501 = not initialised, 503 = sealed. Both mean reachable, and both are
+  # states this script exists to move out of.
   case "$code" in 200|429|472|473|501|503) break ;; esac
   [ "$i" = "30" ] && { echo -e "  ${R}FAIL${X}  OpenBao never became reachable at $ADDR"; exit 1; }
   sleep 1
 done
+
+# ---------------------------------------------------------------------------
+# Initialise once, unseal on every start
+# ---------------------------------------------------------------------------
+#
+# With file storage the server comes up SEALED and stays that way until somebody
+# hands it the unseal key — which is the whole point of a seal and the reason
+# dev mode skips it. One share and a threshold of one, because the alternative
+# is a developer splitting a key three ways on their own laptop.
+initialised=$(curl -s "$ADDR/v1/sys/init" | grep -o '"initialized":[a-z]*' | cut -d: -f2)
+
+if [ "$initialised" = "false" ]; then
+  if [ -f "$CREDS" ]; then
+    # Credentials for a store that no longer exists. Refused rather than
+    # overwritten: the volume was destroyed and the KEK with it, so every
+    # subject's personal data is already unreadable — and silently minting a new
+    # key here is what turns that into a system that looks fine.
+    echo -e "  ${R}FAIL${X}  OpenBao is uninitialised but $CREDS exists."
+    echo    "        The storage volume was destroyed and the key-encryption key with"
+    echo    "        it, so anything already encrypted is unreadable. If that is"
+    echo    "        expected — after \`make nuke\` — delete $CREDS and the kek_canary"
+    echo    "        row, then run this again."
+    exit 1
+  fi
+  out=$(curl -s -X POST -d '{"secret_shares":1,"secret_threshold":1}' "$ADDR/v1/sys/init")
+  key=$(echo "$out" | grep -o '"keys":\["[^"]*' | cut -d'"' -f4)
+  root=$(echo "$out" | grep -o '"root_token":"[^"]*' | cut -d'"' -f4)
+  if [ -z "$key" ] || [ -z "$root" ]; then
+    echo -e "  ${R}FAIL${X}  initialising OpenBao: $out"; exit 1
+  fi
+  mkdir -p "$(dirname "$CREDS")"
+  umask 077
+  printf '{"unseal_key":"%s","root_token":"%s"}\n' "$key" "$root" > "$CREDS"
+  echo -e "  ${G}OK${X}    initialised; unseal key and root token written to $CREDS"
+fi
+
+if [ ! -f "$CREDS" ]; then
+  echo -e "  ${R}FAIL${X}  OpenBao is initialised and $CREDS is missing, so nothing here"
+  echo    "        can unseal it. If the credentials are lost the data is unreadable."
+  exit 1
+fi
+
+UNSEAL=$(grep -o '"unseal_key":"[^"]*' "$CREDS" | cut -d'"' -f4)
+TOKEN=$(grep -o '"root_token":"[^"]*' "$CREDS" | cut -d'"' -f4)
+
+sealed=$(curl -s "$ADDR/v1/sys/seal-status" | grep -o '"sealed":[a-z]*' | cut -d: -f2)
+if [ "$sealed" = "true" ]; then
+  curl -s -X POST -d "{\"key\":\"$UNSEAL\"}" "$ADDR/v1/sys/unseal" >/dev/null
+  sealed=$(curl -s "$ADDR/v1/sys/seal-status" | grep -o '"sealed":[a-z]*' | cut -d: -f2)
+  [ "$sealed" = "true" ] && { echo -e "  ${R}FAIL${X}  OpenBao would not unseal"; exit 1; }
+  echo -e "  ${G}OK${X}    unsealed"
+fi
+
+# The app reads the token from .env, so the one this script minted has to land
+# there. Rewritten in place rather than appended, so repeated runs do not stack
+# stale tokens that shadow each other.
+if [ -f .env ] && ! grep -q "^OPENBAO_DEV_TOKEN=$TOKEN$" .env; then
+  tmp=$(mktemp)
+  grep -v '^OPENBAO_DEV_TOKEN=' .env > "$tmp"
+  printf 'OPENBAO_DEV_TOKEN=%s\n' "$TOKEN" >> "$tmp"
+  mv "$tmp" .env
+  echo -e "  ${G}OK${X}    OPENBAO_DEV_TOKEN updated in .env"
+fi
 
 api() { curl -s -o /dev/null -w '%{http_code}' -H "X-Vault-Token: $TOKEN" "$@"; }
 
