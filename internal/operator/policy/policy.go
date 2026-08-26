@@ -176,7 +176,7 @@ func policyFor(name string, md protoreflect.MethodDescriptor) (Policy, error) {
 		return Policy{}, fmt.Errorf(
 			"%s declares no capability and is not marked unauthenticated or sso_only", name)
 
-	case !knownCapability(capability):
+	case !domain.KnownCapability(capability):
 		// The one-list guarantee options.proto promises. The proto carries a
 		// string so the role table can stay in Go where it is tested; this is
 		// what stops that string being a name the table has never heard of.
@@ -192,15 +192,6 @@ func policyFor(name string, md protoreflect.MethodDescriptor) (Policy, error) {
 			Audit:      audit,
 		}, nil
 	}
-}
-
-func knownCapability(c domain.Capability) bool {
-	for _, known := range domain.Capabilities() {
-		if known == c {
-			return true
-		}
-	}
-	return false
 }
 
 func getString(md protoreflect.MethodDescriptor, xt protoreflect.ExtensionType) string {

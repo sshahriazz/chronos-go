@@ -41,8 +41,8 @@ func NewAuditLog(codec eventsourcing.Codec) *AuditLog {
 		_ context.Context, w db.Writer, env projection.Envelope, e *contract.OperatorSignedIn,
 	) error {
 		w.Exec(operatordb.InsertAuditEntry,
-			entryID(env), e.OperatorID, e.SubjectID, "signed_in", "sign_in",
-			nil, nil, nil, nil, nullIP(e.FromIP), e.SignedInAt)
+			entryID(env), e.OperatorID, e.SubjectID, string(domain.ActionSignedIn), "sign_in",
+			nil, nil, nil, nil, nullText(e.FromIP), e.SignedInAt)
 		return nil
 	})
 
@@ -50,7 +50,7 @@ func NewAuditLog(codec eventsourcing.Codec) *AuditLog {
 		_ context.Context, w db.Writer, env projection.Envelope, e *contract.OperatorSignedOut,
 	) error {
 		w.Exec(operatordb.InsertAuditEntry,
-			entryID(env), e.OperatorID, e.SubjectID, "signed_out", "sign_out",
+			entryID(env), e.OperatorID, e.SubjectID, string(domain.ActionSignedOut), "sign_out",
 			nil, nil, nil, nil, nil, e.SignedOutAt)
 		return nil
 	})
@@ -63,7 +63,7 @@ func NewAuditLog(codec eventsourcing.Codec) *AuditLog {
 		_ context.Context, w db.Writer, env projection.Envelope, e *contract.OperatorElevated,
 	) error {
 		w.Exec(operatordb.InsertAuditEntry,
-			entryID(env), e.OperatorID, e.SubjectID, "elevated", e.Capability,
+			entryID(env), e.OperatorID, e.SubjectID, string(domain.ActionElevated), e.Capability,
 			nil, nil, nil, nullText(e.Reason), nil, e.ElevatedAt)
 		return nil
 	})
@@ -76,7 +76,7 @@ func NewAuditLog(codec eventsourcing.Codec) *AuditLog {
 		_ context.Context, w db.Writer, env projection.Envelope, e *contract.OperatorElevationExpired,
 	) error {
 		w.Exec(operatordb.InsertAuditEntry,
-			entryID(env), e.OperatorID, e.SubjectID, "elevation_expired", e.Capability,
+			entryID(env), e.OperatorID, e.SubjectID, string(domain.ActionElevationExpired), e.Capability,
 			nil, nil, []string{usedLabel(e.Used)}, nil, nil, e.ExpiredAt)
 		return nil
 	})
@@ -88,8 +88,8 @@ func NewAuditLog(codec eventsourcing.Codec) *AuditLog {
 		_ context.Context, w db.Writer, env projection.Envelope, e *contract.OperatorAccessManaged,
 	) error {
 		w.Exec(operatordb.InsertAuditEntry,
-			entryID(env), e.OperatorID, e.SubjectID, "managed_operators", e.Change,
-			nil, nullText(e.TargetOperatorID), nil, nil, nullIP(e.FromIP), e.ManagedAt)
+			entryID(env), e.OperatorID, e.SubjectID, string(domain.ActionManagedOperators), e.Change,
+			nil, nullText(e.TargetOperatorID), nil, nil, nullText(e.FromIP), e.ManagedAt)
 		return nil
 	})
 
@@ -97,9 +97,9 @@ func NewAuditLog(codec eventsourcing.Codec) *AuditLog {
 		_ context.Context, w db.Writer, env projection.Envelope, e *contract.OperatorChangedTenant,
 	) error {
 		w.Exec(operatordb.InsertAuditEntry,
-			entryID(env), e.OperatorID, e.SubjectID, "changed_tenant", e.Change,
+			entryID(env), e.OperatorID, e.SubjectID, string(domain.ActionChangedTenant), e.Change,
 			nullText(e.OrgID), nullText(e.TargetSubjectID), nil,
-			nullText(e.Reason), nullIP(e.FromIP), e.ChangedAt)
+			nullText(e.Reason), nullText(e.FromIP), e.ChangedAt)
 		return nil
 	})
 
@@ -107,8 +107,8 @@ func NewAuditLog(codec eventsourcing.Codec) *AuditLog {
 		_ context.Context, w db.Writer, env projection.Envelope, e *contract.OperatorViewedCustomer,
 	) error {
 		w.Exec(operatordb.InsertAuditEntry,
-			entryID(env), e.OperatorID, e.SubjectID, "viewed_customer", e.Method,
-			nullText(e.OrgID), nil, nil, nil, nullIP(e.FromIP), e.ViewedAt)
+			entryID(env), e.OperatorID, e.SubjectID, string(domain.ActionViewedCustomer), e.Method,
+			nullText(e.OrgID), nil, nil, nil, nullText(e.FromIP), e.ViewedAt)
 		return nil
 	})
 
@@ -116,9 +116,9 @@ func NewAuditLog(codec eventsourcing.Codec) *AuditLog {
 		_ context.Context, w db.Writer, env projection.Envelope, e *contract.OperatorViewedPersonalData,
 	) error {
 		w.Exec(operatordb.InsertAuditEntry,
-			entryID(env), e.OperatorID, e.SubjectID, "viewed_personal_data", e.Method,
+			entryID(env), e.OperatorID, e.SubjectID, string(domain.ActionViewedPersonalData), e.Method,
 			nullText(e.OrgID), nullText(e.TargetSubjectID), e.Fields, nullText(e.Reason),
-			nullIP(e.FromIP), e.ViewedAt)
+			nullText(e.FromIP), e.ViewedAt)
 		return nil
 	})
 
@@ -155,20 +155,23 @@ func entryID(env projection.Envelope) string {
 	return env.Stream.Key()
 }
 
-func nullText(s string) *string {
-	if s == "" {
-		return nil
-	}
-	return &s
-}
-
-// nullIP hands the `inet` column a NULL for anything it cannot parse.
+// nullText renders an empty string as SQL NULL.
 //
-// The address is evidence, not an authorization input. A malformed
-// X-Forwarded-For must not stop the audit row being written — the alternative
-// would let a header somebody else controls suppress the record of their own
-// access.
-func nullIP(s string) *string {
+// One helper for every optional column, including the `inet` one — an earlier
+// version had a second, byte-identical `nullIP` beside it, which is two things
+// to keep correct and one place for them to drift.
+//
+// # What the `inet` column relies on it for
+//
+// A malformed origin becomes NULL rather than failing the insert. The address
+// is EVIDENCE, not an authorization input, so losing it must not stop the audit
+// row being written — the alternative would let a header somebody else controls
+// suppress the record of their own access.
+//
+// The guard treats the same input in the opposite way, and deliberately: there
+// the address IS the input to an access decision, and a decision that cannot be
+// made must fail closed. Same value, two questions, two answers.
+func nullText(s string) *string {
 	if s == "" {
 		return nil
 	}

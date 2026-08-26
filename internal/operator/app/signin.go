@@ -3,9 +3,7 @@ package app
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +13,7 @@ import (
 	"github.com/chronos/chronos-go/internal/operator/contract"
 	"github.com/chronos/chronos-go/internal/platform/codec"
 	"github.com/chronos/chronos-go/internal/platform/ids"
+	"github.com/chronos/chronos-go/internal/platform/secret"
 )
 
 // Durations for the two stages, and why each is what it is.
@@ -46,11 +45,20 @@ const (
 	tokenBytes = 32
 )
 
-// Token digest domains. Length-prefixed and distinct, so a digest lifted from
-// one table cannot be presented to the other's lookup.
+// The two token purposes.
+//
+// `secret.Purpose` rather than a local string, because `secret.Digest` is what
+// derives both — the platform already owns the construction, including the
+// fixed-width length prefix that stops one purpose being made to overlap
+// another by choosing a clever string.
+//
+// An earlier version of this file rolled its own SHA-256 with the same prefix.
+// It was correct and it was a second copy of a security primitive, which is one
+// more place for the prefix to be dropped in a refactor and one more place a
+// reviewer has to check. There is one derivation in this codebase.
 const (
-	pendingTokenDomain = "chronos/operator/pending_token/v1"
-	sessionTokenDomain = "chronos/operator/session_token/v1"
+	pendingTokenPurpose secret.Purpose = "chronos/operator/pending_token/v1"
+	sessionTokenPurpose secret.Purpose = "chronos/operator/session_token/v1"
 )
 
 // IdentityProvider is the OIDC ceremony, as this package needs it.
@@ -297,7 +305,7 @@ func (s *SignIn) Complete(ctx context.Context, ceremonyID string, cb IdPCallback
 		return CompleteResult{}, fmt.Errorf("counting authenticators: %w", err)
 	}
 
-	token, digest, err := s.mint(pendingTokenDomain)
+	token, digest, err := s.mint(pendingTokenPurpose)
 	if err != nil {
 		return CompleteResult{}, err
 	}
@@ -444,7 +452,7 @@ func (s *SignIn) FinishSecondFactor(
 		return SessionResult{}, ErrNotAnOperator
 	}
 
-	token, digest, err := s.mint(sessionTokenDomain)
+	token, digest, err := s.mint(sessionTokenPurpose)
 	if err != nil {
 		return SessionResult{}, err
 	}
@@ -631,7 +639,7 @@ func (s *SignIn) SignOut(ctx context.Context, actor Actor, digest []byte) (bool,
 // The plaintext goes to exactly one caller and the digest to the store, so
 // there is no moment at which a token exists that nothing can resolve, and none
 // at which a digest is stored for a token nobody was given.
-func (s *SignIn) mint(domain string) (string, []byte, error) {
+func (s *SignIn) mint(purpose secret.Purpose) (string, []byte, error) {
 	raw := make([]byte, tokenBytes)
 	if _, err := io.ReadFull(s.entropy, raw); err != nil {
 		// Refused, never degraded. A short read leaves trailing zero bytes, and
@@ -640,35 +648,27 @@ func (s *SignIn) mint(domain string) (string, []byte, error) {
 		return "", nil, fmt.Errorf("generating an operator token: %w", err)
 	}
 	plaintext := base64.RawURLEncoding.EncodeToString(raw)
-	return plaintext, Digest(domain, plaintext), nil
+	return plaintext, secret.Digest(purpose, plaintext), nil
 }
 
-// Digest reduces a presented bearer to what the session table holds.
+// PendingDigest and SessionDigest reduce a presented bearer to what the session
+// table holds, under the two purposes.
 //
-// SHA-256 rather than a slow hash, and the rule is where the entropy came from:
-// the token is 256 bits from crypto/rand, so there is no candidate list to
-// search and a memory-hard hash would add tens of milliseconds to every
-// authenticated request while buying nothing.
+// Exported so the interceptor can derive one without knowing the purpose
+// strings — which is what lets it choose the domain from the DECLARED ACCESS
+// rather than from the token, so a pending bearer presented to an ordinary
+// method hashes to something no row holds.
 //
-// The domain separator is LENGTH-PREFIXED, so no future separator can be made
-// to overlap this one by shifting the boundary. The prefix is eight bytes
-// rather than one: a single byte would wrap silently at 256 characters, and a
-// separator that wrapped would collide with a shorter one by construction —
-// which is exactly the property the prefix exists to prevent.
-func Digest(domain, plaintext string) []byte {
-	h := sha256.New()
-	var lenPrefix [8]byte
-	binary.BigEndian.PutUint64(lenPrefix[:], uint64(len(domain)))
-	h.Write(lenPrefix[:])
-	h.Write([]byte(domain))
-	h.Write([]byte(plaintext))
-	return h.Sum(nil)
+// Both go through `secret.Digest`, which is SHA-256 rather than a slow hash for
+// the reason the tenant plane's session token uses the same: the token is 256
+// bits from crypto/rand, so there is no candidate list to search and a
+// memory-hard hash would add tens of milliseconds to every authenticated
+// request while buying nothing.
+func PendingDigest(plaintext string) []byte {
+	return secret.Digest(pendingTokenPurpose, plaintext)
 }
-
-// PendingDigest and SessionDigest are the two domains, exported so the
-// interceptor can resolve a presented bearer against both without knowing the
-// strings.
-func PendingDigest(plaintext string) []byte { return Digest(pendingTokenDomain, plaintext) }
 
 // SessionDigest reduces a live-session bearer.
-func SessionDigest(plaintext string) []byte { return Digest(sessionTokenDomain, plaintext) }
+func SessionDigest(plaintext string) []byte {
+	return secret.Digest(sessionTokenPurpose, plaintext)
+}

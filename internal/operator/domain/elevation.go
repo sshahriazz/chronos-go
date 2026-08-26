@@ -151,7 +151,7 @@ func ValidateElevation(role contract.Role, cap Capability, reason string) error 
 	case cap == "":
 		return fmt.Errorf("operator: an elevation needs a capability")
 
-	case !knownCapability(cap):
+	case !KnownCapability(cap):
 		return fmt.Errorf("operator: %q is not a capability", cap)
 
 	case len(reason) < 8:
@@ -179,4 +179,10 @@ func ValidateElevation(role contract.Role, cap Capability, reason string) error 
 	return nil
 }
 
-func knownCapability(c Capability) bool { return slices.Contains(Capabilities(), c) }
+// KnownCapability reports whether a string is a capability this build declares.
+//
+// Exported because the POLICY LOADER needs the same question answered, and it
+// had its own copy — a second loop over the same list, which is two things to
+// keep correct so that the proto's capability strings and the role table cannot
+// disagree. One list, one predicate, asked from both places.
+func KnownCapability(c Capability) bool { return slices.Contains(Capabilities(), c) }

@@ -3,9 +3,7 @@ package app
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +18,7 @@ import (
 	"github.com/chronos/chronos-go/internal/platform/errs"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/platform/ids"
+	"github.com/chronos/chronos-go/internal/platform/secret"
 )
 
 // Stream categories written by authentication.
@@ -1831,7 +1830,19 @@ func SessionTokenDigest(plaintext string) []byte {
 	return digestUnder(sessionTokenDomain, plaintext)
 }
 
-// digestUnder is the separator-parameterised form, and it exists to make the
+// digestUnder delegates to the platform's derivation.
+//
+// It USED TO carry its own SHA-256 with its own length prefix — byte for byte
+// what `secret.Digest` already did, and tested by a near-copy of
+// `secret.TestThePurposeBoundaryCannotBeShifted`. Two implementations of one
+// security primitive is one more place for the prefix to be dropped in a
+// refactor, and one more place a reviewer has to check to know it was not.
+//
+// The wrapper stays rather than every caller reaching for `secret.Digest`,
+// because the domain constant is identity's and `SessionTokenDigest` is the
+// name the rest of this module knows. What is gone is the second derivation.
+//
+// It is the separator-parameterised form, and it exists to make the
 // length prefix TESTABLE.
 //
 // With the domain hardcoded, removing the prefix cannot be observed from outside:
@@ -1847,15 +1858,7 @@ func SessionTokenDigest(plaintext string) []byte {
 // property has to keep holding when somebody adds a second separator and does not
 // think to re-derive it.
 func digestUnder(domain, plaintext string) []byte {
-	h := sha256.New()
-	// Fixed-width count, so the boundary between the domain and the token cannot
-	// be moved by choosing a clever separator.
-	var n [8]byte
-	binary.BigEndian.PutUint64(n[:], uint64(len(domain)))
-	_, _ = h.Write(n[:])
-	_, _ = h.Write([]byte(domain))
-	_, _ = h.Write([]byte(plaintext))
-	return h.Sum(nil)
+	return secret.Digest(secret.Purpose(domain), plaintext)
 }
 
 // ---------------------------------------------------------------------------
