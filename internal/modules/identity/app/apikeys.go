@@ -205,13 +205,29 @@ func LooksLikeAPIKey(token string) bool {
 // PRESENTER claims to hold, and the only thing that establishes they hold it is
 // the digest probe, which covers the whole string anyway.
 //
-// Exactly five segments, because the key id contains its own underscore
-// (`key_01ARZ…`, ADR-030) and so occupies two of them. Splitting with a limit
-// would let a secret containing an underscore change the meaning of the
-// segments; base64url contains none, so a token with a sixth segment is not one
-// this system minted.
+// # The split is LIMITED, and the reason is a bug this cost
+//
+// The grammar is `chr_<env>_key_<ulid>_<secret>`: four fixed segments and then
+// the secret, which is base64url — and base64url's 63rd character is `_`.
+//
+// This function used to split on every underscore and demand exactly five
+// parts, with a comment asserting that base64url contains none. It does. About
+// half of the 43-character secrets this system mints contain at least one, so
+// about half of every API key ever issued was refused here, before the digest
+// was ever computed, with "this is not an API key" — a token the server itself
+// had minted seconds earlier.
+//
+// It survived unit tests because a hand-written sample token is written without
+// underscores in its tail, and it survived every layer test because none of
+// them presented a real token to a real authenticator. It died on the first run
+// that did, as a 50/50 coin flip between tests.
+//
+// So the split takes a LIMIT. The first four boundaries are consumed
+// left-to-right against a fixed grammar and the remainder is the secret,
+// underscores included — which cannot be ambiguous, because `ids.Parse` rejects
+// anything that is not a `key_` ULID in the two segments before it.
 func ParseAPIKeyToken(token string) (APIKeyToken, error) {
-	parts := strings.Split(token, "_")
+	parts := strings.SplitN(token, "_", 5)
 	if len(parts) != 5 || parts[0] != apiKeyPrefix {
 		return APIKeyToken{}, errs.Unauthenticatedf("this is not an API key")
 	}

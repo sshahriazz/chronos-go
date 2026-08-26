@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"strings"
 	"testing"
@@ -187,6 +188,73 @@ func TestAnAPIKeyTokenCarriesItsPrefixEnvironmentAndKeyID(t *testing.T) {
 	}
 }
 
+// EVERY TOKEN THIS SYSTEM MINTS CAN BE PARSED BY THE THING THAT AUTHENTICATES IT.
+//
+// # The bug this exists for
+//
+// The secret is 32 random bytes in base64url, and base64url's 63rd character is
+// `_`. A 43-character secret therefore contains at least one underscore about
+// half the time — and the parser split on every underscore and demanded exactly
+// five segments, so about half of every API key this system ever minted was
+// refused by the authenticator with "this is not an API key", before the digest
+// was computed, seconds after the server itself had issued it.
+//
+// Nothing caught it. The mint had tests, the parse had tests, the digest had
+// tests, the authenticator had tests — and each used a hand-written or
+// fixed-entropy token, which is to say a token whose tail nobody rolled. The
+// first thing to present a real minted token to a real server found it as a
+// 50/50 coin flip between test runs.
+//
+// So this rolls REAL entropy, many times, and asserts the round trip. The count
+// is high enough that a one-in-two failure is certain and a rare-character
+// failure is very likely; it costs microseconds.
+func TestEveryMintedTokenParsesBackToTheKeyItNames(t *testing.T) {
+	for i := range 512 {
+		id := ids.New[ids.APIKey](time.Now(), rand.Reader)
+
+		token, _, err := MintAPIKeyToken(keyTestEnv, id, rand.Reader)
+		if err != nil {
+			t.Fatalf("mint %d: %v", i, err)
+		}
+		parsed, err := ParseAPIKeyToken(token.Plaintext)
+		if err != nil {
+			t.Fatalf("the server minted %q and its own parser refused it: %v\n\n"+
+				"Every request this credential makes is refused as \"not an API key\" "+
+				"before the digest is looked at, so the holder sees an authentication "+
+				"failure for a key that was issued to them and is live in the database.",
+				token.Plaintext, err)
+		}
+		if parsed.KeyID != id {
+			t.Fatalf("the token names key %q and parses back as %q; a leaked credential "+
+				"would be attributed to the wrong key", id, parsed.KeyID)
+		}
+		if parsed.Environment != keyTestEnv {
+			t.Fatalf("the token names environment %q and parses back as %q",
+				keyTestEnv, parsed.Environment)
+		}
+	}
+}
+
+// A secret with an underscore in it is a NORMAL token, not a malformed one.
+//
+// Stated on its own, with the underscore placed deliberately rather than left
+// to chance, so the property is asserted and not merely sampled by the test
+// above.
+func TestASecretContainingAnUnderscoreIsStillOurToken(t *testing.T) {
+	id := ids.New[ids.APIKey](time.Now(), &fixedEntropy{})
+	token := "chr_test_" + id.String() + "_AAAA_BBBB_CCCC"
+
+	parsed, err := ParseAPIKeyToken(token)
+	if err != nil {
+		t.Fatalf("a token whose secret contains an underscore was refused: %v; base64url "+
+			"contains underscores, so this is roughly half of all real tokens", err)
+	}
+	if parsed.KeyID != id {
+		t.Fatalf("the key id parsed as %q, want %q — the underscores in the secret must "+
+			"not shift the segments", parsed.KeyID, id)
+	}
+}
+
 // The digest covers the WHOLE token, so the environment and the key id are bound
 // to the secret by the hash itself.
 //
@@ -228,11 +296,18 @@ func TestTheTokenParserRefusesEveryMalformedShape(t *testing.T) {
 	good := "chr_test_" + id.String() + "_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 	refused := map[string]string{
-		"empty":                 "",
-		"a session token":       "6vBpsPRE7CQnO0GEbLZ6FRSGfLPQ0aBqZ2LQhVjw6oA",
-		"the wrong prefix":      "key_test_" + id.String() + "_AAAA",
-		"a missing segment":     "chr_test_" + id.String(),
-		"an extra segment":      good + "_extra",
+		"empty":             "",
+		"a session token":   "6vBpsPRE7CQnO0GEbLZ6FRSGfLPQ0aBqZ2LQhVjw6oA",
+		"the wrong prefix":  "key_test_" + id.String() + "_AAAA",
+		"a missing segment": "chr_test_" + id.String(),
+		// NOT in this table any more, and its absence is the fix to a real
+		// outage: `good + "_extra"` is a token whose SECRET is
+		// `AAA…_extra`, and a secret is opaque. It used to be refused here
+		// because the parser split on every underscore — which also refused
+		// about half of the tokens this system mints, since base64url's 63rd
+		// character is `_`. Refusing it costs nothing to an attacker (the
+		// digest will not resolve) and cost every second integrator their
+		// credential.
 		"an unparseable key id": "chr_test_key_NOTAULID_AAAA",
 		"an empty secret":       "chr_test_" + id.String() + "_",
 		"an upper-case env":     "chr_TEST_" + id.String() + "_AAAA",
