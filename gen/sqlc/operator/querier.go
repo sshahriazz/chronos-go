@@ -11,12 +11,19 @@ import (
 )
 
 type Querier interface {
+	AddCustomerSeat(ctx context.Context, arg AddCustomerSeatParams) error
+	// The counts are derived from SETS, never accumulated.
+	//
+	// A projector is replayed on restart and on rebuild, so the same event WILL
+	// arrive twice; `count = count + 1` applies twice and the directory's numbers
+	// grow every time the plane restarts. Adding to a keyed set and recomputing is
+	// idempotent by construction — and it also makes two projectors over one table
+	// converge instead of summing. See migration 00039.
+	AddCustomerWorkspace(ctx context.Context, arg AddCustomerWorkspaceParams) error
 	// Atomic, and the WHERE clause is the clone check. Zero rows means the counter
 	// did not move forward, which the caller treats as a possible clone rather than
 	// as a failed write.
 	AdvanceOperatorSignCount(ctx context.Context, arg AdvanceOperatorSignCountParams) (int64, error)
-	BumpCustomerMemberCount(ctx context.Context, arg BumpCustomerMemberCountParams) error
-	BumpCustomerWorkspaceCount(ctx context.Context, arg BumpCustomerWorkspaceCountParams) error
 	// Single-use, atomically. The UPDATE … RETURNING is what makes a replay lose:
 	// the second caller matches no row because consumed_at is no longer NULL, and
 	// there is no window between a read and a write for it to slip through.
@@ -74,6 +81,10 @@ type Querier interface {
 	// Credentials
 	// ---------------------------------------------------------------------------
 	ListOperatorCredentials(ctx context.Context, operatorID string) ([]OperatorCredential, error)
+	RecountCustomerSeats(ctx context.Context, orgID string) error
+	RecountCustomerWorkspaces(ctx context.Context, orgID string) error
+	RemoveCustomerSeat(ctx context.Context, arg RemoveCustomerSeatParams) error
+	RemoveCustomerWorkspace(ctx context.Context, arg RemoveCustomerWorkspaceParams) error
 	// The authenticator's query, and it joins operator_account so a DISABLED
 	// operator's live session stops working the moment the disable projects —
 	// which is what operator.md §3 means by "offboarding is immediate".
@@ -92,11 +103,16 @@ type Querier interface {
 	SetOperatorRole(ctx context.Context, arg SetOperatorRoleParams) error
 	SweepOperatorCeremonies(ctx context.Context, expiresAt pgtype.Timestamptz) (int64, error)
 	SweepOperatorSessions(ctx context.Context, expiresAt pgtype.Timestamptz) (int64, error)
+	// `greatest` rather than an assignment, so a replay in any order settles on the
+	// latest instant rather than on whichever event was applied last. greatest()
+	// ignores NULLs, so the first touch sets it.
 	TouchCustomerActivity(ctx context.Context, arg TouchCustomerActivityParams) error
 	// Records use without moving the counter, for the authenticators that report 0
 	// permanently — every synced passkey does.
 	TouchOperatorCredential(ctx context.Context, credentialID string) error
 	TruncateAuditLog(ctx context.Context) error
+	TruncateCustomerSeats(ctx context.Context) error
+	TruncateCustomerWorkspaces(ctx context.Context) error
 	TruncateCustomers(ctx context.Context) error
 	TruncateOperatorAccounts(ctx context.Context) error
 	// ---------------------------------------------------------------------------

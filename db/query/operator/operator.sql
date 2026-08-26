@@ -218,17 +218,56 @@ SET plan_id = $2, plan_version_id = $3, subscription_status = $4,
     trial_ends_at = $5, updated_at = now()
 WHERE org_id = $1;
 
--- name: BumpCustomerWorkspaceCount :exec
-UPDATE operator_customer_list
-SET workspace_count = greatest(0, workspace_count + $2::int), updated_at = now()
-WHERE org_id = $1;
+-- The counts are derived from SETS, never accumulated.
+--
+-- A projector is replayed on restart and on rebuild, so the same event WILL
+-- arrive twice; `count = count + 1` applies twice and the directory's numbers
+-- grow every time the plane restarts. Adding to a keyed set and recomputing is
+-- idempotent by construction — and it also makes two projectors over one table
+-- converge instead of summing. See migration 00039.
 
--- name: BumpCustomerMemberCount :exec
-UPDATE operator_customer_list
-SET member_count = greatest(0, member_count + $2::int), updated_at = now()
-WHERE org_id = $1;
+-- name: AddCustomerWorkspace :exec
+INSERT INTO operator_org_workspace (org_id, workspace_id)
+VALUES ($1, $2)
+ON CONFLICT DO NOTHING;
+
+-- name: RemoveCustomerWorkspace :exec
+DELETE FROM operator_org_workspace WHERE org_id = $1 AND workspace_id = $2;
+
+-- name: RecountCustomerWorkspaces :exec
+UPDATE operator_customer_list c
+SET workspace_count = (
+        SELECT count(*) FROM operator_org_workspace w WHERE w.org_id = c.org_id
+    ),
+    updated_at = now()
+WHERE c.org_id = $1;
+
+-- name: AddCustomerSeat :exec
+INSERT INTO operator_org_seat (org_id, subject_id)
+VALUES ($1, $2)
+ON CONFLICT DO NOTHING;
+
+-- name: RemoveCustomerSeat :exec
+DELETE FROM operator_org_seat WHERE org_id = $1 AND subject_id = $2;
+
+-- name: RecountCustomerSeats :exec
+UPDATE operator_customer_list c
+SET member_count = (
+        SELECT count(*) FROM operator_org_seat s WHERE s.org_id = c.org_id
+    ),
+    updated_at = now()
+WHERE c.org_id = $1;
+
+-- name: TruncateCustomerWorkspaces :exec
+TRUNCATE operator_org_workspace;
+
+-- name: TruncateCustomerSeats :exec
+TRUNCATE operator_org_seat;
 
 -- name: TouchCustomerActivity :exec
+-- `greatest` rather than an assignment, so a replay in any order settles on the
+-- latest instant rather than on whichever event was applied last. greatest()
+-- ignores NULLs, so the first touch sets it.
 UPDATE operator_customer_list
 SET last_active_at = greatest(last_active_at, $2), updated_at = now()
 WHERE org_id = $1;

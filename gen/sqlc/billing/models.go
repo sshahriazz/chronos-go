@@ -226,6 +226,17 @@ type OperatorCustomerList struct {
 	UpdatedAt          pgtype.Timestamptz
 }
 
+// Seat holders by pseudonym, so member_count survives a replay. No RPC exposes this set — the directory returns the count. Adding one would be adding a member list to the operator plane (operator.md §2).
+type OperatorOrgSeat struct {
+	OrgID     string
+	SubjectID string
+}
+
+type OperatorOrgWorkspace struct {
+	OrgID       string
+	WorkspaceID string
+}
+
 type OperatorSession struct {
 	TokenDigest []byte
 	SessionID   string

@@ -102,10 +102,24 @@ func NewCustomers(codec eventsourcing.Codec) *Customers {
 
 	// ── Activity ───────────────────────────────────────────────────────────
 
+	// # The counts are SETS, not accumulators, and that is the whole story
+	//
+	// `count = count + 1` is the obvious handler and it is wrong in the one way
+	// a projection must never be wrong: a projector is replayed on restart and
+	// on rebuild, so the same event WILL arrive twice and the bump applies
+	// twice. TestTheCustomerDirectoryIsActuallyBuilt appended one workspace and
+	// one membership and read back three of each — with the name, the slug and
+	// the lifecycle state all correct, which is how this survives review.
+	//
+	// Adding to a keyed set and recomputing is idempotent by construction. It
+	// also makes two projectors over one table converge rather than sum, which
+	// is what happens during a rolling deploy.
+
 	d.On[wscontract.WorkspaceCreated](func(
 		_ context.Context, w db.Writer, _ projection.Envelope, e *wscontract.WorkspaceCreated,
 	) error {
-		w.Exec(operatordb.BumpCustomerWorkspaceCount, e.OrgID, int32(1))
+		w.Exec(operatordb.AddCustomerWorkspace, e.OrgID, e.WorkspaceID)
+		w.Exec(operatordb.RecountCustomerWorkspaces, e.OrgID)
 		w.Exec(operatordb.TouchCustomerActivity, e.OrgID, e.CreatedAt)
 		return nil
 	})
@@ -116,14 +130,16 @@ func NewCustomers(codec eventsourcing.Codec) *Customers {
 	d.On[wscontract.WorkspaceArchived](func(
 		_ context.Context, w db.Writer, _ projection.Envelope, e *wscontract.WorkspaceArchived,
 	) error {
-		w.Exec(operatordb.BumpCustomerWorkspaceCount, e.OrgID, int32(-1))
+		w.Exec(operatordb.RemoveCustomerWorkspace, e.OrgID, e.WorkspaceID)
+		w.Exec(operatordb.RecountCustomerWorkspaces, e.OrgID)
 		return nil
 	})
 
 	d.On[wscontract.WorkspaceRestored](func(
 		_ context.Context, w db.Writer, _ projection.Envelope, e *wscontract.WorkspaceRestored,
 	) error {
-		w.Exec(operatordb.BumpCustomerWorkspaceCount, e.OrgID, int32(1))
+		w.Exec(operatordb.AddCustomerWorkspace, e.OrgID, e.WorkspaceID)
+		w.Exec(operatordb.RecountCustomerWorkspaces, e.OrgID)
 		return nil
 	})
 
@@ -139,7 +155,8 @@ func NewCustomers(codec eventsourcing.Codec) *Customers {
 		_ context.Context, w db.Writer, _ projection.Envelope, e *wscontract.MemberJoined,
 	) error {
 		if e.SeatConsumed {
-			w.Exec(operatordb.BumpCustomerMemberCount, e.OrgID, int32(1))
+			w.Exec(operatordb.AddCustomerSeat, e.OrgID, e.SubjectID)
+			w.Exec(operatordb.RecountCustomerSeats, e.OrgID)
 		}
 		w.Exec(operatordb.TouchCustomerActivity, e.OrgID, e.JoinedAt)
 		return nil
@@ -149,7 +166,8 @@ func NewCustomers(codec eventsourcing.Codec) *Customers {
 		_ context.Context, w db.Writer, _ projection.Envelope, e *wscontract.MemberRemoved,
 	) error {
 		if e.SeatReleased {
-			w.Exec(operatordb.BumpCustomerMemberCount, e.OrgID, int32(-1))
+			w.Exec(operatordb.RemoveCustomerSeat, e.OrgID, e.SubjectID)
+			w.Exec(operatordb.RecountCustomerSeats, e.OrgID)
 		}
 		return nil
 	})
@@ -188,7 +206,20 @@ func (c *Customers) Apply(ctx context.Context, w db.Writer, env projection.Envel
 	return c.dispatch.Apply(ctx, w, env)
 }
 
+// Reset clears the directory AND the two sets behind its counts.
+//
+// Truncating the directory alone would leave the sets populated, so the first
+// recompute after a rebuild would restore counts for organizations that had not
+// been replayed yet — a rebuild producing numbers from before it started.
 func (c *Customers) Reset(ctx context.Context, q db.Querier) error {
-	_, err := q.Exec(ctx, operatordb.TruncateCustomers)
-	return err
+	for _, stmt := range []string{
+		operatordb.TruncateCustomers,
+		operatordb.TruncateCustomerWorkspaces,
+		operatordb.TruncateCustomerSeats,
+	} {
+		if _, err := q.Exec(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
