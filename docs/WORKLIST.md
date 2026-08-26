@@ -477,8 +477,7 @@ nothing ever ran.
       served by the asynchronous export. What is genuinely unbuilt is
       **rectification (Article 16)** and **objection (Article 21)**.
 
-- [ ] **Article 12(4): a deferred erasure must SAY it was deferred — and this
-      slice created the gap.** Legal holds made deferral reachable for the first
+- [x] **Article 12(4): a deferred erasure now SAYS it was deferred.** Legal holds made deferral reachable for the first
       time. `Execute` now returns `ErrHeld` and the workflow waits, and nobody
       tells the requester anything.
 
@@ -488,8 +487,34 @@ nothing ever ran.
       REQUEST rather than a broadcast about our decision, which is exactly what
       keeps it from being tipping off.
 
-      Small, and it closes a live legal obligation on a code path that shipped
-      this session. It is the reason this block sits above the rest.
+      Built as `ErasureDeferred` / `ErasureResumed` on a per-subject `Deferral`
+      aggregate, with `compliance.erasure_deferred` as the mail.
+
+      **The template names the GROUND and never the matter.** Article 17(3)(e)
+      is a legal basis, is the same sentence for everybody, and is what 12(4)
+      asks for. The matter would tell somebody they are under investigation —
+      it stays on the hold's own event and in `operator_audit_log`, under access
+      controls. A struct-shape test fails on a `matter`-like field existing at
+      all on either deferral event, rather than on a value, because a value test
+      passes on the day the field is added and left empty.
+
+      **It also closed a retry storm I had warned about and not prevented.**
+      `ErrHeld`'s own comment said a hold retried on a backoff "would hammer the
+      store for however long a matter runs" — and the workflow's retry policy
+      has NO attempt limit and a one-minute ceiling, so that is exactly what it
+      did. A hold is now a non-retryable `errTypeDeferred` and the WORKFLOW
+      waits, hourly, on a cadence chosen for how often the answer changes rather
+      than for how quickly a transient error clears.
+
+      Two workflow tests assert against all three wrong answers: failing the run
+      ends a live request; retrying is a query per minute for a month; and
+      completing as `erased` is the worst, because it reports success while the
+      data is still there and nothing looks again.
+
+      **The deferral is an aggregate rather than workflow state**, so one person
+      gets one answer even if the workflow is restarted from scratch — and
+      because 12(4) compliance is something we may have to evidence, which a
+      variable inside a workflow's history is a poor place to keep.
 
 ## The remaining work, analysed
 

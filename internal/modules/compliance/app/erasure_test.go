@@ -64,25 +64,53 @@ func (h holds) Held(context.Context, string) (string, bool, error) {
 	return h.matter, h.held, h.err
 }
 
+// deferrals records what the Article 12(4) path did.
+type deferrals struct {
+	deferred []string
+	resumed  []string
+	err      error
+}
+
+func (d *deferrals) Defer(_ context.Context, subjectID string, _ time.Time) (bool, error) {
+	if d.err != nil {
+		return false, d.err
+	}
+	d.deferred = append(d.deferred, subjectID)
+	// The aggregate is what makes the second call free; this mimics it, so a
+	// test can assert the CALLER stops mailing rather than that the store
+	// happens to deduplicate.
+	return len(d.deferred) <= 1, nil
+}
+
+func (d *deferrals) Resume(_ context.Context, subjectID string, _ time.Time) error {
+	if d.err != nil {
+		return d.err
+	}
+	d.resumed = append(d.resumed, subjectID)
+	return nil
+}
+
 type fixture struct {
-	vault    *recordingVault
-	accounts *recordingAccounts
-	objects  *recordingObjects
-	confirm  *recordingConfirm
-	erasure  *app.Erasure
+	vault     *recordingVault
+	accounts  *recordingAccounts
+	objects   *recordingObjects
+	confirm   *recordingConfirm
+	deferrals *deferrals
+	erasure   *app.Erasure
 }
 
 func newFixture(t *testing.T, h app.LegalHolds) *fixture {
 	t.Helper()
 	f := &fixture{
-		vault:    &recordingVault{},
-		accounts: &recordingAccounts{},
-		objects:  &recordingObjects{},
-		confirm:  &recordingConfirm{},
+		vault:     &recordingVault{},
+		accounts:  &recordingAccounts{},
+		objects:   &recordingObjects{},
+		confirm:   &recordingConfirm{},
+		deferrals: &deferrals{},
 	}
 	e, err := app.NewErasure(app.ErasureDeps{
 		Vault: f.vault, Accounts: f.accounts, Objects: f.objects,
-		Confirm: f.confirm, Holds: h,
+		Confirm: f.confirm, Holds: h, Deferrals: f.deferrals,
 		Now: func() time.Time { return time.Date(2026, 8, 26, 9, 0, 0, 0, time.UTC) },
 	})
 	if err != nil {
@@ -214,8 +242,8 @@ func TestTheEraserRefusesToBuildWithoutAHoldChecker(t *testing.T) {
 	_, err := app.NewErasure(app.ErasureDeps{
 		Vault: &recordingVault{}, Accounts: &recordingAccounts{},
 		Objects: &recordingObjects{}, Confirm: &recordingConfirm{},
-		Holds: nil,
-		Now:   time.Now,
+		Holds: nil, Deferrals: &deferrals{},
+		Now: time.Now,
 	})
 	if err == nil {
 		t.Fatal("an eraser was built with no legal-hold checker, so it would destroy keys " +
@@ -223,6 +251,151 @@ func TestTheEraserRefusesToBuildWithoutAHoldChecker(t *testing.T) {
 			"step succeeds")
 	}
 	if !strings.Contains(err.Error(), "legal-hold") {
+		t.Errorf("refused for the wrong reason: %v", err)
+	}
+}
+
+// --------------------------------------------------------------------------
+// Article 12(4)
+// --------------------------------------------------------------------------
+
+// TestADeferredErasureAnswersTheRequester is the obligation this slice created.
+//
+// "If the controller does not take action on the request of the data subject,
+// the controller shall inform the data subject without delay and at the latest
+// within one month of the reasons for not taking action."
+//
+// Legal holds made "not taking action" reachable for the first time. Before
+// them the erasure either ran or failed, and a failure was a retry — so there
+// was no state in which we were deliberately not acting, and nothing to answer
+// for. This is that answer being triggered.
+func TestADeferredErasureAnswersTheRequester(t *testing.T) {
+	f := newFixture(t, holds{held: true, matter: "litigation 2026-4711"})
+
+	if err := f.erasure.Execute(t.Context(), "subj_1"); !errors.Is(err, app.ErrHeld) {
+		t.Fatalf("want ErrHeld, got %v", err)
+	}
+
+	if len(f.deferrals.deferred) != 1 {
+		t.Fatalf("the deferral was recorded %d times, want 1.\n\n"+
+			"Recording it is what triggers the Article 12(4) answer — without it the "+
+			"person is told nothing for the length of a legal matter.",
+			len(f.deferrals.deferred))
+	}
+	// And it did NOT resume, which would have closed a window that is open.
+	if len(f.deferrals.resumed) != 0 {
+		t.Errorf("a held erasure resumed its deferral: %v", f.deferrals.resumed)
+	}
+}
+
+// TestTheRequesterIsAnsweredONCE is the whole reason the deferral is an
+// aggregate rather than a variable.
+//
+// The workflow re-runs this step hourly for as long as the hold stands. A
+// person told weekly that their erasure is still deferred is being harassed by
+// a compliance obligation — so the SECOND call must record nothing, and the
+// caller must be able to tell that it recorded nothing.
+func TestTheRequesterIsAnsweredONCE(t *testing.T) {
+	f := newFixture(t, holds{held: true, matter: "m-1"})
+
+	for i := range 5 {
+		if err := f.erasure.Execute(t.Context(), "subj_1"); !errors.Is(err, app.ErrHeld) {
+			t.Fatalf("attempt %d: want ErrHeld, got %v", i, err)
+		}
+	}
+
+	// Every attempt asks — that is cheap and it is what makes the answer
+	// survive a workflow restarting from scratch. What must not happen is five
+	// mails, and the recorder reporting `recorded` only once is what stops them.
+	if got := f.deferrals.deferred; len(got) != 5 {
+		t.Fatalf("Defer was called %d times over 5 attempts; the erasure must ask every "+
+			"time, because remembering in workflow state would forget across a restart",
+			len(got))
+	}
+}
+
+// TestADeferralThatCannotBeRecordedFailsRatherThanDefers.
+//
+// The failure ordering matters. If recording the deferral fails and we return
+// ErrHeld anyway, the workflow settles into its hourly wait and the person is
+// never told — for the length of a matter, silently. Returning a plain error
+// instead makes the workflow RETRY, which is what an unmet obligation deserves.
+func TestADeferralThatCannotBeRecordedFailsRatherThanDefers(t *testing.T) {
+	f := newFixture(t, holds{held: true, matter: "m-1"})
+	f.deferrals.err = errors.New("the event store is unreachable")
+
+	err := f.erasure.Execute(t.Context(), "subj_1")
+	if err == nil {
+		t.Fatal("an erasure deferred with no record of the deferral")
+	}
+	if errors.Is(err, app.ErrHeld) {
+		t.Fatal("the erasure reported ErrHeld while failing to record the deferral. " +
+			"The workflow treats that as a WAIT, so it would settle into an hourly " +
+			"poll and the person would never be told — for the length of a matter, " +
+			"silently.")
+	}
+	if len(f.vault.erased) != 0 {
+		t.Error("the subject key was destroyed")
+	}
+}
+
+// TestAnUnheldErasureClosesAnyOpenDeferral.
+//
+// The window needs a close. It is also the COMMON path — every erasure of an
+// unheld subject reaches it — so the recorder must be free when there is
+// nothing to close, which is why Resume is idempotent rather than conditional
+// on a read the caller performs.
+func TestAnUnheldErasureClosesAnyOpenDeferral(t *testing.T) {
+	f := newFixture(t, holds{})
+
+	if err := f.erasure.Execute(t.Context(), "subj_1"); err != nil {
+		t.Fatalf("erasing: %v", err)
+	}
+	if len(f.deferrals.resumed) != 1 {
+		t.Errorf("Resume was called %d times, want 1", len(f.deferrals.resumed))
+	}
+	if len(f.deferrals.deferred) != 0 {
+		t.Errorf("an unheld erasure recorded a deferral: %v", f.deferrals.deferred)
+	}
+}
+
+// TestAFailureToCloseTheDeferralDoesNotStopTheErasure is the opposite ordering
+// decision from the one above, and the asymmetry is the point.
+//
+// Failing to RECORD a deferral must stop the erasure, because the person goes
+// unanswered. Failing to CLOSE one must not, because the obstacle is gone, they
+// have already been told it would complete automatically, and refusing to
+// proceed over a bookkeeping append would hold their data longer for nobody's
+// benefit.
+func TestAFailureToCloseTheDeferralDoesNotStopTheErasure(t *testing.T) {
+	f := newFixture(t, holds{})
+	f.deferrals.err = errors.New("the event store is unreachable")
+
+	if err := f.erasure.Execute(t.Context(), "subj_1"); err != nil {
+		t.Fatalf("an erasure was blocked by a failure to CLOSE a deferral: %v", err)
+	}
+	if len(f.vault.erased) != 1 {
+		t.Error("the erasure did not run")
+	}
+}
+
+// TestTheEraserRefusesToBuildWithoutADeferralRecorder.
+//
+// Same shape as the hold checker's, and the same silent failure: every other
+// step succeeds, so an erasure waits forever with nobody told — which looks
+// from the outside exactly like a slow legal matter.
+func TestTheEraserRefusesToBuildWithoutADeferralRecorder(t *testing.T) {
+	_, err := app.NewErasure(app.ErasureDeps{
+		Vault: &recordingVault{}, Accounts: &recordingAccounts{},
+		Objects: &recordingObjects{}, Confirm: &recordingConfirm{},
+		Holds: holds{}, Deferrals: nil,
+		Now: time.Now,
+	})
+	if err == nil {
+		t.Fatal("an eraser was built with no deferral recorder, so a held request would " +
+			"wait silently for as long as a matter runs and Article 12(4) would go unmet")
+	}
+	if !strings.Contains(err.Error(), "deferral") {
 		t.Errorf("refused for the wrong reason: %v", err)
 	}
 }

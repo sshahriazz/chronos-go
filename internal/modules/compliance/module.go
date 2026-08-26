@@ -11,6 +11,8 @@ import (
 func RegisterEvents(codec *eventcodec.JSON) {
 	eventcodec.Register[contract.ProcessingRestricted](codec)
 	eventcodec.Register[contract.ProcessingRestrictionLifted](codec)
+	eventcodec.Register[contract.ErasureDeferred](codec)
+	eventcodec.Register[contract.ErasureResumed](codec)
 	eventcodec.Register[contract.LegalHoldPlaced](codec)
 	eventcodec.Register[contract.LegalHoldLifted](codec)
 	eventcodec.Register[contract.DataExportRequested](codec)
@@ -38,6 +40,8 @@ func eventTypes() []string {
 	return []string{
 		(&contract.ProcessingRestricted{}).EventType(),
 		(&contract.ProcessingRestrictionLifted{}).EventType(),
+		(&contract.ErasureDeferred{}).EventType(),
+		(&contract.ErasureResumed{}).EventType(),
 		(&contract.LegalHoldPlaced{}).EventType(),
 		(&contract.LegalHoldLifted{}).EventType(),
 		(&contract.DataExportRequested{}).EventType(),

@@ -130,13 +130,23 @@ func newErasure(d *dependencies, log *slog.Logger) (*complianceapp.Erasure, erro
 		return nil, fmt.Errorf("legal holds: %w", err)
 	}
 
+	// Article 12(4)'s answer. Recording the deferral is what triggers the mail
+	// telling somebody their request is not being acted on and why — and what
+	// keeps the evidence that it was owed and when.
+	deferrals, err := complianceadapter.NewDeferrals(d.store, holdCodec, holdUpcasters)
+	if err != nil {
+		return nil, fmt.Errorf("erasure deferrals: %w", err)
+	}
+
 	return complianceapp.NewErasure(complianceapp.ErasureDeps{
-		Vault:    vaultEraser{vault: d.piiVault},
-		Accounts: accountEraser{accounts: d.accountErasure},
-		Objects:  objects,
-		Confirm:  confirmation,
-		Holds:    holds,
-		Now:      clock.System{}.Now,
+		Vault:     vaultEraser{vault: d.piiVault},
+		Accounts:  accountEraser{accounts: d.accountErasure},
+		Objects:   objects,
+		Confirm:   confirmation,
+		Holds:     holds,
+		Deferrals: deferrals,
+		Log:       log,
+		Now:       clock.System{}.Now,
 	})
 }
 

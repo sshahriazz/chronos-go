@@ -3,9 +3,11 @@ package temporal_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
+	complianceapp "github.com/chronos/chronos-go/internal/modules/compliance/app"
 	"go.temporal.io/sdk/testsuite"
 
 	temporaladapter "github.com/chronos/chronos-go/internal/adapter/temporal"
@@ -25,6 +27,17 @@ type fakeErasure struct {
 	reads    int
 	erased   int
 	eraseErr error
+
+	// holdFor makes the first N attempts report a legal hold, after which the
+	// matter closes. holdForever never lifts.
+	//
+	// They model compliance's ErrHeld rather than a generic failure, because
+	// the distinction is the entire subject of the tests that use them: the
+	// activity must translate a hold into a NON-RETRYABLE application error so
+	// the workflow waits, instead of letting the retry policy grind.
+	holdFor     int
+	holdForever bool
+	attempts    int
 }
 
 func (f *fakeErasure) ErasureState(
@@ -41,9 +54,13 @@ func (f *fakeErasure) ErasureState(
 	return f.snapshots[i], nil
 }
 
-func (f *fakeErasure) Execute(_ context.Context, _ string) error {
+func (f *fakeErasure) Execute(_ context.Context, subjectID string) error {
+	f.attempts++
 	if f.eraseErr != nil {
 		return f.eraseErr
+	}
+	if f.holdForever || f.attempts <= f.holdFor {
+		return fmt.Errorf("%w: matter %q", complianceapp.ErrHeld, "litigation 2026-4711")
 	}
 	f.erased++
 	return nil
@@ -298,5 +315,123 @@ func TestTheErasureActivitiesRefuseAnIncompleteWiring(t *testing.T) {
 	}
 	if _, err := temporaladapter.NewExecuteErasure(nil); err == nil {
 		t.Error("an execute activity with no eraser was accepted")
+	}
+}
+
+// A LEGAL HOLD MAKES THE WORKFLOW WAIT, NOT FAIL AND NOT STORM.
+//
+// # The three wrong answers this asserts against
+//
+// A hold is not a failure — the request is DEFERRED and executes automatically
+// when the hold lifts (compliance.md §7) — so all three obvious behaviours are
+// wrong in a different way:
+//
+//   - FAIL the run: ends a request that is still live. The person asked to be
+//     forgotten, was told it would happen, and the workflow that would have
+//     done it is gone.
+//   - RETRY the activity: the policy here has NO attempt limit and a one-minute
+//     maximum backoff, so a hold that runs for a month is a query per minute
+//     for a month, to learn something that changes once.
+//   - COMPLETE as erased: destroys nothing and reports success, which is the
+//     worst of the three because it is the one nobody investigates.
+//
+// The right answer is to sleep and re-check on a cadence chosen for how often
+// the answer actually changes.
+func TestALegalHoldMakesTheWorkflowWaitRatherThanRetry(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+
+	f := &fakeErasure{
+		snapshots: []temporaladapter.ErasureSnapshot{
+			{Exists: true, Requested: true, ScheduledFor: time.Now().Add(-time.Hour)},
+		},
+		// Held for the first two attempts, then the matter closes.
+		holdFor: 2,
+	}
+
+	result, err := runErasure(t, env, f)
+	if err != nil {
+		t.Fatalf("a deferred erasure failed the run: %v\n\n"+
+			"A hold is not a failure — the request is deferred and executes "+
+			"automatically when the hold lifts. Failing ends a request that is "+
+			"still live.", err)
+	}
+	if result.Outcome != "erased" {
+		t.Fatalf("outcome = %q, want erased once the hold lifted", result.Outcome)
+	}
+
+	// THREE calls: two refused by the hold, one that ran. If the activity had
+	// been left retryable the count would be far higher — the retry policy has
+	// no attempt limit — and the workflow would never have reached its own
+	// sleep.
+	if f.attempts != 3 {
+		t.Errorf("the erasure was attempted %d times, want 3 (two held, one erased).\n\n"+
+			"A much higher count means the activity is RETRYING the hold rather than "+
+			"failing fast and letting the workflow wait — which is a query per minute "+
+			"for the length of a legal matter.", f.attempts)
+	}
+	if f.erased != 1 {
+		t.Errorf("the subject was erased %d times", f.erased)
+	}
+}
+
+// A HOLD THAT NEVER LIFTS LEAVES THE WORKFLOW WAITING, NOT FINISHED.
+//
+// The complement of the test above, and the one that catches the most dangerous
+// wrong answer: a deferral that completes the run as "erased" would report
+// success while the data is still there, and nothing downstream would look
+// again.
+func TestAHoldThatNeverLiftsLeavesTheRequestOpen(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+
+	f := &fakeErasure{
+		snapshots: []temporaladapter.ErasureSnapshot{
+			{Exists: true, Requested: true, ScheduledFor: time.Now().Add(-time.Hour)},
+		},
+		holdForever: true,
+	}
+
+	state, err := temporaladapter.NewErasureState(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execute, err := temporaladapter.NewExecuteErasure(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	temporaladapter.RegisterErasureForTest(env, state, execute)
+
+	// The test environment runs a workflow's timers instantly, so a run that
+	// sleeps forever would loop forever. Cutting it off after a bounded number
+	// of attempts is what makes "still waiting" observable at all.
+	env.RegisterDelayedCallback(func() { env.CancelWorkflow() }, 30*24*time.Hour)
+
+	env.ExecuteWorkflow(temporaladapter.ErasureWorkflow,
+		temporaladapter.ErasureInput{SubjectID: erasureSubject})
+
+	if !env.IsWorkflowCompleted() {
+		t.Fatal("the workflow did not complete")
+	}
+
+	// It must NOT have erased, and it must NOT have reported success.
+	if f.erased != 0 {
+		t.Errorf("a permanently held subject was erased %d times", f.erased)
+	}
+
+	var result temporaladapter.ErasureResult
+	if err := env.GetWorkflowError(); err == nil {
+		_ = env.GetWorkflowResult(&result)
+		if result.Outcome == "erased" {
+			t.Fatal("a permanently held erasure reported itself as ERASED. Nothing " +
+				"downstream looks again, so the data stays and the request is closed.")
+		}
+	}
+
+	// And it kept asking, rather than giving up after the first refusal.
+	if f.attempts < 2 {
+		t.Errorf("the erasure was attempted %d times over thirty days; a deferred "+
+			"request must keep re-checking, because the hold lifting is the only "+
+			"thing that completes it", f.attempts)
 	}
 }

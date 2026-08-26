@@ -225,3 +225,71 @@ type LegalHoldLifted struct {
 }
 
 func (*LegalHoldLifted) EventType() string { return "compliance.LegalHoldLifted.v1" }
+
+// ---------------------------------------------------------------------------
+// Deferral (Article 12(4), compliance.md §4 step 2)
+// ---------------------------------------------------------------------------
+
+// ErasureDeferred records that a request could not be acted on yet, and that
+// the person was told.
+//
+// # It exists because Article 12(4) requires an ANSWER, not just a delay
+//
+// "If the controller does not take action on the request of the data subject,
+// the controller shall inform the data subject without delay and at the latest
+// within one month of receipt of the request of the reasons for not taking
+// action."
+//
+// Legal holds made deferral reachable for the first time. Before them the
+// erasure either ran or failed, and a failure was a retry — so there was no
+// state in which we were deliberately not acting, and nothing to answer for.
+//
+// This event is that answer's trigger and its evidence. The notification
+// catalogue turns it into mail; the log keeps the record that the mail was owed
+// and when.
+//
+// # It carries NO MATTER, and that is the whole difficulty of this message
+//
+// The hold's own event names the matter. This one must not, because this one is
+// what reaches the subject — and naming the matter would tell somebody they are
+// under investigation, at the moment when telling them is most damaging.
+//
+// What is disclosable is the GROUND: Article 17(3)(e), processing necessary for
+// the establishment, exercise or defence of legal claims. That is a legal basis
+// rather than a fact about their case, it is what 12(4) actually asks for, and
+// it is the same sentence for everybody.
+//
+// The distinction that makes this lawful rather than tipping off is that it
+// answers THEIR REQUEST. We are not announcing a decision we took about them;
+// we are replying to something they asked for, which is an obligation they
+// triggered.
+type ErasureDeferred struct {
+	SubjectID string
+
+	// DeferredAt is when we first could not act. The 12(4) clock is one month
+	// from the REQUEST rather than from here, so this is not the deadline — it
+	// is the evidence that the answer was sent without delay once the reason
+	// arose.
+	DeferredAt time.Time
+}
+
+func (*ErasureDeferred) EventType() string { return "compliance.ErasureDeferred.v1" }
+
+// ErasureResumed records that the obstacle cleared and the request is live
+// again.
+//
+// It notifies nobody. The person was told the erasure was deferred and would
+// complete automatically; what reaches them next is the erasure's own
+// confirmation, which is the message that actually matters. Mail saying "we
+// have resumed" followed minutes later by "we have finished" is two messages
+// for one event.
+//
+// It is recorded because the deferral was, and a window with an opening and no
+// close is one somebody has to reconstruct from timestamps.
+type ErasureResumed struct {
+	SubjectID string
+
+	ResumedAt time.Time
+}
+
+func (*ErasureResumed) EventType() string { return "compliance.ErasureResumed.v1" }

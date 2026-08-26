@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	complianceapp "github.com/chronos/chronos-go/internal/modules/compliance/app"
 	"go.temporal.io/sdk/activity"
 	sdktemporal "go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
@@ -27,6 +28,38 @@ const (
 	// executeErasureActivity confirms, destroys the key, and cleans up.
 	executeErasureActivity = "chronos.compliance.ExecuteErasure.v1"
 )
+
+// errTypeDeferred marks an erasure blocked by a legal hold (compliance.md §7).
+//
+// # It is NON-RETRYABLE, and that is the opposite of what it looks like
+//
+// Every other failure in this workflow retries with no attempt limit, because
+// erasure is a statutory obligation and giving up leaves it unmet. A hold is
+// not a failure: it is the system working, and the request is DEFERRED rather
+// than refused — it executes automatically when the hold lifts.
+//
+// Left retryable, the activity would run on a one-minute backoff for the entire
+// length of a matter. Weeks of that is a query per minute against the event
+// store to learn something that changes once, and the ErrHeld sentinel's own
+// comment warned about it before this constant existed to prevent it.
+//
+// So the activity fails fast and the WORKFLOW waits — on a cadence chosen for
+// how often the answer actually changes rather than for how quickly a transient
+// error clears.
+const errTypeDeferred = "ErasureDeferred"
+
+// deferralPoll is how often a deferred erasure re-checks its hold.
+//
+// One hour. A legal matter closes on a scale of weeks, so the value is bounded
+// below by nothing and above by how long we are willing to hold data after the
+// obligation to hold it ends — which is a statutory clock the person is owed
+// against. An hour is inconsequential against a month and cheap against a
+// matter.
+//
+// Not the activity's retry backoff, deliberately: that grows toward a minute
+// and is tuned for transient failure. This is tuned for a fact that changes
+// when a human closes a case.
+const deferralPoll = time.Hour
 
 // ErasureInput names the subject this run is about.
 //
@@ -102,8 +135,12 @@ func Erasure(ctx workflow.Context, in ErasureInput) (ErasureResult, error) {
 			// Erasure is a legal obligation with a statutory clock; giving up
 			// after N attempts would leave a request permanently unexecuted with
 			// nothing but a workflow status to say so.
-			MaximumAttempts:        0,
-			NonRetryableErrorTypes: []string{errTypePermanent},
+			MaximumAttempts: 0,
+			// errTypeDeferred joins the permanent list, and it is not permanent
+			// — see the constant. A hold is a WAIT, and the waiting belongs to
+			// the workflow's own sleep rather than to a retry policy tuned for
+			// transient failure.
+			NonRetryableErrorTypes: []string{errTypePermanent, errTypeDeferred},
 		},
 		ScheduleToCloseTimeout: time.Hour,
 	})
@@ -134,12 +171,32 @@ func Erasure(ctx workflow.Context, in ErasureInput) (ErasureResult, error) {
 
 		now := workflow.Now(ctx).UTC()
 		if !now.Before(state.ScheduledFor) {
-			if err := workflow.ExecuteActivity(ctx, executeErasureActivity, in).
-				Get(ctx, nil); err != nil {
+			err := workflow.ExecuteActivity(ctx, executeErasureActivity, in).Get(ctx, nil)
+			switch {
+			case err == nil:
+				result.Outcome = "erased"
+				return result, nil
+
+			case isDeferred(err):
+				// A LEGAL HOLD. The request is deferred, not refused
+				// (compliance.md §7), and the person has already been told —
+				// the activity records ErasureDeferred on its first pass, which
+				// is what the notification catalogue turns into their Article
+				// 12(4) answer.
+				//
+				// So this waits. It does not fail the run: failing would end a
+				// request that is still live, and the whole point of deferral
+				// is that it executes automatically when the hold lifts.
+				workflow.GetLogger(ctx).Info("erasure deferred by a legal hold",
+					"subject", in.SubjectID, "recheck_in", deferralPoll)
+				if sleepErr := workflow.Sleep(ctx, deferralPoll); sleepErr != nil {
+					return result, sleepErr
+				}
+				continue
+
+			default:
 				return result, fmt.Errorf("erasing %s: %w", in.SubjectID, err)
 			}
-			result.Outcome = "erased"
-			return result, nil
 		}
 
 		if err := workflow.Sleep(ctx, state.ScheduledFor.Sub(now)); err != nil {
@@ -197,12 +254,43 @@ func NewExecuteErasure(eraser Eraser) (*ExecuteErasure, error) {
 // only record. A wrong subject is already refused upstream by the aggregate,
 // which is where a genuinely permanent failure belongs.
 func (e *ExecuteErasure) Execute(ctx context.Context, in ErasureInput) error {
-	if err := e.eraser.Execute(ctx, in.SubjectID); err != nil {
+	err := e.eraser.Execute(ctx, in.SubjectID)
+	switch {
+	case err == nil:
+		return nil
+
+	case errors.Is(err, complianceapp.ErrHeld):
+		// Not an error in the ordinary sense: the request is deferred and the
+		// workflow will wait. Reported as NON-RETRYABLE so the retry policy
+		// stops immediately and the WORKFLOW does the waiting — see
+		// errTypeDeferred for why a retryable hold is a query per minute for
+		// the length of a matter.
+		//
+		// INFO rather than ERROR, for the same reason: an operator scanning
+		// error logs should not find a system working correctly.
+		activity.GetLogger(ctx).Info("erasure deferred by a legal hold",
+			"subject", in.SubjectID)
+		return sdktemporal.NewNonRetryableApplicationError(
+			"this erasure is deferred by a legal hold", errTypeDeferred, err)
+
+	default:
 		activity.GetLogger(ctx).Error("erasing a subject",
 			"subject", in.SubjectID, "error", err)
 		return err
 	}
-	return nil
+}
+
+// isDeferred reports whether an activity failure was a legal hold.
+//
+// It matches on the application error's TYPE rather than on the message,
+// because the message crosses a process boundary as text and the type is what
+// Temporal preserves as structure.
+func isDeferred(err error) bool {
+	var appErr *sdktemporal.ApplicationError
+	if !errors.As(err, &appErr) {
+		return false
+	}
+	return appErr.Type() == errTypeDeferred
 }
 
 // RegisterErasure binds the erasure workflow to a worker.

@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 )
 
@@ -76,12 +77,34 @@ type ObjectErasure interface {
 
 // Erasure executes a due erasure request.
 type Erasure struct {
-	vault    Vault
-	accounts AccountErasure
-	objects  ObjectErasure
-	confirm  Confirmation
-	holds    LegalHolds
-	now      func() time.Time
+	vault     Vault
+	accounts  AccountErasure
+	objects   ObjectErasure
+	confirm   Confirmation
+	holds     LegalHolds
+	deferrals Deferrals
+	log       *slog.Logger
+	now       func() time.Time
+}
+
+// Deferrals records that a request is waiting, and that the person was told.
+//
+// # Why the erasure writes it rather than the workflow
+//
+// The workflow re-runs its execute step for as long as a hold stands. Every
+// attempt reaches this code, so this is where "have we already answered them"
+// is asked — and asking it here means the answer survives a workflow being
+// restarted from scratch, which a variable in workflow state would not.
+type Deferrals interface {
+	// Defer records the wait ONCE and returns whether it recorded anything.
+	//
+	// The bool is what stops a caller logging a deferral on every attempt for
+	// weeks; the aggregate is what makes the second call free.
+	Defer(ctx context.Context, subjectID string, at time.Time) (recorded bool, err error)
+
+	// Resume clears it. Idempotent, and the COMMON path: every erasure of an
+	// unheld subject passes through here, so it must be free.
+	Resume(ctx context.Context, subjectID string, at time.Time) error
 }
 
 // LegalHolds answers compliance.md §4 step 2: "check LegalHold → held ⇒ defer
@@ -110,12 +133,14 @@ type LegalHolds interface {
 
 // ErasureDeps is what Erasure needs.
 type ErasureDeps struct {
-	Vault    Vault
-	Accounts AccountErasure
-	Objects  ObjectErasure
-	Confirm  Confirmation
-	Holds    LegalHolds
-	Now      func() time.Time
+	Vault     Vault
+	Accounts  AccountErasure
+	Objects   ObjectErasure
+	Confirm   Confirmation
+	Log       *slog.Logger
+	Holds     LegalHolds
+	Deferrals Deferrals
+	Now       func() time.Time
 }
 
 func NewErasure(d ErasureDeps) (*Erasure, error) {
@@ -140,12 +165,21 @@ func NewErasure(d ErasureDeps) (*Erasure, error) {
 			"§4 step 2 gates the erasure on it, and an eraser constructed without one " +
 			"destroys a key that a court order says must be preserved — silently, because " +
 			"every other step succeeds")
+	case d.Deferrals == nil:
+		return nil, fmt.Errorf("compliance: a deferral recorder is required; Article 12(4) " +
+			"obliges us to tell somebody their request is not being acted on, and without " +
+			"this the erasure waits silently for as long as a matter runs")
 	case d.Now == nil:
 		return nil, fmt.Errorf("compliance: a clock is required")
 	}
+	log := d.Log
+	if log == nil {
+		log = slog.Default()
+	}
 	return &Erasure{
 		vault: d.Vault, accounts: d.Accounts, objects: d.Objects,
-		confirm: d.Confirm, holds: d.Holds, now: d.Now,
+		confirm: d.Confirm, holds: d.Holds, deferrals: d.Deferrals,
+		log: log, now: d.Now,
 	}, nil
 }
 
@@ -212,10 +246,55 @@ func (e *Erasure) Execute(ctx context.Context, subjectID string) error {
 		// check was added to stop anybody making.
 		return fmt.Errorf("compliance: checking legal holds for %s: %w", subjectID, err)
 	case held:
-		// Deferred. The workflow catches this sentinel and waits for
-		// LegalHoldLifted rather than retrying or failing the request — see
-		// ErrHeld for why the distinction has to be visible in the type.
+		// # Article 12(4), and it is recorded BEFORE the sentinel is returned
+		//
+		// "If the controller does not take action on the request of the data
+		// subject, the controller shall inform the data subject without delay
+		// and at the latest within one month of the reasons for not taking
+		// action."
+		//
+		// Recording the deferral is what triggers that answer — the
+		// notification catalogue turns ErasureDeferred into mail — and it is
+		// what keeps the evidence that the answer was owed and when.
+		//
+		// It happens on the FIRST attempt only. The workflow re-runs this step
+		// for as long as the hold stands, and a person told weekly that their
+		// erasure is still deferred is being harassed by a compliance
+		// obligation.
+		//
+		// The MATTER does not go into it. That is the whole difficulty of this
+		// message: the hold's own event names the matter, and this one is what
+		// reaches the subject, so naming it would tell somebody they are under
+		// investigation. What is disclosable is the GROUND — Article 17(3)(e) —
+		// which is a legal basis rather than a fact about their case.
+		recorded, deferErr := e.deferrals.Defer(ctx, subjectID, e.now())
+		if deferErr != nil {
+			// FAILS rather than returning ErrHeld, so the workflow RETRIES
+			// instead of settling into its long wait. Settling would leave the
+			// person unanswered for the length of a matter, which is the
+			// obligation this branch exists to meet.
+			return fmt.Errorf("compliance: recording the deferral of %s: %w", subjectID, deferErr)
+		}
+		if recorded {
+			e.log.WarnContext(ctx, "an erasure was DEFERRED by a legal hold",
+				"subject_id", subjectID, "matter", matter)
+		}
 		return fmt.Errorf("%w: matter %q", ErrHeld, matter)
+	}
+
+	// NOT held. Clear any deferral that stood, so the window has a close.
+	//
+	// This is the common path — every erasure of an unheld subject reaches it —
+	// so the aggregate makes it free: nothing is recorded unless a deferral was
+	// actually open.
+	//
+	// A failure here does NOT stop the erasure. The obstacle is gone, the
+	// person has been told it would complete automatically, and refusing to
+	// proceed because a bookkeeping append failed would hold their data longer
+	// for no one's benefit. It is reported instead.
+	if err := e.deferrals.Resume(ctx, subjectID, e.now()); err != nil {
+		e.log.ErrorContext(ctx, "an erasure resumed and the deferral could not be closed",
+			"subject_id", subjectID, "error", err)
 	}
 
 	if err := e.confirm.SendErasureComplete(ctx, subjectID, Retained); err != nil {

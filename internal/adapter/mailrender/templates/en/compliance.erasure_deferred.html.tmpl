@@ -1,0 +1,27 @@
+{{define "title"}}Your deletion request is on hold{{end}}
+{{define "content"}}
+<p style="margin:0 0 14px;">Hello{{if .Name}} {{.Name}}{{end}},</p>
+<p style="margin:0 0 20px;">You asked us to delete your data. We have not done so yet, and we are required to tell you why.</p>
+{{/*
+  The GROUND, and nothing about the matter.
+
+  Article 12(4) obliges us to give the reasons for not acting. The lawful reason
+  is a legal basis — 17(3)(e) — which is the same sentence for everybody and
+  says nothing about this person's case.
+
+  Naming the matter would be tipping off: it would tell somebody they are under
+  investigation, at the moment when telling them is most damaging, and in
+  several jurisdictions doing so is itself an offence. The matter reference
+  lives on the hold's own event and in the operator audit log, which is where
+  "why is this person held" is answered under access controls.
+*/}}
+<p style="margin:0 0 20px;">We are legally obliged to keep some information for the time being. Under Article 17(3)(e) of the GDPR, the right to erasure does not apply where we need the data to establish, exercise or defend legal claims.</p>
+<p style="margin:0 0 20px;"><strong>This is a delay, not a refusal.</strong> Your request stands. As soon as the obligation ends, the deletion runs automatically and we will confirm it to you — you do not need to ask again.</p>
+<p style="margin:0 0 10px;">While you wait:</p>
+<ul style="margin:0 0 20px;padding-left:20px;">
+  <li style="margin:0 0 6px;">Your account is unaffected. Nothing has changed about how you use it.</li>
+  <li style="margin:0 0 6px;">We are not doing anything new with your data. The obligation is to <em>keep</em> it, not to use it.</li>
+  <li style="margin:0;">Your other rights are unaffected. You can still ask for a copy of your data or object to how it is processed.</li>
+</ul>
+<p style="margin:0;color:#6b7280;font-size:13px;">If you want to know more about the delay, reply to this message and a person will answer.</p>
+{{end}}

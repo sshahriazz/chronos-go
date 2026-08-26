@@ -674,6 +674,36 @@ func identityNotifications(cat *notify.Catalogue) {
 	//
 	// LIFTING is silent for the ordinary reason: the person who lifted it did so
 	// deliberately and is looking at the screen that did it.
+	// ── the deferral answer (Article 12(4)) ────────────────────────────────
+	//
+	// # The one message on this path that the law requires and the hold forbids
+	// # detail in
+	//
+	// 12(4): a controller that does not act on a request must inform the person
+	// of the reasons, without delay and within a month. Legal holds made "not
+	// acting" reachable for the first time, so this obligation arrived with
+	// them.
+	//
+	// TRANSACTIONAL, not Security, and not Product. It is the answer to
+	// something they asked for — the same class as the erasure confirmation it
+	// will eventually be followed by — and no preference may switch it off,
+	// because a person who muted us is still owed a reply to their own request.
+	//
+	// The template names the GROUND (Article 17(3)(e)) and never the matter.
+	// The matter would tell somebody they are under investigation; the ground is
+	// a legal basis, is the same sentence for everybody, and is what 12(4)
+	// actually asks for.
+	cat.On[complianceevents.ErasureDeferred](notify.Spec{
+		Template: "compliance.erasure_deferred",
+		Class:    notify.Transactional,
+		Audience: notify.AudienceSubject,
+	}, nil)
+	cat.Silent[complianceevents.ErasureResumed](
+		"the person was told the deletion would complete automatically, and what reaches " +
+			"them next is the erasure's own confirmation — which is the message that " +
+			"actually matters. 'We have resumed' followed minutes later by 'we have " +
+			"finished' is two messages for one event")
+
 	// ── legal holds (compliance.md §4 step 2, §7) ──────────────────────────
 	//
 	// # Silent, and the tension is real rather than resolved by shrugging
