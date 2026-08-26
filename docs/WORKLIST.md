@@ -1500,6 +1500,44 @@ register:
          name now, and `cmd/projector` gained a test that its own registry names
          compliance.
 
+         SUPERSEDED. That test compared this suite's list against a third
+         hand-written copy, so it caught only the drift somebody had already
+         found — identity's API key projection went missing afterwards and it
+         said nothing. Both lists are gone: `internal/projections` holds the one
+         registry and everything that runs projections calls it.
+
+## Open — a service account can hold a key and reach nothing
+
+- [ ] **Grants for service accounts (identity.md §10, access.md §5).**
+      A service account can be created, a key minted for it, and that key
+      authenticates correctly — the digest resolves, the organization binding is
+      read off the secret row, and gate 1 admits it without a membership check
+      (correctly: a service account is owned by an organization, not a member of
+      it).
+
+      Gate 2 then refuses it for every method in the system. It asks OpenFGA
+      about the key's OWNER, and `docs/access/authorization-model.fga` declares
+      four types — `organization`, `team`, `user`, `workspace` — and no
+      `service_account`. No tuple naming one can exist, and no RPC grants one
+      anything: `CreateServiceAccount` deliberately "records the principal, and
+      gives it nothing", and nothing else ever gives it something.
+
+      So the second column of identity.md §10's table — the integration
+      credential that survives an employee's departure — is unreachable today.
+      Personal access tokens work end to end.
+
+      What it needs: a `service_account` type in identity's access fragment, the
+      organization and workspace relations widened to admit it, a model deploy
+      (access.md §10's three-step ordering, and a re-pin of `OPENFGA_MODEL_ID`),
+      an RPC to grant and revoke a service account's role, and the reactor that
+      writes the tuple.
+
+      Asserted by `TestAServiceAccountKeyAuthenticatesAndCanReachNothing` in
+      `internal/adapter/protocolit`, which FAILS when the feature lands and is to
+      be replaced by the positive case then.
+
+---
+
 ## Parked
 
 - [x] **The two deactivation flakes — CLOSED.** One was a real race found by
