@@ -53,7 +53,12 @@ func NewCustomers(codec eventsourcing.Codec) *Customers {
 	d.On[orgcontract.OrganizationCreated](func(
 		_ context.Context, w db.Writer, _ projection.Envelope, e *orgcontract.OrganizationCreated,
 	) error {
-		w.Exec(operatordb.UpsertCustomer, e.OrgID, e.Slug, e.Name, "active", e.CreatedAt)
+		// OwnerID is a SubjectID pseudonym, and it is the one person
+		// operator.md §2 admits — "member email addresses beyond the org
+		// OWNER'S". It is what makes RevealPersonalData reachable at all: the
+		// directory has no member list, so without this an operator looking at
+		// a customer could name nobody in it.
+		w.Exec(operatordb.UpsertCustomer, e.OrgID, e.Slug, e.Name, "active", e.OwnerID, e.CreatedAt)
 		return nil
 	})
 

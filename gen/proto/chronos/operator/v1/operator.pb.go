@@ -762,9 +762,28 @@ type Customer struct {
 	// Why it was suspended, so a support answer does not begin with a guess.
 	SuspensionReason string `protobuf:"bytes,14,opt,name=suspension_reason,json=suspensionReason,proto3" json:"suspension_reason,omitempty"`
 	// When the organization was created.
-	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,15,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,15,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	// The organization owner's PSEUDONYM, and the only identifier in this
+	// message that names a person.
+	//
+	// # Why it is here, and why it is the only one
+	//
+	// Without it the directory names nobody, and RevealPersonalData — which takes
+	// a subject — is reachable only by an operator who already knows a pseudonym.
+	// In practice that meant reading one out of the database by hand, which has no
+	// justification, no audit entry and no bound on how many subjects it returns.
+	// An access control that is unusable is not a strict one; it is one people
+	// work around, and the workaround was strictly worse than the endpoint.
+	//
+	// The OWNER and nobody else, because operator.md §2 draws the line in its own
+	// exclusion: out of scope are "member email addresses BEYOND THE ORG OWNER'S".
+	// A second subject here would be the member list §2 excludes.
+	//
+	// It resolves to nothing on its own. Turning it into an address still needs
+	// RevealPersonalData, with a justification and an audit entry written first.
+	OwnerSubjectId string `protobuf:"bytes,16,opt,name=owner_subject_id,json=ownerSubjectId,proto3" json:"owner_subject_id,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *Customer) Reset() {
@@ -900,6 +919,13 @@ func (x *Customer) GetCreatedAt() *timestamppb.Timestamp {
 		return x.CreatedAt
 	}
 	return nil
+}
+
+func (x *Customer) GetOwnerSubjectId() string {
+	if x != nil {
+		return x.OwnerSubjectId
+	}
+	return ""
 }
 
 // ListCustomersResponse is one page of the directory.
@@ -1249,7 +1275,7 @@ const file_chronos_operator_v1_operator_proto_rawDesc = "" +
 	"\x0flifecycle_state\x18\x02 \x01(\tB0\xbaH-r+\x18\x102'^$|^(active|past_due|suspended|closed)$R\x0elifecycleState\x12&\n" +
 	"\tpage_size\x18\x03 \x01(\x05B\t\xbaH\x06\x1a\x04\x18d(\x00R\bpageSize\x12'\n" +
 	"\n" +
-	"page_token\x18\x04 \x01(\tB\b\xbaH\x05r\x03\x18\x80\x04R\tpageToken\"\x8d\x06\n" +
+	"page_token\x18\x04 \x01(\tB\b\xbaH\x05r\x03\x18\x80\x04R\tpageToken\"\xe7\x06\n" +
 	"\bCustomer\x12A\n" +
 	"\x06org_id\x18\x01 \x01(\tB*\xbaH'r%\x18\x1e2!^org_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\x05orgId\x12#\n" +
 	"\borg_name\x18\x02 \x01(\tB\b\xbaH\x05r\x03\x18\xc8\x01R\aorgName\x12\x1b\n" +
@@ -1267,7 +1293,8 @@ const file_chronos_operator_v1_operator_proto_rawDesc = "" +
 	"\fsuspended_at\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\vsuspendedAt\x125\n" +
 	"\x11suspension_reason\x18\x0e \x01(\tB\b\xbaH\x05r\x03\x18\x80\x02R\x10suspensionReason\x129\n" +
 	"\n" +
-	"created_at\x18\x0f \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\x90\x01\n" +
+	"created_at\x18\x0f \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12X\n" +
+	"\x10owner_subject_id\x18\x10 \x01(\tB.\xbaH+r)\x18 2%^$|^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\x0eownerSubjectId\"\x90\x01\n" +
 	"\x15ListCustomersResponse\x12E\n" +
 	"\tcustomers\x18\x01 \x03(\v2\x1d.chronos.operator.v1.CustomerB\b\xbaH\x05\x92\x01\x02\x10dR\tcustomers\x120\n" +
 	"\x0fnext_page_token\x18\x02 \x01(\tB\b\xbaH\x05r\x03\x18\x80\x04R\rnextPageToken\"W\n" +

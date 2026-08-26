@@ -120,14 +120,16 @@ func (s *DirectoryStore) List(
 func scanCustomer(row scanner, c *app.Customer) error {
 	var (
 		planID, planVersionID, subStatus, signupSource, suspensionReason *string
+		owner                                                            *string
 		trialEndsAt, lastActiveAt, suspendedAt                           *time.Time
 	)
 	if err := row.Scan(&c.OrgID, &c.Slug, &c.OrgName, &c.LifecycleState,
 		&planID, &planVersionID, &subStatus, &trialEndsAt,
 		&c.WorkspaceCount, &c.MemberCount, &lastActiveAt, &signupSource,
-		&suspendedAt, &suspensionReason, &c.CreatedAt); err != nil {
+		&suspendedAt, &suspensionReason, &owner, &c.CreatedAt); err != nil {
 		return err
 	}
+	c.OwnerSubjectID = deref(owner)
 	c.PlanID = deref(planID)
 	c.PlanVersionID = deref(planVersionID)
 	c.SubscriptionStatus = deref(subStatus)

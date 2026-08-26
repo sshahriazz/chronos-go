@@ -193,7 +193,7 @@ const GetCustomer = `-- name: GetCustomer :one
 SELECT org_id, slug, org_name, lifecycle_state, plan_id, plan_version_id,
        subscription_status, trial_ends_at, workspace_count, member_count,
        last_active_at, signup_source, suspended_at, suspension_reason,
-       org_created_at
+       owner_subject_id, org_created_at
 FROM operator_customer_list
 WHERE org_id = $1
 `
@@ -213,6 +213,7 @@ type GetCustomerRow struct {
 	SignupSource       *string
 	SuspendedAt        pgtype.Timestamptz
 	SuspensionReason   *string
+	OwnerSubjectID     *string
 	OrgCreatedAt       pgtype.Timestamptz
 }
 
@@ -234,6 +235,7 @@ func (q *Queries) GetCustomer(ctx context.Context, orgID string) (GetCustomerRow
 		&i.SignupSource,
 		&i.SuspendedAt,
 		&i.SuspensionReason,
+		&i.OwnerSubjectID,
 		&i.OrgCreatedAt,
 	)
 	return i, err
@@ -583,7 +585,7 @@ const ListCustomers = `-- name: ListCustomers :many
 SELECT org_id, slug, org_name, lifecycle_state, plan_id, plan_version_id,
        subscription_status, trial_ends_at, workspace_count, member_count,
        last_active_at, signup_source, suspended_at, suspension_reason,
-       org_created_at
+       owner_subject_id, org_created_at
 FROM operator_customer_list
 WHERE ($1::text IS NULL
        OR org_name ILIKE '%' || $1::text || '%'
@@ -620,6 +622,7 @@ type ListCustomersRow struct {
 	SignupSource       *string
 	SuspendedAt        pgtype.Timestamptz
 	SuspensionReason   *string
+	OwnerSubjectID     *string
 	OrgCreatedAt       pgtype.Timestamptz
 }
 
@@ -658,6 +661,7 @@ func (q *Queries) ListCustomers(ctx context.Context, arg ListCustomersParams) ([
 			&i.SignupSource,
 			&i.SuspendedAt,
 			&i.SuspensionReason,
+			&i.OwnerSubjectID,
 			&i.OrgCreatedAt,
 		); err != nil {
 			return nil, err
@@ -995,13 +999,14 @@ func (q *Queries) TruncateOperatorAccounts(ctx context.Context) error {
 const UpsertCustomer = `-- name: UpsertCustomer :exec
 
 INSERT INTO operator_customer_list (
-    org_id, slug, org_name, lifecycle_state, org_created_at, updated_at
-) VALUES ($1, $2, $3, $4, $5, now())
+    org_id, slug, org_name, lifecycle_state, owner_subject_id, org_created_at, updated_at
+) VALUES ($1, $2, $3, $4, $5, $6, now())
 ON CONFLICT (org_id) DO UPDATE SET
-    slug            = EXCLUDED.slug,
-    org_name        = EXCLUDED.org_name,
-    lifecycle_state = EXCLUDED.lifecycle_state,
-    updated_at      = now()
+    slug             = EXCLUDED.slug,
+    org_name         = EXCLUDED.org_name,
+    lifecycle_state  = EXCLUDED.lifecycle_state,
+    owner_subject_id = EXCLUDED.owner_subject_id,
+    updated_at       = now()
 `
 
 type UpsertCustomerParams struct {
@@ -1009,6 +1014,7 @@ type UpsertCustomerParams struct {
 	Slug           string
 	OrgName        string
 	LifecycleState string
+	OwnerSubjectID *string
 	OrgCreatedAt   pgtype.Timestamptz
 }
 
@@ -1021,6 +1027,7 @@ func (q *Queries) UpsertCustomer(ctx context.Context, arg UpsertCustomerParams) 
 		arg.Slug,
 		arg.OrgName,
 		arg.LifecycleState,
+		arg.OwnerSubjectID,
 		arg.OrgCreatedAt,
 	)
 	return err

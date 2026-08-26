@@ -247,6 +247,7 @@ func customerToWire(c app.Customer) *operatorv1.Customer {
 		SignupSource:       c.SignupSource,
 		SuspendedAt:        stamp(c.SuspendedAt),
 		SuspensionReason:   c.SuspensionReason,
+		OwnerSubjectId:     c.OwnerSubjectID,
 		CreatedAt:          timestamppb.New(c.CreatedAt),
 	}
 }

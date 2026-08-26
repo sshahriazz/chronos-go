@@ -224,6 +224,8 @@ type OperatorCustomerList struct {
 	SuspensionReason   *string
 	OrgCreatedAt       pgtype.Timestamptz
 	UpdatedAt          pgtype.Timestamptz
+	// The organization owner's pseudonym — the one person operator.md §2 admits. Resolves to nothing without RevealPersonalData, which requires a justification and writes an audit entry first.
+	OwnerSubjectID *string
 }
 
 // Seat holders by pseudonym, so member_count survives a replay. No RPC exposes this set — the directory returns the count. Adding one would be adding a member list to the operator plane (operator.md §2).

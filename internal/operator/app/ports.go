@@ -239,7 +239,13 @@ type Customer struct {
 	SignupSource       string
 	SuspendedAt        *time.Time
 	SuspensionReason   string
-	CreatedAt          time.Time
+
+	// OwnerSubjectID is the organization owner's pseudonym — the one person
+	// operator.md §2 admits, and the only thing in this struct that can be
+	// handed to RevealPersonalData. It resolves to nothing on its own.
+	OwnerSubjectID string
+
+	CreatedAt time.Time
 }
 
 // CustomerPage is one page of the directory, with the cursor for the next.

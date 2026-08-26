@@ -196,13 +196,14 @@ TRUNCATE operator_audit_log;
 
 -- name: UpsertCustomer :exec
 INSERT INTO operator_customer_list (
-    org_id, slug, org_name, lifecycle_state, org_created_at, updated_at
-) VALUES ($1, $2, $3, $4, $5, now())
+    org_id, slug, org_name, lifecycle_state, owner_subject_id, org_created_at, updated_at
+) VALUES ($1, $2, $3, $4, $5, $6, now())
 ON CONFLICT (org_id) DO UPDATE SET
-    slug            = EXCLUDED.slug,
-    org_name        = EXCLUDED.org_name,
-    lifecycle_state = EXCLUDED.lifecycle_state,
-    updated_at      = now();
+    slug             = EXCLUDED.slug,
+    org_name         = EXCLUDED.org_name,
+    lifecycle_state  = EXCLUDED.lifecycle_state,
+    owner_subject_id = EXCLUDED.owner_subject_id,
+    updated_at       = now();
 
 -- name: SetCustomerLifecycle :exec
 UPDATE operator_customer_list
@@ -276,7 +277,7 @@ WHERE org_id = $1;
 SELECT org_id, slug, org_name, lifecycle_state, plan_id, plan_version_id,
        subscription_status, trial_ends_at, workspace_count, member_count,
        last_active_at, signup_source, suspended_at, suspension_reason,
-       org_created_at
+       owner_subject_id, org_created_at
 FROM operator_customer_list
 WHERE org_id = $1;
 
@@ -289,7 +290,7 @@ WHERE org_id = $1;
 SELECT org_id, slug, org_name, lifecycle_state, plan_id, plan_version_id,
        subscription_status, trial_ends_at, workspace_count, member_count,
        last_active_at, signup_source, suspended_at, suspension_reason,
-       org_created_at
+       owner_subject_id, org_created_at
 FROM operator_customer_list
 WHERE (sqlc.narg('query')::text IS NULL
        OR org_name ILIKE '%' || sqlc.narg('query')::text || '%'

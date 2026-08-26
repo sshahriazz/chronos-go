@@ -15,6 +15,11 @@ const page = `<!doctype html>
          margin: 0; padding: 2rem 2.5rem 6rem; max-width: 66rem; }
   h1 { font-size: 1.1rem; margin: 0 0 .35rem; letter-spacing: .02em; }
   h2 { font-size: .95rem; margin: 0 0 .9rem; letter-spacing: .02em; }
+  .hit { border: 1px solid var(--line); border-radius: 6px; padding: .6rem .75rem;
+         margin: .7rem 0 0; display: flex; gap: 1rem; align-items: center;
+         justify-content: space-between; flex-wrap: wrap; }
+  .hit .who { opacity: .74; font-size: .84rem; white-space: pre; }
+  .hit button { margin: 0 0 0 .4rem; padding: .3rem .7rem; font-size: .84rem; }
   p.lede { margin: 0 0 2rem; opacity: .72; max-width: 52rem; }
   section { border: 1px solid var(--line); border-radius: 8px;
             padding: 1.1rem 1.25rem 1.25rem; margin: 0 0 1.4rem; }
@@ -80,7 +85,10 @@ const page = `<!doctype html>
   <p class="note">
     Org-level columns only. The projection behind this has no member list, no
     address and no content — minimisation is structural, so there is no query
-    that <em>could</em> return them.
+    that <em>could</em> return them. The one person it names is the
+    <strong>owner</strong>, by pseudonym: operator.md §2 puts member addresses
+    out of scope "beyond the org owner's", and a pseudonym resolves to nothing
+    without the justified read in panel 5.
   </p>
   <div class="row">
     <div>
@@ -93,6 +101,7 @@ const page = `<!doctype html>
     </div>
   </div>
   <button id="b-list">ListCustomers</button>
+  <div id="hits"></div>
   <pre id="o-list">waiting for a session</pre>
 </section>
 
@@ -114,7 +123,9 @@ const page = `<!doctype html>
   <h2>5 · Reveal personal data</h2>
   <p class="note">
     The only path from this plane to a person's data. One subject, named fields,
-    and a justification that is <strong>mandatory</strong> — refused at the edge
+    and a justification that is <strong>mandatory</strong>. <em>"Reveal owner"</em>
+    in the directory above fills the two identifiers, so nobody hand-copies a
+    pseudonym; the justification is yours. It is refused at the edge
     by protovalidate, in the domain by the audit aggregate, and in the database
     by a CHECK constraint. The audit entry is appended <em>before</em> the vault
     is read, and a failure to append fails the call.
@@ -325,13 +336,70 @@ $('b-wa').onclick = async () => {
 // ---------------------------------------------------------------------------
 $('b-list').onclick = async () => {
   show('o-list', 'reading…');
+  $('hits').innerHTML = '';
   try {
     const res = await rpc('ListCustomers', {
       query: $('q').value, lifecycleState: $('state').value, pageSize: 25,
     }, live());
+    renderHits(res.customers || []);
     show('o-list', res, 'ok');
   } catch (e) { show('o-list', e.message + (e.code ? '\ncode: ' + e.code : ''), 'bad'); }
 };
+
+// renderHits turns each result into a row that FILLS the panels below.
+//
+// # Why this matters more than a convenience
+//
+// The directory has no member list, so before owner_subject_id existed there
+// was no path at all from a customer to a subject — RevealPersonalData was
+// reachable only by somebody who already knew a pseudonym, which in practice
+// meant reading one out of the database by hand. That has no justification, no
+// audit entry and no bound on how many subjects it returns: strictly worse than
+// the endpoint it worked around. An access control that is unusable is not a
+// strict one, it is one people go around.
+//
+// One person per customer, and it is the OWNER, because operator.md §2 draws
+// the line in its own exclusion — out of scope are "member email addresses
+// beyond the org OWNER'S".
+function renderHits(customers) {
+  const box = $('hits');
+  box.innerHTML = '';
+  for (const c of customers) {
+    const row = document.createElement('div');
+    row.className = 'hit';
+
+    const who = document.createElement('span');
+    who.className = 'who';
+    who.textContent = c.orgName + '  ·  ' + c.orgId + '\n' +
+      (c.ownerSubjectId ? 'owner ' + c.ownerSubjectId : 'owner not recorded');
+    row.appendChild(who);
+
+    const buttons = document.createElement('span');
+
+    const open = document.createElement('button');
+    open.textContent = 'Open';
+    open.onclick = () => { $('org').value = c.orgId; $('b-get').click(); };
+    buttons.appendChild(open);
+
+    if (c.ownerSubjectId) {
+      const reveal = document.createElement('button');
+      reveal.textContent = 'Reveal owner →';
+      // It fills the two IDENTIFIERS and stops. The justification is the
+      // operator's to write, and a prefilled one would be the default that
+      // makes a mandatory field mean nothing.
+      reveal.onclick = () => {
+        $('subj').value = c.ownerSubjectId;
+        $('rorg').value = c.orgId;
+        $('s-reveal').scrollIntoView({ behavior: 'smooth' });
+        $('reason').focus();
+      };
+      buttons.appendChild(reveal);
+    }
+
+    row.appendChild(buttons);
+    box.appendChild(row);
+  }
+}
 
 $('b-get').onclick = async () => {
   show('o-get', 'reading…');

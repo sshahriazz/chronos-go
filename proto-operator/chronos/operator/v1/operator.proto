@@ -316,6 +316,31 @@ message Customer {
 
   // When the organization was created.
   google.protobuf.Timestamp created_at = 15;
+
+  // The organization owner's PSEUDONYM, and the only identifier in this
+  // message that names a person.
+  //
+  // # Why it is here, and why it is the only one
+  //
+  // Without it the directory names nobody, and RevealPersonalData — which takes
+  // a subject — is reachable only by an operator who already knows a pseudonym.
+  // In practice that meant reading one out of the database by hand, which has no
+  // justification, no audit entry and no bound on how many subjects it returns.
+  // An access control that is unusable is not a strict one; it is one people
+  // work around, and the workaround was strictly worse than the endpoint.
+  //
+  // The OWNER and nobody else, because operator.md §2 draws the line in its own
+  // exclusion: out of scope are "member email addresses BEYOND THE ORG OWNER'S".
+  // A second subject here would be the member list §2 excludes.
+  //
+  // It resolves to nothing on its own. Turning it into an address still needs
+  // RevealPersonalData, with a justification and an audit entry written first.
+  string owner_subject_id = 16 [
+    (buf.validate.field).string = {
+      max_len: 32
+      pattern: "^$|^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
 }
 
 // ListCustomersResponse is one page of the directory.
