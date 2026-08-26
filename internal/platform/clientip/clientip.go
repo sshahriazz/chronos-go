@@ -181,6 +181,70 @@ func (r Resolver) Scope(peer string, forwarded []string) string {
 	return normalize(addr)
 }
 
+// Address resolves the caller's actual IP, under the same hop policy Scope
+// uses.
+//
+// # Why this exists beside Scope rather than being derived from it
+//
+// Scope returns a BUCKET KEY, and for IPv6 that key is a /64 PREFIX — two
+// addresses on one link share a rate-limit budget on purpose. A caller that
+// needed an address and parsed Scope's answer would work perfectly over IPv4
+// and fail on every IPv6 connection, because `::1/64` is not an address.
+//
+// That is not hypothetical: the operator plane's network restriction was
+// written against Scope and refused every loopback request over IPv6 with "this
+// request's origin could not be established". The two questions are different
+// and now have different methods.
+//
+// Both go through the SAME hop policy, and that matters more than the return
+// type. If "which hop we count against" and "which hop we allow" could
+// disagree, a caller could be rate-limited as one address and admitted as
+// another.
+//
+// Returns false when there is no usable address at all — an in-process
+// transport, a unix socket, an unparseable peer. Callers making an ACCESS
+// decision must treat that as a denial: an origin that cannot be established is
+// not one that can be permitted.
+func (r Resolver) Address(peer string, forwarded []string) (netip.Addr, bool) {
+	fallback, fallbackOK := peerAddr(peer)
+
+	if r.trustedHops == 0 {
+		return fallback, fallbackOK
+	}
+
+	entries := forwardedEntries(forwarded)
+	if len(entries) < r.trustedHops {
+		return fallback, fallbackOK
+	}
+	addr, ok := parseHop(entries[len(entries)-r.trustedHops])
+	if !ok {
+		// Fails CLOSED to the peer address, exactly as Scope does. A malformed
+		// entry is broken infrastructure or a deliberate probe, and neither may
+		// choose its own answer by writing something unparseable.
+		return fallback, fallbackOK
+	}
+	return canonical(addr), true
+}
+
+// peerAddr is peerScope's address half: the connection's peer, port stripped
+// and canonicalised, or false when it is not an IP at all.
+func peerAddr(peer string) (netip.Addr, bool) {
+	peer = strings.TrimSpace(peer)
+	if peer == "" {
+		return netip.Addr{}, false
+	}
+	if host, _, err := net.SplitHostPort(peer); err == nil && host != "" {
+		if addr, ok := parseAddr(host); ok {
+			return canonical(addr), true
+		}
+		return netip.Addr{}, false
+	}
+	if addr, ok := parseAddr(peer); ok {
+		return canonical(addr), true
+	}
+	return netip.Addr{}, false
+}
+
 // peerScope reduces the connection's peer address to a bucket.
 //
 // An address that parses is normalized; one that does not — a unix socket path,

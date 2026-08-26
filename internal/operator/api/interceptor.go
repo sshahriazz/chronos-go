@@ -110,11 +110,19 @@ func (g *Guard) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
 				errors.New("this method declares no enforcement policy"))
 		}
 
-		peer := g.resolver.Scope(req.Peer().Addr, req.Header().Values("X-Forwarded-For"))
-		if err := g.allow(peer); err != nil {
+		// Address, NOT Scope. Scope returns a rate-limit BUCKET KEY, and for
+		// IPv6 that key is a /64 prefix — so parsing it as an address works
+		// over IPv4 and refuses every IPv6 connection, which is exactly the bug
+		// this line shipped with and which denied every loopback request.
+		addr, ok := g.resolver.Address(req.Peer().Addr, req.Header().Values("X-Forwarded-For"))
+		if err := g.allow(addr, ok); err != nil {
 			g.log.WarnContext(ctx, "an operator request came from outside the permitted networks",
-				"method", method, "from_ip", peer)
+				"method", method, "from_ip", addr.String(), "resolved", ok)
 			return nil, connect.NewError(connect.CodePermissionDenied, err)
+		}
+		peer := ""
+		if ok {
+			peer = addr.String()
 		}
 
 		if p.Access == policy.AccessUnauthenticated {
@@ -206,17 +214,22 @@ func (g *Guard) WrapStreamingHandler(_ connect.StreamingHandlerFunc) connect.Str
 var _ connect.Interceptor = (*Guard)(nil)
 
 // allow enforces the internal-network restriction.
-func (g *Guard) allow(peer string) error {
+//
+// An unresolvable origin is REFUSED, unlike in the audit path where it becomes
+// NULL. The two treat it differently on purpose: there the address is evidence
+// and losing it must not stop the record; here it is the input to an access
+// decision, and a decision that cannot be made must fail closed.
+//
+// The refusal only applies when a restriction is CONFIGURED. With no permitted
+// networks the plane is deliberately open — which the binary refuses to start
+// in unless OPERATOR_ALLOW_ANY_IP says so — and refusing an in-process or
+// unix-socket caller there would break a deployment that had asked for exactly
+// this.
+func (g *Guard) allow(addr netip.Addr, resolved bool) error {
 	if len(g.allowed) == 0 {
 		return nil
 	}
-	addr, err := netip.ParseAddr(peer)
-	if err != nil {
-		// An unparseable origin is REFUSED here, unlike in the audit path where
-		// it becomes NULL. The two treat it differently on purpose: there the
-		// address is evidence and losing it must not stop the record; here it
-		// is the input to an access decision, and a decision that cannot be
-		// made must fail closed.
+	if !resolved {
 		return fmt.Errorf("this request's origin could not be established")
 	}
 	for _, p := range g.allowed {

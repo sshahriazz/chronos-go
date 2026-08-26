@@ -46,6 +46,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	connectvalidate "connectrpc.com/validate"
 
 	"github.com/chronos/chronos-go/gen/proto/chronos/operator/v1/operatorv1connect"
 	"github.com/chronos/chronos-go/internal/operator/api"
@@ -127,9 +128,21 @@ func run() error {
 		return err
 	}
 
+	// ORDER MATTERS, and it is the tenant plane's order for the same reason.
+	//
+	// Connect applies the first interceptor OUTERMOST for handlers, so the
+	// guard runs BEFORE protovalidate. Validating ahead of authenticating would
+	// answer an unauthenticated caller with a field-level description of a
+	// request they were never entitled to make — and on this plane that
+	// description names the shape of the cross-tenant surface.
+	//
+	// Without the validate interceptor every bound in operator.proto is a
+	// comment: the `reason` field's min_len of 8 would document a rule while
+	// accepting "x", and the page size's ceiling would document a limit while
+	// serving a bulk export of the customer base.
 	mux := http.NewServeMux()
 	path, handler := operatorv1connect.NewOperatorServiceHandler(service,
-		connect.WithInterceptors(guard))
+		connect.WithInterceptors(guard, connectvalidate.NewInterceptor()))
 	mux.Handle(path, handler)
 
 	var wg sync.WaitGroup
