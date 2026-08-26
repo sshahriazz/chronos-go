@@ -853,14 +853,27 @@ func (d *dependencies) buildIdentity(
 	// staging credential and a production credential the same shape. The four key
 	// RPCs then answer NOT_FOUND naming the variable, and the read side and the
 	// authenticator keep working.
-	var apiKeys *app.APIKeys
+	// The INTERFACE type, never the concrete pointer, for the reason buildPasskeys
+	// spells out at length: a nil `*app.APIKeys` stored in an interface makes the
+	// interface NON-nil, so `s.apiKeys == nil` in the handler never fires and
+	// every key RPC dispatches on a nil receiver.
+	//
+	// This declaration was `var apiKeys *app.APIKeys`, and the difference is the
+	// whole of the bug. The guard was written, the NOT_FOUND was written, the
+	// startup line naming the variable was written — and an unconfigured
+	// deployment panicked on the first CreateServiceAccount instead of refusing
+	// it. Passkeys learnt this on the wiring test's first run; keys repeated it
+	// and no unit test could see it, because the wrong branch is the one nobody
+	// exercises.
+	var apiKeys identityapi.APIKeyCommands
 	if cfg.Identity.APIKeysConfigured() {
+		var keys *app.APIKeys
 		apiKeyRepo := eventsourcing.NewRepository[*domain.APIKey](
 			d.store, d.codec, d.upcasters, app.APIKeyCategory, domain.NewAPIKey)
 		serviceAccountRepo := eventsourcing.NewRepository[*domain.ServiceAccount](
 			d.store, d.codec, d.upcasters, app.ServiceAccountCategory, domain.NewServiceAccount)
 
-		apiKeys, err = app.NewAPIKeys(app.APIKeysDeps{
+		keys, err = app.NewAPIKeys(app.APIKeysDeps{
 			Clock: clk,
 			// The SAME entropy source every identifier in this process uses, and
 			// crypto/rand underneath. Not a second reader built here: a bounded or
@@ -879,6 +892,7 @@ func (d *dependencies) buildIdentity(
 		if err != nil {
 			return nil, fmt.Errorf("API keys: %w", err)
 		}
+		apiKeys = keys
 		log.Info("API keys configured", "environment", cfg.Identity.APIKeyEnvironment)
 	} else {
 		// Named at INFO rather than silently: a deployment that cannot mint keys
