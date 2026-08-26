@@ -98,7 +98,8 @@ func NewAuditLog(codec eventsourcing.Codec) *AuditLog {
 	) error {
 		w.Exec(operatordb.InsertAuditEntry,
 			entryID(env), e.OperatorID, e.SubjectID, "changed_tenant", e.Change,
-			nullText(e.OrgID), nil, nil, nullText(e.Reason), nullIP(e.FromIP), e.ChangedAt)
+			nullText(e.OrgID), nullText(e.TargetSubjectID), nil,
+			nullText(e.Reason), nullIP(e.FromIP), e.ChangedAt)
 		return nil
 	})
 

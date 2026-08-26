@@ -173,6 +173,35 @@ func (a *Auditor) RecordTenantWrite(
 	return entryID, a.append(ctx, entryID, entry)
 }
 
+// RecordSubjectWrite records an operator change scoped to a SUBJECT rather than
+// to an organization — a legal hold, today.
+//
+// It reuses OperatorChangedTenant with the target in `TargetSubjectID` and no
+// org, rather than adding a ninth action. The act is the same shape from the
+// audit log's point of view: an operator changed something about a customer,
+// with a justification, and the question a review asks is the same one.
+func (a *Auditor) RecordSubjectWrite(
+	ctx context.Context, actor Actor, subjectID, change, reason string,
+) (string, error) {
+	entryID, err := newAuditID(a.clock.Now())
+	if err != nil {
+		return "", err
+	}
+	entry := eventsourcing.NewAggregate(domain.NewAuditEntry)
+	if err := entry.RecordSubjectWrite(contract.OperatorChangedTenant{
+		OperatorID:      actor.OperatorID,
+		SubjectID:       actor.SubjectID,
+		TargetSubjectID: subjectID,
+		Change:          change,
+		Reason:          reason,
+		FromIP:          actor.FromIP,
+		ChangedAt:       a.clock.Now(),
+	}); err != nil {
+		return "", err
+	}
+	return entryID, a.append(ctx, entryID, entry)
+}
+
 // RecordView records a read of the directory or of one customer.
 //
 // orgID is empty on a list, and that is not an omission: a page is an aggregate

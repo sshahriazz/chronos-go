@@ -243,7 +243,15 @@ func newDependencies(
 		return fail(err)
 	}
 
-	tenants, err := app.NewTenants(orgWriter, auditor, d.clock, log)
+	// compliance's aggregate, written by this plane because nothing else can:
+	// a hold has an owner and a recorded justification, and both are operator
+	// concerns. Its events must therefore be decodable here.
+	holdWriter, err := operatorevents.NewLegalHolds(eventStore, codec, upcasters)
+	if err != nil {
+		return fail(err)
+	}
+
+	tenants, err := app.NewTenants(orgWriter, holdWriter, auditor, d.clock, log)
 	if err != nil {
 		return fail(err)
 	}

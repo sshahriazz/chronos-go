@@ -455,9 +455,15 @@ nothing ever ran.
       outage than the one being reported. What changed is `Impact()`, which now
       names ERASURE FIRST: every other durable job degrades into a delay, and
       this is the one that simply does not happen.
-- [ ] **Legal holds and retention exemptions** (compliance.md §4 steps 2–3) are
-      not consulted. Nothing can place a hold yet, so there is nothing to check;
-      it becomes real with the `LegalHold` aggregate.
+- [x] **Legal holds — BUILT, and the erasure now defers on them.** The
+      `LegalHold` aggregate, the operator RPCs that place and lift one, and
+      step 2 of the erasure workflow. `NewErasure` REFUSES a nil hold checker,
+      because an eraser without one destroys a key a court order says must be
+      preserved — silently, since every other step succeeds.
+
+      **Retention exemptions (step 3) remain open** and are a different thing:
+      §7's table already says invoices are retained under Article 17(3)(b), and
+      nothing yet reads that table during an erasure.
 - [ ] **The subject graph is not traversed** (step 4). Only identity holds
       personal data today, so erasing it is erasing everything — but that stops
       being true the moment a second module does, and the traversal is what
@@ -719,11 +725,11 @@ already has a name for.
       the two deferred cascades — team deletion to grants, and the team's own
       member edges — are waiting for.
 
-- [ ] **Legal holds (compliance.md §4 step 2).** Same shape. The erasure ignores
-      holds because NOTHING CAN PLACE ONE: a hold has an owner and a recorded
-      justification, both of which are operator concerns, and `operator` is a
-      separate deployable (ADR-024) that does not exist. A `LegalHold` aggregate
-      with no way to create a hold is a check that can only ever pass.
+- [x] **Legal holds — UNBLOCKED and built.** This entry was right about why it
+      was blocked: a hold has an owner and a recorded justification, both
+      operator concerns, and "a `LegalHold` aggregate with no way to create a
+      hold is a check that can only ever pass" is exactly the vacuous shape it
+      would have had. Operator slice 2 supplied the missing half.
 
 - [x] **`operator` — the back-office (operator.md). SLICE 1 SHIPPED.** The
       binary, its identity, its audit, the customer directory, and the four
@@ -744,23 +750,23 @@ retires a CLI-only path; the tenant-affecting write third because it establishes
 the cross-plane pattern every remaining write copies; legal holds fourth because
 they have been waiting for exactly that pattern.
 
-- [ ] **A · Break-glass elevation** (§5). Time-boxed, justified, auto-expiring,
+- [x] **A · Break-glass elevation** (§5). Time-boxed, justified, auto-expiring,
       and it raises an alert AT THE TIME OF USE rather than in a report somebody
       reads next quarter. Two decisions the spec leaves open and this slice has
       to settle: WHICH capabilities a role may elevate to, and what "alert a
       second person" means on a plane that deliberately holds no operator
       addresses.
-- [ ] **B · Operator account management** (§7, `operator_admin`). The aggregate
+- [x] **B · Operator account management** (§7, `operator_admin`). The aggregate
       already exists and only the RPCs are missing, so this is small — and it
       retires `provisionoperator` for every operator except the first, which no
       RPC can ever create.
-- [ ] **C · Suspend and reinstate an organization** (§7, `operator_admin`;
+- [x] **C · Suspend and reinstate an organization** (§7, `operator_admin`;
       organization.md §5). The first write that touches a TENANT aggregate, and
       therefore the one that establishes the pattern: operator writes go through
       the same domain commands as everything else, because a privileged
       back-channel that skips domain rules is what corrupts state that then
       cannot be replayed.
-- [ ] **D · Legal holds** (compliance.md §4 steps 2–3). Unblocked by C. A hold
+- [x] **D · Legal holds** (compliance.md §4 steps 2–3). Unblocked by C. A hold
       has an owner and a recorded justification, and both now have somewhere to
       come from.
 - [ ] **E · The billing writes** (§7). Refunds, coupons, entitlement overrides,

@@ -66,19 +66,57 @@ type TenantOrganizations interface {
 	Reinstate(ctx context.Context, orgID string, at time.Time) (changed bool, err error)
 }
 
+// TenantLegalHolds writes compliance's LegalHold aggregate (compliance.md §7).
+//
+// # Why the operator plane is the only thing that can place one
+//
+// A hold has an owner and a recorded justification, and both are operator
+// concerns — there is no tenant-facing action that produces either. The
+// worklist named this as BLOCKED rather than unbuilt for exactly that reason: a
+// LegalHold aggregate with no way to create a hold is a check that can only ever
+// pass, which is the vacuous-test shape this repository has a name for.
+//
+// The direction is the same as every other cross-plane write: the operator
+// plane calls compliance's own aggregate and appends compliance's own event.
+type TenantLegalHolds interface {
+	// Place holds a subject's data under a matter reference.
+	Place(ctx context.Context, subjectID, placedBy, matter string, at time.Time) error
+
+	// Lift releases them, and reports whether anything changed.
+	Lift(ctx context.Context, subjectID, liftedBy string, at time.Time) (changed bool, err error)
+}
+
+// ErrHoldRefused means the hold could not be placed, and carries the domain's
+// own message.
+//
+// The commonest cause is a subject already held under another matter, which the
+// compliance aggregate refuses rather than absorbing — one stream per subject
+// means one hold at a time, and a silently absorbed second hold would be
+// released by lifting the first with nothing recording that two matters
+// overlapped.
+var ErrHoldRefused = errors.New("operator: this legal hold was refused")
+
 // Tenants is the operator's write surface onto tenant state.
 type Tenants struct {
 	orgs    TenantOrganizations
+	holds   TenantLegalHolds
 	auditor *Auditor
 	clock   Clock
 	log     *slog.Logger
 }
 
 // NewTenants builds the use case.
-func NewTenants(orgs TenantOrganizations, auditor *Auditor, clock Clock, log *slog.Logger) (*Tenants, error) {
+func NewTenants(
+	orgs TenantOrganizations, holds TenantLegalHolds,
+	auditor *Auditor, clock Clock, log *slog.Logger,
+) (*Tenants, error) {
 	switch {
 	case orgs == nil:
 		return nil, errors.New("operator: tenant writes need an organization repository")
+	case holds == nil:
+		return nil, errors.New("operator: tenant writes need a legal-hold repository; the " +
+			"operator plane is the only thing that can place one, so without it " +
+			"compliance's hold check can only ever pass")
 	case auditor == nil:
 		return nil, errors.New("operator: tenant writes need an auditor")
 	case clock == nil:
@@ -87,7 +125,76 @@ func NewTenants(orgs TenantOrganizations, auditor *Auditor, clock Clock, log *sl
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Tenants{orgs: orgs, auditor: auditor, clock: clock, log: log}, nil
+	return &Tenants{orgs: orgs, holds: holds, auditor: auditor, clock: clock, log: log}, nil
+}
+
+// PlaceLegalHold suspends erasure and retention purges for one subject
+// (compliance.md §7).
+//
+// # The justification splits, as it does for a suspension
+//
+// The compliance event carries a MATTER REFERENCE — "litigation 2026-4711" —
+// and nothing more. The narrative goes to the operator audit log alone.
+//
+// The reason is ADR-002 rather than discretion: a hold's justification is prose
+// about a legal matter, and legal matters name people — the opposing party, a
+// complainant, a third party who is not the subject of this stream at all.
+// Putting it on the tenant's permanent, replicated log would be putting other
+// people's personal data there under a subject id that is not theirs.
+//
+// # It notifies nobody, deliberately
+//
+// Telling somebody a hold has been placed on their data is tipping off. What
+// they are owed under Article 12(4) is an answer to their OWN erasure request
+// saying it is deferred — a response to a request, not a broadcast about our
+// decision. See cmd/worker/events.go, where that distinction is recorded
+// against the event itself.
+func (t *Tenants) PlaceLegalHold(
+	ctx context.Context, actor Actor, subjectID, matter, reason string,
+) (TenantWriteResult, error) {
+	entryID, err := t.auditor.RecordSubjectWrite(ctx, actor, subjectID,
+		"legal hold placed under "+matter, reason)
+	if err != nil {
+		return TenantWriteResult{}, fmt.Errorf("recording the hold: %w", err)
+	}
+
+	if err := t.holds.Place(ctx, subjectID, actor.OperatorID, matter, t.clock.Now()); err != nil {
+		return TenantWriteResult{}, fmt.Errorf("%w: %w", ErrHoldRefused, err)
+	}
+
+	t.log.WarnContext(ctx, "an operator placed a LEGAL HOLD",
+		"subject_id", subjectID, "matter", matter,
+		"operator_id", actor.OperatorID, "audit_entry_id", entryID)
+
+	return TenantWriteResult{Changed: true, AuditEntryID: entryID}, nil
+}
+
+// LiftLegalHold releases a subject, and resumes any deferred erasure.
+//
+// The resumption is compliance's, not this call's: an erasure deferred by a
+// hold is retried by the workflow once the hold lifts (§7). Coupling the two
+// here would make a transient vault error look like a hold that did not lift.
+func (t *Tenants) LiftLegalHold(
+	ctx context.Context, actor Actor, subjectID, reason string,
+) (TenantWriteResult, error) {
+	entryID, err := t.auditor.RecordSubjectWrite(ctx, actor, subjectID,
+		"legal hold lifted", reason)
+	if err != nil {
+		return TenantWriteResult{}, fmt.Errorf("recording the lift: %w", err)
+	}
+
+	changed, err := t.holds.Lift(ctx, subjectID, actor.OperatorID, t.clock.Now())
+	if err != nil {
+		return TenantWriteResult{}, fmt.Errorf("%w: %w", ErrHoldRefused, err)
+	}
+
+	if changed {
+		t.log.WarnContext(ctx, "an operator LIFTED a legal hold",
+			"subject_id", subjectID, "operator_id", actor.OperatorID,
+			"audit_entry_id", entryID)
+	}
+
+	return TenantWriteResult{Changed: changed, AuditEntryID: entryID}, nil
 }
 
 // TenantWriteResult reports the state after a suspension or a reinstatement.

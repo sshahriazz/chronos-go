@@ -100,6 +100,12 @@ const (
 	// OperatorServiceReinstateCustomerProcedure is the fully-qualified name of the OperatorService's
 	// ReinstateCustomer RPC.
 	OperatorServiceReinstateCustomerProcedure = "/chronos.operator.v1.OperatorService/ReinstateCustomer"
+	// OperatorServicePlaceLegalHoldProcedure is the fully-qualified name of the OperatorService's
+	// PlaceLegalHold RPC.
+	OperatorServicePlaceLegalHoldProcedure = "/chronos.operator.v1.OperatorService/PlaceLegalHold"
+	// OperatorServiceLiftLegalHoldProcedure is the fully-qualified name of the OperatorService's
+	// LiftLegalHold RPC.
+	OperatorServiceLiftLegalHoldProcedure = "/chronos.operator.v1.OperatorService/LiftLegalHold"
 	// OperatorServiceRevealPersonalDataProcedure is the fully-qualified name of the OperatorService's
 	// RevealPersonalData RPC.
 	OperatorServiceRevealPersonalDataProcedure = "/chronos.operator.v1.OperatorService/RevealPersonalData"
@@ -249,6 +255,38 @@ type OperatorServiceClient interface {
 	// and the state machine already says so. An operator-only path would be a
 	// second way to reach one state, which is how two paths drift.
 	ReinstateCustomer(context.Context, *connect.Request[v1.ReinstateCustomerRequest]) (*connect.Response[v1.ReinstateCustomerResponse], error)
+	// PlaceLegalHold suspends erasure and retention purges for one subject
+	// (compliance.md §4 step 2, §7).
+	//
+	// # A held erasure is DEFERRED, not refused
+	//
+	// §7: "a held subject's erasure request is deferred, not refused, and
+	// executes automatically when the hold lifts". That is the only reading that
+	// survives both obligations at once — Article 17 gives a right the controller
+	// cannot decline, and a litigation hold is a duty it cannot ignore.
+	//
+	// # It notifies nobody, and that is the law rather than convenience
+	//
+	// Telling somebody a hold has been placed on their data is TIPPING OFF: it
+	// names an investigation to its subject at the moment when doing so is most
+	// damaging, and in several jurisdictions it is itself an offence.
+	//
+	// What they ARE owed is Article 12(4)'s answer to their own erasure request,
+	// saying it is deferred and why — a response to a request rather than a
+	// broadcast about our decision. That belongs to the DSAR response path.
+	//
+	// # `suspend_organization`, because this is the same class of act
+	//
+	// Placing a hold overrides a statutory right, and lifting one lets a deferred
+	// erasure destroy data that was being preserved for a court. It sits with the
+	// other operator_admin-only capability rather than with the billing writes,
+	// and like it, nobody may break the glass to reach it.
+	PlaceLegalHold(context.Context, *connect.Request[v1.PlaceLegalHoldRequest]) (*connect.Response[v1.PlaceLegalHoldResponse], error)
+	// LiftLegalHold releases a subject, and resumes any deferred erasure.
+	//
+	// The resumption is compliance's, not this call's — coupling them would make
+	// a transient vault error look like a hold that did not lift.
+	LiftLegalHold(context.Context, *connect.Request[v1.LiftLegalHoldRequest]) (*connect.Response[v1.LiftLegalHoldResponse], error)
 	// RevealPersonalData resolves one subject's vault fields, with a recorded
 	// justification (operator.md §4).
 	//
@@ -358,6 +396,18 @@ func NewOperatorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(operatorServiceMethods.ByName("ReinstateCustomer")),
 			connect.WithClientOptions(opts...),
 		),
+		placeLegalHold: connect.NewClient[v1.PlaceLegalHoldRequest, v1.PlaceLegalHoldResponse](
+			httpClient,
+			baseURL+OperatorServicePlaceLegalHoldProcedure,
+			connect.WithSchema(operatorServiceMethods.ByName("PlaceLegalHold")),
+			connect.WithClientOptions(opts...),
+		),
+		liftLegalHold: connect.NewClient[v1.LiftLegalHoldRequest, v1.LiftLegalHoldResponse](
+			httpClient,
+			baseURL+OperatorServiceLiftLegalHoldProcedure,
+			connect.WithSchema(operatorServiceMethods.ByName("LiftLegalHold")),
+			connect.WithClientOptions(opts...),
+		),
 		revealPersonalData: connect.NewClient[v1.RevealPersonalDataRequest, v1.RevealPersonalDataResponse](
 			httpClient,
 			baseURL+OperatorServiceRevealPersonalDataProcedure,
@@ -383,6 +433,8 @@ type operatorServiceClient struct {
 	getCustomer        *connect.Client[v1.GetCustomerRequest, v1.GetCustomerResponse]
 	suspendCustomer    *connect.Client[v1.SuspendCustomerRequest, v1.SuspendCustomerResponse]
 	reinstateCustomer  *connect.Client[v1.ReinstateCustomerRequest, v1.ReinstateCustomerResponse]
+	placeLegalHold     *connect.Client[v1.PlaceLegalHoldRequest, v1.PlaceLegalHoldResponse]
+	liftLegalHold      *connect.Client[v1.LiftLegalHoldRequest, v1.LiftLegalHoldResponse]
 	revealPersonalData *connect.Client[v1.RevealPersonalDataRequest, v1.RevealPersonalDataResponse]
 }
 
@@ -454,6 +506,16 @@ func (c *operatorServiceClient) SuspendCustomer(ctx context.Context, req *connec
 // ReinstateCustomer calls chronos.operator.v1.OperatorService.ReinstateCustomer.
 func (c *operatorServiceClient) ReinstateCustomer(ctx context.Context, req *connect.Request[v1.ReinstateCustomerRequest]) (*connect.Response[v1.ReinstateCustomerResponse], error) {
 	return c.reinstateCustomer.CallUnary(ctx, req)
+}
+
+// PlaceLegalHold calls chronos.operator.v1.OperatorService.PlaceLegalHold.
+func (c *operatorServiceClient) PlaceLegalHold(ctx context.Context, req *connect.Request[v1.PlaceLegalHoldRequest]) (*connect.Response[v1.PlaceLegalHoldResponse], error) {
+	return c.placeLegalHold.CallUnary(ctx, req)
+}
+
+// LiftLegalHold calls chronos.operator.v1.OperatorService.LiftLegalHold.
+func (c *operatorServiceClient) LiftLegalHold(ctx context.Context, req *connect.Request[v1.LiftLegalHoldRequest]) (*connect.Response[v1.LiftLegalHoldResponse], error) {
+	return c.liftLegalHold.CallUnary(ctx, req)
 }
 
 // RevealPersonalData calls chronos.operator.v1.OperatorService.RevealPersonalData.
@@ -605,6 +667,38 @@ type OperatorServiceHandler interface {
 	// and the state machine already says so. An operator-only path would be a
 	// second way to reach one state, which is how two paths drift.
 	ReinstateCustomer(context.Context, *connect.Request[v1.ReinstateCustomerRequest]) (*connect.Response[v1.ReinstateCustomerResponse], error)
+	// PlaceLegalHold suspends erasure and retention purges for one subject
+	// (compliance.md §4 step 2, §7).
+	//
+	// # A held erasure is DEFERRED, not refused
+	//
+	// §7: "a held subject's erasure request is deferred, not refused, and
+	// executes automatically when the hold lifts". That is the only reading that
+	// survives both obligations at once — Article 17 gives a right the controller
+	// cannot decline, and a litigation hold is a duty it cannot ignore.
+	//
+	// # It notifies nobody, and that is the law rather than convenience
+	//
+	// Telling somebody a hold has been placed on their data is TIPPING OFF: it
+	// names an investigation to its subject at the moment when doing so is most
+	// damaging, and in several jurisdictions it is itself an offence.
+	//
+	// What they ARE owed is Article 12(4)'s answer to their own erasure request,
+	// saying it is deferred and why — a response to a request rather than a
+	// broadcast about our decision. That belongs to the DSAR response path.
+	//
+	// # `suspend_organization`, because this is the same class of act
+	//
+	// Placing a hold overrides a statutory right, and lifting one lets a deferred
+	// erasure destroy data that was being preserved for a court. It sits with the
+	// other operator_admin-only capability rather than with the billing writes,
+	// and like it, nobody may break the glass to reach it.
+	PlaceLegalHold(context.Context, *connect.Request[v1.PlaceLegalHoldRequest]) (*connect.Response[v1.PlaceLegalHoldResponse], error)
+	// LiftLegalHold releases a subject, and resumes any deferred erasure.
+	//
+	// The resumption is compliance's, not this call's — coupling them would make
+	// a transient vault error look like a hold that did not lift.
+	LiftLegalHold(context.Context, *connect.Request[v1.LiftLegalHoldRequest]) (*connect.Response[v1.LiftLegalHoldResponse], error)
 	// RevealPersonalData resolves one subject's vault fields, with a recorded
 	// justification (operator.md §4).
 	//
@@ -710,6 +804,18 @@ func NewOperatorServiceHandler(svc OperatorServiceHandler, opts ...connect.Handl
 		connect.WithSchema(operatorServiceMethods.ByName("ReinstateCustomer")),
 		connect.WithHandlerOptions(opts...),
 	)
+	operatorServicePlaceLegalHoldHandler := connect.NewUnaryHandler(
+		OperatorServicePlaceLegalHoldProcedure,
+		svc.PlaceLegalHold,
+		connect.WithSchema(operatorServiceMethods.ByName("PlaceLegalHold")),
+		connect.WithHandlerOptions(opts...),
+	)
+	operatorServiceLiftLegalHoldHandler := connect.NewUnaryHandler(
+		OperatorServiceLiftLegalHoldProcedure,
+		svc.LiftLegalHold,
+		connect.WithSchema(operatorServiceMethods.ByName("LiftLegalHold")),
+		connect.WithHandlerOptions(opts...),
+	)
 	operatorServiceRevealPersonalDataHandler := connect.NewUnaryHandler(
 		OperatorServiceRevealPersonalDataProcedure,
 		svc.RevealPersonalData,
@@ -746,6 +852,10 @@ func NewOperatorServiceHandler(svc OperatorServiceHandler, opts ...connect.Handl
 			operatorServiceSuspendCustomerHandler.ServeHTTP(w, r)
 		case OperatorServiceReinstateCustomerProcedure:
 			operatorServiceReinstateCustomerHandler.ServeHTTP(w, r)
+		case OperatorServicePlaceLegalHoldProcedure:
+			operatorServicePlaceLegalHoldHandler.ServeHTTP(w, r)
+		case OperatorServiceLiftLegalHoldProcedure:
+			operatorServiceLiftLegalHoldHandler.ServeHTTP(w, r)
 		case OperatorServiceRevealPersonalDataProcedure:
 			operatorServiceRevealPersonalDataHandler.ServeHTTP(w, r)
 		default:
@@ -811,6 +921,14 @@ func (UnimplementedOperatorServiceHandler) SuspendCustomer(context.Context, *con
 
 func (UnimplementedOperatorServiceHandler) ReinstateCustomer(context.Context, *connect.Request[v1.ReinstateCustomerRequest]) (*connect.Response[v1.ReinstateCustomerResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.operator.v1.OperatorService.ReinstateCustomer is not implemented"))
+}
+
+func (UnimplementedOperatorServiceHandler) PlaceLegalHold(context.Context, *connect.Request[v1.PlaceLegalHoldRequest]) (*connect.Response[v1.PlaceLegalHoldResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.operator.v1.OperatorService.PlaceLegalHold is not implemented"))
+}
+
+func (UnimplementedOperatorServiceHandler) LiftLegalHold(context.Context, *connect.Request[v1.LiftLegalHoldRequest]) (*connect.Response[v1.LiftLegalHoldResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.operator.v1.OperatorService.LiftLegalHold is not implemented"))
 }
 
 func (UnimplementedOperatorServiceHandler) RevealPersonalData(context.Context, *connect.Request[v1.RevealPersonalDataRequest]) (*connect.Response[v1.RevealPersonalDataResponse], error) {

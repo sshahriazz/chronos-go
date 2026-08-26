@@ -148,3 +148,80 @@ const (
 	// export is processing.
 	ExportFailedRestricted = "processing_restricted"
 )
+
+// ---------------------------------------------------------------------------
+// Legal holds (compliance.md §4 step 2, §7)
+// ---------------------------------------------------------------------------
+
+// LegalHoldPlaced suspends erasure and retention purges for one subject.
+//
+// # A held erasure is DEFERRED, not refused
+//
+// compliance.md §7 is explicit: "a held subject's erasure request is deferred,
+// not refused, and executes automatically when the hold lifts". That is the
+// only reading that survives both obligations at once — Article 17 gives the
+// person a right the controller cannot decline, and a litigation hold is a
+// legal duty the controller cannot ignore. Deferring honours the first as soon
+// as the second releases.
+//
+// It follows that placing a hold is not the end of anything. The request stays
+// live, its statutory clock keeps whatever meaning it had, and LegalHoldLifted
+// is what resumes it.
+//
+// # The OWNER, and why it is an operator
+//
+// §7: holds carry "a recorded justification and an owner". A hold with no owner
+// is one nobody can be asked about; one placed by "the system" is one nobody
+// decided. Only an operator can place one (operator.md §7 puts it beside the
+// other operator writes), so the owner is an operator id — a pseudonymous
+// identifier for a member of our staff.
+type LegalHoldPlaced struct {
+	SubjectID string
+
+	// PlacedBy is the operator id of whoever placed it.
+	//
+	// Not a SubjectID: an operator's pseudonym identifies them in the operator
+	// plane's own audit log, and this event lives on the TENANT's log where
+	// that pseudonym means nothing. The operator id is the stable handle across
+	// both.
+	PlacedBy string
+
+	// Matter is a REFERENCE, not a narrative: "litigation 2026-4711",
+	// "regulator request DPA-88".
+	//
+	// # Why the full justification is not here
+	//
+	// ADR-002 keeps free text out of the event log because it is where personal
+	// data hides, and a hold's justification is prose about a legal matter that
+	// very often names people — the opposing party, a complainant, a
+	// third party who is not the subject of this stream at all.
+	//
+	// The narrative IS recorded, verbatim, in operator_audit_log, which is
+	// access-controlled and retained on its own schedule. This carries the
+	// handle that joins the two, so "why is this subject held" is answerable
+	// without the tenant's permanent log holding the answer.
+	Matter string
+
+	PlacedAt time.Time
+}
+
+func (*LegalHoldPlaced) EventType() string { return "compliance.LegalHoldPlaced.v1" }
+
+// LegalHoldLifted releases a subject, and resumes any deferred erasure.
+//
+// The resumption is automatic (§7) and is a reactor's job rather than this
+// event's: lifting a hold and re-running an erasure are separate failures with
+// separate retries, and coupling them would make a transient vault error look
+// like a hold that did not lift.
+type LegalHoldLifted struct {
+	SubjectID string
+
+	// LiftedBy is the operator who released it. A hold that lapsed on its own
+	// would be a hold with a timer, and §7 gives it none — somebody decides a
+	// matter is closed.
+	LiftedBy string
+
+	LiftedAt time.Time
+}
+
+func (*LegalHoldLifted) EventType() string { return "compliance.LegalHoldLifted.v1" }

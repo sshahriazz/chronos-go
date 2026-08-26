@@ -357,6 +357,12 @@ func stubOperators(t *testing.T) *app.Operators {
 	return o
 }
 
+type stubHolds struct{}
+
+func (stubHolds) Place(context.Context, string, string, string, time.Time) error { return nil }
+
+func (stubHolds) Lift(context.Context, string, string, time.Time) (bool, error) { return false, nil }
+
 type stubOrgs struct{}
 
 func (stubOrgs) Suspend(context.Context, string, orgcontract.SuspensionReason, time.Time) (bool, error) {
@@ -369,7 +375,7 @@ func (stubOrgs) Reinstate(context.Context, string, time.Time) (bool, error) {
 
 func stubTenants(t *testing.T) *app.Tenants {
 	t.Helper()
-	x, err := app.NewTenants(stubOrgs{}, app.NewAuditor(stubEvents{}, fixedClock{}), fixedClock{}, nil)
+	x, err := app.NewTenants(stubOrgs{}, stubHolds{}, app.NewAuditor(stubEvents{}, fixedClock{}), fixedClock{}, nil)
 	if err != nil {
 		t.Fatalf("building the tenants use case: %v", err)
 	}

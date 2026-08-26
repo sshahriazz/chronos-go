@@ -794,6 +794,94 @@ message ReinstateCustomerResponse {
   ];
 }
 
+// PlaceLegalHoldRequest suspends erasure and retention purges for one subject.
+message PlaceLegalHoldRequest {
+  // The subject to hold, by pseudonym.
+  string subject_id = 1 [
+    (buf.validate.field).string = {
+      max_len: 32
+      pattern: "^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // A matter REFERENCE — "litigation 2026-4711", "regulator request DPA-88".
+  //
+  // A handle, not a narrative. It goes onto the TENANT's permanent event log,
+  // and ADR-002 keeps prose out of there because prose about a legal matter
+  // names people — the opposing party, a complainant, a third party who is not
+  // the subject of this stream at all.
+  string matter = 2 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_len: 120
+    }
+  ];
+
+  // The full justification, which goes to the OPERATOR audit log alone.
+  //
+  // The split is the point: the tenant's log carries a handle that joins the
+  // two, and the narrative lives in a store with access controls and its own
+  // retention schedule.
+  string reason = 3 [
+    (buf.validate.field).string = {
+      min_len: 8
+      max_len: 500
+    }
+  ];
+}
+
+// PlaceLegalHoldResponse reports the state after the call.
+message PlaceLegalHoldResponse {
+  // Always true when the call succeeded: a second hold over an
+  // already-held subject is REFUSED rather than absorbed, because one silently
+  // absorbed would be released by lifting the first with nothing recording that
+  // two matters overlapped.
+  bool changed = 1;
+
+  // The audit entry carrying the full justification.
+  string audit_entry_id = 2 [
+    (buf.validate.field).string = {
+      max_len: 32
+      pattern: "^audit_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
+// LiftLegalHoldRequest releases a subject.
+message LiftLegalHoldRequest {
+  // The subject to release.
+  string subject_id = 1 [
+    (buf.validate.field).string = {
+      max_len: 32
+      pattern: "^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+
+  // Why the matter is closed. Mandatory: a hold lifted with no recorded reason
+  // is one nobody can defend having lifted, and lifting is what lets a deferred
+  // erasure destroy the data the hold was preserving.
+  string reason = 2 [
+    (buf.validate.field).string = {
+      min_len: 8
+      max_len: 500
+    }
+  ];
+}
+
+// LiftLegalHoldResponse reports the state after the call.
+message LiftLegalHoldResponse {
+  // False means they were not held.
+  bool changed = 1;
+
+  // The audit entry.
+  string audit_entry_id = 2 [
+    (buf.validate.field).string = {
+      max_len: 32
+      pattern: "^audit_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
 // ---------------------------------------------------------------------------
 // The service
 // ---------------------------------------------------------------------------
@@ -994,6 +1082,46 @@ service OperatorService {
   // and the state machine already says so. An operator-only path would be a
   // second way to reach one state, which is how two paths drift.
   rpc ReinstateCustomer(ReinstateCustomerRequest) returns (ReinstateCustomerResponse) {
+    option (chronos.operator.v1.capability) = "suspend_organization";
+    option (chronos.operator.v1.audit) = AUDIT_ACTION_CHANGED_TENANT;
+  }
+
+  // PlaceLegalHold suspends erasure and retention purges for one subject
+  // (compliance.md §4 step 2, §7).
+  //
+  // # A held erasure is DEFERRED, not refused
+  //
+  // §7: "a held subject's erasure request is deferred, not refused, and
+  // executes automatically when the hold lifts". That is the only reading that
+  // survives both obligations at once — Article 17 gives a right the controller
+  // cannot decline, and a litigation hold is a duty it cannot ignore.
+  //
+  // # It notifies nobody, and that is the law rather than convenience
+  //
+  // Telling somebody a hold has been placed on their data is TIPPING OFF: it
+  // names an investigation to its subject at the moment when doing so is most
+  // damaging, and in several jurisdictions it is itself an offence.
+  //
+  // What they ARE owed is Article 12(4)'s answer to their own erasure request,
+  // saying it is deferred and why — a response to a request rather than a
+  // broadcast about our decision. That belongs to the DSAR response path.
+  //
+  // # `suspend_organization`, because this is the same class of act
+  //
+  // Placing a hold overrides a statutory right, and lifting one lets a deferred
+  // erasure destroy data that was being preserved for a court. It sits with the
+  // other operator_admin-only capability rather than with the billing writes,
+  // and like it, nobody may break the glass to reach it.
+  rpc PlaceLegalHold(PlaceLegalHoldRequest) returns (PlaceLegalHoldResponse) {
+    option (chronos.operator.v1.capability) = "suspend_organization";
+    option (chronos.operator.v1.audit) = AUDIT_ACTION_CHANGED_TENANT;
+  }
+
+  // LiftLegalHold releases a subject, and resumes any deferred erasure.
+  //
+  // The resumption is compliance's, not this call's — coupling them would make
+  // a transient vault error look like a hold that did not lift.
+  rpc LiftLegalHold(LiftLegalHoldRequest) returns (LiftLegalHoldResponse) {
     option (chronos.operator.v1.capability) = "suspend_organization";
     option (chronos.operator.v1.audit) = AUDIT_ACTION_CHANGED_TENANT;
   }

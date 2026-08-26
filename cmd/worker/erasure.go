@@ -10,6 +10,7 @@ import (
 	"github.com/chronos/chronos-go/internal/adapter/piivault"
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
 	temporaladapter "github.com/chronos/chronos-go/internal/adapter/temporal"
+	complianceadapter "github.com/chronos/chronos-go/internal/modules/compliance/adapter"
 	complianceapp "github.com/chronos/chronos-go/internal/modules/compliance/app"
 	compliancereactor "github.com/chronos/chronos-go/internal/modules/compliance/reactor"
 	identitypg "github.com/chronos/chronos-go/internal/modules/identity/adapter/postgres"
@@ -112,11 +113,29 @@ func newErasure(d *dependencies, log *slog.Logger) (*complianceapp.Erasure, erro
 	log.Info("erasure orchestration constructed",
 		"object_prefixes", len(subjectObjectPrefixes("probe")))
 
+	// compliance.md §4 step 2. It reads the STREAM rather than a projection,
+	// because a hold placed moments before an erasure runs would not yet be in
+	// a projection — and the check would then say "not held" and destroy a key
+	// under a live court order, with no correcting poll afterwards.
+	//
+	// It uses compliance's OWN codec and registry rather than this binary's
+	// shared one, for the reason newComplianceCodec exists: a Repository decodes
+	// through UpcasterRegistry.Apply, which refuses a type with no registered
+	// version (ADR-029) — and the shared codec registers event TYPES without
+	// registering their schema versions, because the reactors that use it decode
+	// through codec.Unmarshal directly and never go near a repository.
+	holdCodec, holdUpcasters := newComplianceCodec()
+	holds, err := complianceadapter.NewLegalHolds(d.store, holdCodec, holdUpcasters)
+	if err != nil {
+		return nil, fmt.Errorf("legal holds: %w", err)
+	}
+
 	return complianceapp.NewErasure(complianceapp.ErasureDeps{
 		Vault:    vaultEraser{vault: d.piiVault},
 		Accounts: accountEraser{accounts: d.accountErasure},
 		Objects:  objects,
 		Confirm:  confirmation,
+		Holds:    holds,
 		Now:      clock.System{}.Now,
 	})
 }

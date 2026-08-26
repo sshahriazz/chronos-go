@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
+	"github.com/chronos/chronos-go/internal/modules/compliance"
 	"github.com/chronos/chronos-go/internal/modules/organization"
 	"github.com/chronos/chronos-go/internal/modules/workspace"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
@@ -30,4 +31,17 @@ func registerTenantEvents(codec *eventcodec.JSON, upcasters *eventsourcing.Upcas
 
 	workspace.RegisterEvents(codec)
 	workspace.RegisterSchemas(upcasters)
+
+	// compliance, because this plane WRITES its LegalHold aggregate — nothing
+	// else can place a hold, since a hold needs an owner and a recorded
+	// justification and both are operator concerns.
+	//
+	// It is the first module registered here for a write rather than for the
+	// directory, which is the case the comment above anticipated: a module the
+	// directory does not project, whose events this binary must still decode.
+	// Without it the repository would refuse the read rather than fail
+	// silently — Repository.decode calls UpcasterRegistry.Apply, which refuses a
+	// type with no registered version (ADR-029).
+	compliance.RegisterEvents(codec)
+	compliance.RegisterSchemas(upcasters)
 }

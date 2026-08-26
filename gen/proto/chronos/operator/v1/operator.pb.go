@@ -2165,6 +2165,249 @@ func (x *ReinstateCustomerResponse) GetAuditEntryId() string {
 	return ""
 }
 
+// PlaceLegalHoldRequest suspends erasure and retention purges for one subject.
+type PlaceLegalHoldRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The subject to hold, by pseudonym.
+	SubjectId string `protobuf:"bytes,1,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
+	// A matter REFERENCE — "litigation 2026-4711", "regulator request DPA-88".
+	//
+	// A handle, not a narrative. It goes onto the TENANT's permanent event log,
+	// and ADR-002 keeps prose out of there because prose about a legal matter
+	// names people — the opposing party, a complainant, a third party who is not
+	// the subject of this stream at all.
+	Matter string `protobuf:"bytes,2,opt,name=matter,proto3" json:"matter,omitempty"`
+	// The full justification, which goes to the OPERATOR audit log alone.
+	//
+	// The split is the point: the tenant's log carries a handle that joins the
+	// two, and the narrative lives in a store with access controls and its own
+	// retention schedule.
+	Reason        string `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PlaceLegalHoldRequest) Reset() {
+	*x = PlaceLegalHoldRequest{}
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PlaceLegalHoldRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PlaceLegalHoldRequest) ProtoMessage() {}
+
+func (x *PlaceLegalHoldRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PlaceLegalHoldRequest.ProtoReflect.Descriptor instead.
+func (*PlaceLegalHoldRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_operator_v1_operator_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *PlaceLegalHoldRequest) GetSubjectId() string {
+	if x != nil {
+		return x.SubjectId
+	}
+	return ""
+}
+
+func (x *PlaceLegalHoldRequest) GetMatter() string {
+	if x != nil {
+		return x.Matter
+	}
+	return ""
+}
+
+func (x *PlaceLegalHoldRequest) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+// PlaceLegalHoldResponse reports the state after the call.
+type PlaceLegalHoldResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Always true when the call succeeded: a second hold over an
+	// already-held subject is REFUSED rather than absorbed, because one silently
+	// absorbed would be released by lifting the first with nothing recording that
+	// two matters overlapped.
+	Changed bool `protobuf:"varint,1,opt,name=changed,proto3" json:"changed,omitempty"`
+	// The audit entry carrying the full justification.
+	AuditEntryId  string `protobuf:"bytes,2,opt,name=audit_entry_id,json=auditEntryId,proto3" json:"audit_entry_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PlaceLegalHoldResponse) Reset() {
+	*x = PlaceLegalHoldResponse{}
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PlaceLegalHoldResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PlaceLegalHoldResponse) ProtoMessage() {}
+
+func (x *PlaceLegalHoldResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PlaceLegalHoldResponse.ProtoReflect.Descriptor instead.
+func (*PlaceLegalHoldResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_operator_v1_operator_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *PlaceLegalHoldResponse) GetChanged() bool {
+	if x != nil {
+		return x.Changed
+	}
+	return false
+}
+
+func (x *PlaceLegalHoldResponse) GetAuditEntryId() string {
+	if x != nil {
+		return x.AuditEntryId
+	}
+	return ""
+}
+
+// LiftLegalHoldRequest releases a subject.
+type LiftLegalHoldRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The subject to release.
+	SubjectId string `protobuf:"bytes,1,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
+	// Why the matter is closed. Mandatory: a hold lifted with no recorded reason
+	// is one nobody can defend having lifted, and lifting is what lets a deferred
+	// erasure destroy the data the hold was preserving.
+	Reason        string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LiftLegalHoldRequest) Reset() {
+	*x = LiftLegalHoldRequest{}
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LiftLegalHoldRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LiftLegalHoldRequest) ProtoMessage() {}
+
+func (x *LiftLegalHoldRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LiftLegalHoldRequest.ProtoReflect.Descriptor instead.
+func (*LiftLegalHoldRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_operator_v1_operator_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *LiftLegalHoldRequest) GetSubjectId() string {
+	if x != nil {
+		return x.SubjectId
+	}
+	return ""
+}
+
+func (x *LiftLegalHoldRequest) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+// LiftLegalHoldResponse reports the state after the call.
+type LiftLegalHoldResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// False means they were not held.
+	Changed bool `protobuf:"varint,1,opt,name=changed,proto3" json:"changed,omitempty"`
+	// The audit entry.
+	AuditEntryId  string `protobuf:"bytes,2,opt,name=audit_entry_id,json=auditEntryId,proto3" json:"audit_entry_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LiftLegalHoldResponse) Reset() {
+	*x = LiftLegalHoldResponse{}
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LiftLegalHoldResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LiftLegalHoldResponse) ProtoMessage() {}
+
+func (x *LiftLegalHoldResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LiftLegalHoldResponse.ProtoReflect.Descriptor instead.
+func (*LiftLegalHoldResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_operator_v1_operator_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *LiftLegalHoldResponse) GetChanged() bool {
+	if x != nil {
+		return x.Changed
+	}
+	return false
+}
+
+func (x *LiftLegalHoldResponse) GetAuditEntryId() string {
+	if x != nil {
+		return x.AuditEntryId
+	}
+	return ""
+}
+
 var File_chronos_operator_v1_operator_proto protoreflect.FileDescriptor
 
 const file_chronos_operator_v1_operator_proto_rawDesc = "" +
@@ -2324,7 +2567,24 @@ const file_chronos_operator_v1_operator_proto_rawDesc = "" +
 	"\xbaH\ar\x05\x10\b\x18\xf4\x03R\x06reason\"\x89\x01\n" +
 	"\x19ReinstateCustomerResponse\x12\x18\n" +
 	"\achanged\x18\x01 \x01(\bR\achanged\x12R\n" +
-	"\x0eaudit_entry_id\x18\x02 \x01(\tB,\xbaH)r'\x18 2#^audit_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\fauditEntryId2\x9c\x0f\n" +
+	"\x0eaudit_entry_id\x18\x02 \x01(\tB,\xbaH)r'\x18 2#^audit_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\fauditEntryId\"\xaa\x01\n" +
+	"\x15PlaceLegalHoldRequest\x12J\n" +
+	"\n" +
+	"subject_id\x18\x01 \x01(\tB+\xbaH(r&\x18 2\"^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\tsubjectId\x12!\n" +
+	"\x06matter\x18\x02 \x01(\tB\t\xbaH\x06r\x04\x10\x01\x18xR\x06matter\x12\"\n" +
+	"\x06reason\x18\x03 \x01(\tB\n" +
+	"\xbaH\ar\x05\x10\b\x18\xf4\x03R\x06reason\"\x86\x01\n" +
+	"\x16PlaceLegalHoldResponse\x12\x18\n" +
+	"\achanged\x18\x01 \x01(\bR\achanged\x12R\n" +
+	"\x0eaudit_entry_id\x18\x02 \x01(\tB,\xbaH)r'\x18 2#^audit_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\fauditEntryId\"\x86\x01\n" +
+	"\x14LiftLegalHoldRequest\x12J\n" +
+	"\n" +
+	"subject_id\x18\x01 \x01(\tB+\xbaH(r&\x18 2\"^subj_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\tsubjectId\x12\"\n" +
+	"\x06reason\x18\x02 \x01(\tB\n" +
+	"\xbaH\ar\x05\x10\b\x18\xf4\x03R\x06reason\"\x85\x01\n" +
+	"\x15LiftLegalHoldResponse\x12\x18\n" +
+	"\achanged\x18\x01 \x01(\bR\achanged\x12R\n" +
+	"\x0eaudit_entry_id\x18\x02 \x01(\tB,\xbaH)r'\x18 2#^audit_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\fauditEntryId2\xad\x11\n" +
 	"\x0fOperatorService\x12f\n" +
 	"\vBeginSignIn\x12'.chronos.operator.v1.BeginSignInRequest\x1a(.chronos.operator.v1.BeginSignInResponse\"\x04\x98\xb2\x19\x01\x12o\n" +
 	"\x0eCompleteSignIn\x12*.chronos.operator.v1.CompleteSignInRequest\x1a+.chronos.operator.v1.CompleteSignInResponse\"\x04\x98\xb2\x19\x01\x12l\n" +
@@ -2339,7 +2599,9 @@ const file_chronos_operator_v1_operator_proto_rawDesc = "" +
 	"\rListCustomers\x12).chronos.operator.v1.ListCustomersRequest\x1a*.chronos.operator.v1.ListCustomersResponse\"\x16\x8a\xb2\x19\x0eview_customers\x90\xb2\x19\x03\x12x\n" +
 	"\vGetCustomer\x12'.chronos.operator.v1.GetCustomerRequest\x1a(.chronos.operator.v1.GetCustomerResponse\"\x16\x8a\xb2\x19\x0eview_customers\x90\xb2\x19\x03\x12\x8a\x01\n" +
 	"\x0fSuspendCustomer\x12+.chronos.operator.v1.SuspendCustomerRequest\x1a,.chronos.operator.v1.SuspendCustomerResponse\"\x1c\x8a\xb2\x19\x14suspend_organization\x90\xb2\x19\a\x12\x90\x01\n" +
-	"\x11ReinstateCustomer\x12-.chronos.operator.v1.ReinstateCustomerRequest\x1a..chronos.operator.v1.ReinstateCustomerResponse\"\x1c\x8a\xb2\x19\x14suspend_organization\x90\xb2\x19\a\x12\x91\x01\n" +
+	"\x11ReinstateCustomer\x12-.chronos.operator.v1.ReinstateCustomerRequest\x1a..chronos.operator.v1.ReinstateCustomerResponse\"\x1c\x8a\xb2\x19\x14suspend_organization\x90\xb2\x19\a\x12\x87\x01\n" +
+	"\x0ePlaceLegalHold\x12*.chronos.operator.v1.PlaceLegalHoldRequest\x1a+.chronos.operator.v1.PlaceLegalHoldResponse\"\x1c\x8a\xb2\x19\x14suspend_organization\x90\xb2\x19\a\x12\x84\x01\n" +
+	"\rLiftLegalHold\x12).chronos.operator.v1.LiftLegalHoldRequest\x1a*.chronos.operator.v1.LiftLegalHoldResponse\"\x1c\x8a\xb2\x19\x14suspend_organization\x90\xb2\x19\a\x12\x91\x01\n" +
 	"\x12RevealPersonalData\x12..chronos.operator.v1.RevealPersonalDataRequest\x1a/.chronos.operator.v1.RevealPersonalDataResponse\"\x1a\x8a\xb2\x19\x12view_personal_data\x90\xb2\x19\x04B\xde\x01\n" +
 	"\x17com.chronos.operator.v1B\rOperatorProtoP\x01ZFgithub.com/chronos/chronos-go/gen/proto/chronos/operator/v1;operatorv1\xa2\x02\x03COX\xaa\x02\x13Chronos.Operator.V1\xca\x02\x13Chronos\\Operator\\V1\xe2\x02\x1fChronos\\Operator\\V1\\GPBMetadata\xea\x02\x15Chronos::Operator::V1b\x06proto3"
 
@@ -2355,7 +2617,7 @@ func file_chronos_operator_v1_operator_proto_rawDescGZIP() []byte {
 	return file_chronos_operator_v1_operator_proto_rawDescData
 }
 
-var file_chronos_operator_v1_operator_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
+var file_chronos_operator_v1_operator_proto_msgTypes = make([]protoimpl.MessageInfo, 37)
 var file_chronos_operator_v1_operator_proto_goTypes = []any{
 	(*BeginSignInRequest)(nil),         // 0: chronos.operator.v1.BeginSignInRequest
 	(*BeginSignInResponse)(nil),        // 1: chronos.operator.v1.BeginSignInResponse
@@ -2389,23 +2651,27 @@ var file_chronos_operator_v1_operator_proto_goTypes = []any{
 	(*SuspendCustomerResponse)(nil),    // 29: chronos.operator.v1.SuspendCustomerResponse
 	(*ReinstateCustomerRequest)(nil),   // 30: chronos.operator.v1.ReinstateCustomerRequest
 	(*ReinstateCustomerResponse)(nil),  // 31: chronos.operator.v1.ReinstateCustomerResponse
-	nil,                                // 32: chronos.operator.v1.RevealPersonalDataResponse.FieldsEntry
-	(*timestamppb.Timestamp)(nil),      // 33: google.protobuf.Timestamp
+	(*PlaceLegalHoldRequest)(nil),      // 32: chronos.operator.v1.PlaceLegalHoldRequest
+	(*PlaceLegalHoldResponse)(nil),     // 33: chronos.operator.v1.PlaceLegalHoldResponse
+	(*LiftLegalHoldRequest)(nil),       // 34: chronos.operator.v1.LiftLegalHoldRequest
+	(*LiftLegalHoldResponse)(nil),      // 35: chronos.operator.v1.LiftLegalHoldResponse
+	nil,                                // 36: chronos.operator.v1.RevealPersonalDataResponse.FieldsEntry
+	(*timestamppb.Timestamp)(nil),      // 37: google.protobuf.Timestamp
 }
 var file_chronos_operator_v1_operator_proto_depIdxs = []int32{
-	33, // 0: chronos.operator.v1.BeginSignInResponse.expires_at:type_name -> google.protobuf.Timestamp
-	33, // 1: chronos.operator.v1.CompleteSignInResponse.expires_at:type_name -> google.protobuf.Timestamp
-	33, // 2: chronos.operator.v1.FinishWebAuthnResponse.expires_at:type_name -> google.protobuf.Timestamp
-	33, // 3: chronos.operator.v1.Customer.trial_ends_at:type_name -> google.protobuf.Timestamp
-	33, // 4: chronos.operator.v1.Customer.last_active_at:type_name -> google.protobuf.Timestamp
-	33, // 5: chronos.operator.v1.Customer.suspended_at:type_name -> google.protobuf.Timestamp
-	33, // 6: chronos.operator.v1.Customer.created_at:type_name -> google.protobuf.Timestamp
+	37, // 0: chronos.operator.v1.BeginSignInResponse.expires_at:type_name -> google.protobuf.Timestamp
+	37, // 1: chronos.operator.v1.CompleteSignInResponse.expires_at:type_name -> google.protobuf.Timestamp
+	37, // 2: chronos.operator.v1.FinishWebAuthnResponse.expires_at:type_name -> google.protobuf.Timestamp
+	37, // 3: chronos.operator.v1.Customer.trial_ends_at:type_name -> google.protobuf.Timestamp
+	37, // 4: chronos.operator.v1.Customer.last_active_at:type_name -> google.protobuf.Timestamp
+	37, // 5: chronos.operator.v1.Customer.suspended_at:type_name -> google.protobuf.Timestamp
+	37, // 6: chronos.operator.v1.Customer.created_at:type_name -> google.protobuf.Timestamp
 	11, // 7: chronos.operator.v1.ListCustomersResponse.customers:type_name -> chronos.operator.v1.Customer
 	11, // 8: chronos.operator.v1.GetCustomerResponse.customer:type_name -> chronos.operator.v1.Customer
-	32, // 9: chronos.operator.v1.RevealPersonalDataResponse.fields:type_name -> chronos.operator.v1.RevealPersonalDataResponse.FieldsEntry
-	33, // 10: chronos.operator.v1.RequestElevationResponse.expires_at:type_name -> google.protobuf.Timestamp
-	33, // 11: chronos.operator.v1.Operator.disabled_at:type_name -> google.protobuf.Timestamp
-	33, // 12: chronos.operator.v1.Operator.provisioned_at:type_name -> google.protobuf.Timestamp
+	36, // 9: chronos.operator.v1.RevealPersonalDataResponse.fields:type_name -> chronos.operator.v1.RevealPersonalDataResponse.FieldsEntry
+	37, // 10: chronos.operator.v1.RequestElevationResponse.expires_at:type_name -> google.protobuf.Timestamp
+	37, // 11: chronos.operator.v1.Operator.disabled_at:type_name -> google.protobuf.Timestamp
+	37, // 12: chronos.operator.v1.Operator.provisioned_at:type_name -> google.protobuf.Timestamp
 	19, // 13: chronos.operator.v1.ListOperatorsResponse.operators:type_name -> chronos.operator.v1.Operator
 	0,  // 14: chronos.operator.v1.OperatorService.BeginSignIn:input_type -> chronos.operator.v1.BeginSignInRequest
 	2,  // 15: chronos.operator.v1.OperatorService.CompleteSignIn:input_type -> chronos.operator.v1.CompleteSignInRequest
@@ -2421,24 +2687,28 @@ var file_chronos_operator_v1_operator_proto_depIdxs = []int32{
 	13, // 25: chronos.operator.v1.OperatorService.GetCustomer:input_type -> chronos.operator.v1.GetCustomerRequest
 	28, // 26: chronos.operator.v1.OperatorService.SuspendCustomer:input_type -> chronos.operator.v1.SuspendCustomerRequest
 	30, // 27: chronos.operator.v1.OperatorService.ReinstateCustomer:input_type -> chronos.operator.v1.ReinstateCustomerRequest
-	15, // 28: chronos.operator.v1.OperatorService.RevealPersonalData:input_type -> chronos.operator.v1.RevealPersonalDataRequest
-	1,  // 29: chronos.operator.v1.OperatorService.BeginSignIn:output_type -> chronos.operator.v1.BeginSignInResponse
-	3,  // 30: chronos.operator.v1.OperatorService.CompleteSignIn:output_type -> chronos.operator.v1.CompleteSignInResponse
-	5,  // 31: chronos.operator.v1.OperatorService.BeginWebAuthn:output_type -> chronos.operator.v1.BeginWebAuthnResponse
-	7,  // 32: chronos.operator.v1.OperatorService.FinishWebAuthn:output_type -> chronos.operator.v1.FinishWebAuthnResponse
-	9,  // 33: chronos.operator.v1.OperatorService.SignOut:output_type -> chronos.operator.v1.SignOutResponse
-	18, // 34: chronos.operator.v1.OperatorService.RequestElevation:output_type -> chronos.operator.v1.RequestElevationResponse
-	21, // 35: chronos.operator.v1.OperatorService.ProvisionOperator:output_type -> chronos.operator.v1.ProvisionOperatorResponse
-	23, // 36: chronos.operator.v1.OperatorService.ChangeOperatorRole:output_type -> chronos.operator.v1.ChangeOperatorRoleResponse
-	25, // 37: chronos.operator.v1.OperatorService.DisableOperator:output_type -> chronos.operator.v1.DisableOperatorResponse
-	27, // 38: chronos.operator.v1.OperatorService.ListOperators:output_type -> chronos.operator.v1.ListOperatorsResponse
-	12, // 39: chronos.operator.v1.OperatorService.ListCustomers:output_type -> chronos.operator.v1.ListCustomersResponse
-	14, // 40: chronos.operator.v1.OperatorService.GetCustomer:output_type -> chronos.operator.v1.GetCustomerResponse
-	29, // 41: chronos.operator.v1.OperatorService.SuspendCustomer:output_type -> chronos.operator.v1.SuspendCustomerResponse
-	31, // 42: chronos.operator.v1.OperatorService.ReinstateCustomer:output_type -> chronos.operator.v1.ReinstateCustomerResponse
-	16, // 43: chronos.operator.v1.OperatorService.RevealPersonalData:output_type -> chronos.operator.v1.RevealPersonalDataResponse
-	29, // [29:44] is the sub-list for method output_type
-	14, // [14:29] is the sub-list for method input_type
+	32, // 28: chronos.operator.v1.OperatorService.PlaceLegalHold:input_type -> chronos.operator.v1.PlaceLegalHoldRequest
+	34, // 29: chronos.operator.v1.OperatorService.LiftLegalHold:input_type -> chronos.operator.v1.LiftLegalHoldRequest
+	15, // 30: chronos.operator.v1.OperatorService.RevealPersonalData:input_type -> chronos.operator.v1.RevealPersonalDataRequest
+	1,  // 31: chronos.operator.v1.OperatorService.BeginSignIn:output_type -> chronos.operator.v1.BeginSignInResponse
+	3,  // 32: chronos.operator.v1.OperatorService.CompleteSignIn:output_type -> chronos.operator.v1.CompleteSignInResponse
+	5,  // 33: chronos.operator.v1.OperatorService.BeginWebAuthn:output_type -> chronos.operator.v1.BeginWebAuthnResponse
+	7,  // 34: chronos.operator.v1.OperatorService.FinishWebAuthn:output_type -> chronos.operator.v1.FinishWebAuthnResponse
+	9,  // 35: chronos.operator.v1.OperatorService.SignOut:output_type -> chronos.operator.v1.SignOutResponse
+	18, // 36: chronos.operator.v1.OperatorService.RequestElevation:output_type -> chronos.operator.v1.RequestElevationResponse
+	21, // 37: chronos.operator.v1.OperatorService.ProvisionOperator:output_type -> chronos.operator.v1.ProvisionOperatorResponse
+	23, // 38: chronos.operator.v1.OperatorService.ChangeOperatorRole:output_type -> chronos.operator.v1.ChangeOperatorRoleResponse
+	25, // 39: chronos.operator.v1.OperatorService.DisableOperator:output_type -> chronos.operator.v1.DisableOperatorResponse
+	27, // 40: chronos.operator.v1.OperatorService.ListOperators:output_type -> chronos.operator.v1.ListOperatorsResponse
+	12, // 41: chronos.operator.v1.OperatorService.ListCustomers:output_type -> chronos.operator.v1.ListCustomersResponse
+	14, // 42: chronos.operator.v1.OperatorService.GetCustomer:output_type -> chronos.operator.v1.GetCustomerResponse
+	29, // 43: chronos.operator.v1.OperatorService.SuspendCustomer:output_type -> chronos.operator.v1.SuspendCustomerResponse
+	31, // 44: chronos.operator.v1.OperatorService.ReinstateCustomer:output_type -> chronos.operator.v1.ReinstateCustomerResponse
+	33, // 45: chronos.operator.v1.OperatorService.PlaceLegalHold:output_type -> chronos.operator.v1.PlaceLegalHoldResponse
+	35, // 46: chronos.operator.v1.OperatorService.LiftLegalHold:output_type -> chronos.operator.v1.LiftLegalHoldResponse
+	16, // 47: chronos.operator.v1.OperatorService.RevealPersonalData:output_type -> chronos.operator.v1.RevealPersonalDataResponse
+	31, // [31:48] is the sub-list for method output_type
+	14, // [14:31] is the sub-list for method input_type
 	14, // [14:14] is the sub-list for extension type_name
 	14, // [14:14] is the sub-list for extension extendee
 	0,  // [0:14] is the sub-list for field type_name
@@ -2456,7 +2726,7 @@ func file_chronos_operator_v1_operator_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chronos_operator_v1_operator_proto_rawDesc), len(file_chronos_operator_v1_operator_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   33,
+			NumMessages:   37,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

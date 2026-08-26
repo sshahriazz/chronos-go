@@ -12,6 +12,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -79,7 +80,32 @@ type Erasure struct {
 	accounts AccountErasure
 	objects  ObjectErasure
 	confirm  Confirmation
+	holds    LegalHolds
 	now      func() time.Time
+}
+
+// LegalHolds answers compliance.md §4 step 2: "check LegalHold → held ⇒ defer
+// and explain".
+//
+// # It is REQUIRED, not optional, and that is a deliberate reversal
+//
+// Until holds existed, this check could not be written — nothing could place
+// one, so a check against them could only ever pass. That is the shape a
+// vacuous test takes, and the worklist named it as blocked rather than pretend
+// otherwise.
+//
+// Now that holds exist, the opposite failure is the live one: an erasure path
+// constructed WITHOUT a hold checker would destroy a key that a court order
+// says must be preserved, and it would do so silently, because every other step
+// would succeed. So the constructor refuses a nil rather than treating the
+// check as an enhancement.
+type LegalHolds interface {
+	// Held reports whether this subject's data is currently held, and under
+	// which matter.
+	//
+	// An ERROR is not "not held". The caller must treat a failure to answer as
+	// a reason not to proceed — see Execute, where it defers.
+	Held(ctx context.Context, subjectID string) (matter string, held bool, err error)
 }
 
 // ErasureDeps is what Erasure needs.
@@ -88,6 +114,7 @@ type ErasureDeps struct {
 	Accounts AccountErasure
 	Objects  ObjectErasure
 	Confirm  Confirmation
+	Holds    LegalHolds
 	Now      func() time.Time
 }
 
@@ -108,14 +135,34 @@ func NewErasure(d ErasureDeps) (*Erasure, error) {
 		return nil, fmt.Errorf("compliance: a confirmation sender is required; it is the " +
 			"one notification that cannot be sent afterwards, because afterwards there is " +
 			"no address to send it to")
+	case d.Holds == nil:
+		return nil, fmt.Errorf("compliance: a legal-hold checker is required; compliance.md " +
+			"§4 step 2 gates the erasure on it, and an eraser constructed without one " +
+			"destroys a key that a court order says must be preserved — silently, because " +
+			"every other step succeeds")
 	case d.Now == nil:
 		return nil, fmt.Errorf("compliance: a clock is required")
 	}
 	return &Erasure{
 		vault: d.Vault, accounts: d.Accounts, objects: d.Objects,
-		confirm: d.Confirm, now: d.Now,
+		confirm: d.Confirm, holds: d.Holds, now: d.Now,
 	}, nil
 }
+
+// ErrHeld means a legal hold stands over this subject (compliance.md §7).
+//
+// # It is DEFERRED, not refused, and the caller is what makes that true
+//
+// §7: "a held subject's erasure request is deferred, not refused, and executes
+// automatically when the hold lifts". This error is how Execute says so; the
+// deferral itself belongs to the workflow, which does not consume the request.
+//
+// It is a distinguishable sentinel precisely so that the workflow can tell it
+// apart from a failure. A hold retried on a backoff would hammer the store for
+// however long a matter runs; a hold that ENDED the request would refuse a
+// statutory right. Neither is what §7 asks for, and both are what an
+// indistinguishable error produces.
+var ErrHeld = errors.New("compliance: a legal hold stands over this subject")
 
 // Execute erases one subject.
 //
@@ -146,6 +193,29 @@ func NewErasure(d ErasureDeps) (*Erasure, error) {
 func (e *Erasure) Execute(ctx context.Context, subjectID string) error {
 	if subjectID == "" {
 		return fmt.Errorf("compliance: an erasure needs a subject")
+	}
+
+	// STEP 2, and it comes before the confirmation as well as before the
+	// destroy.
+	//
+	// compliance.md §4 puts the hold check second, ahead of everything
+	// irreversible. It has to be ahead of the CONFIRMATION too, which the
+	// published order does not say because the published order has the
+	// confirmation last — mailing "your data has been erased" to somebody whose
+	// erasure is deferred would be a false statement about a legal obligation,
+	// and it is the one message here that cannot be retracted.
+	matter, held, err := e.holds.Held(ctx, subjectID)
+	switch {
+	case err != nil:
+		// A failure to ANSWER is not "not held". Proceeding would destroy a key
+		// on the assumption that no hold exists, which is the assumption the
+		// check was added to stop anybody making.
+		return fmt.Errorf("compliance: checking legal holds for %s: %w", subjectID, err)
+	case held:
+		// Deferred. The workflow catches this sentinel and waits for
+		// LegalHoldLifted rather than retrying or failing the request — see
+		// ErrHeld for why the distinction has to be visible in the type.
+		return fmt.Errorf("%w: matter %q", ErrHeld, matter)
 	}
 
 	if err := e.confirm.SendErasureComplete(ctx, subjectID, Retained); err != nil {

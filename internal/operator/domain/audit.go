@@ -176,10 +176,39 @@ func (a *AuditEntry) RecordTenantWrite(ev contract.OperatorChangedTenant) error 
 		return fmt.Errorf("operator: a tenant-change record needs an operator")
 	case ev.OrgID == "":
 		return fmt.Errorf("operator: a tenant-change record names exactly one organization")
+	case ev.TargetSubjectID != "":
+		return fmt.Errorf("operator: a tenant-change record names an organization OR a " +
+			"subject, never both — one scoped to both is two changes wearing one record")
 	case ev.Change == "":
 		return fmt.Errorf("operator: a tenant-change record needs to say what changed")
 	case ev.Reason == "":
 		return fmt.Errorf("operator: changing a tenant requires a recorded justification")
+	}
+	ev.ChangedAt = ev.ChangedAt.UTC()
+	eventsourcing.Record(a, &ev)
+	return nil
+}
+
+// RecordSubjectWrite records an operator change scoped to a subject.
+//
+// The same event as RecordTenantWrite with the other half of the target set,
+// and the same mandatory justification — a legal hold placed with no recorded
+// reason is one nobody can defend having placed.
+func (a *AuditEntry) RecordSubjectWrite(ev contract.OperatorChangedTenant) error {
+	switch {
+	case a.recorded:
+		return fmt.Errorf("operator: audit entry already recorded")
+	case ev.OperatorID == "":
+		return fmt.Errorf("operator: a subject-change record needs an operator")
+	case ev.TargetSubjectID == "":
+		return fmt.Errorf("operator: a subject-change record names exactly one subject")
+	case ev.OrgID != "":
+		return fmt.Errorf("operator: a subject-change record names a subject OR an " +
+			"organization, never both")
+	case ev.Change == "":
+		return fmt.Errorf("operator: a subject-change record needs to say what changed")
+	case ev.Reason == "":
+		return fmt.Errorf("operator: changing a subject requires a recorded justification")
 	}
 	ev.ChangedAt = ev.ChangedAt.UTC()
 	eventsourcing.Record(a, &ev)

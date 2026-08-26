@@ -347,6 +347,42 @@ func (s *Service) ReinstateCustomer(
 	}), nil
 }
 
+// PlaceLegalHold suspends erasure and retention purges for one subject.
+func (s *Service) PlaceLegalHold(
+	ctx context.Context, req *connect.Request[operatorv1.PlaceLegalHoldRequest],
+) (*connect.Response[operatorv1.PlaceLegalHoldResponse], error) {
+	actor, ok := ActorFrom(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, app.ErrSessionRefused)
+	}
+	res, err := s.tenants.PlaceLegalHold(ctx, actor,
+		req.Msg.GetSubjectId(), req.Msg.GetMatter(), req.Msg.GetReason())
+	if err != nil {
+		return nil, wire(err)
+	}
+	return connect.NewResponse(&operatorv1.PlaceLegalHoldResponse{
+		Changed: res.Changed, AuditEntryId: res.AuditEntryID,
+	}), nil
+}
+
+// LiftLegalHold releases a subject.
+func (s *Service) LiftLegalHold(
+	ctx context.Context, req *connect.Request[operatorv1.LiftLegalHoldRequest],
+) (*connect.Response[operatorv1.LiftLegalHoldResponse], error) {
+	actor, ok := ActorFrom(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, app.ErrSessionRefused)
+	}
+	res, err := s.tenants.LiftLegalHold(ctx, actor,
+		req.Msg.GetSubjectId(), req.Msg.GetReason())
+	if err != nil {
+		return nil, wire(err)
+	}
+	return connect.NewResponse(&operatorv1.LiftLegalHoldResponse{
+		Changed: res.Changed, AuditEntryId: res.AuditEntryID,
+	}), nil
+}
+
 // RevealPersonalData resolves one subject's vault fields.
 func (s *Service) RevealPersonalData(
 	ctx context.Context, req *connect.Request[operatorv1.RevealPersonalDataRequest],
@@ -462,7 +498,7 @@ func wire(err error) error {
 	// caller is an authenticated operator acting deliberately, and "this org is
 	// closed" is what tells them to stop rather than retry — the same reasoning
 	// as a refused break-glass, and safe for the same reason.
-	case errors.Is(err, app.ErrIllegalTransition):
+	case errors.Is(err, app.ErrIllegalTransition), errors.Is(err, app.ErrHoldRefused):
 		return connect.NewError(connect.CodeFailedPrecondition, err)
 
 	case errors.Is(err, app.ErrOperatorExists):

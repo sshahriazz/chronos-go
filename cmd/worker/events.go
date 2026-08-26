@@ -674,6 +674,45 @@ func identityNotifications(cat *notify.Catalogue) {
 	//
 	// LIFTING is silent for the ordinary reason: the person who lifted it did so
 	// deliberately and is looking at the screen that did it.
+	// ── legal holds (compliance.md §4 step 2, §7) ──────────────────────────
+	//
+	// # Silent, and the tension is real rather than resolved by shrugging
+	//
+	// A hold is placed because of litigation, a regulator or a fraud
+	// investigation. Mailing the subject "a legal hold has been placed on your
+	// data" is TIPPING OFF: it tells somebody they are under investigation, at
+	// the moment when telling them is most damaging, and in several
+	// jurisdictions doing so is itself an offence.
+	//
+	// # What the subject IS entitled to, and where it belongs
+	//
+	// Article 12(4) requires a controller that does not act on a request to say
+	// so, and why, within a month. Article 17(3)(e) is the ground: erasure does
+	// not apply where processing is necessary for the establishment, exercise or
+	// defence of legal claims.
+	//
+	// So the person asking for erasure must be told it is deferred. That is a
+	// response to THEIR REQUEST, not a broadcast triggered by our placing a
+	// hold — which is exactly the distinction that makes it not tipping off, and
+	// exactly why it is not a notification on this event.
+	//
+	// It belongs to the DSAR response path (compliance.md §3), which is unbuilt.
+	// Until it is, a held erasure defers with ErrHeld and the requester is told
+	// by whoever handles the request. That is a gap, it is named here rather
+	// than papered over, and it is the reason §3's remaining rights sit on the
+	// worklist immediately after this slice.
+	cat.Silent[complianceevents.LegalHoldPlaced](
+		"telling somebody a legal hold has been placed on their data is tipping off — it " +
+			"names an investigation to its subject, and in several jurisdictions doing so " +
+			"is an offence. What they ARE owed under Article 12(4) is an answer to their " +
+			"OWN erasure request saying it is deferred and why, which is a response to a " +
+			"request rather than a broadcast about our decision, and belongs to the DSAR " +
+			"response path (compliance.md §3)")
+	cat.Silent[complianceevents.LegalHoldLifted](
+		"the same reasoning in reverse: a person never told a hold was placed cannot be " +
+			"told it was lifted. What lifting DOES do is resume a deferred erasure " +
+			"automatically (§7), and the erasure's own confirmation is what reaches them")
+
 	cat.Silent[complianceevents.ProcessingRestricted](
 		"telling somebody we have stopped contacting them is contacting them. The " +
 			"dispatcher would suppress it anyway, because the subject is restricted — " +

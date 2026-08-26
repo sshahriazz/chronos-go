@@ -502,9 +502,17 @@ type OperatorChangedTenant struct {
 	OperatorID string
 	SubjectID  string
 
-	// OrgID is the tenant that was changed. Always present — unlike a list,
-	// every write here names exactly one.
+	// OrgID is the tenant that was changed, when the change was scoped to an
+	// organization — a suspension, a reinstatement.
 	OrgID string
+
+	// TargetSubjectID is the person the change was about, when it was scoped to
+	// a SUBJECT rather than to an organization — a legal hold.
+	//
+	// Exactly one of OrgID and TargetSubjectID is set, and the domain enforces
+	// it: a change scoped to neither names nobody, and one scoped to both is two
+	// changes wearing one record.
+	TargetSubjectID string
 
 	// Change is what was done: "suspended", "reinstated". A closed vocabulary
 	// in practice, kept as a string for the same reason
