@@ -99,6 +99,13 @@ func run(addr string, log *slog.Logger) error {
 	deps, closeDeps := newDependencies(cfg, log)
 	defer closeDeps()
 
+	// The one dependency failure that stops the process. See dependencies.fatal
+	// and verifyKEK: a key store that is briefly unreachable is survivable and a
+	// key that cannot decrypt this installation's data is not.
+	if deps.fatal != nil {
+		return deps.fatal
+	}
+
 	startedAt := deps.clock.Now()
 
 	// The movable clock (ADR-054). Disabled everywhere but local, and config

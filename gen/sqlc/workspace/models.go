@@ -108,6 +108,15 @@ type InvoiceView struct {
 	UpdatedAt            pgtype.Timestamptz
 }
 
+// One wrapped value proving the KEK still decrypts what this installation encrypted (ADR-028). Checked at startup; a mismatch means every wrapped data key in the database is undecryptable and the process refuses to start.
+type KekCanary struct {
+	ID         bool
+	KekName    string
+	Wrapped    []byte
+	CreatedAt  pgtype.Timestamptz
+	VerifiedAt pgtype.Timestamptz
+}
+
 // Authentication outcomes. subject_id is NULL when the identifier matched no account.
 type LoginHistoryView struct {
 	ID         int64

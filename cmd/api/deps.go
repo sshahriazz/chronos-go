@@ -61,6 +61,14 @@ import (
 // designed outcome. Only genuinely malformed configuration stops startup, and
 // that is caught by config.Load before we get here.
 type dependencies struct {
+	// fatal is the ONE dependency failure that must stop the process.
+	//
+	// ADR-010 says the server stays resilient, and every other unreachable
+	// dependency is logged and survived. This field exists for the single case
+	// where surviving is worse than not starting: a key-encryption key that
+	// cannot decrypt this installation's data. See verifyKEK.
+	fatal error
+
 	probes  []health.Probe
 	closes  []func()
 	metrics *obs.Metrics
@@ -551,10 +559,35 @@ func newDependencies(cfg *config.Config, log *slog.Logger) (*dependencies, func(
 			// resolves at most one subject per request, so a cache would buy nothing
 			// and would widen the window in which an erased subject's key is still
 			// usable in a replica that missed its invalidation (ADR-041).
-			v := piivault.New(pgadapter.New(d.pool),
-				openbao.NewKeyRing(bc, cfg.OpenBao.KEKName))
+			ring := openbao.NewKeyRing(bc, cfg.OpenBao.KEKName)
+			v := piivault.New(pgadapter.New(d.pool), ring)
 			d.vault = vaultOrNil(v)
 			d.piiVault = v
+
+			// THE KEK CANARY, and it is FATAL.
+			//
+			// Every subject's data key is wrapped by this key. If it has been
+			// replaced rather than rotated — a backup restored from before it, a
+			// migration without the key material, an operator recreating it, an
+			// in-memory instance restarting — then every wrapped data key in the
+			// database is undecryptable, permanently.
+			//
+			// Nothing else notices. The probe above reports HEALTHY, because
+			// OpenBao is healthy; it simply holds a different key. Accounts
+			// authenticate normally, because authentication touches no personal
+			// data. What fails is every notification, one at a time, as each tries
+			// to turn a pseudonym into an address — which reads as undelivered
+			// mail rather than as data loss, and that is how a catastrophe gets
+			// diagnosed as a mail problem for a week.
+			//
+			// So this is the ONE dependency failure that stops the process. ADR-010
+			// says the server stays resilient, and a key store that is briefly
+			// unreachable still gets that treatment — it comes back and the data is
+			// fine. A key store holding the WRONG KEY never comes back on its own,
+			// and every request served meanwhile is one that could not read a single
+			// subject's data. Refusing to start turns a silent permanent loss into a
+			// deploy that visibly did not happen, while a rollback is still possible.
+			d.fatal = verifyKEK(cfg, d, ring, log)
 		}
 	}
 
@@ -834,4 +867,49 @@ func (v vaultProfile) Profile(
 // for.
 func subjectObjectPrefixes(subjectID string) []string {
 	return []string{profiledomain.AvatarPrefix(subjectID)}
+}
+
+// verifyKEK proves the key-encryption key still decrypts what this installation
+// encrypted, and returns the error that must stop the boot.
+//
+// See the call site for why this one is fatal when nothing else is.
+func verifyKEK(
+	cfg *config.Config, d *dependencies, ring *openbao.KeyRing, log *slog.Logger,
+) error {
+	canary, err := pgadapter.NewKEKCanary(pgadapter.New(d.pool))
+	if err != nil {
+		return fmt.Errorf("kek canary: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if err := pii.VerifyKEK(ctx, ring, canary, cfg.OpenBao.KEKName, d.clock.Now()); err != nil {
+		if errors.Is(err, pii.ErrKEKChanged) {
+			// The message is written for whoever is staring at a failed deploy at
+			// two in the morning, so it says what is true, what it means and what
+			// to do — not just which check failed.
+			return fmt.Errorf("THE KEY-ENCRYPTION KEY HAS CHANGED. Every subject's "+
+				"personal data in this database is encrypted under data keys wrapped "+
+				"by %q, and the key this process holds cannot decrypt them. Starting "+
+				"would serve a system where no address can be resolved, every "+
+				"notification silently fails, and nothing reports it. Restore the "+
+				"previous key material rather than recreating the key — a recreated "+
+				"key has a new value and will not decrypt anything. If this "+
+				"installation genuinely has no data to lose, drop the kek_canary row "+
+				"deliberately: %w", cfg.OpenBao.KEKName, err)
+		}
+		// Anything else — the store is unreachable, the key store is down — is
+		// TRANSIENT and gets ADR-010's treatment: it is not a changed key, and
+		// refusing to boot on it would turn a blip into an outage.
+		//
+		// LOGGED LOUDLY, because a check that cannot run is a check that is not
+		// protecting anything, and the first version of this returned nil in
+		// silence — so a permanently broken canary looked exactly like a passing
+		// one. That is the defect this whole guard exists to prevent, reproduced
+		// inside the guard itself.
+		log.Error("THE KEK CANARY DID NOT RUN; the key-encryption key is unverified and a "+
+			"replaced key would not be detected at startup", "error", err)
+		return nil
+	}
+	return nil
 }

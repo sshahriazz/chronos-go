@@ -6,6 +6,8 @@ package platformdb
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type Querier interface {
@@ -73,10 +75,19 @@ type Querier interface {
 	// the takeover above is ever loosened, this is what stops a response being
 	// replayed past the TTL that bounds how long it may be kept.
 	GetIdempotencyKey(ctx context.Context, arg GetIdempotencyKeyParams) (GetIdempotencyKeyRow, error)
+	// Queries for kek_canary.
+	GetKEKCanary(ctx context.Context) (GetKEKCanaryRow, error)
 	// The PII vault. Only ciphertext and wrapped keys cross these queries.
 	GetSubjectKey(ctx context.Context, subjectID string) (GetSubjectKeyRow, error)
 	GetValue(ctx context.Context, arg GetValueParams) ([]byte, error)
 	HasReactorProcessed(ctx context.Context, arg HasReactorProcessedParams) (bool, error)
+	// Written once, the first time a build sees an empty table.
+	//
+	// DO NOTHING on conflict rather than DO UPDATE: a second writer means two
+	// processes started against an empty table at once, and the first one's canary
+	// is as good as the second's. Overwriting would let a process that holds the
+	// WRONG key replace the proof that it is wrong.
+	InsertKEKCanary(ctx context.Context, arg InsertKEKCanaryParams) error
 	ListValues(ctx context.Context, subjectID string) ([]ListValuesRow, error)
 	// Queries for the tables the PLATFORM owns: projector checkpoints and reactor
 	// deduplication. They belong to no module — every module's projector and every
@@ -102,6 +113,9 @@ type Querier interface {
 	// Queued into the same pipelined round trip as the rows it describes, so that
 	// rows and checkpoint commit together (ADR-019).
 	SaveCheckpoint(ctx context.Context, arg SaveCheckpointParams) error
+	// Record that the canary verified, so an operator can see the check is running
+	// rather than assuming it.
+	TouchKEKCanary(ctx context.Context, verifiedAt pgtype.Timestamptz) error
 }
 
 var _ Querier = (*Queries)(nil)
