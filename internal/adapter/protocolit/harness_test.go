@@ -138,30 +138,25 @@ import (
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
 	"github.com/chronos/chronos-go/internal/adapter/seaweedfs"
 	"github.com/chronos/chronos-go/internal/modules/compliance"
-	complianceprojection "github.com/chronos/chronos-go/internal/modules/compliance/projection"
 	"github.com/chronos/chronos-go/internal/modules/identity"
 	"github.com/chronos/chronos-go/internal/modules/identity/adapter/blindindex"
 	identitypg "github.com/chronos/chronos-go/internal/modules/identity/adapter/postgres"
 	"github.com/chronos/chronos-go/internal/modules/identity/adapter/token"
 	"github.com/chronos/chronos-go/internal/modules/identity/app"
 	"github.com/chronos/chronos-go/internal/modules/identity/domain"
-	identityprojection "github.com/chronos/chronos-go/internal/modules/identity/projection"
 	"github.com/chronos/chronos-go/internal/modules/notification"
 	notificationcontract "github.com/chronos/chronos-go/internal/modules/notification/contract"
 	notificationdomain "github.com/chronos/chronos-go/internal/modules/notification/domain"
-	notificationprojection "github.com/chronos/chronos-go/internal/modules/notification/projection"
 	"github.com/chronos/chronos-go/internal/modules/organization"
-	organizationprojection "github.com/chronos/chronos-go/internal/modules/organization/projection"
 	"github.com/chronos/chronos-go/internal/modules/profile"
-	profileprojection "github.com/chronos/chronos-go/internal/modules/profile/projection"
 	"github.com/chronos/chronos-go/internal/modules/workspace"
-	workspaceprojection "github.com/chronos/chronos-go/internal/modules/workspace/projection"
 	"github.com/chronos/chronos-go/internal/platform/blob"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/db"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/platform/ids"
 	"github.com/chronos/chronos-go/internal/platform/projection"
+	"github.com/chronos/chronos-go/internal/projections"
 	"github.com/chronos/chronos-go/internal/server/interceptor"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pquerna/otp"
@@ -342,6 +337,20 @@ func newHarness() (*harness, error) {
 	env["API_PORT"] = strconv.Itoa(port)
 	env["CLOCK_CONTROL_ENABLED"] = "true"
 	env["CLOCK_CONTROL_ADDR"] = fmt.Sprintf("127.0.0.1:%d", clockPort)
+
+	// Set HERE rather than read from .env, and the difference is a test that
+	// silently tests nothing.
+	//
+	// The key RPCs are optional by design: with this unset the handler answers
+	// NOT_FOUND and the server starts perfectly happily. A developer whose .env
+	// predates the variable would run this whole file against a server that
+	// cannot mint a key, and every assertion below would fail for a reason that
+	// has nothing to do with what it is asserting.
+	//
+	// The value is the environment segment bound into every token digest, so it
+	// is deliberately NOT "dev" — a token minted by this suite must not be
+	// mistakable for one minted by the local stack.
+	env["IDENTITY_API_KEY_ENVIRONMENT"] = "protocolit"
 
 	hh := &harness{
 		suffix:    suffix,
@@ -1488,39 +1497,18 @@ func projectionRegistry(codec *eventcodec.JSON) []projection.Projection {
 	if codec == nil {
 		codec = eventcodec.NewJSON(eventsourcing.NewUpcasterRegistry())
 	}
-	return []projection.Projection{
-		notificationprojection.NewFeed(codec),
-		notificationprojection.NewPushSubscriptions(codec),
-		notificationprojection.NewPreferences(codec),
-		profileprojection.NewProfile(codec),
-		// Organization's status: gate 3 reads it on every request.
-		organizationprojection.NewStatus(codec),
-		// Workspace owns the membership index gate 1 verifies against, because
-		// belonging comes from organization events AND workspace joins and one
-		// table has one writer (ADR-020).
-		workspaceprojection.NewOrgMembers(codec),
-		workspaceprojection.NewMembers(codec),
-		workspaceprojection.NewInvitations(codec),
-		workspaceprojection.NewTeams(codec),
-		identityprojection.NewUser(codec),
-		identityprojection.NewSession(codec),
-		identityprojection.NewReservation(codec),
-		// Compliance's two. They were MISSING while this function's doc claimed to
-		// run every projection cmd/projector runs — so a data-subject request
-		// could be accepted here and its poll would never find a row, and a
-		// restriction could be placed and the dispatcher would never see it.
-		//
-		// The drift is the reason a test asserts this list against
-		// cmd/projector's rather than trusting the comment.
-		complianceprojection.NewRestrictions(codec),
-		// Article 21's, added with the right itself rather than after the drift
-		// test caught it. Its absence is the restriction's failure one notch
-		// quieter: an objection could be recorded here and the dispatcher would
-		// never see it, so activity and product mail would keep arriving for a
-		// person who stopped it — with the row written and nobody reading it.
-		complianceprojection.NewObjections(codec),
-		complianceprojection.NewExports(codec),
-	}
+	// THE registry, shared with cmd/projector rather than restated here.
+	//
+	// It was restated, and it drifted twice. Compliance's two were missing, so
+	// two read models were permanently empty and every assertion against them
+	// passed by never being exercised. Then identity's API key projection was
+	// missing the same way, and a service account created through the running
+	// server was invisible to the command that mints keys for it.
+	//
+	// A drift test existed and could not catch either, because it compared this
+	// copy against a third hand-written copy. One list is the only version of
+	// this that works.
+	return projections.All(codec)
 }
 
 // resetPerCallerLimits clears the per-IP counters this suite spends.

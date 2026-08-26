@@ -26,23 +26,17 @@ import (
 
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
 	"github.com/chronos/chronos-go/internal/modules/billing"
-	billingprojection "github.com/chronos/chronos-go/internal/modules/billing/projection"
 	"github.com/chronos/chronos-go/internal/modules/compliance"
-	complianceprojection "github.com/chronos/chronos-go/internal/modules/compliance/projection"
 	"github.com/chronos/chronos-go/internal/modules/identity"
-	identityprojection "github.com/chronos/chronos-go/internal/modules/identity/projection"
 	"github.com/chronos/chronos-go/internal/modules/notification"
-	notificationprojection "github.com/chronos/chronos-go/internal/modules/notification/projection"
 	"github.com/chronos/chronos-go/internal/modules/organization"
-	organizationprojection "github.com/chronos/chronos-go/internal/modules/organization/projection"
 	"github.com/chronos/chronos-go/internal/modules/profile"
-	profileprojection "github.com/chronos/chronos-go/internal/modules/profile/projection"
 	"github.com/chronos/chronos-go/internal/modules/workspace"
-	workspaceprojection "github.com/chronos/chronos-go/internal/modules/workspace/projection"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/config"
 	"github.com/chronos/chronos-go/internal/platform/obs"
 	"github.com/chronos/chronos-go/internal/platform/projection"
+	projectionregistry "github.com/chronos/chronos-go/internal/projections"
 	"github.com/chronos/chronos-go/internal/server/health"
 )
 
@@ -245,71 +239,15 @@ func serveHealth(ctx context.Context, addr string, d *dependencies, log *slog.Lo
 	}
 }
 
-// projections is the registry.
+// projections is the registry, and it lives in internal/projections.
 //
-// Every read model in the system is listed here, and nowhere else. A projection
-// that is not in this list does not run — which is the intended way to retire
-// one, and the reason the list is worth reading before a deploy.
+// Kept as a function here so the call sites below read unchanged, and so the
+// reason the list is NOT in this file has somewhere to be stated: a main
+// package is importable by nothing, so every other process that runs
+// projections had to restate the list — and two of those restatements were
+// silently missing projections.
 func projections(codec *eventcodec.JSON) []projection.Projection {
-	return []projection.Projection{
-		// One projection per table. Two writers to one table makes rebuild
-		// order undefined (CONVENTIONS §8).
-		notificationprojection.NewFeed(codec),
-		notificationprojection.NewPushSubscriptions(codec),
-		notificationprojection.NewPreferences(codec),
-
-		profileprojection.NewProfile(codec),
-
-		organizationprojection.NewStatus(codec),
-
-		// Billing's invoice mirror. Its own projection because it is its own
-		// table, and its own STREAM CATEGORY because an invoice is Stripe's
-		// object rather than part of the organization's lifecycle.
-		billingprojection.NewInvoices(codec),
-
-		// Article 18 restrictions. Its absence is silent in the dangerous
-		// direction: an empty table reads as "nobody is restricted", so
-		// processing resumes for exactly the people who asked it to stop.
-		complianceprojection.NewRestrictions(codec),
-
-		// Article 21 objections. Its absence fails in the same direction as the
-		// restriction above and is easier to miss, because it costs less when it
-		// happens: an empty table reads as "nobody has objected", so activity and
-		// product mail resumes for the people who stopped it. Nothing errors, no
-		// metric moves, and the only signal is a complaint from somebody who
-		// already told us once.
-		complianceprojection.NewObjections(codec),
-
-		// Data-subject export requests. Its absence is silent in a different
-		// direction from the one above: the workflow still builds the bundle and
-		// still records the outcome in the log, but the subject's poll finds no
-		// row — so a completed export reads as a request that was never made, and
-		// the person is told to ask again for something they already have.
-		complianceprojection.NewExports(codec),
-
-		// Both membership projections belong to WORKSPACE, including the one
-		// that builds `org_member_index`: belonging to an organization comes
-		// from organization events AND from workspace joins, one table has one
-		// writer, and `workspace -> organization` is the only direction the
-		// dependency may run (ADR-020).
-		workspaceprojection.NewOrgMembers(codec),
-		workspaceprojection.NewMembers(codec),
-		workspaceprojection.NewInvitations(codec),
-		workspaceprojection.NewTeams(codec),
-
-		identityprojection.NewUser(codec),
-		identityprojection.NewSession(codec),
-		identityprojection.NewReservation(codec),
-
-		// Service accounts and API keys (identity.md §10). ORG-SCOPED, unlike
-		// every other identity projection: its two tables carry row-level
-		// security, so every statement it queues runs under the tenant scope taken
-		// from the event.s own metadata (projection.ScopeOf). An API key event
-		// appended without an OrgID would stop this projection on the policy.s
-		// WITH CHECK rather than be projected into no tenant, which is the correct
-		// direction for that mistake to fail in.
-		identityprojection.NewAPIKey(codec),
-	}
+	return projectionregistry.All(codec)
 }
 
 // registerEvents binds every stored event type to its Go type.

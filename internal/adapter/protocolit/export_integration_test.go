@@ -300,37 +300,16 @@ func mustStream(t *testing.T, category, key string) eventsourcing.StreamID {
 	return id
 }
 
-// THE HARNESS RUNS EVERY PROJECTION THE PROJECTOR DOES.
+// The test that used to sit here compared this suite's projection list against
+// a hand-written copy of cmd/projector's. It is gone because both lists are
+// gone: internal/projections holds the one registry and everything that runs
+// projections calls it, so the drift it watched for cannot happen.
 //
-// # This is the drift that made the test above necessary
-//
-// `startProjectors`' doc said it ran every projection cmd/projector runs, and it
-// did not: compliance's two were absent. Nothing failed — the suite simply had
-// two read models that were permanently empty, so anything depending on them
-// would have "passed" by never being exercised.
-//
-// Compared by NAME against the projector's own registry rather than by a list
-// written here, because a second list is a second place to forget one.
-func TestTheHarnessRunsEveryProjectionTheProjectorDoes(t *testing.T) {
-	running := map[string]bool{}
-	for _, v := range projectionRegistry(h.codec) {
-		running[v.Name()] = true
-	}
-
-	// The projector's list, by name. Restated here rather than imported because
-	// cmd/projector is a main package — so this is the one place the two lists
-	// are compared, and the projector's own test asserts its half is complete.
-	for _, want := range []string{
-		"identity_user", "identity_session", "identity_reservation",
-		"processing_restriction_view", "data_export_view",
-	} {
-		if !running[want] {
-			t.Errorf("this suite does not run %q, so anything reading that table sees an "+
-				"empty one and every assertion against it passes by never being "+
-				"exercised", want)
-		}
-	}
-}
+// It is worth recording that the test did not work. It caught compliance's two
+// missing projections only because somebody had already found them and added
+// their names to it; identity's API key projection went missing afterwards and
+// the test said nothing, because the third copy was never updated either. A
+// consistency check between two copies is only ever as good as a third copy.
 
 // THE BUNDLE HALF, AGAINST REAL INFRASTRUCTURE.
 //
