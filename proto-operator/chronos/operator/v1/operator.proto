@@ -456,6 +456,56 @@ message RevealPersonalDataResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Break-glass elevation (operator.md §5)
+// ---------------------------------------------------------------------------
+
+// RequestElevationRequest asks for one capability, for a short while, with a
+// reason.
+message RequestElevationRequest {
+  // The single capability to take. One, never a list: an elevation granting
+  // several would be a role change with a timer, and the audit entry would not
+  // say which of them was actually needed.
+  string capability = 1 [
+    (buf.validate.field).string = {
+      min_len: 1
+      max_len: 32
+      pattern: "^[a-z][a-z0-9_]*$"
+    }
+  ];
+
+  // Why. Mandatory, stored verbatim, and eight characters minimum for the same
+  // reason RevealPersonalData's is: a rule that can be satisfied by "x" is a
+  // rule that will be.
+  string reason = 2 [
+    (buf.validate.field).string = {
+      min_len: 8
+      max_len: 500
+    }
+  ];
+}
+
+// RequestElevationResponse reports the window that was opened.
+message RequestElevationResponse {
+  // The capability granted, echoed so a console cannot show one thing while the
+  // server granted another.
+  string capability = 1 [(buf.validate.field).string.max_len = 32];
+
+  // When the window closes. ABSOLUTE, and nothing extends it — there is no
+  // renew endpoint, deliberately. A second break-glass is a second event with
+  // its own justification and its own alert, which is what keeps the alert
+  // worth reading.
+  google.protobuf.Timestamp expires_at = 2;
+
+  // The audit entry this elevation produced, so the operator can quote it.
+  string audit_entry_id = 3 [
+    (buf.validate.field).string = {
+      max_len: 32
+      pattern: "^audit_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  ];
+}
+
+// ---------------------------------------------------------------------------
 // The service
 // ---------------------------------------------------------------------------
 
@@ -512,6 +562,36 @@ service OperatorService {
   rpc SignOut(SignOutRequest) returns (SignOutResponse) {
     option (chronos.operator.v1.capability) = "self_session";
     option (chronos.operator.v1.audit) = AUDIT_ACTION_SIGNED_OUT;
+  }
+
+  // RequestElevation takes a capability this operator's role does not hold,
+  // for fifteen minutes, with a recorded justification (operator.md §5).
+  //
+  // # What it can and cannot reach
+  //
+  // A role may break the glass to what the role ABOVE it holds, and no further.
+  // The spec says only "beyond a role's default", which read literally would
+  // permit a support engineer elevating to `manage_operators` — self-promotion
+  // with a fifteen-minute delay and an alert nobody can act on faster than the
+  // grant.
+  //
+  // Two capabilities are reachable by nobody: `manage_operators`, because it
+  // grants capabilities and so the time box would bound nothing; and
+  // `suspend_organization`, because it is the only operator action that stops a
+  // paying customer working.
+  //
+  // # It declares `self_session`, which looks wrong and is not
+  //
+  // The capability being REQUESTED cannot gate the request — that is the
+  // deadlock `bootstrap_min_aal` describes on the tenant plane, in another
+  // costume. What gates it is that the caller holds a live session, and the
+  // domain then decides whether their role may reach what they asked for.
+  //
+  // The elevation is scoped to the SESSION, so signing out ends it and a second
+  // session of the same operator is unaffected.
+  rpc RequestElevation(RequestElevationRequest) returns (RequestElevationResponse) {
+    option (chronos.operator.v1.capability) = "self_session";
+    option (chronos.operator.v1.audit) = AUDIT_ACTION_ELEVATED;
   }
 
   // ListCustomers pages the customer directory.

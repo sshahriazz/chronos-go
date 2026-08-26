@@ -55,6 +55,32 @@ func NewAuditLog(codec eventsourcing.Codec) *AuditLog {
 		return nil
 	})
 
+	// The break-glass pair. `reason` carries the justification on the grant and
+	// deliberately not on the expiry: the justification belongs to the act of
+	// breaking the glass, and repeating it would put the same free text in the
+	// log twice.
+	d.On[contract.OperatorElevated](func(
+		_ context.Context, w db.Writer, env projection.Envelope, e *contract.OperatorElevated,
+	) error {
+		w.Exec(operatordb.InsertAuditEntry,
+			entryID(env), e.OperatorID, e.SubjectID, "elevated", e.Capability,
+			nil, nil, nil, nullText(e.Reason), nil, e.ElevatedAt)
+		return nil
+	})
+
+	// `used` rides in the FIELDS column, which is a string array and otherwise
+	// unused on this action. A dedicated column would be a fifth nullable that
+	// one action out of six populates; the array already means "what this entry
+	// is about", and "used" or "unused" is exactly that here.
+	d.On[contract.OperatorElevationExpired](func(
+		_ context.Context, w db.Writer, env projection.Envelope, e *contract.OperatorElevationExpired,
+	) error {
+		w.Exec(operatordb.InsertAuditEntry,
+			entryID(env), e.OperatorID, e.SubjectID, "elevation_expired", e.Capability,
+			nil, nil, []string{usedLabel(e.Used)}, nil, nil, e.ExpiredAt)
+		return nil
+	})
+
 	d.On[contract.OperatorViewedCustomer](func(
 		_ context.Context, w db.Writer, env projection.Envelope, e *contract.OperatorViewedCustomer,
 	) error {
@@ -125,4 +151,16 @@ func nullIP(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// usedLabel renders whether a break-glass was exercised, for the audit row.
+//
+// An elevation nobody used is a false alarm, and telling it apart from one that
+// was needed is the difference between an alert people act on and one they
+// mute.
+func usedLabel(used bool) string {
+	if used {
+		return "used"
+	}
+	return "unused"
 }

@@ -245,11 +245,17 @@ type OperatorSession struct {
 	OperatorID  string
 	Stage       string
 	// Absolute and never moved. Non-extendable by design (operator.md §3) — there is deliberately no idle deadline, because an idle timeout that renews on activity is extension.
-	ExpiresAt    pgtype.Timestamptz
-	EndedAt      pgtype.Timestamptz
-	FromIp       *netip.Addr
-	CredentialID pgtype.Text
-	CreatedAt    pgtype.Timestamptz
+	ExpiresAt          pgtype.Timestamptz
+	EndedAt            pgtype.Timestamptz
+	FromIp             *netip.Addr
+	CredentialID       pgtype.Text
+	CreatedAt          pgtype.Timestamptz
+	ElevatedCapability pgtype.Text
+	// Absolute; nothing extends it. Whether the grant is live is decided by comparing this in SQL, so a late sweep never extends a window (ADR-045's reasoning, applied the other way round).
+	ElevatedUntil             pgtype.Timestamptz
+	ElevationReason           pgtype.Text
+	ElevationUsedAt           pgtype.Timestamptz
+	ElevationExpiryRecordedAt pgtype.Timestamptz
 }
 
 // Membership per (org, subject). Gate 1 verifies against it; seat counting will too.

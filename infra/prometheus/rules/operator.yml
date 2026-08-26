@@ -1,0 +1,89 @@
+# Alerting for the operator plane (ADR-024, docs/domains/operator.md).
+#
+# The rule that matters here is the FIRST one. operator.md §5 requires a
+# break-glass to "raise an alert to a second person AT THE TIME OF USE — not in
+# a report someone reads next quarter", and this file is the half of that
+# requirement which lives outside the Go code.
+#
+# Without it, internal/operator/adapter/alert increments a counter nobody looks
+# at, which is exactly the report §5 names and rejects. The counter and this
+# rule are one control in two files, and either alone is the appearance of one.
+groups:
+  - name: operator-break-glass
+    rules:
+      # ANY increase pages. Not a threshold, not a rate over five minutes — one.
+      #
+      # A break-glass is an operator taking a privilege their role does not
+      # hold, which is meant to be rare and is meant to be seen while it is
+      # happening. A threshold would say "two of these are fine", and the whole
+      # design of the fifteen-minute window assumes somebody is told about the
+      # first.
+      - alert: OperatorBrokeTheGlass
+        expr: increase(chronos_operator_elevations_granted_total[2m]) > 0
+        # No `for:`, deliberately, and it is the one place in this file without
+        # one. `for:` waits to see whether a condition persists, and this
+        # condition is an EVENT — by the time it had persisted for five minutes
+        # a third of the window would be gone.
+        labels:
+          severity: page
+        annotations:
+          summary: >-
+            An operator took the {{ $labels.capability }} capability, which the
+            {{ $labels.role }} role does not hold.
+          description: >-
+            Break-glass elevation (operator.md §5). This is a deliberate,
+            justified, fifteen-minute grant — the justification and the operator
+            are in operator_audit_log under action 'elevated', and in the plane's
+            own logs at WARN with the reason attached. It is not in this alert
+            because the metric labels are closed sets on purpose: who broke the
+            glass belongs in a store with access controls.
+
+            The alert exists so a SECOND PERSON knows while the window is open.
+            Confirm the operator, confirm the reason, and confirm the action
+            taken — the audit log records whether the capability was actually
+            exercised.
+
+      # Elevations that nobody used. Not a page — a signal that something is
+      # wrong with the ROLE rather than with the operator.
+      #
+      # A steady stream of unused break-glasses usually means a role is scoped
+      # so tightly that people elevate pre-emptively, which turns the alert into
+      # noise and then into something muted. The fix is a role change, and this
+      # is what makes the case for one visible.
+      - alert: OperatorElevationsGoingUnused
+        expr: |
+          sum(increase(chronos_operator_elevations_granted_total[24h])) > 5
+        for: 1h
+        labels:
+          severity: ticket
+        annotations:
+          summary: More than five break-glass elevations in a day.
+          description: >-
+            Break-glass is meant to be rare. This many in a day is usually a role
+            scoped too tightly rather than an incident — check
+            operator_audit_log for entries with action 'elevation_expired' whose
+            fields contain 'unused', which are the ones granted and never
+            exercised. If they cluster on one capability, that capability belongs
+            in a role.
+
+  - name: operator-plane
+    rules:
+      # The audit projector is what makes reads auditable, and this plane's
+      # whole claim rests on it. A stalled one means actions are happening and
+      # not being recorded — which is worse than the plane being down, because
+      # it looks identical to working.
+      - alert: OperatorAuditProjectionStalled
+        expr: |
+          chronos_projection_live{projection="operator_audit_log"} == 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: The operator audit projection is not live.
+          description: >-
+            Under GDPR looking is processing, so operator reads are events
+            (operator.md §5). While this projection is stalled the events are
+            still being appended — the log is the authority and nothing is lost
+            — but operator_audit_log is behind, so "who looked at us" and the
+            break-glass review both answer with stale data. Restart cmd/operator;
+            the projection resumes from its checkpoint.

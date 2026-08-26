@@ -33,6 +33,18 @@ type Querier interface {
 	// person, which is an audited act; a column that could be un-set would turn
 	// offboarding into a toggle.
 	DisableOperatorAccount(ctx context.Context, arg DisableOperatorAccountParams) error
+	// Grants a break-glass on ONE session.
+	//
+	// Guarded on there being no LIVE elevation already, so a second request inside
+	// an open window is refused rather than silently replacing the first. Replacing
+	// it would let an operator chain windows into an unbounded grant while each
+	// individual event looked correctly time-boxed — which is exactly what the
+	// fifteen-minute limit exists to prevent.
+	//
+	// An EXPIRED elevation is overwritten freely: that is the ordinary case of
+	// breaking the glass twice in a shift, and each one keeps its own event, its
+	// own justification and its own alert.
+	ElevateOperatorSession(ctx context.Context, arg ElevateOperatorSessionParams) (int64, error)
 	EndOperatorSession(ctx context.Context, arg EndOperatorSessionParams) (int64, error)
 	// Offboarding's fan-out: end every live session an operator holds.
 	EndOperatorSessionsFor(ctx context.Context, arg EndOperatorSessionsForParams) error
@@ -77,10 +89,23 @@ type Querier interface {
 	// boundary does not shift when a new organization signs up mid-listing — which
 	// with OFFSET silently skips a customer.
 	ListCustomers(ctx context.Context, arg ListCustomersParams) ([]ListCustomersRow, error)
+	// What the sweep records. Windows that have closed and whose expiry has not yet
+	// been appended to the log.
+	ListExpiredElevations(ctx context.Context, arg ListExpiredElevationsParams) ([]ListExpiredElevationsRow, error)
 	// ---------------------------------------------------------------------------
 	// Credentials
 	// ---------------------------------------------------------------------------
 	ListOperatorCredentials(ctx context.Context, operatorID string) ([]OperatorCredential, error)
+	// Separate from the window closing, which is what makes the grant stop working.
+	// This is about the AUDIT RECORD, and keeping the two apart is what stops a
+	// sweep outage from either double-recording or silently extending anything.
+	MarkElevationExpiryRecorded(ctx context.Context, arg MarkElevationExpiryRecordedParams) error
+	// Records the first exercise of an elevated capability, and only the first.
+	//
+	// `IS NULL` rather than an unconditional set, so the timestamp is when the
+	// glass was first broken rather than when it was last used. "Was this needed at
+	// all" is the question the expiry event answers, and the first use settles it.
+	MarkElevationUsed(ctx context.Context, arg MarkElevationUsedParams) error
 	RecountCustomerSeats(ctx context.Context, orgID string) error
 	RecountCustomerWorkspaces(ctx context.Context, orgID string) error
 	RemoveCustomerSeat(ctx context.Context, arg RemoveCustomerSeatParams) error

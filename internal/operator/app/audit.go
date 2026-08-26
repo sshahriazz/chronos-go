@@ -85,6 +85,49 @@ func (a *Auditor) RecordSignOut(ctx context.Context, actor Actor) (string, error
 	return entryID, a.append(ctx, entryID, entry)
 }
 
+// RecordElevation records a break-glass.
+func (a *Auditor) RecordElevation(
+	ctx context.Context, actor Actor, capability, reason string, expiresAt time.Time,
+) (string, error) {
+	entryID, err := newAuditID(a.clock.Now())
+	if err != nil {
+		return "", err
+	}
+	entry := eventsourcing.NewAggregate(domain.NewAuditEntry)
+	if err := entry.RecordElevation(contract.OperatorElevated{
+		OperatorID: actor.OperatorID,
+		SubjectID:  actor.SubjectID,
+		SessionID:  actor.SessionID,
+		Capability: capability,
+		Reason:     reason,
+		ElevatedAt: a.clock.Now(),
+		ExpiresAt:  expiresAt,
+	}); err != nil {
+		return "", err
+	}
+	return entryID, a.append(ctx, entryID, entry)
+}
+
+// RecordElevationExpiry closes a break-glass window in the log.
+func (a *Auditor) RecordElevationExpiry(ctx context.Context, e ExpiredElevation) (string, error) {
+	entryID, err := newAuditID(a.clock.Now())
+	if err != nil {
+		return "", err
+	}
+	entry := eventsourcing.NewAggregate(domain.NewAuditEntry)
+	if err := entry.RecordElevationExpiry(contract.OperatorElevationExpired{
+		OperatorID: e.OperatorID,
+		SubjectID:  e.SubjectID,
+		SessionID:  e.SessionID,
+		Capability: e.Capability,
+		Used:       e.Used,
+		ExpiredAt:  e.ExpiredAt,
+	}); err != nil {
+		return "", err
+	}
+	return entryID, a.append(ctx, entryID, entry)
+}
+
 // RecordView records a read of the directory or of one customer.
 //
 // orgID is empty on a list, and that is not an omission: a page is an aggregate

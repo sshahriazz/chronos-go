@@ -16,6 +16,7 @@ import (
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
 	waadapter "github.com/chronos/chronos-go/internal/adapter/webauthn"
 	"github.com/chronos/chronos-go/internal/operator"
+	alertadapter "github.com/chronos/chronos-go/internal/operator/adapter/alert"
 	operatorceremony "github.com/chronos/chronos-go/internal/operator/adapter/ceremony"
 	operatorevents "github.com/chronos/chronos-go/internal/operator/adapter/kurrentdb"
 	operatorpg "github.com/chronos/chronos-go/internal/operator/adapter/postgres"
@@ -47,6 +48,7 @@ type dependencies struct {
 
 	signIn    *app.SignIn
 	customers *app.Customers
+	elevation *app.Elevation
 
 	clock    app.Clock
 	resolver clientip.Resolver
@@ -207,6 +209,17 @@ func newDependencies(
 		return fail(err)
 	}
 	d.customers = customers
+
+	// The alerter is REQUIRED by NewElevation, not optional, so a build that
+	// forgot to construct it does not start. operator.md §5 lists the alert
+	// beside the justification and the time box as one of three controls, and a
+	// break-glass that raises none is the dangerous half of the feature.
+	elevation, err := app.NewElevation(store, auditor,
+		alertadapter.NewElevations(d.metrics.Registry(), log), d.clock, log)
+	if err != nil {
+		return fail(err)
+	}
+	d.elevation = elevation
 
 	return d, closeAll, nil
 }

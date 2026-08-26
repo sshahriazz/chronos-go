@@ -148,8 +148,39 @@ const page = `<!doctype html>
   <pre id="o-reveal">waiting for a session</pre>
 </section>
 
+<section id="s-glass" data-locked="1">
+  <h2>6 · Break the glass</h2>
+  <p class="note">
+    Take a capability your role does <em>not</em> hold, for fifteen minutes,
+    with a recorded reason (operator.md §5). It is <strong>scoped to this
+    session</strong> — signing out ends it, and a second session of yours is
+    unaffected. Nothing extends it: a second break-glass is a second event with
+    its own reason and its own alert, which is what keeps the alert worth
+    reading.
+  </p>
+  <p class="note">
+    A role reaches what the role <em>above</em> it holds and no further.
+    <code>manage_operators</code> and <code>suspend_organization</code> are
+    reachable by nobody — the first grants capabilities, so a time box would
+    bound nothing; the second is the only operator action that stops a paying
+    customer working.
+  </p>
+  <div class="row">
+    <div>
+      <label for="cap">Capability</label>
+      <input id="cap" placeholder="issue_refund">
+    </div>
+    <div>
+      <label for="glassreason">Reason (8 characters minimum, stored verbatim)</label>
+      <input id="glassreason" placeholder="incident 4711: duplicate charge, customer on the phone">
+    </div>
+  </div>
+  <button id="b-glass">RequestElevation</button>
+  <pre id="o-glass">waiting for a session</pre>
+</section>
+
 <section id="s-out" data-locked="1">
-  <h2>6 · End the session</h2>
+  <h2>7 · End the session</h2>
   <p class="note">
     Distinct from expiry, which appends nothing: a sign-out is an action
     somebody took, and it belongs in the trail beside the sign-in it ends.
@@ -217,11 +248,11 @@ const pending = () => sessionStorage.getItem('operator.pending');
 
 function refresh() {
   if (live()) {
-    unlock('s-list', 's-get', 's-reveal', 's-out');
+    unlock('s-list', 's-get', 's-reveal', 's-glass', 's-out');
     show('o-wa', 'signed in as ' + sessionStorage.getItem('operator.id') +
                  ' (' + sessionStorage.getItem('operator.role') + ')\n' +
                  'session expires ' + sessionStorage.getItem('operator.expires'), 'ok');
-    ['o-list', 'o-get', 'o-reveal', 'o-out'].forEach((id) => {
+    ['o-list', 'o-get', 'o-reveal', 'o-glass', 'o-out'].forEach((id) => {
       if ($(id).textContent.startsWith('waiting')) show(id, 'ready');
     });
   } else if (pending()) {
@@ -422,6 +453,29 @@ $('b-reveal').onclick = async () => {
   } catch (e) {
     show('o-reveal', e.message + (e.code ? '\ncode: ' + e.code : '') +
       (e.detail && e.detail.details ? '\n\n' + JSON.stringify(e.detail.details, null, 2) : ''), 'bad');
+  }
+};
+
+$('b-glass').onclick = async () => {
+  show('o-glass', 'requesting…');
+  try {
+    const res = await rpc('RequestElevation', {
+      capability: $('cap').value.trim(),
+      reason: $('glassreason').value,
+    }, live());
+    show('o-glass',
+      'GLASS BROKEN — ' + res.capability + '\n\n' +
+      '  expires   ' + res.expiresAt + '  (absolute; nothing extends it)\n' +
+      '  audit     ' + res.auditEntryId + '\n\n' +
+      'An OperatorElevated event was appended BEFORE the grant, and an alert\n' +
+      'was raised at the same moment — a Prometheus counter and a WARN line,\n' +
+      'not mail, because this plane holds no operator addresses.', 'ok');
+  } catch (e) {
+    // The one endpoint here that explains itself. Everywhere else an opaque
+    // refusal stops an attacker learning which check failed; here the caller
+    // is an authenticated operator asking for a privilege, and being told
+    // "your role cannot reach that" is how they learn to ask a human.
+    show('o-glass', e.message + (e.code ? '\n\ncode: ' + e.code : ''), 'bad');
   }
 };
 

@@ -86,9 +86,11 @@ const (
 	AuditAction_AUDIT_ACTION_SIGNED_OUT AuditAction = 2
 	// A read of the customer directory or of one customer's record.
 	AuditAction_AUDIT_ACTION_VIEWED_CUSTOMER AuditAction = 3
-	// A vault resolution for one named subject. The only action that carries a
-	// mandatory justification.
+	// A vault resolution for one named subject.
 	AuditAction_AUDIT_ACTION_VIEWED_PERSONAL_DATA AuditAction = 4
+	// A break-glass: an operator taking a capability their role does not hold
+	// (operator.md §5). Carries a mandatory justification, like the one above.
+	AuditAction_AUDIT_ACTION_ELEVATED AuditAction = 5
 )
 
 // Enum value maps for AuditAction.
@@ -99,6 +101,7 @@ var (
 		2: "AUDIT_ACTION_SIGNED_OUT",
 		3: "AUDIT_ACTION_VIEWED_CUSTOMER",
 		4: "AUDIT_ACTION_VIEWED_PERSONAL_DATA",
+		5: "AUDIT_ACTION_ELEVATED",
 	}
 	AuditAction_value = map[string]int32{
 		"AUDIT_ACTION_UNSPECIFIED":          0,
@@ -106,6 +109,7 @@ var (
 		"AUDIT_ACTION_SIGNED_OUT":           2,
 		"AUDIT_ACTION_VIEWED_CUSTOMER":      3,
 		"AUDIT_ACTION_VIEWED_PERSONAL_DATA": 4,
+		"AUDIT_ACTION_ELEVATED":             5,
 	}
 )
 
@@ -219,13 +223,14 @@ var File_chronos_operator_v1_options_proto protoreflect.FileDescriptor
 
 const file_chronos_operator_v1_options_proto_rawDesc = "" +
 	"\n" +
-	"!chronos/operator/v1/options.proto\x12\x13chronos.operator.v1\x1a google/protobuf/descriptor.proto*\xad\x01\n" +
+	"!chronos/operator/v1/options.proto\x12\x13chronos.operator.v1\x1a google/protobuf/descriptor.proto*\xc8\x01\n" +
 	"\vAuditAction\x12\x1c\n" +
 	"\x18AUDIT_ACTION_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16AUDIT_ACTION_SIGNED_IN\x10\x01\x12\x1b\n" +
 	"\x17AUDIT_ACTION_SIGNED_OUT\x10\x02\x12 \n" +
 	"\x1cAUDIT_ACTION_VIEWED_CUSTOMER\x10\x03\x12%\n" +
-	"!AUDIT_ACTION_VIEWED_PERSONAL_DATA\x10\x04:@\n" +
+	"!AUDIT_ACTION_VIEWED_PERSONAL_DATA\x10\x04\x12\x19\n" +
+	"\x15AUDIT_ACTION_ELEVATED\x10\x05:@\n" +
 	"\n" +
 	"capability\x12\x1e.google.protobuf.MethodOptions\x18\xa1\x96\x03 \x01(\tR\n" +
 	"capability:X\n" +

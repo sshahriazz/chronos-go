@@ -107,6 +107,60 @@ INSERT INTO operator_session (
     token_digest, session_id, operator_id, stage, expires_at, from_ip, credential_id
 ) VALUES ($1, $2, $3, $4, $5, $6, $7);
 
+-- name: ElevateOperatorSession :execrows
+-- Grants a break-glass on ONE session.
+--
+-- Guarded on there being no LIVE elevation already, so a second request inside
+-- an open window is refused rather than silently replacing the first. Replacing
+-- it would let an operator chain windows into an unbounded grant while each
+-- individual event looked correctly time-boxed — which is exactly what the
+-- fifteen-minute limit exists to prevent.
+--
+-- An EXPIRED elevation is overwritten freely: that is the ordinary case of
+-- breaking the glass twice in a shift, and each one keeps its own event, its
+-- own justification and its own alert.
+UPDATE operator_session
+SET elevated_capability = $2,
+    elevated_until = $3,
+    elevation_reason = $4,
+    elevation_used_at = NULL,
+    elevation_expiry_recorded_at = NULL
+WHERE token_digest = $1
+  AND ended_at IS NULL
+  AND expires_at > $5
+  AND (elevated_capability IS NULL OR elevated_until <= $5);
+
+-- name: MarkElevationUsed :exec
+-- Records the first exercise of an elevated capability, and only the first.
+--
+-- `IS NULL` rather than an unconditional set, so the timestamp is when the
+-- glass was first broken rather than when it was last used. "Was this needed at
+-- all" is the question the expiry event answers, and the first use settles it.
+UPDATE operator_session
+SET elevation_used_at = $2
+WHERE token_digest = $1 AND elevation_used_at IS NULL;
+
+-- name: ListExpiredElevations :many
+-- What the sweep records. Windows that have closed and whose expiry has not yet
+-- been appended to the log.
+SELECT s.session_id, s.operator_id, a.subject_id, s.elevated_capability,
+       s.elevated_until, (s.elevation_used_at IS NOT NULL) AS used
+FROM operator_session s
+JOIN operator_account a ON a.operator_id = s.operator_id
+WHERE s.elevated_capability IS NOT NULL
+  AND s.elevation_expiry_recorded_at IS NULL
+  AND s.elevated_until <= $1
+ORDER BY s.elevated_until
+LIMIT $2;
+
+-- name: MarkElevationExpiryRecorded :exec
+-- Separate from the window closing, which is what makes the grant stop working.
+-- This is about the AUDIT RECORD, and keeping the two apart is what stops a
+-- sweep outage from either double-recording or silently extending anything.
+UPDATE operator_session
+SET elevation_expiry_recorded_at = $2
+WHERE session_id = $1 AND elevation_expiry_recorded_at IS NULL;
+
 -- name: ResolveOperatorSession :one
 -- The authenticator's query, and it joins operator_account so a DISABLED
 -- operator's live session stops working the moment the disable projects —
@@ -115,7 +169,8 @@ INSERT INTO operator_session (
 -- Expiry is compared in SQL rather than in Go so that "expired" is decided by
 -- the same clock that stored the row.
 SELECT s.session_id, s.operator_id, s.stage, s.expires_at, s.credential_id,
-       a.subject_id, a.role, a.disabled_at
+       a.subject_id, a.role, a.disabled_at,
+       s.elevated_capability, s.elevated_until, s.elevation_reason
 FROM operator_session s
 JOIN operator_account a ON a.operator_id = s.operator_id
 WHERE s.token_digest = $1

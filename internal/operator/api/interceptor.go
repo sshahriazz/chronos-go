@@ -178,10 +178,47 @@ func (g *Guard) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
 		}
 
 		if p.Access == policy.AccessCapability {
-			if !domain.Permits(sess.Role, p.Capability) {
+			now := g.clock.Now()
+
+			// THE ROLE FIRST, then the elevation. The order is not an
+			// optimisation: an operator whose role already holds the capability
+			// must not have the call recorded as a break-glass use, or the
+			// "was this elevation needed" signal fills with actions that needed
+			// nothing.
+			switch {
+			case domain.Permits(sess.Role, p.Capability):
+				// Ordinary.
+
+			case sess.Elevation.Grants(p.Capability, now):
+				// A break-glass, being exercised. Recorded as USED on the first
+				// call only, which is what lets the expiry event report whether
+				// the glass was broken for nothing.
+				//
+				// A failure here does NOT refuse the call. The elevation is
+				// already granted and already in the log with its
+				// justification; losing the first-use timestamp costs the
+				// expiry event one field, and refusing a legitimate
+				// break-glass action because a bookkeeping write failed is the
+				// worse outcome at the moment it would happen.
+				if err := g.sessions.MarkElevationUsed(ctx, digest, now); err != nil {
+					g.log.ErrorContext(ctx, "an elevation's first use could not be recorded",
+						"method", method, "operator_id", sess.OperatorID,
+						"capability", p.Capability, "error", err)
+				}
+				g.log.WarnContext(ctx, "an elevated capability was exercised",
+					"method", method, "operator_id", sess.OperatorID,
+					"capability", p.Capability, "expires_at", sess.Elevation.ExpiresAt,
+					"reason", sess.Elevation.Reason)
+
+			default:
 				g.log.InfoContext(ctx, "an operator was refused a capability their role does not hold",
 					"method", method, "operator_id", sess.OperatorID,
-					"role", sess.Role, "capability", p.Capability)
+					"role", sess.Role, "capability", p.Capability,
+					// Named so a refusal during a break-glass is diagnosable:
+					// elevating to the wrong capability and being refused for
+					// the right one is otherwise indistinguishable from having
+					// no elevation at all.
+					"elevated_to", sess.Elevation.Capability)
 				return nil, connect.NewError(connect.CodePermissionDenied, app.ErrForbidden)
 			}
 		}

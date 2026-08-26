@@ -69,9 +69,12 @@ enum AuditAction {
   // A read of the customer directory or of one customer's record.
   AUDIT_ACTION_VIEWED_CUSTOMER = 3;
 
-  // A vault resolution for one named subject. The only action that carries a
-  // mandatory justification.
+  // A vault resolution for one named subject.
   AUDIT_ACTION_VIEWED_PERSONAL_DATA = 4;
+
+  // A break-glass: an operator taking a capability their role does not hold
+  // (operator.md §5). Carries a mandatory justification, like the one above.
+  AUDIT_ACTION_ELEVATED = 5;
 }
 
 extend google.protobuf.MethodOptions {

@@ -347,3 +347,91 @@ type OperatorSignedOut struct {
 }
 
 func (*OperatorSignedOut) EventType() string { return "operator.OperatorSignedOut.v1" }
+
+// ---------------------------------------------------------------------------
+// Break-glass elevation (operator.md §5)
+// ---------------------------------------------------------------------------
+
+// OperatorElevated records that an operator took a capability their role does
+// not hold.
+//
+// # What elevation is for, and what it is not
+//
+// It is not a convenience for a role that was scoped too tightly — that is a
+// role change, and it goes through OperatorRoleChanged where a second person
+// grants it. Elevation is for the case where the right answer is "yes, once,
+// now, and everybody should know": an incident at 3am, a customer on the phone,
+// a support engineer who needs one action they normally must not take.
+//
+// So it carries a deadline and a justification, and neither is optional. An
+// elevation with no deadline is a role change nobody reviewed; one with no
+// justification is a role change nobody can audit.
+type OperatorElevated struct {
+	OperatorID string
+	SubjectID  string
+
+	// SessionID scopes the elevation to ONE session, not to the operator.
+	//
+	// That is the difference between "this person may do X for ten minutes" and
+	// "this browser tab may". An operator holding two sessions elevates one of
+	// them, and a stolen bearer from the other is unaffected — which matters
+	// because elevation is exactly when the stakes are highest.
+	SessionID string
+
+	// Capability is the single capability granted. One, never a set: an
+	// elevation that granted several would be a role change with a timer, and
+	// the audit entry would not say which of them the operator actually needed.
+	Capability string
+
+	// Reason is the recorded justification. Mandatory, and stored verbatim for
+	// the same reason OperatorViewedPersonalData's is — it is the evidence that
+	// makes the act reviewable, and a record of a break-glass with no account
+	// of why is a record that says only that somebody broke the glass.
+	Reason string
+
+	ElevatedAt time.Time
+
+	// ExpiresAt is minutes away, not hours (operator.md §5). It is ABSOLUTE and
+	// nothing extends it: a second elevation is a second event, with its own
+	// justification and its own alert, which is the point.
+	ExpiresAt time.Time
+}
+
+func (*OperatorElevated) EventType() string { return "operator.OperatorElevated.v1" }
+
+// OperatorElevationExpired records that a break-glass window closed.
+//
+// # Why expiry is an EVENT when it is derivable from a timestamp
+//
+// Because "did anything happen while the glass was broken" is the question an
+// incident review asks, and answering it from a deadline alone means computing
+// which actions fell inside a window nobody recorded closing. A pair of events
+// bounds the window explicitly.
+//
+// It is appended by a SWEEP rather than by a timer per elevation, and the
+// distinction is ADR-045's: a timer that fires is a promise, and a promise that
+// is lost when a process restarts leaves the log claiming a window is still
+// open. The sweep is idempotent and finds what the timers missed.
+//
+// It does NOT gate anything. Whether an elevation is live is decided by
+// comparing the deadline in SQL, so a sweep that is late costs an audit record
+// its punctuality and never grants a capability past its window — the failure
+// mode ADR-045 names for revocation tombstones, avoided the same way.
+type OperatorElevationExpired struct {
+	OperatorID string
+	SubjectID  string
+	SessionID  string
+
+	Capability string
+
+	// Used reports whether the capability was actually exercised before the
+	// window closed. An elevation nobody used is a false alarm worth seeing as
+	// distinct from one that was needed.
+	Used bool
+
+	ExpiredAt time.Time
+}
+
+func (*OperatorElevationExpired) EventType() string {
+	return "operator.OperatorElevationExpired.v1"
+}

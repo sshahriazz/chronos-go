@@ -56,6 +56,8 @@ func (a *AuditEntry) Apply(event eventsourcing.Event) {
 	switch event.(type) {
 	case *contract.OperatorSignedIn,
 		*contract.OperatorSignedOut,
+		*contract.OperatorElevated,
+		*contract.OperatorElevationExpired,
 		*contract.OperatorViewedCustomer,
 		*contract.OperatorViewedPersonalData:
 		a.recorded = true
@@ -88,6 +90,57 @@ func (a *AuditEntry) RecordSignOut(ev contract.OperatorSignedOut) error {
 		return fmt.Errorf("operator: a sign-out record needs a session")
 	}
 	ev.SignedOutAt = ev.SignedOutAt.UTC()
+	eventsourcing.Record(a, &ev)
+	return nil
+}
+
+// RecordElevation records a break-glass, and REFUSES one with no justification.
+//
+// The same three-layer enforcement RecordPersonalDataView has, and for the same
+// reason: this is the other act on this plane whose lawfulness rests on the
+// account of why it was taken. A break-glass with no recorded reason is a
+// record that somebody broke the glass and nothing else.
+func (a *AuditEntry) RecordElevation(ev contract.OperatorElevated) error {
+	switch {
+	case a.recorded:
+		return fmt.Errorf("operator: audit entry already recorded")
+	case ev.OperatorID == "":
+		return fmt.Errorf("operator: an elevation record needs an operator")
+	case ev.SessionID == "":
+		return fmt.Errorf("operator: an elevation is scoped to a session and needs one")
+	case ev.Capability == "":
+		return fmt.Errorf("operator: an elevation record needs the capability granted")
+	case ev.Reason == "":
+		return fmt.Errorf("operator: a break-glass requires a recorded justification")
+	case !ev.ExpiresAt.After(ev.ElevatedAt):
+		// An elevation that expires at or before it began is either a clock
+		// problem or a zero deadline, and the second reads as "never expires"
+		// to anything comparing against it.
+		return fmt.Errorf("operator: an elevation must expire after it begins")
+	}
+	ev.ElevatedAt = ev.ElevatedAt.UTC()
+	ev.ExpiresAt = ev.ExpiresAt.UTC()
+	eventsourcing.Record(a, &ev)
+	return nil
+}
+
+// RecordElevationExpiry closes the window in the log.
+//
+// It carries no justification, and that is right: the justification belongs to
+// the act of breaking the glass, and repeating it here would put the same free
+// text in the log twice.
+func (a *AuditEntry) RecordElevationExpiry(ev contract.OperatorElevationExpired) error {
+	switch {
+	case a.recorded:
+		return fmt.Errorf("operator: audit entry already recorded")
+	case ev.OperatorID == "":
+		return fmt.Errorf("operator: an expiry record needs an operator")
+	case ev.SessionID == "":
+		return fmt.Errorf("operator: an expiry record needs a session")
+	case ev.Capability == "":
+		return fmt.Errorf("operator: an expiry record needs the capability that lapsed")
+	}
+	ev.ExpiredAt = ev.ExpiredAt.UTC()
 	eventsourcing.Record(a, &ev)
 	return nil
 }

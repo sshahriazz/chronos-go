@@ -30,6 +30,7 @@ import (
 	operatordb "github.com/chronos/chronos-go/gen/sqlc/operator"
 	"github.com/chronos/chronos-go/internal/operator/app"
 	"github.com/chronos/chronos-go/internal/operator/contract"
+	"github.com/chronos/chronos-go/internal/operator/domain"
 	"github.com/chronos/chronos-go/internal/platform/db"
 )
 
@@ -268,15 +269,18 @@ func (s *Store) Issue(ctx context.Context, n app.NewSession) error {
 // after two round trips would leave a window whose width is a network hop.
 func (s *Store) Resolve(ctx context.Context, digest []byte, now time.Time) (app.SessionRecord, error) {
 	var (
-		rec          app.SessionRecord
-		stage, role  string
-		credentialID *string
-		disabledAt   *time.Time
+		rec                   app.SessionRecord
+		stage, role           string
+		credentialID          *string
+		disabledAt            *time.Time
+		elevatedCap, elevReas *string
+		elevatedUntil         *time.Time
 	)
 	err := s.tx.InSystemTx(ctx, func(ctx context.Context, q db.Querier) error {
 		return q.QueryRow(ctx, operatordb.ResolveOperatorSession, digest, now.UTC()).Scan(
 			&rec.SessionID, &rec.OperatorID, &stage, &rec.ExpiresAt, &credentialID,
-			&rec.SubjectID, &role, &disabledAt)
+			&rec.SubjectID, &role, &disabledAt,
+			&elevatedCap, &elevatedUntil, &elevReas)
 	})
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -291,7 +295,87 @@ func (s *Store) Resolve(ctx context.Context, digest []byte, now time.Time) (app.
 	if credentialID != nil {
 		rec.CredentialID = *credentialID
 	}
+
+	// The elevation is carried WHOLE or not at all. A capability with no
+	// deadline would be read by Elevation.Live as never expiring, which is the
+	// one way a fifteen-minute grant becomes permanent — so a partial read
+	// yields the zero value, which grants nothing.
+	//
+	// The database's own CHECK constraint makes a partial row unwritable, so
+	// this branch is unreachable through the write path. It is here because
+	// "unreachable" is a claim about today's schema, and the cost of being
+	// wrong about it is an unbounded privilege.
+	if elevatedCap != nil && elevatedUntil != nil {
+		rec.Elevation = domain.Elevation{
+			Capability: domain.Capability(*elevatedCap),
+			Reason:     deref(elevReas),
+			ExpiresAt:  *elevatedUntil,
+		}
+	}
 	return rec, nil
+}
+
+// Elevate grants a break-glass on one session.
+func (s *Store) Elevate(
+	ctx context.Context, digest []byte, e domain.Elevation, now time.Time,
+) (bool, error) {
+	var granted bool
+	err := s.tx.InSystemTx(ctx, func(ctx context.Context, q db.Querier) error {
+		n, err := q.Exec(ctx, operatordb.ElevateOperatorSession,
+			digest, string(e.Capability), e.ExpiresAt.UTC(), e.Reason, now.UTC())
+		if err != nil {
+			return err
+		}
+		granted = n > 0
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("operator postgres: granting an elevation: %w", err)
+	}
+	return granted, nil
+}
+
+// MarkElevationUsed records the first exercise of an elevated capability.
+func (s *Store) MarkElevationUsed(ctx context.Context, digest []byte, now time.Time) error {
+	return s.exec(ctx, "recording an elevation's first use",
+		operatordb.MarkElevationUsed, digest, now.UTC())
+}
+
+// ExpiredElevations lists windows whose expiry is not yet in the log.
+func (s *Store) ExpiredElevations(
+	ctx context.Context, before time.Time, limit int32,
+) ([]app.ExpiredElevation, error) {
+	out := make([]app.ExpiredElevation, 0, limit)
+	err := s.tx.InSystemTx(ctx, func(ctx context.Context, q db.Querier) error {
+		rows, err := q.Query(ctx, operatordb.ListExpiredElevations, before.UTC(), limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				e   app.ExpiredElevation
+				cap *string
+			)
+			if err := rows.Scan(&e.SessionID, &e.OperatorID, &e.SubjectID,
+				&cap, &e.ExpiredAt, &e.Used); err != nil {
+				return err
+			}
+			e.Capability = deref(cap)
+			out = append(out, e)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("operator postgres: listing expired elevations: %w", err)
+	}
+	return out, nil
+}
+
+// MarkElevationExpiryRecorded is the sweep's idempotency.
+func (s *Store) MarkElevationExpiryRecorded(ctx context.Context, sessionID string, now time.Time) error {
+	return s.exec(ctx, "recording that an elevation expiry was logged",
+		operatordb.MarkElevationExpiryRecorded, sessionID, now.UTC())
 }
 
 // End marks a session over and reports whether this call changed anything.

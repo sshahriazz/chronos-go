@@ -731,6 +731,50 @@ already has a name for.
       above. Slice 2 (break-glass, view-as, writes) is what still gates legal
       holds.
 
+## Now — `operator`, slice 2: elevation, and the writes
+
+Slice 1 made the plane exist and proved it end to end. It is a VIEWER: every
+method is a read, and operator.md §7's table of eight writes is entirely
+unbuilt. This is that table, plus the two controls that have to stand in front
+of it.
+
+The order is by dependency, not by size. Elevation first because it is what a
+dangerous action is supposed to require; account management second because it
+retires a CLI-only path; the tenant-affecting write third because it establishes
+the cross-plane pattern every remaining write copies; legal holds fourth because
+they have been waiting for exactly that pattern.
+
+- [ ] **A · Break-glass elevation** (§5). Time-boxed, justified, auto-expiring,
+      and it raises an alert AT THE TIME OF USE rather than in a report somebody
+      reads next quarter. Two decisions the spec leaves open and this slice has
+      to settle: WHICH capabilities a role may elevate to, and what "alert a
+      second person" means on a plane that deliberately holds no operator
+      addresses.
+- [ ] **B · Operator account management** (§7, `operator_admin`). The aggregate
+      already exists and only the RPCs are missing, so this is small — and it
+      retires `provisionoperator` for every operator except the first, which no
+      RPC can ever create.
+- [ ] **C · Suspend and reinstate an organization** (§7, `operator_admin`;
+      organization.md §5). The first write that touches a TENANT aggregate, and
+      therefore the one that establishes the pattern: operator writes go through
+      the same domain commands as everything else, because a privileged
+      back-channel that skips domain rules is what corrupts state that then
+      cannot be replayed.
+- [ ] **D · Legal holds** (compliance.md §4 steps 2–3). Unblocked by C. A hold
+      has an owner and a recorded justification, and both now have somewhere to
+      come from.
+- [ ] **E · The billing writes** (§7). Refunds, coupons, entitlement overrides,
+      trial extension, dispute resolution, and the plan catalogue. Every one is
+      a Stripe mutation behind an operator command, so they are mechanical once
+      C exists — and they are last because each is a real-money action that
+      wants its own review.
+- [ ] **F · View-as** (§6). Read-only, from operator projections, or nothing.
+      Deliberately after the writes: the feature every support team asks for and
+      the one most likely to become a breach, and it is worth building when
+      there is something to view.
+
+---
+
 ## Done — `operator`, slice 1: the plane
 
 The gate that held this closed is open (see the identity section below), so this

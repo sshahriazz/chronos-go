@@ -124,6 +124,19 @@ func TestEventTypesMatchesWhatIsRegistered(t *testing.T) {
 // alert to a second person AT THE TIME OF USE" (operator.md §5). When
 // OperatorElevated arrives it must NOT be added to this list.
 func TestOperatorEventsNotifyNobody(t *testing.T) {
+	// OperatorElevated is the one event on this plane that DOES notify, and it
+	// is listed here rather than omitted so the exception is visible.
+	//
+	// operator.md §5 requires an alert "at the time of use", and it is raised by
+	// internal/operator/adapter/alert — a Prometheus counter plus a WARN line,
+	// not mail, because this plane deliberately holds no operator addresses. It
+	// is therefore not a notification in NOTIFICATIONS.md's sense and has no
+	// entry in that catalogue; it is an operational page.
+	notifies := map[string]string{
+		"operator.OperatorElevated.v1": "raises a break-glass alert (operator.md §5) through " +
+			"internal/operator/adapter/alert, as a metric and a WARN line rather than mail",
+	}
+
 	silent := map[string]string{
 		"operator.OperatorProvisioned.v1":        "an access grant to our own staff; audited, not announced",
 		"operator.OperatorRoleChanged.v1":        "an audited privilege change; the alert on escalation reads the log",
@@ -131,11 +144,15 @@ func TestOperatorEventsNotifyNobody(t *testing.T) {
 		"operator.OperatorCredentialEnrolled.v1": "the operator performed it themselves, seconds earlier",
 		"operator.OperatorSignedIn.v1":           "an audit record; per-sign-in mail would be ignored within a week",
 		"operator.OperatorSignedOut.v1":          "an audit record",
+		"operator.OperatorElevationExpired.v1":   "the closing half of a window whose opening already alerted",
 		"operator.OperatorViewedCustomer.v1":     "the tenant sees this in their operator-access history (operator.md §5)",
 		"operator.OperatorViewedPersonalData.v1": "same, with the justification attached",
 	}
 
 	for _, event := range operatorEventUniverse(t) {
+		if _, ok := notifies[event]; ok {
+			continue
+		}
 		if _, ok := silent[event]; !ok {
 			t.Errorf("%s has no notification decision.\n\n"+
 				"Every operator event either notifies somebody or is declared silent WITH A "+

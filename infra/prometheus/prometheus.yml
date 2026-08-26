@@ -107,6 +107,20 @@ scrape_configs:
     # which is absent rather than zero when the process is gone.
     honor_labels: true
 
+  # The OPERATOR plane. Scraped because operator.md §5's break-glass alert is a
+  # counter here, and a counter nothing scrapes is the report §5 rejects.
+  #
+  # A failed scrape is EXPECTED in development — most people do not run the back
+  # office — so alerting is on the counter increasing rather than on the target
+  # being up.
+  - job_name: chronos-operator
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['host.docker.internal:8096']
+        labels:
+          component: operator
+    honor_labels: true
+
   - job_name: chronos-worker
     metrics_path: /metrics
     static_configs:

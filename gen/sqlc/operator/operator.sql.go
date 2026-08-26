@@ -144,6 +144,52 @@ func (q *Queries) DisableOperatorAccount(ctx context.Context, arg DisableOperato
 	return err
 }
 
+const ElevateOperatorSession = `-- name: ElevateOperatorSession :execrows
+UPDATE operator_session
+SET elevated_capability = $2,
+    elevated_until = $3,
+    elevation_reason = $4,
+    elevation_used_at = NULL,
+    elevation_expiry_recorded_at = NULL
+WHERE token_digest = $1
+  AND ended_at IS NULL
+  AND expires_at > $5
+  AND (elevated_capability IS NULL OR elevated_until <= $5)
+`
+
+type ElevateOperatorSessionParams struct {
+	TokenDigest        []byte
+	ElevatedCapability *string
+	ElevatedUntil      pgtype.Timestamptz
+	ElevationReason    *string
+	ExpiresAt          pgtype.Timestamptz
+}
+
+// Grants a break-glass on ONE session.
+//
+// Guarded on there being no LIVE elevation already, so a second request inside
+// an open window is refused rather than silently replacing the first. Replacing
+// it would let an operator chain windows into an unbounded grant while each
+// individual event looked correctly time-boxed — which is exactly what the
+// fifteen-minute limit exists to prevent.
+//
+// An EXPIRED elevation is overwritten freely: that is the ordinary case of
+// breaking the glass twice in a shift, and each one keeps its own event, its
+// own justification and its own alert.
+func (q *Queries) ElevateOperatorSession(ctx context.Context, arg ElevateOperatorSessionParams) (int64, error) {
+	result, err := q.db.Exec(ctx, ElevateOperatorSession,
+		arg.TokenDigest,
+		arg.ElevatedCapability,
+		arg.ElevatedUntil,
+		arg.ElevationReason,
+		arg.ExpiresAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const EndOperatorSession = `-- name: EndOperatorSession :execrows
 UPDATE operator_session
 SET ended_at = $2
@@ -674,6 +720,61 @@ func (q *Queries) ListCustomers(ctx context.Context, arg ListCustomersParams) ([
 	return items, nil
 }
 
+const ListExpiredElevations = `-- name: ListExpiredElevations :many
+SELECT s.session_id, s.operator_id, a.subject_id, s.elevated_capability,
+       s.elevated_until, (s.elevation_used_at IS NOT NULL) AS used
+FROM operator_session s
+JOIN operator_account a ON a.operator_id = s.operator_id
+WHERE s.elevated_capability IS NOT NULL
+  AND s.elevation_expiry_recorded_at IS NULL
+  AND s.elevated_until <= $1
+ORDER BY s.elevated_until
+LIMIT $2
+`
+
+type ListExpiredElevationsParams struct {
+	ElevatedUntil pgtype.Timestamptz
+	Limit         int32
+}
+
+type ListExpiredElevationsRow struct {
+	SessionID          string
+	OperatorID         string
+	SubjectID          string
+	ElevatedCapability *string
+	ElevatedUntil      pgtype.Timestamptz
+	Used               interface{}
+}
+
+// What the sweep records. Windows that have closed and whose expiry has not yet
+// been appended to the log.
+func (q *Queries) ListExpiredElevations(ctx context.Context, arg ListExpiredElevationsParams) ([]ListExpiredElevationsRow, error) {
+	rows, err := q.db.Query(ctx, ListExpiredElevations, arg.ElevatedUntil, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListExpiredElevationsRow{}
+	for rows.Next() {
+		var i ListExpiredElevationsRow
+		if err := rows.Scan(
+			&i.SessionID,
+			&i.OperatorID,
+			&i.SubjectID,
+			&i.ElevatedCapability,
+			&i.ElevatedUntil,
+			&i.Used,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const ListOperatorCredentials = `-- name: ListOperatorCredentials :many
 
 SELECT credential_id, operator_id, public_key, sign_count, aaguid, transports,
@@ -717,6 +818,46 @@ func (q *Queries) ListOperatorCredentials(ctx context.Context, operatorID string
 		return nil, err
 	}
 	return items, nil
+}
+
+const MarkElevationExpiryRecorded = `-- name: MarkElevationExpiryRecorded :exec
+UPDATE operator_session
+SET elevation_expiry_recorded_at = $2
+WHERE session_id = $1 AND elevation_expiry_recorded_at IS NULL
+`
+
+type MarkElevationExpiryRecordedParams struct {
+	SessionID                 string
+	ElevationExpiryRecordedAt pgtype.Timestamptz
+}
+
+// Separate from the window closing, which is what makes the grant stop working.
+// This is about the AUDIT RECORD, and keeping the two apart is what stops a
+// sweep outage from either double-recording or silently extending anything.
+func (q *Queries) MarkElevationExpiryRecorded(ctx context.Context, arg MarkElevationExpiryRecordedParams) error {
+	_, err := q.db.Exec(ctx, MarkElevationExpiryRecorded, arg.SessionID, arg.ElevationExpiryRecordedAt)
+	return err
+}
+
+const MarkElevationUsed = `-- name: MarkElevationUsed :exec
+UPDATE operator_session
+SET elevation_used_at = $2
+WHERE token_digest = $1 AND elevation_used_at IS NULL
+`
+
+type MarkElevationUsedParams struct {
+	TokenDigest     []byte
+	ElevationUsedAt pgtype.Timestamptz
+}
+
+// Records the first exercise of an elevated capability, and only the first.
+//
+// `IS NULL` rather than an unconditional set, so the timestamp is when the
+// glass was first broken rather than when it was last used. "Was this needed at
+// all" is the question the expiry event answers, and the first use settles it.
+func (q *Queries) MarkElevationUsed(ctx context.Context, arg MarkElevationUsedParams) error {
+	_, err := q.db.Exec(ctx, MarkElevationUsed, arg.TokenDigest, arg.ElevationUsedAt)
+	return err
 }
 
 const RecountCustomerSeats = `-- name: RecountCustomerSeats :exec
@@ -777,7 +918,8 @@ func (q *Queries) RemoveCustomerWorkspace(ctx context.Context, arg RemoveCustome
 
 const ResolveOperatorSession = `-- name: ResolveOperatorSession :one
 SELECT s.session_id, s.operator_id, s.stage, s.expires_at, s.credential_id,
-       a.subject_id, a.role, a.disabled_at
+       a.subject_id, a.role, a.disabled_at,
+       s.elevated_capability, s.elevated_until, s.elevation_reason
 FROM operator_session s
 JOIN operator_account a ON a.operator_id = s.operator_id
 WHERE s.token_digest = $1
@@ -791,14 +933,17 @@ type ResolveOperatorSessionParams struct {
 }
 
 type ResolveOperatorSessionRow struct {
-	SessionID    string
-	OperatorID   string
-	Stage        string
-	ExpiresAt    pgtype.Timestamptz
-	CredentialID *string
-	SubjectID    string
-	Role         string
-	DisabledAt   pgtype.Timestamptz
+	SessionID          string
+	OperatorID         string
+	Stage              string
+	ExpiresAt          pgtype.Timestamptz
+	CredentialID       *string
+	SubjectID          string
+	Role               string
+	DisabledAt         pgtype.Timestamptz
+	ElevatedCapability *string
+	ElevatedUntil      pgtype.Timestamptz
+	ElevationReason    *string
 }
 
 // The authenticator's query, and it joins operator_account so a DISABLED
@@ -819,6 +964,9 @@ func (q *Queries) ResolveOperatorSession(ctx context.Context, arg ResolveOperato
 		&i.SubjectID,
 		&i.Role,
 		&i.DisabledAt,
+		&i.ElevatedCapability,
+		&i.ElevatedUntil,
+		&i.ElevationReason,
 	)
 	return i, err
 }

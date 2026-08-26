@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/chronos/chronos-go/internal/operator/contract"
+	"github.com/chronos/chronos-go/internal/operator/domain"
 )
 
 // Errors the use cases return. Each is mapped to a wire error by the API layer.
@@ -141,6 +142,14 @@ type SessionRecord struct {
 	Stage        Stage
 	ExpiresAt    time.Time
 	CredentialID string
+
+	// Elevation is the break-glass grant on THIS session, if any.
+	//
+	// Its zero value grants nothing, so a session read that failed to populate
+	// it, a store that does not set it, and an expired window all produce the
+	// same answer — denial. That is the same construction `authz.Decision` uses
+	// and the reason it is a value rather than a pointer.
+	Elevation domain.Elevation
 }
 
 // NewSession is a session about to be stored.
@@ -154,10 +163,42 @@ type NewSession struct {
 	CredentialID string
 }
 
+// ExpiredElevation is a break-glass window that has closed and whose expiry has
+// not yet been recorded in the log.
+type ExpiredElevation struct {
+	SessionID  string
+	OperatorID string
+	SubjectID  string
+	Capability string
+	ExpiredAt  time.Time
+
+	// Used reports whether the capability was actually exercised. An elevation
+	// nobody used is a false alarm, and telling it apart from one that was
+	// needed is the difference between an alert people act on and one they mute.
+	Used bool
+}
+
 // Sessions is operator_session — authoritative, like the tenant plane's
 // session_token.
 type Sessions interface {
 	Issue(ctx context.Context, s NewSession) error
+
+	// Elevate grants a break-glass on one session and reports whether it took.
+	//
+	// FALSE means a live elevation already stands, which is refused rather than
+	// replaced: replacing would let an operator chain windows into an unbounded
+	// grant while every individual event looked correctly time-boxed.
+	Elevate(ctx context.Context, digest []byte, e domain.Elevation, now time.Time) (bool, error)
+
+	// MarkElevationUsed records the FIRST exercise of an elevated capability.
+	MarkElevationUsed(ctx context.Context, digest []byte, now time.Time) error
+
+	// ExpiredElevations lists windows whose expiry is not yet in the log.
+	ExpiredElevations(ctx context.Context, before time.Time, limit int32) ([]ExpiredElevation, error)
+
+	// MarkElevationExpiryRecorded is the sweep's idempotency: an expiry already
+	// appended is not appended again.
+	MarkElevationExpiryRecorded(ctx context.Context, sessionID string, now time.Time) error
 
 	// Resolve returns the session behind a token digest, or ErrSessionRefused.
 	// It must refuse an expired session, an ended one, and one belonging to a

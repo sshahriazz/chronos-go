@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,6 +35,20 @@ type stubSessions struct{ app.Sessions }
 
 func (stubSessions) Resolve(context.Context, []byte, time.Time) (app.SessionRecord, error) {
 	return app.SessionRecord{}, app.ErrSessionRefused
+}
+
+func (stubSessions) MarkElevationUsed(context.Context, []byte, time.Time) error { return nil }
+
+// recordingAlerter is how TestTheAlerterIsWired asserts the alert FIRED rather
+// than that a counter exists somewhere.
+//
+// "The adapter was built, fully tested, and constructed by no binary" is this
+// repository's named failure — it happened to three notification channels at
+// once — and an alerting adapter nobody wired has exactly that shape.
+type recordingAlerter struct{ calls int }
+
+func (r *recordingAlerter) Alert(context.Context, app.Actor, string, string, time.Time) {
+	r.calls++
 }
 
 type fixedClock struct{}
@@ -70,7 +85,7 @@ func handler(t *testing.T, allowed []netip.Prefix) http.Handler {
 		t.Fatalf("building the guard: %v", err)
 	}
 
-	svc, err := api.NewService(stubSignIn(t), stubCustomers(t))
+	svc, err := api.NewService(stubSignIn(t), stubCustomers(t), stubElevation(t))
 	if err != nil {
 		t.Fatalf("building the service: %v", err)
 	}
@@ -294,4 +309,34 @@ func stubCustomers(t *testing.T) *app.Customers {
 		t.Fatalf("building the customers use case: %v", err)
 	}
 	return c
+}
+
+func stubElevation(t *testing.T) *app.Elevation {
+	t.Helper()
+	e, err := app.NewElevation(stubSessions{}, app.NewAuditor(stubEvents{}, fixedClock{}),
+		&recordingAlerter{}, fixedClock{}, nil)
+	if err != nil {
+		t.Fatalf("building the elevation use case: %v", err)
+	}
+	return e
+}
+
+// TestElevationRefusesToBuildWithoutAnAlerter is the composition-root assertion
+// for operator.md §5's third control.
+//
+// The justification and the time box are enforced by the domain and by the
+// database, so they cannot be omitted. The ALERT is the one control that lives
+// outside both — and the way it gets lost is a constructor that treats a nil
+// alerter as "alerting is optional here". It does not.
+func TestElevationRefusesToBuildWithoutAnAlerter(t *testing.T) {
+	_, err := app.NewElevation(stubSessions{}, app.NewAuditor(stubEvents{}, fixedClock{}),
+		nil, fixedClock{}, nil)
+	if err == nil {
+		t.Fatal("a break-glass use case was built with no alerter, so it would grant " +
+			"privileges silently — the dangerous half of the feature without the control " +
+			"that makes it safe")
+	}
+	if !strings.Contains(err.Error(), "alerter") {
+		t.Errorf("refused for the wrong reason: %v", err)
+	}
 }

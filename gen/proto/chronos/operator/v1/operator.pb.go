@@ -1223,6 +1223,134 @@ func (x *RevealPersonalDataResponse) GetAuditEntryId() string {
 	return ""
 }
 
+// RequestElevationRequest asks for one capability, for a short while, with a
+// reason.
+type RequestElevationRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The single capability to take. One, never a list: an elevation granting
+	// several would be a role change with a timer, and the audit entry would not
+	// say which of them was actually needed.
+	Capability string `protobuf:"bytes,1,opt,name=capability,proto3" json:"capability,omitempty"`
+	// Why. Mandatory, stored verbatim, and eight characters minimum for the same
+	// reason RevealPersonalData's is: a rule that can be satisfied by "x" is a
+	// rule that will be.
+	Reason        string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RequestElevationRequest) Reset() {
+	*x = RequestElevationRequest{}
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RequestElevationRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RequestElevationRequest) ProtoMessage() {}
+
+func (x *RequestElevationRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RequestElevationRequest.ProtoReflect.Descriptor instead.
+func (*RequestElevationRequest) Descriptor() ([]byte, []int) {
+	return file_chronos_operator_v1_operator_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *RequestElevationRequest) GetCapability() string {
+	if x != nil {
+		return x.Capability
+	}
+	return ""
+}
+
+func (x *RequestElevationRequest) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+// RequestElevationResponse reports the window that was opened.
+type RequestElevationResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The capability granted, echoed so a console cannot show one thing while the
+	// server granted another.
+	Capability string `protobuf:"bytes,1,opt,name=capability,proto3" json:"capability,omitempty"`
+	// When the window closes. ABSOLUTE, and nothing extends it — there is no
+	// renew endpoint, deliberately. A second break-glass is a second event with
+	// its own justification and its own alert, which is what keeps the alert
+	// worth reading.
+	ExpiresAt *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	// The audit entry this elevation produced, so the operator can quote it.
+	AuditEntryId  string `protobuf:"bytes,3,opt,name=audit_entry_id,json=auditEntryId,proto3" json:"audit_entry_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RequestElevationResponse) Reset() {
+	*x = RequestElevationResponse{}
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RequestElevationResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RequestElevationResponse) ProtoMessage() {}
+
+func (x *RequestElevationResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chronos_operator_v1_operator_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RequestElevationResponse.ProtoReflect.Descriptor instead.
+func (*RequestElevationResponse) Descriptor() ([]byte, []int) {
+	return file_chronos_operator_v1_operator_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *RequestElevationResponse) GetCapability() string {
+	if x != nil {
+		return x.Capability
+	}
+	return ""
+}
+
+func (x *RequestElevationResponse) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
+func (x *RequestElevationResponse) GetAuditEntryId() string {
+	if x != nil {
+		return x.AuditEntryId
+	}
+	return ""
+}
+
 var File_chronos_operator_v1_operator_proto protoreflect.FileDescriptor
 
 const file_chronos_operator_v1_operator_proto_rawDesc = "" +
@@ -1314,13 +1442,27 @@ const file_chronos_operator_v1_operator_proto_rawDesc = "" +
 	"\x0eaudit_entry_id\x18\x02 \x01(\tB,\xbaH)r'\x18 2#^audit_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\fauditEntryId\x1a9\n" +
 	"\vFieldsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012\xc7\a\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"{\n" +
+	"\x17RequestElevationRequest\x12<\n" +
+	"\n" +
+	"capability\x18\x01 \x01(\tB\x1c\xbaH\x19r\x17\x10\x01\x18 2\x11^[a-z][a-z0-9_]*$R\n" +
+	"capability\x12\"\n" +
+	"\x06reason\x18\x02 \x01(\tB\n" +
+	"\xbaH\ar\x05\x10\b\x18\xf4\x03R\x06reason\"\xd2\x01\n" +
+	"\x18RequestElevationResponse\x12'\n" +
+	"\n" +
+	"capability\x18\x01 \x01(\tB\a\xbaH\x04r\x02\x18 R\n" +
+	"capability\x129\n" +
+	"\n" +
+	"expires_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12R\n" +
+	"\x0eaudit_entry_id\x18\x03 \x01(\tB,\xbaH)r'\x18 2#^audit_[0-7][0-9A-HJKMNP-TV-Z]{25}$R\fauditEntryId2\xcf\b\n" +
 	"\x0fOperatorService\x12f\n" +
 	"\vBeginSignIn\x12'.chronos.operator.v1.BeginSignInRequest\x1a(.chronos.operator.v1.BeginSignInResponse\"\x04\x98\xb2\x19\x01\x12o\n" +
 	"\x0eCompleteSignIn\x12*.chronos.operator.v1.CompleteSignInRequest\x1a+.chronos.operator.v1.CompleteSignInResponse\"\x04\x98\xb2\x19\x01\x12l\n" +
 	"\rBeginWebAuthn\x12).chronos.operator.v1.BeginWebAuthnRequest\x1a*.chronos.operator.v1.BeginWebAuthnResponse\"\x04\xa0\xb2\x19\x01\x12s\n" +
 	"\x0eFinishWebAuthn\x12*.chronos.operator.v1.FinishWebAuthnRequest\x1a+.chronos.operator.v1.FinishWebAuthnResponse\"\b\x90\xb2\x19\x01\xa0\xb2\x19\x01\x12j\n" +
-	"\aSignOut\x12#.chronos.operator.v1.SignOutRequest\x1a$.chronos.operator.v1.SignOutResponse\"\x14\x8a\xb2\x19\fself_session\x90\xb2\x19\x02\x12~\n" +
+	"\aSignOut\x12#.chronos.operator.v1.SignOutRequest\x1a$.chronos.operator.v1.SignOutResponse\"\x14\x8a\xb2\x19\fself_session\x90\xb2\x19\x02\x12\x85\x01\n" +
+	"\x10RequestElevation\x12,.chronos.operator.v1.RequestElevationRequest\x1a-.chronos.operator.v1.RequestElevationResponse\"\x14\x8a\xb2\x19\fself_session\x90\xb2\x19\x05\x12~\n" +
 	"\rListCustomers\x12).chronos.operator.v1.ListCustomersRequest\x1a*.chronos.operator.v1.ListCustomersResponse\"\x16\x8a\xb2\x19\x0eview_customers\x90\xb2\x19\x03\x12x\n" +
 	"\vGetCustomer\x12'.chronos.operator.v1.GetCustomerRequest\x1a(.chronos.operator.v1.GetCustomerResponse\"\x16\x8a\xb2\x19\x0eview_customers\x90\xb2\x19\x03\x12\x91\x01\n" +
 	"\x12RevealPersonalData\x12..chronos.operator.v1.RevealPersonalDataRequest\x1a/.chronos.operator.v1.RevealPersonalDataResponse\"\x1a\x8a\xb2\x19\x12view_personal_data\x90\xb2\x19\x04B\xde\x01\n" +
@@ -1338,7 +1480,7 @@ func file_chronos_operator_v1_operator_proto_rawDescGZIP() []byte {
 	return file_chronos_operator_v1_operator_proto_rawDescData
 }
 
-var file_chronos_operator_v1_operator_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_chronos_operator_v1_operator_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
 var file_chronos_operator_v1_operator_proto_goTypes = []any{
 	(*BeginSignInRequest)(nil),         // 0: chronos.operator.v1.BeginSignInRequest
 	(*BeginSignInResponse)(nil),        // 1: chronos.operator.v1.BeginSignInResponse
@@ -1357,41 +1499,46 @@ var file_chronos_operator_v1_operator_proto_goTypes = []any{
 	(*GetCustomerResponse)(nil),        // 14: chronos.operator.v1.GetCustomerResponse
 	(*RevealPersonalDataRequest)(nil),  // 15: chronos.operator.v1.RevealPersonalDataRequest
 	(*RevealPersonalDataResponse)(nil), // 16: chronos.operator.v1.RevealPersonalDataResponse
-	nil,                                // 17: chronos.operator.v1.RevealPersonalDataResponse.FieldsEntry
-	(*timestamppb.Timestamp)(nil),      // 18: google.protobuf.Timestamp
+	(*RequestElevationRequest)(nil),    // 17: chronos.operator.v1.RequestElevationRequest
+	(*RequestElevationResponse)(nil),   // 18: chronos.operator.v1.RequestElevationResponse
+	nil,                                // 19: chronos.operator.v1.RevealPersonalDataResponse.FieldsEntry
+	(*timestamppb.Timestamp)(nil),      // 20: google.protobuf.Timestamp
 }
 var file_chronos_operator_v1_operator_proto_depIdxs = []int32{
-	18, // 0: chronos.operator.v1.BeginSignInResponse.expires_at:type_name -> google.protobuf.Timestamp
-	18, // 1: chronos.operator.v1.CompleteSignInResponse.expires_at:type_name -> google.protobuf.Timestamp
-	18, // 2: chronos.operator.v1.FinishWebAuthnResponse.expires_at:type_name -> google.protobuf.Timestamp
-	18, // 3: chronos.operator.v1.Customer.trial_ends_at:type_name -> google.protobuf.Timestamp
-	18, // 4: chronos.operator.v1.Customer.last_active_at:type_name -> google.protobuf.Timestamp
-	18, // 5: chronos.operator.v1.Customer.suspended_at:type_name -> google.protobuf.Timestamp
-	18, // 6: chronos.operator.v1.Customer.created_at:type_name -> google.protobuf.Timestamp
+	20, // 0: chronos.operator.v1.BeginSignInResponse.expires_at:type_name -> google.protobuf.Timestamp
+	20, // 1: chronos.operator.v1.CompleteSignInResponse.expires_at:type_name -> google.protobuf.Timestamp
+	20, // 2: chronos.operator.v1.FinishWebAuthnResponse.expires_at:type_name -> google.protobuf.Timestamp
+	20, // 3: chronos.operator.v1.Customer.trial_ends_at:type_name -> google.protobuf.Timestamp
+	20, // 4: chronos.operator.v1.Customer.last_active_at:type_name -> google.protobuf.Timestamp
+	20, // 5: chronos.operator.v1.Customer.suspended_at:type_name -> google.protobuf.Timestamp
+	20, // 6: chronos.operator.v1.Customer.created_at:type_name -> google.protobuf.Timestamp
 	11, // 7: chronos.operator.v1.ListCustomersResponse.customers:type_name -> chronos.operator.v1.Customer
 	11, // 8: chronos.operator.v1.GetCustomerResponse.customer:type_name -> chronos.operator.v1.Customer
-	17, // 9: chronos.operator.v1.RevealPersonalDataResponse.fields:type_name -> chronos.operator.v1.RevealPersonalDataResponse.FieldsEntry
-	0,  // 10: chronos.operator.v1.OperatorService.BeginSignIn:input_type -> chronos.operator.v1.BeginSignInRequest
-	2,  // 11: chronos.operator.v1.OperatorService.CompleteSignIn:input_type -> chronos.operator.v1.CompleteSignInRequest
-	4,  // 12: chronos.operator.v1.OperatorService.BeginWebAuthn:input_type -> chronos.operator.v1.BeginWebAuthnRequest
-	6,  // 13: chronos.operator.v1.OperatorService.FinishWebAuthn:input_type -> chronos.operator.v1.FinishWebAuthnRequest
-	8,  // 14: chronos.operator.v1.OperatorService.SignOut:input_type -> chronos.operator.v1.SignOutRequest
-	10, // 15: chronos.operator.v1.OperatorService.ListCustomers:input_type -> chronos.operator.v1.ListCustomersRequest
-	13, // 16: chronos.operator.v1.OperatorService.GetCustomer:input_type -> chronos.operator.v1.GetCustomerRequest
-	15, // 17: chronos.operator.v1.OperatorService.RevealPersonalData:input_type -> chronos.operator.v1.RevealPersonalDataRequest
-	1,  // 18: chronos.operator.v1.OperatorService.BeginSignIn:output_type -> chronos.operator.v1.BeginSignInResponse
-	3,  // 19: chronos.operator.v1.OperatorService.CompleteSignIn:output_type -> chronos.operator.v1.CompleteSignInResponse
-	5,  // 20: chronos.operator.v1.OperatorService.BeginWebAuthn:output_type -> chronos.operator.v1.BeginWebAuthnResponse
-	7,  // 21: chronos.operator.v1.OperatorService.FinishWebAuthn:output_type -> chronos.operator.v1.FinishWebAuthnResponse
-	9,  // 22: chronos.operator.v1.OperatorService.SignOut:output_type -> chronos.operator.v1.SignOutResponse
-	12, // 23: chronos.operator.v1.OperatorService.ListCustomers:output_type -> chronos.operator.v1.ListCustomersResponse
-	14, // 24: chronos.operator.v1.OperatorService.GetCustomer:output_type -> chronos.operator.v1.GetCustomerResponse
-	16, // 25: chronos.operator.v1.OperatorService.RevealPersonalData:output_type -> chronos.operator.v1.RevealPersonalDataResponse
-	18, // [18:26] is the sub-list for method output_type
-	10, // [10:18] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	19, // 9: chronos.operator.v1.RevealPersonalDataResponse.fields:type_name -> chronos.operator.v1.RevealPersonalDataResponse.FieldsEntry
+	20, // 10: chronos.operator.v1.RequestElevationResponse.expires_at:type_name -> google.protobuf.Timestamp
+	0,  // 11: chronos.operator.v1.OperatorService.BeginSignIn:input_type -> chronos.operator.v1.BeginSignInRequest
+	2,  // 12: chronos.operator.v1.OperatorService.CompleteSignIn:input_type -> chronos.operator.v1.CompleteSignInRequest
+	4,  // 13: chronos.operator.v1.OperatorService.BeginWebAuthn:input_type -> chronos.operator.v1.BeginWebAuthnRequest
+	6,  // 14: chronos.operator.v1.OperatorService.FinishWebAuthn:input_type -> chronos.operator.v1.FinishWebAuthnRequest
+	8,  // 15: chronos.operator.v1.OperatorService.SignOut:input_type -> chronos.operator.v1.SignOutRequest
+	17, // 16: chronos.operator.v1.OperatorService.RequestElevation:input_type -> chronos.operator.v1.RequestElevationRequest
+	10, // 17: chronos.operator.v1.OperatorService.ListCustomers:input_type -> chronos.operator.v1.ListCustomersRequest
+	13, // 18: chronos.operator.v1.OperatorService.GetCustomer:input_type -> chronos.operator.v1.GetCustomerRequest
+	15, // 19: chronos.operator.v1.OperatorService.RevealPersonalData:input_type -> chronos.operator.v1.RevealPersonalDataRequest
+	1,  // 20: chronos.operator.v1.OperatorService.BeginSignIn:output_type -> chronos.operator.v1.BeginSignInResponse
+	3,  // 21: chronos.operator.v1.OperatorService.CompleteSignIn:output_type -> chronos.operator.v1.CompleteSignInResponse
+	5,  // 22: chronos.operator.v1.OperatorService.BeginWebAuthn:output_type -> chronos.operator.v1.BeginWebAuthnResponse
+	7,  // 23: chronos.operator.v1.OperatorService.FinishWebAuthn:output_type -> chronos.operator.v1.FinishWebAuthnResponse
+	9,  // 24: chronos.operator.v1.OperatorService.SignOut:output_type -> chronos.operator.v1.SignOutResponse
+	18, // 25: chronos.operator.v1.OperatorService.RequestElevation:output_type -> chronos.operator.v1.RequestElevationResponse
+	12, // 26: chronos.operator.v1.OperatorService.ListCustomers:output_type -> chronos.operator.v1.ListCustomersResponse
+	14, // 27: chronos.operator.v1.OperatorService.GetCustomer:output_type -> chronos.operator.v1.GetCustomerResponse
+	16, // 28: chronos.operator.v1.OperatorService.RevealPersonalData:output_type -> chronos.operator.v1.RevealPersonalDataResponse
+	20, // [20:29] is the sub-list for method output_type
+	11, // [11:20] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_chronos_operator_v1_operator_proto_init() }
@@ -1406,7 +1553,7 @@ func file_chronos_operator_v1_operator_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chronos_operator_v1_operator_proto_rawDesc), len(file_chronos_operator_v1_operator_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   18,
+			NumMessages:   20,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

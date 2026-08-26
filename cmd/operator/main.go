@@ -123,7 +123,7 @@ func run() error {
 		return err
 	}
 
-	service, err := api.NewService(deps.signIn, deps.customers)
+	service, err := api.NewService(deps.signIn, deps.customers, deps.elevation)
 	if err != nil {
 		return err
 	}
@@ -144,6 +144,26 @@ func run() error {
 	path, handler := operatorv1connect.NewOperatorServiceHandler(service,
 		connect.WithInterceptors(guard, connectvalidate.NewInterceptor()))
 	mux.Handle(path, handler)
+
+	// # /metrics is what makes the break-glass alert real
+	//
+	// operator.md §5's alert is a Prometheus counter (see
+	// internal/operator/adapter/alert for why a counter and not mail), and a
+	// counter nothing scrapes is the report §5 names and rejects. This route is
+	// the difference between an alerting design and an alert.
+	//
+	// It is on the SAME port as the RPCs, unlike the projector and the worker
+	// which use a separate health port. The reason is the network restriction:
+	// this port is bound to internal ranges, and a second listener would be a
+	// second thing to remember to restrict — which is how the one endpoint
+	// nobody thought about becomes reachable.
+	//
+	// The guard does NOT cover it: a Connect interceptor wraps Connect
+	// handlers, not plain mux routes. That is acceptable and deliberate here,
+	// because the metric labels are `role` and `capability` — both closed sets,
+	// neither naming a person. Who broke the glass is in the audit log, which
+	// has access controls; a metrics store usually does not.
+	mux.Handle("GET /metrics", deps.metrics.Handler())
 
 	var wg sync.WaitGroup
 	runProjectors(ctx, &wg, deps, log)
@@ -241,7 +261,14 @@ func runProjectors(ctx context.Context, wg *sync.WaitGroup, d *dependencies, log
 // queries that read them compare the deadline in SQL, so an unswept row is
 // already unusable. This bounds table SIZE, not exposure.
 func runSweeps(ctx context.Context, wg *sync.WaitGroup, d *dependencies, log *slog.Logger) {
-	const every = 10 * time.Minute
+	// Two minutes, not the ten the other sweeps use.
+	//
+	// A break-glass window is fifteen minutes, so a ten-minute sweep would
+	// leave an expiry unrecorded for most of another window — and "did anything
+	// happen while the glass was broken" is an incident-review question asked
+	// in minutes. The sweep is three cheap statements over a partial index, so
+	// the extra frequency costs almost nothing.
+	const every = 2 * time.Minute
 
 	wg.Add(1)
 	go func() {
@@ -264,9 +291,30 @@ func runSweeps(ctx context.Context, wg *sync.WaitGroup, d *dependencies, log *sl
 				} else if n > 0 {
 					log.Info("swept expired operator ceremonies", "removed", n)
 				}
+				// The elevation sweep CLOSES break-glass windows in the log.
+				//
+				// It gates nothing — whether a grant is live is decided by
+				// comparing the deadline in SQL — so being late costs an audit
+				// record its punctuality and can never extend a privilege.
+				// That is ADR-045's rule pointed the other way: there a timer
+				// firing EARLY restores access, here a sweep running LATE
+				// delays only the record that the glass closed.
+				if n, err := d.elevation.SweepExpired(ctx, elevationSweepBatch); err != nil {
+					log.Error("the elevation expiry sweep failed", "error", err)
+				} else if n > 0 {
+					log.Info("recorded expired break-glass windows", "closed", n)
+				}
 			}
 		}
 	}()
 }
+
+// elevationSweepBatch bounds one pass.
+//
+// Generous relative to any plausible number of concurrent operators, so a
+// backlog after an outage clears in one pass rather than trickling — but
+// bounded, because an unbounded LIMIT is how a recovery sweep becomes the
+// incident.
+const elevationSweepBatch = 200
 
 var _ = app.StageLive // keeps the app import honest for readers of this file

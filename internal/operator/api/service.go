@@ -24,14 +24,15 @@ import (
 type Service struct {
 	signIn    *app.SignIn
 	customers *app.Customers
+	elevation *app.Elevation
 }
 
 // NewService builds the handlers.
-func NewService(signIn *app.SignIn, customers *app.Customers) (*Service, error) {
-	if signIn == nil || customers == nil {
-		return nil, errors.New("operator api: the service needs its two use cases")
+func NewService(signIn *app.SignIn, customers *app.Customers, elevation *app.Elevation) (*Service, error) {
+	if signIn == nil || customers == nil || elevation == nil {
+		return nil, errors.New("operator api: the service needs its three use cases")
 	}
-	return &Service{signIn: signIn, customers: customers}, nil
+	return &Service{signIn: signIn, customers: customers, elevation: elevation}, nil
 }
 
 var _ operatorv1connect.OperatorServiceHandler = (*Service)(nil)
@@ -150,6 +151,32 @@ func (s *Service) SignOut(
 		return nil, wire(err)
 	}
 	return connect.NewResponse(&operatorv1.SignOutResponse{Changed: changed}), nil
+}
+
+// RequestElevation takes a capability this operator's role does not hold.
+func (s *Service) RequestElevation(
+	ctx context.Context, req *connect.Request[operatorv1.RequestElevationRequest],
+) (*connect.Response[operatorv1.RequestElevationResponse], error) {
+	actor, ok := ActorFrom(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeUnauthenticated, app.ErrSessionRefused)
+	}
+	digest, ok := DigestFrom(ctx)
+	if !ok {
+		return nil, connect.NewError(connect.CodeInternal,
+			errors.New("this request's own bearer was not carried through"))
+	}
+
+	res, err := s.elevation.Request(ctx, actor, digest,
+		req.Msg.GetCapability(), req.Msg.GetReason())
+	if err != nil {
+		return nil, wire(err)
+	}
+	return connect.NewResponse(&operatorv1.RequestElevationResponse{
+		Capability:   res.Capability,
+		ExpiresAt:    timestamppb.New(res.ExpiresAt),
+		AuditEntryId: res.AuditEntryID,
+	}), nil
 }
 
 // ListCustomers pages the directory.
@@ -284,6 +311,21 @@ func wire(err error) error {
 		return connect.NewError(connect.CodeUnauthenticated, err)
 	case errors.Is(err, app.ErrForbidden):
 		return connect.NewError(connect.CodePermissionDenied, err)
+
+	// A refused break-glass explains itself, which nothing else here does. The
+	// caller is an authenticated operator asking for a privilege, and telling
+	// them their role cannot reach it is how they learn to ask a human rather
+	// than retry — see ErrElevationRefused for why that is safe here and not
+	// elsewhere.
+	case errors.Is(err, app.ErrElevationRefused):
+		return connect.NewError(connect.CodePermissionDenied, err)
+
+	case errors.Is(err, app.ErrElevationInProgress):
+		// FailedPrecondition, not AlreadyExists: the caller's request was
+		// well-formed and the state refuses it, which is exactly what the code
+		// means — and a client can tell "wait for the window to close" from
+		// "you may never do this".
+		return connect.NewError(connect.CodeFailedPrecondition, err)
 	case errors.Is(err, app.ErrNoSuchCustomer):
 		return connect.NewError(connect.CodeNotFound, err)
 	default:

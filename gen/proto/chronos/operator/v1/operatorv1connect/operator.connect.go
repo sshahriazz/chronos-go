@@ -73,6 +73,9 @@ const (
 	OperatorServiceFinishWebAuthnProcedure = "/chronos.operator.v1.OperatorService/FinishWebAuthn"
 	// OperatorServiceSignOutProcedure is the fully-qualified name of the OperatorService's SignOut RPC.
 	OperatorServiceSignOutProcedure = "/chronos.operator.v1.OperatorService/SignOut"
+	// OperatorServiceRequestElevationProcedure is the fully-qualified name of the OperatorService's
+	// RequestElevation RPC.
+	OperatorServiceRequestElevationProcedure = "/chronos.operator.v1.OperatorService/RequestElevation"
 	// OperatorServiceListCustomersProcedure is the fully-qualified name of the OperatorService's
 	// ListCustomers RPC.
 	OperatorServiceListCustomersProcedure = "/chronos.operator.v1.OperatorService/ListCustomers"
@@ -119,6 +122,32 @@ type OperatorServiceClient interface {
 	// privilege, and an operator who cannot sign out on a shared machine is an
 	// operator whose safest action is unavailable.
 	SignOut(context.Context, *connect.Request[v1.SignOutRequest]) (*connect.Response[v1.SignOutResponse], error)
+	// RequestElevation takes a capability this operator's role does not hold,
+	// for fifteen minutes, with a recorded justification (operator.md §5).
+	//
+	// # What it can and cannot reach
+	//
+	// A role may break the glass to what the role ABOVE it holds, and no further.
+	// The spec says only "beyond a role's default", which read literally would
+	// permit a support engineer elevating to `manage_operators` — self-promotion
+	// with a fifteen-minute delay and an alert nobody can act on faster than the
+	// grant.
+	//
+	// Two capabilities are reachable by nobody: `manage_operators`, because it
+	// grants capabilities and so the time box would bound nothing; and
+	// `suspend_organization`, because it is the only operator action that stops a
+	// paying customer working.
+	//
+	// # It declares `self_session`, which looks wrong and is not
+	//
+	// The capability being REQUESTED cannot gate the request — that is the
+	// deadlock `bootstrap_min_aal` describes on the tenant plane, in another
+	// costume. What gates it is that the caller holds a live session, and the
+	// domain then decides whether their role may reach what they asked for.
+	//
+	// The elevation is scoped to the SESSION, so signing out ends it and a second
+	// session of the same operator is unaffected.
+	RequestElevation(context.Context, *connect.Request[v1.RequestElevationRequest]) (*connect.Response[v1.RequestElevationResponse], error)
 	// ListCustomers pages the customer directory.
 	//
 	// Audited, like every read here. The entry names no org, because a page is an
@@ -181,6 +210,12 @@ func NewOperatorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(operatorServiceMethods.ByName("SignOut")),
 			connect.WithClientOptions(opts...),
 		),
+		requestElevation: connect.NewClient[v1.RequestElevationRequest, v1.RequestElevationResponse](
+			httpClient,
+			baseURL+OperatorServiceRequestElevationProcedure,
+			connect.WithSchema(operatorServiceMethods.ByName("RequestElevation")),
+			connect.WithClientOptions(opts...),
+		),
 		listCustomers: connect.NewClient[v1.ListCustomersRequest, v1.ListCustomersResponse](
 			httpClient,
 			baseURL+OperatorServiceListCustomersProcedure,
@@ -209,6 +244,7 @@ type operatorServiceClient struct {
 	beginWebAuthn      *connect.Client[v1.BeginWebAuthnRequest, v1.BeginWebAuthnResponse]
 	finishWebAuthn     *connect.Client[v1.FinishWebAuthnRequest, v1.FinishWebAuthnResponse]
 	signOut            *connect.Client[v1.SignOutRequest, v1.SignOutResponse]
+	requestElevation   *connect.Client[v1.RequestElevationRequest, v1.RequestElevationResponse]
 	listCustomers      *connect.Client[v1.ListCustomersRequest, v1.ListCustomersResponse]
 	getCustomer        *connect.Client[v1.GetCustomerRequest, v1.GetCustomerResponse]
 	revealPersonalData *connect.Client[v1.RevealPersonalDataRequest, v1.RevealPersonalDataResponse]
@@ -237,6 +273,11 @@ func (c *operatorServiceClient) FinishWebAuthn(ctx context.Context, req *connect
 // SignOut calls chronos.operator.v1.OperatorService.SignOut.
 func (c *operatorServiceClient) SignOut(ctx context.Context, req *connect.Request[v1.SignOutRequest]) (*connect.Response[v1.SignOutResponse], error) {
 	return c.signOut.CallUnary(ctx, req)
+}
+
+// RequestElevation calls chronos.operator.v1.OperatorService.RequestElevation.
+func (c *operatorServiceClient) RequestElevation(ctx context.Context, req *connect.Request[v1.RequestElevationRequest]) (*connect.Response[v1.RequestElevationResponse], error) {
+	return c.requestElevation.CallUnary(ctx, req)
 }
 
 // ListCustomers calls chronos.operator.v1.OperatorService.ListCustomers.
@@ -289,6 +330,32 @@ type OperatorServiceHandler interface {
 	// privilege, and an operator who cannot sign out on a shared machine is an
 	// operator whose safest action is unavailable.
 	SignOut(context.Context, *connect.Request[v1.SignOutRequest]) (*connect.Response[v1.SignOutResponse], error)
+	// RequestElevation takes a capability this operator's role does not hold,
+	// for fifteen minutes, with a recorded justification (operator.md §5).
+	//
+	// # What it can and cannot reach
+	//
+	// A role may break the glass to what the role ABOVE it holds, and no further.
+	// The spec says only "beyond a role's default", which read literally would
+	// permit a support engineer elevating to `manage_operators` — self-promotion
+	// with a fifteen-minute delay and an alert nobody can act on faster than the
+	// grant.
+	//
+	// Two capabilities are reachable by nobody: `manage_operators`, because it
+	// grants capabilities and so the time box would bound nothing; and
+	// `suspend_organization`, because it is the only operator action that stops a
+	// paying customer working.
+	//
+	// # It declares `self_session`, which looks wrong and is not
+	//
+	// The capability being REQUESTED cannot gate the request — that is the
+	// deadlock `bootstrap_min_aal` describes on the tenant plane, in another
+	// costume. What gates it is that the caller holds a live session, and the
+	// domain then decides whether their role may reach what they asked for.
+	//
+	// The elevation is scoped to the SESSION, so signing out ends it and a second
+	// session of the same operator is unaffected.
+	RequestElevation(context.Context, *connect.Request[v1.RequestElevationRequest]) (*connect.Response[v1.RequestElevationResponse], error)
 	// ListCustomers pages the customer directory.
 	//
 	// Audited, like every read here. The entry names no org, because a page is an
@@ -347,6 +414,12 @@ func NewOperatorServiceHandler(svc OperatorServiceHandler, opts ...connect.Handl
 		connect.WithSchema(operatorServiceMethods.ByName("SignOut")),
 		connect.WithHandlerOptions(opts...),
 	)
+	operatorServiceRequestElevationHandler := connect.NewUnaryHandler(
+		OperatorServiceRequestElevationProcedure,
+		svc.RequestElevation,
+		connect.WithSchema(operatorServiceMethods.ByName("RequestElevation")),
+		connect.WithHandlerOptions(opts...),
+	)
 	operatorServiceListCustomersHandler := connect.NewUnaryHandler(
 		OperatorServiceListCustomersProcedure,
 		svc.ListCustomers,
@@ -377,6 +450,8 @@ func NewOperatorServiceHandler(svc OperatorServiceHandler, opts ...connect.Handl
 			operatorServiceFinishWebAuthnHandler.ServeHTTP(w, r)
 		case OperatorServiceSignOutProcedure:
 			operatorServiceSignOutHandler.ServeHTTP(w, r)
+		case OperatorServiceRequestElevationProcedure:
+			operatorServiceRequestElevationHandler.ServeHTTP(w, r)
 		case OperatorServiceListCustomersProcedure:
 			operatorServiceListCustomersHandler.ServeHTTP(w, r)
 		case OperatorServiceGetCustomerProcedure:
@@ -410,6 +485,10 @@ func (UnimplementedOperatorServiceHandler) FinishWebAuthn(context.Context, *conn
 
 func (UnimplementedOperatorServiceHandler) SignOut(context.Context, *connect.Request[v1.SignOutRequest]) (*connect.Response[v1.SignOutResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.operator.v1.OperatorService.SignOut is not implemented"))
+}
+
+func (UnimplementedOperatorServiceHandler) RequestElevation(context.Context, *connect.Request[v1.RequestElevationRequest]) (*connect.Response[v1.RequestElevationResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chronos.operator.v1.OperatorService.RequestElevation is not implemented"))
 }
 
 func (UnimplementedOperatorServiceHandler) ListCustomers(context.Context, *connect.Request[v1.ListCustomersRequest]) (*connect.Response[v1.ListCustomersResponse], error) {
