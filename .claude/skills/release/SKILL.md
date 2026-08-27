@@ -127,7 +127,13 @@ Then read what it wrote — `git diff` — and tag:
 
 ```bash
 make release-tag                   # commits CHANGELOG.md + .changes/, annotated tag, no push
+git cat-file tag <version>         # confirm the notes actually landed in the annotation
 ```
+
+The tag carries the notes in its own annotation, not just in the commit it
+points at. Check it — this failed silently once: `git tag -F` defaults to
+`--cleanup=strip`, which deletes every line starting with `#`, so Markdown
+headings were eaten and the tag read as one bare bullet.
 
 ## 6. Stop
 

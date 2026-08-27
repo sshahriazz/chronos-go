@@ -352,14 +352,23 @@ release: ## Assemble the next release: CHANGELOG.md and .changes/vX.Y.Z.md. No c
 	@echo "  review    git diff"
 	@echo "  then      make release-tag"
 
+# The tag CARRIES the release notes, rather than pointing at a commit that
+# happens to contain them. `git show <tag>`, `git tag -n99` and every UI that
+# reads an annotation then answer "what is in this release?" without a checkout.
+#
+# --cleanup=verbatim is not optional here. `git tag -F` defaults to
+# --cleanup=strip, which deletes every line beginning with '#' as a comment —
+# and the notes are Markdown, so that silently ate `## v0.1.0-alpha.1` and
+# `### Fixed` and left a tag annotated with one bare bullet.
 .PHONY: release-tag
-release-tag: ## Commit the assembled release and tag it. Does NOT push.
+release-tag: ## Commit the assembled release and tag it, notes and all. Does NOT push.
 	@v=$$($(CHANGIE) latest); \
 	 test -n "$$v" || { echo "nothing assembled; run: make release"; exit 1; }; \
+	 test -f ".changes/$$v.md" || { echo "no release notes at .changes/$$v.md"; exit 1; }; \
 	 if git rev-parse --verify "$$v" >/dev/null 2>&1; then echo "$$v is already tagged"; exit 1; fi; \
 	 git add CHANGELOG.md .changes && \
 	 git commit -m "release: $$v" && \
-	 git tag -a "$$v" -m "$$v" && \
+	 git tag -a "$$v" --cleanup=verbatim -F ".changes/$$v.md" && \
 	 echo "  tagged $$v — publish with: git push origin main --follow-tags"
 
 .PHONY: bao-init
