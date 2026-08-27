@@ -212,3 +212,43 @@ func (s *Sessions) List(
 	}
 	return out, nil
 }
+
+// Destroy removes the digests of named sessions.
+//
+// A SYSTEM transaction, like Issue: `session_token` carries no tenant column —
+// a session belongs to a person, not to an organization — and a revocation is
+// performed from paths that have no organization in scope at all, an erasure and
+// a password reset among them.
+//
+// An empty list is a no-op rather than an error. `RevokeAllSessions` on an
+// account with nothing live plans no appends and destroys no digests, and that
+// is an ordinary outcome rather than a caller mistake.
+func (s *Sessions) Destroy(ctx context.Context, sessions []ids.SessionID) (int64, error) {
+	if len(sessions) == 0 {
+		return 0, nil
+	}
+
+	values := make([]string, 0, len(sessions))
+	for _, id := range sessions {
+		if id.IsZero() {
+			// Refused rather than skipped. A zero id means the caller lost track of
+			// which sessions it revoked, and destroying the rest of the list would
+			// leave one session live while reporting a complete revocation.
+			return 0, errors.New("identity/postgres: destroying a session secret needs the " +
+				"session it belongs to; a zero id in the list means the caller does not " +
+				"know which sessions it ended")
+		}
+		values = append(values, id.String())
+	}
+
+	var destroyed int64
+	err := s.tx.InSystemTx(ctx, func(ctx context.Context, q db.Querier) error {
+		tag, err := q.Exec(ctx, identitydb.DeleteSessionTokens, values)
+		if err != nil {
+			return fmt.Errorf("identity/postgres: destroying session secrets: %w", err)
+		}
+		destroyed = tag
+		return nil
+	})
+	return destroyed, err
+}

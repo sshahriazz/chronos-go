@@ -355,6 +355,13 @@ type authSessionTokens struct {
 	journal *[]string
 	issued  []NewSessionToken
 	err     error
+
+	// destroyed is every session whose secret was removed, in call order, and
+	// destroyErr makes the removal fail. Both exist so a test can assert that a
+	// revocation destroys the secret AFTER the append and reports it when it
+	// cannot — the two properties that make a revocation immediate.
+	destroyed  []ids.SessionID
+	destroyErr error
 }
 
 var _ SessionTokens = (*authSessionTokens)(nil)
@@ -366,6 +373,17 @@ func (s *authSessionTokens) Issue(_ context.Context, token NewSessionToken) erro
 	}
 	s.issued = append(s.issued, token)
 	return nil
+}
+
+func (s *authSessionTokens) Destroy(
+	_ context.Context, sessions []ids.SessionID,
+) (int64, error) {
+	*s.journal = append(*s.journal, "destroy")
+	if s.destroyErr != nil {
+		return 0, s.destroyErr
+	}
+	s.destroyed = append(s.destroyed, sessions...)
+	return int64(len(sessions)), nil
 }
 
 type authLive struct {
@@ -2338,10 +2356,17 @@ func TestRevokingASessionInvalidatesTheSubjectsCachedDecisions(t *testing.T) {
 	}
 }
 
+// The three writes happen in ONE order, and each position is load-bearing.
+//
 // The invalidation comes FIRST. If it fails, nothing may be in the log: the retry
 // then redoes both, whereas a retry against an already-revoked session appends
 // nothing and would never reach the invalidation that failed.
-func TestTheEpochIsBumpedBeforeTheRevocationIsAppended(t *testing.T) {
+//
+// The secret is destroyed LAST, after the append is durable. Destroying it first
+// would sign somebody out with nothing in the log saying why if the append then
+// failed — a `session_view` row that says the session is live while no token can
+// reach it. RevokeAPIKey orders its two writes the same way for the same reason.
+func TestTheEpochIsBumpedBeforeTheRevocationIsAppendedAndTheSecretGoesLast(t *testing.T) {
 	h := newAuthHarness(t)
 	id := h.liveSession(t, h.subjectID)
 	h.journal = nil
@@ -2351,10 +2376,66 @@ func TestTheEpochIsBumpedBeforeTheRevocationIsAppended(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("revoking: %v", err)
 	}
-	if len(h.journal) != 2 || h.journal[0] != "epoch" || h.journal[1] != "append" {
-		t.Errorf("the journal is %v, want [epoch append]: an append that outlives a failed "+
-			"invalidation can never be retried into one, because the retry finds the "+
-			"session already revoked and appends nothing", h.journal)
+	want := []string{"epoch", "append", "destroy"}
+	if len(h.journal) != len(want) {
+		t.Fatalf("the journal is %v, want %v", h.journal, want)
+	}
+	for i := range want {
+		if h.journal[i] != want[i] {
+			t.Fatalf("the journal is %v, want %v: the invalidation must precede the append "+
+				"(an append that outlives a failed invalidation can never be retried into "+
+				"one) and the secret must follow it (a secret destroyed before a failed "+
+				"append signs somebody out with nothing in the log saying why)",
+				h.journal, want)
+		}
+	}
+}
+
+// THE REVOKED SESSION'S SECRET IS DESTROYED, AND IT IS THE RIGHT ONE.
+//
+// This is what makes the revocation immediate. Without it the session keeps
+// resolving until the projector clears `revoked_at` — milliseconds when the
+// projector is healthy, unbounded while it is stopped, and silent either way,
+// because a request served by a revoked session looks exactly like a request
+// served by a live one.
+func TestRevokingASessionDestroysThatSessionsSecret(t *testing.T) {
+	h := newAuthHarness(t)
+	id := h.liveSession(t, h.subjectID)
+
+	if _, err := h.auth.RevokeSession(context.Background(), RevokeSessionCommand{
+		SessionID: id, SubjectID: h.subjectID, IdempotencyKey: "idem-revoke",
+	}); err != nil {
+		t.Fatalf("revoking: %v", err)
+	}
+	if len(h.tokens.destroyed) != 1 {
+		t.Fatalf("destroyed %d secrets, want 1: the bearer still resolves until the "+
+			"projector catches up, which is a window whose width is another component's "+
+			"health", len(h.tokens.destroyed))
+	}
+	if h.tokens.destroyed[0] != id {
+		t.Errorf("destroyed the secret of %s, want %s — a revocation that ends the wrong "+
+			"session signs out a bystander and leaves the target live",
+			h.tokens.destroyed[0], id)
+	}
+}
+
+// A REVOCATION THAT CANNOT DESTROY THE SECRET FAILS LOUDLY.
+//
+// The append has already happened, so the revocation IS recorded and the
+// projection will apply it. Reporting an error anyway is the point: the seconds
+// until then are exactly what "immediate" was supposed to remove, and a caller
+// told the sign-out succeeded would have no reason to look.
+func TestARevocationThatCannotDestroyTheSecretIsReported(t *testing.T) {
+	h := newAuthHarness(t)
+	id := h.liveSession(t, h.subjectID)
+	h.tokens.destroyErr = errors.New("the pool is exhausted")
+
+	_, err := h.auth.RevokeSession(context.Background(), RevokeSessionCommand{
+		SessionID: id, SubjectID: h.subjectID, IdempotencyKey: "idem-revoke",
+	})
+	if err == nil {
+		t.Fatal("the revocation reported success while the credential it revoked is still " +
+			"usable; the caller has no reason to retry and nothing else will")
 	}
 }
 
@@ -2426,8 +2507,24 @@ func TestRevokeAllInvalidatesOnceIncludingTheSparedSession(t *testing.T) {
 	if len(h.epochs.bumped) != 1 || h.epochs.bumped[0] != want {
 		t.Fatalf("invalidated %+v, want exactly one bump of %+v", h.epochs.bumped, want)
 	}
-	if len(h.journal) != 2 || h.journal[0] != "epoch" || h.journal[1] != "append" {
-		t.Errorf("the journal is %v, want [epoch append]", h.journal)
+	if len(h.journal) != 3 || h.journal[0] != "epoch" ||
+		h.journal[1] != "append" || h.journal[2] != "destroy" {
+		t.Errorf("the journal is %v, want [epoch append destroy]", h.journal)
+	}
+
+	// THE SPARED SESSION KEEPS ITS SECRET. "Sign out everywhere ELSE" that
+	// destroyed the caller's own digest would sign them out too — and it would do
+	// it silently, because the append and the epoch bump look identical whether
+	// or not the spared session survived.
+	if len(h.tokens.destroyed) != 2 {
+		t.Fatalf("destroyed %d secrets, want 2 (the spared session keeps its own): %v",
+			len(h.tokens.destroyed), h.tokens.destroyed)
+	}
+	for _, destroyed := range h.tokens.destroyed {
+		if destroyed == keep {
+			t.Errorf("the spared session %s had its secret destroyed; the caller asked to "+
+				"sign out everywhere ELSE and was signed out too", keep)
+		}
 	}
 }
 

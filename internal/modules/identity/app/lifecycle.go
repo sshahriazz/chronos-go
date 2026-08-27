@@ -32,10 +32,10 @@ const DefaultDeletionGracePeriod = 30 * 24 * time.Hour
 // evidence of which one happened.
 const RevokeReasonDeactivated = "account_deactivated"
 
-// SessionRevocationPlanner plans a revocation and invalidates the authorization
-// cache, without writing anything.
+// SessionRevocationPlanner plans a revocation, invalidates the authorization
+// cache, and destroys the secrets of sessions that were revoked.
 //
-// Declared by the consumer and narrowed to two methods (ADR-001, CONVENTIONS
+// Declared by the consumer and narrowed to three methods (ADR-001, CONVENTIONS
 // §2). It is satisfied by *Authentication, which owns every rule about what
 // revoking a subject's sessions means — this package must not acquire a second
 // answer to that question.
@@ -44,6 +44,11 @@ type SessionRevocationPlanner interface {
 		ctx context.Context, cmd RevokeAllSessionsCommand,
 	) (SessionRevocationPlan, error)
 	InvalidateAuthorization(ctx context.Context, subjectID string) error
+
+	// DestroySessionSecrets makes the revocation immediate. Without it a
+	// deactivated account's sessions keep authenticating until the projector
+	// clears `revoked_at` — see the implementation for what that costs.
+	DestroySessionSecrets(ctx context.Context, sessions []ids.SessionID) (int64, error)
 }
 
 // Lifecycle is the account's own on/off switch and its request to be erased.
@@ -344,6 +349,14 @@ func (l *Lifecycle) Deactivate(
 	// if the caller retried after a transient failure.
 	user.ClearUncommitted()
 	plan.Commit()
+
+	// The secrets, destroyed now that the append is durable. A deactivation whose
+	// sessions outlive it by the projector's lag is the one outcome this command
+	// must not have: the holder pressed the switch, was told it worked, and their
+	// bearer still opens their account.
+	if _, err := l.revocations.DestroySessionSecrets(ctx, plan.Revoked()); err != nil {
+		return DeactivateAccountResult{}, err
+	}
 
 	result.SessionsRevoked = len(plan.Appends)
 	result.Position = results[0].Position

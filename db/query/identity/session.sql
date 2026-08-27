@@ -477,3 +477,39 @@ WHERE deletion_requested_at IS NOT NULL
   AND state <> 'erased'
 ORDER BY deletion_scheduled_for
 LIMIT $2;
+
+-- name: DeleteSessionTokens :execrows
+-- Destroy the SECRET half of named sessions, which is what makes a revocation
+-- immediate.
+--
+-- # Why this exists, and why the revocation event is not enough on its own
+--
+-- `GetSessionByToken` inner-joins `session_view` and checks `revoked_at`, and
+-- that column is written by the PROJECTOR from `SessionRevoked`. So for as long
+-- as the projector is behind — milliseconds normally, unbounded while it is
+-- stopped, being rebuilt, or wedged on an unrelated event — a revoked session
+-- keeps authenticating, and nothing anywhere reports it.
+--
+-- ADR-018 says the opaque token's revocation is "Immediate, server-side". A
+-- window whose width is another component's health is not that, and it is a
+-- fail-OPEN under component failure, which ADR-010 permits nowhere but OpenFGA.
+--
+-- Deleting the digest closes it without touching a projection: the join has two
+-- halves and this removes the one the projector does not own. `session_token`
+-- is authoritative — a token is a secret, so it may never enter an event
+-- (ADR-002) and no replay can restore it (migration 00010) — so a handler
+-- deleting from it is not a handler writing a read model, and ADR-019 is
+-- untouched.
+--
+-- BY EXPLICIT ID rather than by subject. `DeleteSessionTokensOfSubject` reaches
+-- its rows through `session_view`, which is the dependency being removed here;
+-- the revocation already knows exactly which sessions it ended, and a statement
+-- that asks the projection which those were would carry the same staleness in
+-- through the back door.
+--
+-- The event is still appended and the projector still sets `revoked_at`. Neither
+-- half is sufficient alone: the delete leaves nothing in the log saying why the
+-- session ended, and the event alone leaves it usable — the same conclusion
+-- API key revocation reached (migration 00051) and operator offboarding before
+-- it.
+DELETE FROM session_token WHERE session_id = ANY(@session_ids::text[]);

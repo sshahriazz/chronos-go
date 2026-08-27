@@ -698,6 +698,33 @@ type SessionTokens interface {
 	// the process dies between them, and this is the recoverable one — see
 	// Authentication.CreateSession, where the reasoning belongs.
 	Issue(ctx context.Context, token NewSessionToken) error
+
+	// Destroy removes the digests of named sessions, which is what makes a
+	// revocation take effect on the NEXT REQUEST rather than on the projector's
+	// schedule.
+	//
+	// # The window this closes
+	//
+	// `GetSessionByToken` checks `session_view.revoked_at`, and the projector
+	// writes that column from `SessionRevoked`. While the projector is behind, a
+	// revoked session still resolves — milliseconds normally, and unbounded while
+	// it is stopped, rebuilding, or wedged on an unrelated event. Nothing reports
+	// it, because from the outside a healthy projector and a stopped one produce
+	// the same successful request.
+	//
+	// ADR-018 says this token's revocation is "Immediate, server-side". A window
+	// whose width is another component's health is not that, and it fails OPEN,
+	// which ADR-010 permits nowhere except OpenFGA's inverse.
+	//
+	// Deleting the digest is not a handler writing a projection: this half is
+	// authoritative (see the type comment), so ADR-019 is untouched. The event is
+	// still appended and the projector still sets `revoked_at` — the log keeps
+	// the reason, and the sessions screen keeps the record.
+	//
+	// Returns how many digests were actually removed, which is deliberately not
+	// the number of sessions revoked: a session whose token was already swept, or
+	// which was revoked twice, removes nothing and is not an error.
+	Destroy(ctx context.Context, sessions []ids.SessionID) (int64, error)
 }
 
 // NewSessionToken is everything the authoritative half of a session needs.

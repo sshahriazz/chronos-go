@@ -1986,7 +1986,57 @@ func (a *Authentication) RevokeSession(
 	if err != nil {
 		return RevokeSessionResult{}, conflictOnRace(err)
 	}
+
+	// The secret, destroyed now that the revocation is durable. Without this the
+	// session keeps resolving until the projector clears `revoked_at`, which is a
+	// window whose width is another component's health — see DestroySessionSecrets.
+	if _, err := a.DestroySessionSecrets(ctx, []ids.SessionID{cmd.SessionID}); err != nil {
+		return RevokeSessionResult{}, err
+	}
 	return RevokeSessionResult{Changed: true, Position: position}, nil
+}
+
+// DestroySessionSecrets removes the digests of sessions that have just been
+// revoked, which is what makes the revocation take effect on the next request.
+//
+// # Called AFTER the append, and the order is the API key's argument
+//
+// Destroying first would leave a session dead with nothing in the log saying
+// why if the append then failed — an unexplained sign-out, and a `session_view`
+// row that says the session is live while no token can reach it. Appending
+// first leaves the old window open for exactly as long as it takes to run one
+// DELETE, and closes it even if the projector never runs.
+//
+// A failure here is REPORTED and not swallowed. The revocation is recorded and
+// the projection will apply it, so the caller's request did happen — but the
+// seconds until then are precisely what "immediate" was supposed to remove, and
+// a revocation that silently left the credential live is the shape of failure
+// this whole change exists to end. RevokeAPIKey answers the same question the
+// same way.
+func (a *Authentication) DestroySessionSecrets(
+	ctx context.Context, sessions []ids.SessionID,
+) (int64, error) {
+	if len(sessions) == 0 {
+		return 0, nil
+	}
+	if a.tokens == nil {
+		// Refused rather than skipped. A nil here means a composition root built
+		// an Authentication that can issue sessions and cannot end them, and the
+		// only symptom would be revocations that quietly wait for the projector.
+		return 0, errs.Internalf(
+			"identity: revoking a session needs the session-token store; without it a " +
+				"revocation is not immediate and nothing says so")
+	}
+
+	destroyed, err := a.tokens.Destroy(ctx, sessions)
+	if err != nil {
+		a.log.ErrorContext(ctx, "revoked sessions kept their secrets; they remain usable "+
+			"until the session projection catches up",
+			"sessions", len(sessions), "error", err)
+		return 0, fmt.Errorf("destroying the secrets of %d revoked session(s): %w",
+			len(sessions), err)
+	}
+	return destroyed, nil
 }
 
 // RevokeReasonEmailVerified is the reason a verification voids sessions.
@@ -2109,6 +2159,15 @@ func (a *Authentication) RevokeAllSessions(
 	// Cleared only now. Clearing before the append is durable would lose the events
 	// if the caller retried after a transient failure.
 	plan.Commit()
+
+	// Every secret this plan ended, destroyed now that the appends are durable.
+	// The SPARED session is not in the list — plan.Revoked() is derived from the
+	// aggregates that were actually revoked, so "sign out everywhere else" cannot
+	// sign the caller out by destroying a digest it still needs.
+	if _, err := a.DestroySessionSecrets(ctx, plan.Revoked()); err != nil {
+		return RevokeAllSessionsResult{}, err
+	}
+
 	result.Revoked = len(plan.Appends)
 	result.Position = results[0].Position
 	return result, nil
@@ -2141,6 +2200,22 @@ type SessionRevocationPlan struct {
 	// Scanned is how many live sessions the work list returned, the spared one
 	// included.
 	Scanned int
+}
+
+// Revoked names the sessions this plan ends.
+//
+// Derived from the aggregates rather than carried as a third field, so it cannot
+// disagree with what was actually appended — a list built beside the appends is
+// a list that can drift from them, and the caller uses this to decide which
+// secrets to destroy. A secret destroyed for a session that was not revoked
+// signs somebody out with no event saying why; one left behind for a session
+// that was keeps it usable, which is the whole failure this closes.
+func (p SessionRevocationPlan) Revoked() []ids.SessionID {
+	out := make([]ids.SessionID, 0, len(p.Sessions))
+	for _, session := range p.Sessions {
+		out = append(out, session.ID())
+	}
+	return out
 }
 
 // Commit clears the uncommitted events of every session the plan revoked.

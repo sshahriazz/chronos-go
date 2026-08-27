@@ -459,6 +459,15 @@ func (stubPlanner) PlanRevokeAllSessions(
 	return SessionRevocationPlan{}, nil
 }
 
+// DestroySessionSecrets answers zero because this stub plans no revocations, so
+// there is never a secret to destroy. A test that needs the destroy asserted
+// uses newLifeHarness, which wires the real Authentication.
+func (stubPlanner) DestroySessionSecrets(
+	context.Context, []ids.SessionID,
+) (int64, error) {
+	return 0, nil
+}
+
 func (stubPlanner) InvalidateAuthorization(context.Context, string) error { return nil }
 
 var _ SessionRevocationPlanner = stubPlanner{}
@@ -592,5 +601,86 @@ func TestCancellingNeedsAnIdempotencyKey(t *testing.T) {
 		SubjectID: h.subjectID,
 	}); err == nil {
 		t.Error("a cancellation with no Idempotency-Key was accepted")
+	}
+}
+
+// DEACTIVATION DESTROYS THE SECRETS OF THE SESSIONS IT ENDED.
+//
+// The append above makes the deactivation and its revocations one atomic write.
+// It does not make them take EFFECT: `GetSessionByToken` checks
+// `session_view.revoked_at`, which the projector writes, so a session whose
+// revocation is durable in the log keeps authenticating until the projection
+// applies it — milliseconds when the projector is healthy, unbounded while it is
+// stopped or rebuilding, and silent in both cases, because a request served by a
+// revoked session looks exactly like one served by a live session.
+//
+// Destroying the digest removes the other half of that join, which the projector
+// does not own. It is what makes ADR-018's "immediate, server-side" true.
+//
+// This is also the case with the worst audience: somebody switching an account
+// off mid-incident is doing it because they believe it is compromised.
+func TestDeactivationDestroysTheSecretsOfTheSessionsItEnded(t *testing.T) {
+	h := newLifeHarness(t)
+	first := h.liveSession(t, h.subjectID)
+	second := h.liveSession(t, h.subjectID)
+	h.live.sessions = []ids.SessionID{first, second}
+
+	if _, err := h.deactivate(t, "idem-deactivate"); err != nil {
+		t.Fatalf("deactivating: %v", err)
+	}
+
+	if len(h.tokens.destroyed) != 2 {
+		t.Fatalf("destroyed %d secrets, want 2: the sessions this deactivation ended keep "+
+			"authenticating until the projector catches up, and the holder was told "+
+			"their account is off", len(h.tokens.destroyed))
+	}
+	for _, want := range []ids.SessionID{first, second} {
+		found := false
+		for _, got := range h.tokens.destroyed {
+			if got == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("session %s was revoked and kept its secret", want)
+		}
+	}
+}
+
+// AND IT DESTROYS THEM AFTER THE APPEND, NOT BEFORE.
+//
+// A secret destroyed before an append that then fails signs somebody out with
+// nothing in the log saying why, and leaves a `session_view` row claiming the
+// session is live while no token can reach it. The deactivation's append can
+// fail — it is refused outright on a concurrent write to the account — so this
+// ordering is reachable rather than theoretical.
+func TestDeactivationDestroysSecretsOnlyAfterTheAppendIsDurable(t *testing.T) {
+	h := newLifeHarness(t)
+	h.live.sessions = []ids.SessionID{h.liveSession(t, h.subjectID)}
+	h.journal = nil
+
+	if _, err := h.deactivate(t, "idem-deactivate"); err != nil {
+		t.Fatalf("deactivating: %v", err)
+	}
+
+	appended, destroyed := -1, -1
+	for i, entry := range h.journal {
+		switch entry {
+		case "append":
+			appended = i
+		case "destroy":
+			destroyed = i
+		}
+	}
+	switch {
+	case appended < 0:
+		t.Fatalf("the deactivation never appended: %v", h.journal)
+	case destroyed < 0:
+		t.Fatalf("the deactivation never destroyed a secret: %v; the revoked session "+
+			"keeps resolving until the projector catches up", h.journal)
+	case destroyed < appended:
+		t.Errorf("the journal is %v: the secret was destroyed before the append was "+
+			"durable, so a failed append leaves somebody signed out with nothing in the "+
+			"log saying why", h.journal)
 	}
 }
