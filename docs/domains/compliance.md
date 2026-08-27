@@ -287,37 +287,68 @@ Article 30 register records both roles separately.
 
 ## 12. Events published
 
-`ConsentGranted` · `ConsentWithdrawn` · `DsarReceived` · `DsarVerified` ·
-`DsarRejected` · `ErasureRequested` · `ErasureDeferred` · `ErasureCompleted` ·
-`ExportRequested` · `ExportReady` · `ExportPurged` · `PersonalDataCorrected` ·
-`ProcessingRestricted` · `ProcessingResumed` · `LegalHoldPlaced` ·
-`LegalHoldLifted` · `RetentionPurgeExecuted` · `BreachRecorded` ·
-`BreachNotified`
+**Built** — twelve, and this list is the code's:
+
+`ErasureDeferred` · `ErasureResumed` · `LegalHoldPlaced` · `LegalHoldLifted` ·
+`PersonalDataCorrected` · `ProcessingRestricted` · `ProcessingRestrictionLifted` ·
+`ProcessingObjected` · `ProcessingObjectionWithdrawn` · `DataExportRequested` ·
+`DataExportCompleted` · `DataExportFailed`
+
+**Erasure's completion is `identity.UserErased`, not a compliance event.** The
+act that satisfies Article 17 is the destruction of the subject's key, and the
+key belongs to identity — so the assertion "this person's data can no longer be
+read" is made by the module that can make it. A second event here would be
+compliance asserting something it did not do.
+
+**Not built**: `ConsentGranted` · `ConsentWithdrawn` · `DsarReceived` ·
+`DsarVerified` · `DsarRejected` · `ExportPurged` · `RetentionPurgeExecuted` ·
+`BreachRecorded` · `BreachNotified`. Consent, the DSAR queue, the purge sweep
+and the breach register are the four unbuilt areas of this domain; §7's
+conditional retention exemption for breach records is stated for everybody
+precisely because the register behind it does not exist.
 
 ---
 
 ## 13. Read models
 
+**Built:**
+
 | Projection | Serves |
 | --- | --- |
-| `dsar_view` | request queue, clock, status |
-| `consent_view` | current consent per subject and purpose |
-| `retention_schedule_view` | what expires when |
-| `audit_log_view` | pseudonymised audit trail |
-| `legal_hold_view` | active holds |
-| `processing_register` | Article 30 |
+| `processing_restriction_view` | Article 18 — who has asked us to stop, and since when |
+| `processing_objection_view` | Article 21 — who has objected, and to which purposes |
+| `data_export_view` | Article 15/20 — request status and the poll a subject holds |
+
+Each is registered in `internal/projections`, which is the one registry every
+process that runs projections calls.
+
+**Not built**: `dsar_view` · `consent_view` · `retention_schedule_view` ·
+`audit_log_view` · `legal_hold_view` · `processing_register`. Two of those are
+worth distinguishing from the rest. The retention schedule is not a projection
+at all — it is `domain.RetentionExemptions()`, a compiled table, deliberately,
+because a schedule that can be edited at runtime is one nobody can review. And
+legal holds have no view because a hold is asked about one subject at a time,
+by the erasure gate, straight from the aggregate; a projection would exist only
+to list them, which is an operator screen nobody has asked for yet.
 
 ---
 
 ## 14. Temporal workflows
 
+**Built:**
+
 | Workflow | Purpose |
 | --- | --- |
-| `ErasureWorkflow` | §4, with the statutory clock |
-| `ExportWorkflow` | §5, resumable, produces the bundle |
-| `RetentionSweep` | **Schedule** (CONVENTIONS §1.5), per data class |
-| `BreachNotificationWorkflow` | 72-hour obligation |
-| `ConsentReconfirmation` | on policy version change |
+| `Erasure` | §4, with the statutory clock and the deferral loop |
+| `ExportData` | §5, resumable, produces the bundle |
+| `SweepErasures` | the reconciliation backstop for a lost erasure |
+| `PurgeIdentityRetention` | identity's retention purge, per data class |
+
+`SweepErasures` and `PurgeIdentityRetention` are Schedules (CONVENTIONS §1.5),
+not workflows anything starts by hand.
+
+**Not built**: `BreachNotificationWorkflow` (the 72-hour obligation, with no
+register behind it) and `ConsentReconfirmation` (consent is unbuilt entirely).
 
 ---
 

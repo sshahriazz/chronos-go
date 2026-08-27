@@ -667,39 +667,124 @@ nothing ever ran.
       because 12(4) compliance is something we may have to evidence, which a
       variable inside a workflow's history is a poor place to keep.
 
-## Now — three things this session left named rather than finished
+## Session findings and follow-ups
 
-- [ ] **`AssumeRecordsExist` is a placeholder, wired at three composition
-      roots.** The retention exemptions resolver asks "does this subject appear
-      on a retained record" and nothing can answer: `invoice_view` is keyed by
-      ORG, not by subject, so billing cannot say whether one person is named on
-      an invoice.
+- [x] **Three integration tests were races against the projector, and adding two
+      projections exposed all three.** Wiring the shared registry into the
+      protocol harness added billing's invoice mirror and identity's API key
+      projection to a suite that had run neither. Nothing about the machine
+      changed and three tests began failing intermittently — which is the useful
+      version of this discovery, because each was asserting a timing property
+      the design never offered.
 
-      It resolves toward STATING the class, and that direction is right — §7
-      names under-statement as the misleading answer, and over-statement is the
-      smaller wrong. But "we may have retained invoice data about you" told to
-      somebody who was never invoiced is still a sentence we would rather not
-      send, and the fix is a subject-keyed read on billing's side.
+      `awaitExport` and `awaitExportWithin` both fatalled on the FIRST
+      `NOT_FOUND` from `GetDataExport`. The id came from `ExportMyData` a moment
+      earlier, so the export exists in the log by definition and the row is
+      written by a projection: NOT_FOUND is what the poll is supposed to see
+      until it catches up. Both loops were byte-identical, so the fix was to
+      delete one — `awaitExport` now calls `awaitExportWithin` with a shorter
+      deadline, and there is one place that decides what NOT_FOUND means.
 
-      Replacing it is one line in each of `cmd/api/deps.go`,
-      `cmd/worker/erasure.go` and `cmd/worker/export.go`. It is wired at the
-      roots rather than defaulted inside the resolver precisely so this entry
-      has somewhere to point.
+      `TestTheIdempotencyContractHoldsForEveryAuthenticatedMutation` asserted
+      that a replay of `DeactivateAccount` is refused by the gate on the very
+      next request. It is not, and cannot be: deactivation ends its sessions by
+      appending `SessionRevoked` to each session's stream, and the authenticator
+      joins `session_view`, which the PROJECTOR writes. That is deliberate —
+      `identity/app/ports.go` says on `LiveSessions` that a port able to write
+      the view could end a session with no event saying so, and the view would
+      stop being reconstructable from the log (ADR-019).
 
-- [ ] **`app.Exports` — the SYNCHRONOUS export use case — is constructed by no
-      binary.** Verified: `NewExports` appears only in its own test file; the
-      async path uses `ExportRuns`, and `cmd/worker` wires that.
+      So the replay is now polled for up to 20 seconds. The property is
+      unchanged and is the one that matters — a caller who may no longer make
+      the request may not read the stored answer to it either, so the gate must
+      answer before `Idempotency.Do` — and what is bounded is only how long the
+      revocation may take to become visible.
 
-      It is the "built, fully tested, wired into nothing" shape CLAUDE.md names,
-      and it is live duplication — two export implementations where one is dead.
-      Removal is SURGICAL rather than a file delete: `Bundle`, `RetainedRecord`
-      and `ExportedObject` in the same file ARE used by the async path.
+      This is the entry the two earlier "deactivation flakes" were circling. One
+      of them "survived seventy-two clean observations with three hypotheses
+      eliminated"; the mechanism was a projection-lag window that the harness of
+      the day was too idle to open.
 
-- [ ] **`docs/domains/compliance.md` §12/§13 are behind the code.** Objection's
-      two events and `processing_objection_view` are not in the spec's own
-      inventories. The specs are marked settled and this session added to them
-      three times (legal holds, deferral, objection) — a settled spec that no
-      longer describes the code is worse than one openly in progress.
+- [ ] **Session revocation is not immediate, and ADR-018 says the opaque token's
+      should be.** Discovered by the entry above rather than looked for.
+
+      ADR-018 gives two tokens: a signed access JWT revoked by TTL or a Valkey
+      denylist, and an opaque refresh token whose revocation is "Immediate,
+      server-side". What this build actually issues is one opaque bearer,
+      resolved on every request by joining `session_token` to `session_view` —
+      the refresh token's shape, and therefore the row that promises immediate
+      revocation.
+
+      It is not immediate. Revoking appends an event; the projector clears the
+      row; the bearer keeps authenticating until it does. The window is
+      milliseconds on an idle machine and grew large enough to fail a test when
+      two projections were added to the harness.
+
+      The denylist ADR-018 names for emergencies is not built (no code mentions
+      one), and building it as stated would be wrong here anyway: everything in
+      Valkey carries a TTL and `FLUSHALL` must be survivable, so a denylist that
+      is the only record of a revocation resurrects every revoked session on a
+      flush — the exact failure ADR-045 forbids for access tombstones.
+
+      The shape that works is the one API keys already use: an AUTHORITATIVE
+      row, written by the command and deleted by the revocation, which the
+      authenticator resolves without touching a projection (migration 00051's
+      header argues it in full). `session_token` may already be most of that
+      table; what makes the join projection-dependent is `session_view`.
+
+      Not urgent — the window is small, it closes on its own, and no request
+      inside it does anything a valid session could not. It is written down
+      because it is a promise the ADR makes and the code does not keep, and
+      because the next person to see a deactivation flake should find this
+      instead of hypothesis four.
+
+- [x] **`AssumeRecordsExist` replaced for the class that could be answered.**
+      Billing now answers "does this subject appear on a retained invoice" —
+      `SubjectHasRetainedInvoices` joins `invoice_view` to `org_member_index`,
+      in a system transaction because an erasure spans every organization the
+      person belongs to and has no tenant scope of its own. The answer that
+      crosses the boundary is a single boolean, so nothing about any tenant is
+      returned.
+
+      Membership rather than ownership, deliberately: ownership can move, and a
+      former owner whose name is on a two-year-old invoice would otherwise be
+      told everything about them was destroyed. It over-states in the direction
+      §7 calls the smaller wrong.
+
+      What it buys: every trial account that never converted — which is most of
+      them — no longer gets a confirmation saying invoice data may be kept about
+      them for seven to ten years.
+
+      `RecordsByClass` routes each conditional class to whoever can answer it and
+      states the rest. The breach register is still stated for everybody, because
+      it does not exist; `Unanswered()` names exactly which classes are in that
+      state, and `TestEveryConditionalClassIsEitherAnsweredOrNamed` fails when a
+      third one joins them silently.
+
+- [x] **`app.Exports` — the dead SYNCHRONOUS export — REMOVED, surgically.**
+      `Bundle`, `RetainedRecord`, `ExportedObject`, `SubjectProfile`,
+      `ExportStore` and `DefaultExportExpiry` all survive; the async path uses
+      every one.
+
+      Its tests were the real find. `export_test.go` asserted the bundle's
+      contents, the retained-records statement and the erased-class omission —
+      all against the implementation that shipped in no binary, while the one
+      people actually receive their personal data from was covered by none of
+      them. They now drive `ExportRuns` through the same harness the rest of
+      exportrun_test.go uses, so they assert the bytes the object store is
+      handed. Verified by mutation: dropping a profile field fails the test.
+
+- [x] **`docs/domains/compliance.md` §12/§13/§14 reconciled with the code.**
+      §12 listed nineteen events; twelve exist, and five of the listed names
+      never will in that form — erasure's completion is `identity.UserErased`,
+      because the act that satisfies Article 17 is destroying the key and the key
+      is identity's. §13 listed six projections; three exist, and two of the
+      absent three are absent by design (the retention schedule is a compiled
+      table on purpose; a legal hold is asked about one subject at a time). §14
+      named five workflows under names none of them have.
+
+      Each section now separates built from not-built rather than describing an
+      aspiration in the present tense.
 
 ---
 
