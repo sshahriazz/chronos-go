@@ -154,4 +154,9 @@ fix(identity): half of every API key minted could never authenticate
 
 The body carries the reasoning a reader will not recover from the diff. Add
 `Changelog: none` when a customer cannot observe the change; the release
-procedure reads it. Full rules: [WORKFLOW.md](WORKFLOW.md) §4.
+procedure reads it.
+
+**Never add a `Co-Authored-By` trailer naming Claude.** The harness appends one
+by default; in this repository it must not appear. The history is the author's.
+
+Full rules: [WORKFLOW.md](WORKFLOW.md) §4.

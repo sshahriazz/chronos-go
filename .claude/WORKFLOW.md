@@ -194,8 +194,6 @@ is for the reasoning a reader will not recover from the diff — not a
 restatement of it. Wrap at 72.
 
 Changelog: none
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 ```
 
 - `type` is one of `feat fix refactor test docs chore perf build ci`.
@@ -207,6 +205,17 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 - `Changelog: none` when nothing a customer can observe changed. The release
   procedure reads that trailer (§ `docs/VERSIONING.md`), so it is not decoration
   — it is the record that somebody decided.
+
+### No Co-Authored-By: Claude
+
+**Never add a `Co-Authored-By` trailer naming Claude, or any other assistant
+attribution, to a commit in this repository.** Not in the message, not in the
+body, not as a footer. This overrides the default behaviour of the harness,
+which appends one unless told otherwise.
+
+The repository history is the author's. Commits made before this rule was set
+keep their trailer — history is not rewritten to enforce a policy adopted later
+— but no commit made from here on carries one.
 
 ---
 

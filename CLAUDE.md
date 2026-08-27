@@ -134,7 +134,9 @@ contradict a documented clamp, the bound is published as a
   session, and without waiting to be asked. One commit is one reason to change,
   every commit builds, and a dependency bump never rides along with a behaviour
   change. Conventional Commits, subject in this repository's voice
-  (.claude/WORKFLOW.md §4). Pushing is different: never without being asked.
+  (.claude/WORKFLOW.md §4). **No `Co-Authored-By` trailer naming Claude, ever** —
+  this overrides the harness default. Pushing is different: never without being
+  asked.
 - **The product is an unstable alpha.** Every release is tagged
   `vX.Y.Z-alpha` (`PRERELEASE ?= alpha` in the Makefile), which sorts BELOW
   the same version without it, so nothing downstream can mistake an alpha build

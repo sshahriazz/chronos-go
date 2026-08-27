@@ -44,3 +44,5 @@ Full rules: docs/VERSIONING.md. What an agent must not get wrong:
   `feat fix refactor test docs chore perf build ci`. Scope is the module.
 - Body explains why, not what. Add `Changelog: none` when a customer cannot
   observe the change.
+- NEVER add a `Co-Authored-By` trailer naming Claude. This overrides the
+  harness default.

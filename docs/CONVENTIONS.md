@@ -847,7 +847,8 @@ Full rules in [VERSIONING.md](VERSIONING.md). What matters while writing Go:
   `make check`; `make release` refuses a release that describes nothing.
 - **Commit small and often.** One reason to change per commit, every commit
   builds, Conventional Commits with a subject that states what changed about the
-  system (.claude/WORKFLOW.md §4).
+  system, and no `Co-Authored-By` trailer naming an assistant
+  (.claude/WORKFLOW.md §4).
 - **`CHANGELOG.md` and `.changes/vX.Y.Z.md` are generated.** `make release`
   assembles them from the fragments. Hand-editing them is the same mistake as
   hand-editing a generated dashboard (§11).
