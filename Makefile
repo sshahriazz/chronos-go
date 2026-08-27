@@ -1,6 +1,41 @@
 SHELL := /bin/bash
 COMPOSE := docker compose
 
+## ---------------------------------------------------------------------------
+## Build identity and release channel (docs/VERSIONING.md)
+## ---------------------------------------------------------------------------
+
+# The version is the git tag, and nothing else is allowed to disagree with it.
+# `--always` keeps an untagged checkout answerable, `--dirty` refuses to let a
+# build made from uncommitted code claim to be the release it was cut from.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT  ?= $(shell git rev-parse HEAD 2>/dev/null)
+
+# One symbol, stamped once, read by every binary in ./cmd/... — see
+# internal/platform/buildinfo for why this is not three per-main variables.
+BUILDINFO := github.com/chronos/chronos-go/internal/platform/buildinfo
+LDFLAGS   := -X $(BUILDINFO).version=$(VERSION) -X $(BUILDINFO).commit=$(COMMIT)
+
+# Pinned at the invocation, so there is no install step and no version that
+# depends on what a machine happens to have on its PATH.
+CHANGIE := go run github.com/miniscruff/changie@v1.26.0
+
+# Chronos is an UNSTABLE ALPHA. Every release carries a prerelease marker, so
+# a bare `v0.2.0` cannot be cut by accident and nothing downstream can mistake a
+# build for a supported one. Bump the counter per release: PRERELEASE=alpha.2.
+#
+# Emptying this default is the deliberate act of declaring the product beta or
+# stable. It is not a cleanup. See docs/VERSIONING.md §3.
+PRERELEASE ?= alpha.1
+PRERELEASE_FLAG := $(if $(PRERELEASE),-p $(PRERELEASE),)
+
+# `auto` derives the bump from the fragment kinds, which is what almost every
+# release wants. Override it for a release whose number is a decision rather
+# than a consequence — the FIRST one especially: with no prior version a lone
+# `Fixed` fragment computes v0.0.1, and `make release BUMP=v0.1.0` says what was
+# meant instead.
+BUMP ?= auto
+
 .DEFAULT_GOAL := help
 
 ## ---------------------------------------------------------------------------
@@ -10,7 +45,7 @@ COMPOSE := docker compose
 .PHONY: help
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
-		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 .env: ## Create .env from the example if missing
 	@test -f .env || (cp .env.example .env && echo "created .env from .env.example")
@@ -168,7 +203,7 @@ run: ## Run the tenant API against the local stack
 	@echo "  api        http://localhost:$${API_PORT:-8090}"
 	@echo "  healthz    http://localhost:$${API_PORT:-8090}/healthz"
 	@echo "  readyz     http://localhost:$${API_PORT:-8090}/readyz"
-	@go run ./cmd/api -addr :$${API_PORT:-8090}
+	@go run -ldflags "$(LDFLAGS)" ./cmd/api -addr :$${API_PORT:-8090}
 
 .PHONY: dev-api dev-worker dev-projector
 dev-api: ## Hot-reload cmd/api (air)
@@ -184,34 +219,34 @@ dev-projector: ## Hot-reload cmd/projector (air)
 projector: ## Run the projector against the local stack
 	@echo "  healthz    http://localhost:$${PROJECTOR_PORT:-8093}/healthz"
 	@echo "  readyz     http://localhost:$${PROJECTOR_PORT:-8093}/readyz"
-	@go run ./cmd/projector -addr :$${PROJECTOR_PORT:-8093}
+	@go run -ldflags "$(LDFLAGS)" ./cmd/projector -addr :$${PROJECTOR_PORT:-8093}
 
 .PHONY: projector-list
 projector-list: ## List every registered projection
-	@go run ./cmd/projector -list
+	@go run -ldflags "$(LDFLAGS)" ./cmd/projector -list
 
 .PHONY: projector-rebuild
 projector-rebuild: ## Rebuild one projection from zero: make projector-rebuild NAME=identity_users
 	@test -n "$(NAME)" || { echo "NAME is required, e.g. make projector-rebuild NAME=identity_users"; exit 1; }
-	@go run ./cmd/projector -rebuild $(NAME)
+	@go run -ldflags "$(LDFLAGS)" ./cmd/projector -rebuild $(NAME)
 
 .PHONY: worker
 worker: ## Run the reactors (email, push, workflows) against the local stack
 	@echo "  healthz    http://localhost:$${WORKER_PORT:-8094}/healthz"
-	@go run ./cmd/worker -addr :$${WORKER_PORT:-8094}
+	@go run -ldflags "$(LDFLAGS)" ./cmd/worker -addr :$${WORKER_PORT:-8094}
 
 .PHONY: worker-list
 worker-list: ## List every registered reactor
-	@go run ./cmd/worker -list
+	@go run -ldflags "$(LDFLAGS)" ./cmd/worker -list
 
 .PHONY: worker-stats
 worker-stats: ## Queue depth and parked count per reactor
-	@go run ./cmd/worker -stats
+	@go run -ldflags "$(LDFLAGS)" ./cmd/worker -stats
 
 .PHONY: worker-replay
 worker-replay: ## Return a reactor's parked events to the live queue: make worker-replay NAME=welcome_email
 	@test -n "$(NAME)" || { echo "NAME is required, e.g. make worker-replay NAME=welcome_email"; exit 1; }
-	@go run ./cmd/worker -replay-parked $(NAME)
+	@go run -ldflags "$(LDFLAGS)" ./cmd/worker -replay-parked $(NAME)
 
 .PHONY: status
 status-api: ## Call GetStatus over HTTP/JSON
@@ -261,7 +296,7 @@ api: proto proto-lint api-docs ## Everything schema-driven, regenerated
 .PHONY: build
 build: ## Build every binary into bin/
 	@mkdir -p bin
-	go build -o bin/ ./cmd/...
+	go build -ldflags "$(LDFLAGS)" -o bin/ ./cmd/...
 
 .PHONY: test
 test: ## Run all tests
@@ -270,6 +305,58 @@ test: ## Run all tests
 .PHONY: bench
 bench: ## Benchmarks with allocation reporting (ADR-038)
 	go test ./... -run=XXX -bench=. -benchmem
+
+## ---------------------------------------------------------------------------
+## Versioning and the changelog (docs/VERSIONING.md)
+## ---------------------------------------------------------------------------
+
+.PHONY: version
+version: ## Print the version, commit and release channel this tree would build as
+	@echo "  version   $(VERSION)"
+	@echo "  commit    $(COMMIT)"
+	@next=$$($(CHANGIE) next $(BUMP) $(PRERELEASE_FLAG) 2>/dev/null) && echo "  next      $$next" || echo "  next      (no unreleased fragments)"
+	@echo "  channel   $(if $(PRERELEASE),UNSTABLE — every release is tagged -$(PRERELEASE),STABLE — no prerelease marker)"
+
+.PHONY: changelog-new
+changelog-new: ## Describe a customer-visible change (interactive, or KIND= DOMAIN= BODY=)
+	@if [ -n "$(BODY)" ]; then \
+		test -n "$(KIND)"   || { echo "KIND is required, e.g. KIND=Added";       exit 1; }; \
+		test -n "$(DOMAIN)" || { echo "DOMAIN is required, e.g. DOMAIN=billing"; exit 1; }; \
+		$(CHANGIE) new -i=false -k "$(KIND)" -m "Domain=$(DOMAIN)" -b "$(BODY)"; \
+	else \
+		$(CHANGIE) new; \
+	fi
+	@$(MAKE) --no-print-directory changelog-check
+
+.PHONY: changelog-check
+changelog-check: ## Fail if a customer-visible change arrived without an entry
+	@go run ./internal/tools/checkchangelog
+
+.PHONY: changelog-preview
+changelog-preview: ## Show the release notes the current fragments would produce
+	@$(CHANGIE) batch $(BUMP) $(PRERELEASE_FLAG) --dry-run
+
+.PHONY: release
+release: ## Assemble the next release: CHANGELOG.md and .changes/vX.Y.Z.md. No commit, no tag.
+	@test -z "$$(git status --porcelain)" || { \
+		echo "the working tree is dirty; a release is assembled from committed code"; exit 1; }
+	@$(MAKE) --no-print-directory changelog-check
+	@$(CHANGIE) batch $(BUMP) $(PRERELEASE_FLAG)
+	@$(CHANGIE) merge
+	@echo
+	@echo "  assembled $$($(CHANGIE) latest)"
+	@echo "  review    git diff"
+	@echo "  then      make release-tag"
+
+.PHONY: release-tag
+release-tag: ## Commit the assembled release and tag it. Does NOT push.
+	@v=$$($(CHANGIE) latest); \
+	 test -n "$$v" || { echo "nothing assembled; run: make release"; exit 1; }; \
+	 if git rev-parse --verify "$$v" >/dev/null 2>&1; then echo "$$v is already tagged"; exit 1; fi; \
+	 git add CHANGELOG.md .changes && \
+	 git commit -m "release: $$v" && \
+	 git tag -a "$$v" -m "$$v" && \
+	 echo "  tagged $$v — publish with: git push origin main --follow-tags"
 
 .PHONY: bao-init
 bao-init: ## Mount the transit engine and create the KEK (ADR-028); idempotent
@@ -432,7 +519,7 @@ fmt-check: ## Fail if anything is unformatted — CI must VERIFY, never rewrite
 	@echo "  formatting OK"
 
 .PHONY: check
-check: fmt-check proto-lint proto-breaking api-validate authz-check proto-thirdparty-check migrate-check sqlc-check sql-check lint vet-integration test ## Everything CI runs
+check: fmt-check proto-lint proto-breaking api-validate authz-check proto-thirdparty-check migrate-check sqlc-check sql-check changelog-check lint vet-integration test ## Everything CI runs
 
 .PHONY: vet-integration
 vet-integration: ## Type-check the integration-tagged tests without running them

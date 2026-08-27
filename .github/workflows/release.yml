@@ -1,0 +1,76 @@
+# A tag is the release. This workflow does not decide anything — it verifies
+# that the tag and the changelog agree, builds binaries stamped with that tag,
+# and publishes the notes the change authors wrote.
+#
+# Everything it publishes already exists in the repository at the tagged commit:
+# `.changes/<tag>.md` was written by `make release` and reviewed in the release
+# commit. Nothing here composes prose, because a release note generated at
+# publish time is a note nobody read.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: verify, build, publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `git describe` needs the tags, and the build stamps what it reports.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # A tag that does not match the assembled changelog means someone tagged
+      # by hand and the notes describe a different release. Refuse rather than
+      # publish a document that lies about what it contains.
+      - name: The tag and the changelog agree
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          notes=".changes/${tag}.md"
+          if [ ! -f "$notes" ]; then
+            echo "no release notes at $notes"
+            echo "a release is assembled with 'make release', which writes that file"
+            exit 1
+          fi
+          grep -qF "$tag" CHANGELOG.md || {
+            echo "CHANGELOG.md does not mention $tag; run 'make release' and commit the result"
+            exit 1
+          }
+          echo "$tag is described by $notes"
+
+      # The same command developers run, so the released binary is built the
+      # way every other binary in this project is built.
+      - name: Build stamped binaries
+        run: make build VERSION=${GITHUB_REF_NAME} COMMIT=${GITHUB_SHA}
+
+      # Proves the stamp survived the link. An unstamped release binary reports
+      # a commit hash where customers and dashboards expect a version, and
+      # nobody notices until an incident.
+      - name: The binaries report the tag
+        run: |
+          for b in api worker projector; do
+            got="$(./bin/$b -version)"
+            case "$got" in
+              "${GITHUB_REF_NAME}"*) echo "$b: $got" ;;
+              *) echo "$b reports '$got', expected ${GITHUB_REF_NAME}"; exit 1 ;;
+            esac
+          done
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file ".changes/${GITHUB_REF_NAME}.md" \
+            ./bin/api ./bin/worker ./bin/projector ./bin/migrate

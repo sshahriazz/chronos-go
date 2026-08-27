@@ -32,6 +32,7 @@ import (
 	"github.com/chronos/chronos-go/internal/modules/organization"
 	"github.com/chronos/chronos-go/internal/modules/profile"
 	"github.com/chronos/chronos-go/internal/modules/workspace"
+	"github.com/chronos/chronos-go/internal/platform/buildinfo"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/config"
 	"github.com/chronos/chronos-go/internal/platform/obs"
@@ -40,14 +41,23 @@ import (
 	"github.com/chronos/chronos-go/internal/server/health"
 )
 
-// version is set at build time: -ldflags "-X main.version=$(git rev-parse --short HEAD)"
-var version = "dev"
+// version identifies this build. It is resolved once, from the link-time stamp
+// the Makefile passes, or from the VCS data Go embeds when there is none.
+var version = buildinfo.Version()
 
 func main() {
 	addr := flag.String("addr", ":"+envOr("PROJECTOR_PORT", "8093"), "health listen address")
 	rebuild := flag.String("rebuild", "", "rebuild one projection from the beginning of the log, then exit")
 	list := flag.Bool("list", false, "list registered projections and exit")
+	showVersion := flag.Bool("version", false, "print the build version and exit")
 	flag.Parse()
+
+	// Answerable without a database, a log store or a network. `make build`
+	// stamps the tag; an unstamped binary says what it really is.
+	if *showVersion {
+		fmt.Println(buildinfo.String())
+		return
+	}
 
 	// Wrapped so every context-aware line carries the trace it belongs to.
 	// Correlating logs and traces by timestamp stops working the moment two
@@ -78,7 +88,7 @@ func run(addr, rebuild string, list bool, log *slog.Logger) error {
 		return nil
 	}
 
-	log.Info("configuration loaded", "env", cfg.Env, "version", version)
+	log.Info("configuration loaded", "env", cfg.Env, "version", version, "commit", buildinfo.Commit())
 
 	// The registry is built BEFORE the dependencies because the lease pool is
 	// sized from it: every running projection pins one connection for its

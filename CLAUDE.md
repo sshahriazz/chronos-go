@@ -24,6 +24,9 @@ order before touching anything:
    data flows.** Verified against the running server; read before writing any
    command handler, projector or reactor.
 8. [docs/REVIEW.md](docs/REVIEW.md) — design review, all findings resolved.
+9. [docs/VERSIONING.md](docs/VERSIONING.md) — **the three things that carry a
+   version, and the changelog a customer reads.** Read before cutting a release
+   or wondering whether a change needs an entry.
 
 The **operator plane** (`internal/operator`, `cmd/operator`, `proto-operator/`)
 is the one part of this system that deliberately breaks tenant isolation, and it
@@ -115,6 +118,30 @@ contradict a documented clamp, the bound is published as a
   startup.
 - **Migrations are append-only.** Never edit an applied migration; add a new
   one. `make migrate-check` enforces it (ADR-011).
+- **A change a customer can observe ships with the sentence they will read.**
+  Not a commit subject — those are written for engineers here, deliberately.
+  `make changelog-new` writes a fragment under `.changes/unreleased/`;
+  `make changelog-check` runs in `make check` and in CI and fails a change to
+  `proto/chronos/`, `internal/modules/`, `internal/server/`, a service binary or
+  a migration that carries neither a fragment nor a `Changelog: none` commit
+  trailer. Refactors, tests, generated code, internal tools and the operator
+  plane earn no entry — a public changelog padded with invisible work is
+  useless (docs/VERSIONING.md).
+- **The product is an unstable alpha.** Every release is tagged
+  `vX.Y.Z-alpha.N` (`PRERELEASE ?= alpha.1` in the Makefile), which sorts BELOW
+  the same version without it, so nothing downstream can mistake an alpha build
+  for a supported one. Emptying `PRERELEASE` declares the product beta or
+  stable; it is a decision, not a cleanup.
+- **The product version and the wire version are independent.** `chronos.*.v1`
+  does not become `v2` because the product reached `2.0.0`; a customer's
+  generated client is pinned to that package. A real wire break is a new proto
+  package served alongside the old one, and `buf breaking` makes any other kind
+  fail the build.
+- **One build identity, stamped once.** `internal/platform/buildinfo` is the
+  only place a binary learns which build it is. Never reintroduce a per-`main`
+  `var version`: three of them existed, all documenting an `-ldflags` invocation
+  no build passed, so every process reported `dev` in its logs, its
+  `service.version` span attribute and its `GetStatus` response.
 - **All times UTC.** `APP_TIMEZONE` affects presentation and operator
   convenience only — never storage.
 - **The build is pure Go.** Every generator and every gate is a program under
@@ -134,6 +161,13 @@ make api         # regenerate Go, Connect, OpenAPI and the error catalogue
 make api-docs    # OpenAPI spec + docs/api/errors.md only
 make test        # go test ./... -race
 make lint        # includes the depguard import contract (CONVENTIONS §2)
+
+make changelog-new      # describe a customer-visible change (docs/VERSIONING.md)
+make changelog-check    # fail if one arrived without an entry; part of `make check`
+make changelog-preview  # the release notes the current fragments would produce
+make version            # what this tree builds as, and what it would release as
+make release            # assemble CHANGELOG.md + .changes/vX.Y.Z.md. No commit, no tag.
+make release-tag        # commit and tag the assembled release. Does NOT push.
 
 make up          # start stack (creates .env from .env.example if missing); idempotent
 make down        # stop, keep volumes
@@ -162,6 +196,7 @@ go run ./internal/tools/gendocs                 # docs/api/errors.md + the OpenA
 go run ./internal/tools/fixopenapi              # -spec <file>; runs after buf generate, never by hand
 go run ./internal/tools/gendashboards           # -out <dir>
 go run ./internal/tools/checkopenapi            # -spec <file> -proto <dir>
+go run ./internal/tools/checkchangelog         # -base <ref>; the changelog gate
 go run ./internal/tools/checkdashboards         # -dashboards <dir> -prometheus <url>
 go run ./internal/tools/obsprobe targets|traces|status
 ```

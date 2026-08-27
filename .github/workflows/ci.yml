@@ -130,6 +130,32 @@ jobs:
         env:
           MIGRATION_BASE_REF: origin/main
 
+  changelog:
+    name: a customer-visible change carries an entry
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The gate diffs against the base branch, so the ref has to exist locally.
+      # On a push to main this makes origin/main equal to HEAD, the diff is
+      # empty, and the job passes without asserting anything — which is correct:
+      # the assertion belongs on the pull request, where the author is.
+      - name: Fetch the base branch
+        run: git fetch --no-tags --depth=1 origin main
+
+      # Written for engineers in the commit, for customers in the fragment.
+      # See docs/VERSIONING.md §4.
+      - name: A customer-visible change carries a changelog entry
+        run: go run ./internal/tools/checkchangelog
+        env:
+          CHANGELOG_BASE_REF: origin/main
+
   integration:
     name: integration against real infrastructure
     runs-on: ubuntu-latest

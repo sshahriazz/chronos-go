@@ -1,0 +1,5 @@
+kind: Fixed
+body: Your data export and erasure confirmation now state that invoice records are retained only when your organizations were actually invoiced, instead of saying so for everyone.
+time: 2026-08-27T17:02:24.187736+06:00
+custom:
+    Domain: compliance

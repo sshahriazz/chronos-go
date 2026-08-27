@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -28,6 +29,7 @@ import (
 	"github.com/chronos/chronos-go/gen/proto/chronos/system/v1/systemv1connect"
 	"github.com/chronos/chronos-go/gen/proto/chronos/workspace/v1/workspacev1connect"
 	billingapi "github.com/chronos/chronos-go/internal/modules/billing/api"
+	"github.com/chronos/chronos-go/internal/platform/buildinfo"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/config"
 	"github.com/chronos/chronos-go/internal/platform/obs"
@@ -37,12 +39,21 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
-// version is set at build time: -ldflags "-X main.version=$(git rev-parse --short HEAD)"
-var version = "dev"
+// version identifies this build. It is resolved once, from the link-time stamp
+// the Makefile passes, or from the VCS data Go embeds when there is none.
+var version = buildinfo.Version()
 
 func main() {
 	addr := flag.String("addr", ":"+envOr("API_PORT", "8090"), "listen address")
+	showVersion := flag.Bool("version", false, "print the build version and exit")
 	flag.Parse()
+
+	// Answerable without a database, a log store or a network. `make build`
+	// stamps the tag; an unstamped binary says what it really is.
+	if *showVersion {
+		fmt.Println(buildinfo.String())
+		return
+	}
 
 	// Wrapped so every context-aware line carries the trace it belongs to.
 	// Correlating logs and traces by timestamp stops working the moment two
@@ -65,7 +76,7 @@ func run(addr string, log *slog.Logger) error {
 		return err
 	}
 	log.Info("configuration loaded",
-		"env", cfg.Env, "timezone", cfg.Timezone, "version", version)
+		"env", cfg.Env, "timezone", cfg.Timezone, "version", version, "commit", buildinfo.Commit())
 
 	// Secrets in custody override the environment, before anything reads them.
 	// It runs HERE — before tracing, before any dependency — because a value

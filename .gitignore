@@ -38,6 +38,7 @@ bin/
 /worker
 
 # internal/tools — same thing, one binary per generator and gate.
+/checkchangelog
 /checkdashboards
 /checkopenapi
 /fixopenapi

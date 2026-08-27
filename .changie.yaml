@@ -1,0 +1,77 @@
+# The customer-facing changelog, assembled from one file per change.
+#
+# WHY FRAGMENTS AND NOT THE COMMIT LOG
+#
+# This repository writes commit subjects for engineers — "half of every API key
+# minted could never authenticate" is the right sentence for `git log` and the
+# wrong one for a customer. A generated-from-commits changelog therefore either
+# leaks internal detail or reads as noise. Each change that a customer would
+# notice instead carries one small YAML file, written by its author while the
+# change is fresh, in the words the customer will read.
+#
+# Fragments live in .changes/unreleased/ and never conflict: one file per
+# change, named by timestamp, so two branches merging touch two different files.
+#
+# NOT EVERY CHANGE GETS ONE. A refactor, a test, a generated file or an
+# internal tool is invisible to the customer and must NOT produce a fragment —
+# padding a public changelog with work nobody outside can observe makes it
+# useless. `make changelog-check` decides which changes need one.
+changesDir: .changes
+unreleasedDir: unreleased
+headerPath: header.tpl.md
+changelogPath: CHANGELOG.md
+versionExt: md
+
+# Every version file is standalone Markdown with its own heading, so the
+# website can serve one release per page without reparsing CHANGELOG.md.
+versionFormat: '## {{.Version}} — {{.Time.Format "2006-01-02"}}'
+kindFormat: '### {{.Kind}}'
+changeFormat: '- **{{.Custom.Domain}}** — {{.Body}}'
+
+# Keep A Changelog's categories, each mapped to the semver part it forces.
+# `changie batch auto` reads these, so the version is a consequence of what
+# changed rather than someone's judgement on release day.
+#
+# `Removed` is the only minor-to-major escalation, and on the wire it cannot
+# happen quietly: `buf breaking` runs in `make check`, so removing a field or an
+# RPC from a published `chronos.*.v1` package fails the build. A genuine break
+# is a new proto package version (v2), never an edit to v1.
+kinds:
+    - label: Added
+      auto: minor
+    - label: Changed
+      auto: minor
+    - label: Deprecated
+      auto: minor
+    - label: Removed
+      auto: major
+    - label: Fixed
+      auto: patch
+    - label: Security
+      auto: patch
+
+# One required field beyond the body: which part of the product changed. The
+# website groups by it, and the author picking it is what stops "improved
+# performance" entries with no subject.
+custom:
+    - key: Domain
+      label: Domain
+      type: enum
+      enumOptions:
+          - identity
+          - access
+          - organization
+          - workspace
+          - billing
+          - entitlement
+          - compliance
+          - notification
+          - operator
+          - platform
+
+newlines:
+    afterChangelogHeader: 1
+    beforeKind: 1
+    beforeChangelogVersion: 1
+    endOfVersion: 1
+envPrefix: CHANGIE_

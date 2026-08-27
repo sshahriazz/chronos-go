@@ -88,3 +88,45 @@ Four that matter most, in short:
    into nothing; every component test passed.
 4. **Never widen a rule to fit the code.** A carve-out was written into
    CONVENTIONS.md to excuse raw SQL rather than configuring the mandated sqlc.
+
+## Versioning and the changelog
+
+Read [docs/VERSIONING.md](../docs/VERSIONING.md) before cutting a release or
+deciding whether a change needs a changelog entry. The short form:
+
+**Write the customer's sentence while the change is fresh.** Commit subjects in
+this repository are written for engineers on purpose — "half of every API key
+minted could never authenticate" belongs in `git log` and nowhere near a
+customer. So a change a customer can observe carries a fragment:
+
+```bash
+make changelog-new KIND=Fixed DOMAIN=identity BODY="API keys created before … now authenticate."
+```
+
+**Not every change earns one.** A refactor, a test, generated code, a dashboard,
+an internal tool or anything in the operator plane is invisible from outside.
+Say so in a commit trailer rather than inventing an entry:
+
+```
+Changelog: none
+```
+
+`make changelog-check` (part of `make check`, and a CI job) decides which paths
+need one and validates every fragment against `.changie.yaml`. It fails on an
+unknown kind or domain, an empty body, or a body that is a pasted commit
+subject — which is the substitution it exists to prevent.
+
+**Do not hand-edit `CHANGELOG.md` or `.changes/vX.Y.Z.md`.** Both are assembled
+by `make release` from the fragments. Editing them is the same class of mistake
+as editing a generated dashboard.
+
+**Do not add a `var version` to a `main` package.** `internal/platform/buildinfo`
+is the one place a binary learns which build it is; three per-`main` copies
+existed and all three reported `dev` forever.
+
+**Chronos is an unstable alpha.** Releases are tagged `vX.Y.Z-alpha.N`. Do not
+remove the `PRERELEASE` default in the Makefile as tidying — emptying it is how
+the product is declared beta or stable.
+
+**Never bump `chronos.*.v1` to match a product version.** They are independent
+axes; see docs/VERSIONING.md §1.

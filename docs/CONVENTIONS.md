@@ -820,3 +820,33 @@ are fine; no code here takes one.
   query can be written from the module name alone.
 - Personal data reaches logs only via a `Redactable` type, which makes logging a
   raw email a compile-time-visible mistake rather than a review-time one.
+
+---
+
+## 12. Versioning, releases and the changelog
+
+Full rules in [VERSIONING.md](VERSIONING.md). What matters while writing Go:
+
+- **The product is an unstable alpha.** Releases are tagged `vX.Y.Z-alpha.N`;
+  `PRERELEASE` in the Makefile puts the marker there, and semver sorts it below
+  the same version without it. Emptying that default declares the product beta
+  or stable — a decision, never a cleanup.
+- **Three axes, never conflated**: build identity (`internal/platform/buildinfo`,
+  stamped by the Makefile), product version (git tags, `CHANGELOG.md`), and the
+  wire contract (`chronos.<domain>.v1`). A product major bump does not touch a
+  proto package version, and a proto `v2` is not a product release.
+- **One build identity.** A `main` package must not declare `var version`. It
+  reads `buildinfo.Version()`, which resolves the link-time stamp, then Go's
+  embedded VCS data, then `dev` — in that order. Three per-`main` copies existed
+  and all reported `dev` in every log line, span and `GetStatus` response.
+- **A customer-visible change carries a fragment.** `make changelog-new`, and the
+  body is the sentence a customer reads — not the commit subject, which in this
+  repository is deliberately written for engineers. A change that is invisible
+  from outside declares `Changelog: none` in a commit trailer instead.
+  `make changelog-check` enforces both and runs in `make check`.
+- **`CHANGELOG.md` and `.changes/vX.Y.Z.md` are generated.** `make release`
+  assembles them from the fragments. Hand-editing them is the same mistake as
+  hand-editing a generated dashboard (§11).
+- **A tightened bound is a breaking change** even though `buf breaking` accepts
+  it: lowering a `maxLength` or a numeric ceiling rejects requests that used to
+  succeed (§7.2). It needs a `Changed` entry and a deprecation window.

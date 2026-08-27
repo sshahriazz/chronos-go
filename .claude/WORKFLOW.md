@@ -116,15 +116,16 @@ assumptions.
 Nothing is "done" until `make check` passes. It runs:
 
 ```
-fmt-check      formatting is VERIFIED, never rewritten — a check that fixes checks nothing
-proto-lint     COMMENTS category: an undocumented field fails the build
-proto-breaking against main
-api-validate   the OpenAPI spec is non-empty and complete
-migrate-check  migrations are append-only
-sqlc-check     generated query code is current AND matches the schema
-sql-check      no SQL in Go outside the kernel carve-out
-lint           golangci-lint, including the depguard import contract
-test           go test ./... -race
+fmt-check         formatting is VERIFIED, never rewritten — a check that fixes checks nothing
+proto-lint        COMMENTS category: an undocumented field fails the build
+proto-breaking    against main
+api-validate      the OpenAPI spec is non-empty and complete
+migrate-check     migrations are append-only
+sqlc-check        generated query code is current AND matches the schema
+sql-check         no SQL in Go outside the kernel carve-out
+changelog-check   a customer-visible change carries the sentence a customer reads
+lint              golangci-lint, including the depguard import contract
+test              go test ./... -race
 ```
 
 Integration tests need the stack: `make up` (which also bootstraps OpenBao
@@ -132,6 +133,23 @@ transit), then `go test -tags=integration ./... -race`.
 
 `-race` always. The projector and reactor runners are concurrent by design; a
 data race there corrupts a read model rather than crashing.
+
+### The changelog gate is not a formality
+
+Commit subjects here are written for engineers on purpose. A changelog
+generated from them either leaks internal detail or reads as noise, and one
+assembled at release time is written by whoever cuts the release — weeks later,
+about work they did not do. So the sentence a customer reads is written by the
+author, while the change is fresh:
+
+```bash
+make changelog-new KIND=Fixed DOMAIN=identity BODY="…"   # a fragment, one file, no merge conflicts
+```
+
+If the change is invisible from outside — a refactor, a test, generated code, an
+internal tool, the operator plane — it earns no entry, and the commit says so
+with a `Changelog: none` trailer. Both paths are checked; neither is optional.
+See docs/VERSIONING.md.
 
 ---
 

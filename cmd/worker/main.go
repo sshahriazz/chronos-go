@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
+	"github.com/chronos/chronos-go/internal/platform/buildinfo"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/config"
 	"github.com/chronos/chronos-go/internal/platform/notify"
@@ -39,15 +40,24 @@ import (
 	"github.com/chronos/chronos-go/internal/server/health"
 )
 
-// version is set at build time: -ldflags "-X main.version=$(git rev-parse --short HEAD)"
-var version = "dev"
+// version identifies this build. It is resolved once, from the link-time stamp
+// the Makefile passes, or from the VCS data Go embeds when there is none.
+var version = buildinfo.Version()
 
 func main() {
 	addr := flag.String("addr", ":"+envOr("WORKER_PORT", "8094"), "health listen address")
 	list := flag.Bool("list", false, "list registered reactors and exit")
 	replay := flag.String("replay-parked", "", "return a reactor's parked events to the live queue, then exit")
 	stats := flag.Bool("stats", false, "print each reactor's queue depth and parked count, then exit")
+	showVersion := flag.Bool("version", false, "print the build version and exit")
 	flag.Parse()
+
+	// Answerable without a database, a log store or a network. `make build`
+	// stamps the tag; an unstamped binary says what it really is.
+	if *showVersion {
+		fmt.Println(buildinfo.String())
+		return
+	}
 
 	// Wrapped so every context-aware line carries the trace it belongs to.
 	// Correlating logs and traces by timestamp stops working the moment two
@@ -118,7 +128,7 @@ func run(addr string, list bool, replay string, stats bool, log *slog.Logger) er
 		// series is indistinguishable from a healthy one.
 		d.metrics.InitReactor(r.Name())
 	}
-	log.Info("configuration loaded", "env", cfg.Env, "version", version, "reactors", len(rs))
+	log.Info("configuration loaded", "env", cfg.Env, "version", version, "commit", buildinfo.Commit(), "reactors", len(rs))
 
 	if stats {
 		return printStats(ctx, rs, d)
