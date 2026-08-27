@@ -147,6 +147,18 @@ const (
 	// compliance.md §6: a restricted subject is not processed, and building an
 	// export is processing.
 	ExportFailedRestricted = "processing_restricted"
+
+	// ExportFailedNoSubjectGraph is a traversal with nothing in it.
+	//
+	// Its own reason rather than `source_unreadable`, because nothing is
+	// unreadable and a retry cannot help: the subject graph
+	// (internal/subjectgraph) assembled with no object prefixes, which is a
+	// misconfiguration of this deployment rather than a fault of the subject's
+	// data. It is the export's half of the refusal Objects.ErasePrefixes has
+	// always made — an export over no prefixes writes a manifest listing zero
+	// objects and reports READY, telling the person that everything we hold about
+	// them is in a file that omits their photographs.
+	ExportFailedNoSubjectGraph = "no_subject_graph"
 )
 
 // ---------------------------------------------------------------------------

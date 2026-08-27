@@ -246,7 +246,24 @@ func (e *ExportRuns) Begin(ctx context.Context, exportID string) (ExportPlan, er
 		return ExportPlan{}, &PermanentExportError{Reason: contract.ExportFailedRestricted}
 	}
 
-	return ExportPlan{SubjectID: export.SubjectID(), Prefixes: e.prefixes(export.SubjectID())}, nil
+	prefixes := e.prefixes(export.SubjectID())
+	if len(prefixes) == 0 {
+		// REFUSED, matching Objects.ErasePrefixes.
+		//
+		// The erasure has always refused an empty traversal — "an erasure that
+		// traverses nothing reports success having deleted nothing" — and the
+		// export did not, so the two halves of the same subject graph disagreed
+		// about what an empty one means. An export over no prefixes writes a
+		// manifest listing zero objects and reports READY, which tells the person
+		// that everything we hold about them is in a file that omits their
+		// photographs.
+		//
+		// Retrying cannot fix a graph with nothing in it, so this is PERMANENT
+		// rather than an error the workflow would spend its retries on.
+		return ExportPlan{}, &PermanentExportError{Reason: contract.ExportFailedNoSubjectGraph}
+	}
+
+	return ExportPlan{SubjectID: export.SubjectID(), Prefixes: prefixes}, nil
 }
 
 // PermanentExportError is a failure retrying cannot fix.

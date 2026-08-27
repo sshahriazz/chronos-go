@@ -9,6 +9,7 @@ import (
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
 	"github.com/chronos/chronos-go/internal/modules/compliance"
 	"github.com/chronos/chronos-go/internal/modules/compliance/app"
+	"github.com/chronos/chronos-go/internal/modules/compliance/contract"
 	"github.com/chronos/chronos-go/internal/modules/compliance/domain"
 	"github.com/chronos/chronos-go/internal/platform/blob"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
@@ -182,6 +183,18 @@ func newRunHarnessFor(
 	t *testing.T, restricted fakeRestricted, fields map[string]string,
 ) *runHarness {
 	t.Helper()
+	return newRunHarnessWithPrefixes(t, restricted, fields,
+		func(s string) []string { return []string{"px" + s} })
+}
+
+// newRunHarnessWithPrefixes lets a test choose the subject graph, which is the
+// only way to exercise an EMPTY one — the production graph refuses to assemble
+// empty, and this asserts what the export does if one ever reached it.
+func newRunHarnessWithPrefixes(
+	t *testing.T, restricted fakeRestricted, fields map[string]string,
+	prefixes app.SubjectPrefixes,
+) *runHarness {
+	t.Helper()
 
 	events := newMemoryStore()
 	store := &recordingStore{}
@@ -193,7 +206,7 @@ func newRunHarnessFor(
 			domain.ExportCategory, domain.NewExport),
 		Profile:      fakeProfile{fields: fields},
 		Objects:      lister,
-		Prefixes:     app.SubjectPrefixes(func(s string) []string { return []string{"px" + s} }),
+		Prefixes:     prefixes,
 		Store:        store,
 		Prefix:       func(s string) string { return "px" + s },
 		Restrictions: restricted,
@@ -440,5 +453,46 @@ func TestExportRunsRefusesAPartialWiring(t *testing.T) {
 				t.Fatalf("a runner was built with %s", name)
 			}
 		})
+	}
+}
+
+// AN EXPORT OVER AN EMPTY SUBJECT GRAPH IS REFUSED, PERMANENTLY.
+//
+// The erasure has always refused this — "an erasure that traverses nothing
+// reports success having deleted nothing" (objects.go) — and the export did
+// not, so the two halves of one subject graph disagreed about what an empty one
+// means. An export over no prefixes writes a manifest listing zero objects and
+// reports READY, which tells the person that everything held about them is in a
+// file that omits their photographs.
+//
+// PERMANENT rather than retryable: a graph with nothing in it is this
+// deployment's misconfiguration, and no number of attempts adds a prefix to it.
+func TestAnExportOverAnEmptySubjectGraphIsRefused(t *testing.T) {
+	h := newRunHarnessWithPrefixes(t, fakeRestricted{},
+		map[string]string{"email": "a@b.test"},
+		app.SubjectPrefixes(func(string) []string { return nil }))
+	ctx := context.Background()
+
+	id, err := h.runs.Request(ctx, app.RequestExportCommand{
+		SubjectID: "subj_1", IdempotencyKey: "k-empty",
+	})
+	if err != nil {
+		t.Fatalf("Request: %v", err)
+	}
+
+	_, err = h.runs.Begin(ctx, id)
+	if err == nil {
+		t.Fatal("an export with no prefixes to walk was allowed to proceed; it produces " +
+			"a manifest listing zero objects and reports READY")
+	}
+	var permanent *app.PermanentExportError
+	if !errors.As(err, &permanent) {
+		t.Fatalf("the refusal is %T, want a PermanentExportError: retrying cannot add a "+
+			"prefix to an empty graph, so the workflow would spend its whole retry "+
+			"budget on it", err)
+	}
+	if permanent.Reason != contract.ExportFailedNoSubjectGraph {
+		t.Errorf("the recorded reason is %q, want %q — a reason a reader can act on",
+			permanent.Reason, contract.ExportFailedNoSubjectGraph)
 	}
 }
