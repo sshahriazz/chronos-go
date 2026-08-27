@@ -669,6 +669,54 @@ nothing ever ran.
 
 ## Session findings and follow-ups
 
+- [x] **Session revocation is immediate now, and ADR-018's promise is kept.**
+      The gap: `GetSessionByToken` refuses a row whose `session_view.revoked_at`
+      is set, and the PROJECTOR writes that column. So a revocation was durable
+      in the log and not yet in effect — milliseconds while the projector is
+      healthy, unbounded while it is stopped, being rebuilt, or wedged on an
+      unrelated event, and silent in every case, because a request served by a
+      revoked session is indistinguishable from one served by a live session.
+
+      That is a fail-OPEN under component failure. ADR-010 permits exactly one
+      deliberate fail-open in this system and it is OpenFGA's inverse.
+
+      The fix is the shape API keys already use and migration 00051 argues in
+      full: revocation destroys the SECRET half in the same request that appends
+      the event. `session_token` is authoritative rather than projected
+      (migration 00010) — a token may never enter an event (ADR-002), so no
+      replay can restore it — which is why a handler deleting from it is not a
+      handler writing a read model, and ADR-019 is untouched. The event still
+      appends and the projector still sets `revoked_at`; neither half is
+      sufficient alone.
+
+      NOT the Valkey denylist ADR-018 names for emergencies. Everything in
+      Valkey carries a TTL and `FLUSHALL` must be survivable, so a denylist that
+      was the only record of a revocation resurrects every revoked session on a
+      flush — the failure ADR-045 forbids for access tombstones, somewhere it
+      matters more.
+
+      Every revocation path is covered, because all of them route through
+      `RevokeSession` or `RevokeAllSessions`: the sessions screen, sign-out
+      everywhere, password reset, both email-change paths, registration's
+      address verification, and deactivation. Erasure was already structural —
+      the session projection deletes digests by subject on `UserErased`.
+
+      Ordering is append-then-destroy, matching RevokeAPIKey: destroying first
+      would sign somebody out with nothing in the log saying why if the append
+      then failed. A destroy that fails is REPORTED rather than swallowed, for
+      the reason the whole change exists.
+
+      Asserted at both levels, and both mutation-checked. Six use-case tests
+      cover the ordering, the set (the spared session keeps its digest), and the
+      loud failure; two integration tests drive the running server and assert
+      the projector-INDEPENDENT fact — that the `session_token` row is gone —
+      because a 401 alone is satisfied by a fast projector.
+
+      It also removed the 20-second poll this session had added to
+      `TestTheIdempotencyContractHoldsForEveryAuthenticatedMutation`. That
+      tolerance existed only because of this gap; the test asserts the refusal
+      on the very next request again, and means it.
+
 - [x] **Three integration tests were races against the projector, and adding two
       projections exposed all three.** Wiring the shared registry into the
       protocol harness added billing's invoice mirror and identity's API key
@@ -704,39 +752,6 @@ nothing ever ran.
       of them "survived seventy-two clean observations with three hypotheses
       eliminated"; the mechanism was a projection-lag window that the harness of
       the day was too idle to open.
-
-- [ ] **Session revocation is not immediate, and ADR-018 says the opaque token's
-      should be.** Discovered by the entry above rather than looked for.
-
-      ADR-018 gives two tokens: a signed access JWT revoked by TTL or a Valkey
-      denylist, and an opaque refresh token whose revocation is "Immediate,
-      server-side". What this build actually issues is one opaque bearer,
-      resolved on every request by joining `session_token` to `session_view` —
-      the refresh token's shape, and therefore the row that promises immediate
-      revocation.
-
-      It is not immediate. Revoking appends an event; the projector clears the
-      row; the bearer keeps authenticating until it does. The window is
-      milliseconds on an idle machine and grew large enough to fail a test when
-      two projections were added to the harness.
-
-      The denylist ADR-018 names for emergencies is not built (no code mentions
-      one), and building it as stated would be wrong here anyway: everything in
-      Valkey carries a TTL and `FLUSHALL` must be survivable, so a denylist that
-      is the only record of a revocation resurrects every revoked session on a
-      flush — the exact failure ADR-045 forbids for access tombstones.
-
-      The shape that works is the one API keys already use: an AUTHORITATIVE
-      row, written by the command and deleted by the revocation, which the
-      authenticator resolves without touching a projection (migration 00051's
-      header argues it in full). `session_token` may already be most of that
-      table; what makes the join projection-dependent is `session_view`.
-
-      Not urgent — the window is small, it closes on its own, and no request
-      inside it does anything a valid session could not. It is written down
-      because it is a promise the ADR makes and the code does not keep, and
-      because the next person to see a deactivation flake should find this
-      instead of hypothesis four.
 
 - [x] **`AssumeRecordsExist` replaced for the class that could be answered.**
       Billing now answers "does this subject appear on a retained invoice" —

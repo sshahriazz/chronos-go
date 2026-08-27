@@ -1083,9 +1083,23 @@ data), created-at, last-seen-at, current AAL, and whether it is *this* session.
 Actions: revoke one · revoke all others · revoke all · rename device · mark
 device trusted.
 
-- Revocation takes effect **immediately** on the refresh path and within the
-  access-token TTL (10 min) otherwise; emergency revocation uses the Valkey
-  denylist for instant effect (ADR-018).
+- Revocation takes effect **immediately** — on the next request, not on the
+  projector's schedule. Revoking appends `SessionRevoked` AND destroys the
+  session's digest in the same request, so `GetSessionByToken`'s inner join has
+  nothing left to resolve whatever `session_view` says. Neither half is
+  sufficient alone: the delete leaves nothing in the log saying why the session
+  ended, and the event alone leaves the bearer usable for as long as the
+  projector is behind — milliseconds when it is healthy, unbounded while it is
+  stopped or rebuilding, and silent in both cases.
+  - This is why there is no Valkey denylist, and ADR-018's mention of one for
+    emergencies does not apply here. Everything in Valkey carries a TTL and
+    `FLUSHALL` must be survivable, so a denylist that was the only record of a
+    revocation would resurrect every revoked session on a flush — the failure
+    ADR-045 forbids for access tombstones, in a worse place.
+  - `session_token` is authoritative rather than projected (migration 00010), so
+    a handler deleting from it is not a handler writing a read model; ADR-019
+    is untouched. `session_view.revoked_at` is still set by the projector and is
+    still what the sessions screen reads.
 - Revocation also drops the Centrifugo connection, so realtime does not outlive
   the session.
 - IP and geolocation are **personal data**: stored in the PII vault, referenced
