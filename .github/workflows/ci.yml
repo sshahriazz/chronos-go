@@ -27,9 +27,11 @@ env:
   #   valkey was unreachable when this process started
   #   dial tcp [::1]:6379: connect: connection refused
   #   TEMPORAL_ENABLED=true built no client
+  #   dial tcp [::1]:10000: connect: connection refused   (Centrifugo)
+  #   dial tcp [::1]:8200: connect: connection refused    (OpenBao)
   #
   # A job that starts less than the suite needs does not test less; it fails.
-  COMPOSE_SERVICES: postgres kurrentdb valkey openfga temporal mailpit
+  COMPOSE_SERVICES: postgres kurrentdb valkey openfga temporal mailpit centrifugo openbao
 
 jobs:
   build:
@@ -206,6 +208,13 @@ jobs:
           docker compose ps
           docker compose logs --tail=100
           exit 1
+
+      # Personal data cannot be stored at all without the transit engine: the
+      # vault wraps every data key through it, and a fresh volume has none, so
+      # Register fails with a 404 nobody expects and the tests read it as
+      # "internal error". Idempotent, and the same target `make up` runs.
+      - name: Mount the OpenBao transit engine and create the KEK
+        run: make bao-init
 
       # Applied with the OWNER credentials; the tests then connect as the
       # non-privileged chronos_app role, which is what makes the RLS assertions
