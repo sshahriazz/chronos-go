@@ -165,7 +165,22 @@ type runHarness struct {
 	events *memoryStore
 }
 
+// newRunHarness builds the producer with one representative profile field.
 func newRunHarness(t *testing.T, restricted fakeRestricted) *runHarness {
+	t.Helper()
+	return newRunHarnessFor(t, restricted, map[string]string{"email": "a@b.test"})
+}
+
+// newRunHarnessWithProfile is newRunHarness with the vault's answer chosen, for
+// the bundle-content tests in exportbundle_test.go.
+func newRunHarnessWithProfile(t *testing.T, fields map[string]string) *runHarness {
+	t.Helper()
+	return newRunHarnessFor(t, fakeRestricted{}, fields)
+}
+
+func newRunHarnessFor(
+	t *testing.T, restricted fakeRestricted, fields map[string]string,
+) *runHarness {
 	t.Helper()
 
 	events := newMemoryStore()
@@ -176,7 +191,7 @@ func newRunHarness(t *testing.T, restricted fakeRestricted) *runHarness {
 		Exports: eventsourcing.NewRepository[*domain.Export](
 			events, events.codec, nil,
 			domain.ExportCategory, domain.NewExport),
-		Profile:      fakeProfile{fields: map[string]string{"email": "a@b.test"}},
+		Profile:      fakeProfile{fields: fields},
 		Objects:      lister,
 		Prefixes:     app.SubjectPrefixes(func(s string) []string { return []string{"px" + s} }),
 		Store:        store,

@@ -2,12 +2,10 @@ package app
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/chronos/chronos-go/internal/modules/compliance/domain"
 	"github.com/chronos/chronos-go/internal/platform/blob"
-	"github.com/chronos/chronos-go/internal/platform/codec"
 )
 
 // ExportFormatVersion is the bundle's own schema version.
@@ -182,45 +180,6 @@ type ExportedObject struct {
 	ModifiedAt time.Time `json:"modifiedAt"`
 }
 
-// Exports produces a data subject's portability bundle.
-type Exports struct {
-	profile    SubjectProfile
-	store      ExportStore
-	exemptions RetentionExemptions
-	prefix     func(subjectID string) string
-	expiry     time.Duration
-	now        func() time.Time
-}
-
-// ExportsDeps is what Exports needs.
-type ExportsDeps struct {
-	Profile SubjectProfile
-	Store   ExportStore
-
-	// Exemptions states what this system keeps that is NOT in the bundle.
-	//
-	// Required, and for Article 15(1) rather than for symmetry with the erasure:
-	// the right of access is a right to know about the PROCESSING, not only to
-	// receive the values. A bundle handed over with no retention statement is a
-	// file that answers half the article and reads as though it answered all of
-	// it.
-	Exemptions RetentionExemptions
-
-	// Prefix is the object-store namespace the bundle is written under.
-	//
-	// It must be the SUBJECT'S OWN prefix, and that is not a tidiness rule: the
-	// erasure deletes every object under a subject's prefixes, so a bundle
-	// written there is purged by erasure automatically (compliance.md §4 step
-	// 9). A bundle written anywhere else is personal data that survives the
-	// erasure of the person it describes.
-	Prefix func(subjectID string) string
-
-	// Expiry bounds the download link.
-	Expiry time.Duration
-
-	Now func() time.Time
-}
-
 // DefaultExportExpiry is how long a download link lives.
 //
 // # Fifteen minutes, and the number is not ours to choose freely
@@ -243,105 +202,19 @@ type ExportsDeps struct {
 // click that follows.
 const DefaultExportExpiry = 15 * time.Minute
 
-func NewExports(d ExportsDeps) (*Exports, error) {
-	switch {
-	case d.Profile == nil:
-		return nil, fmt.Errorf("compliance: a subject profile source is required; an export " +
-			"with no personal data in it answers Article 15 with an empty file")
-	case d.Store == nil:
-		return nil, fmt.Errorf("compliance: an object store is required")
-	case d.Prefix == nil:
-		return nil, fmt.Errorf("compliance: a subject prefix is required; a bundle written " +
-			"outside the subject's own namespace is personal data that survives their erasure")
-	case d.Exemptions == nil:
-		return nil, fmt.Errorf("compliance: a retention-exemption resolver is required; a " +
-			"bundle that lists a name and an address and says nothing about invoices " +
-			"retained under Article 17(3)(b) is an accurate file and a misleading answer")
-	case d.Now == nil:
-		return nil, fmt.Errorf("compliance: a clock is required")
-	}
-	if d.Expiry <= 0 {
-		d.Expiry = DefaultExportExpiry
-	}
-	return &Exports{
-		profile: d.Profile, store: d.Store, exemptions: d.Exemptions,
-		prefix: d.Prefix, expiry: d.Expiry, now: d.Now,
-	}, nil
-}
-
-// ExportResult is where the bundle went and how to fetch it.
-type ExportResult struct {
-	// ObjectKey is where it was written. Recorded so a later request can find
-	// the same bundle rather than regenerating one.
-	ObjectKey string
-
-	// DownloadURL is short-lived and is NOT stored anywhere: it is a bearer
-	// capability, and persisting one would turn an expiring link into a durable
-	// credential.
-	DownloadURL string
-
-	ExpiresAt time.Time
-}
-
-// Produce builds a subject's bundle, stores it, and returns a link.
+// WHAT USED TO BE HERE: `Exports`, the SYNCHRONOUS export use case.
 //
-// # The bundle is written under the subject's OWN prefix
+// It built a bundle, uploaded it and returned a download URL, in one call. It
+// was complete and fully tested, and it was constructed by no binary — the
+// asynchronous path (`ExportRuns`, driven by a Temporal workflow) is what
+// cmd/worker wires and what the RPCs reach, and it has been since resumability
+// landed (compliance.md §5).
 //
-// Which means the erasure deletes it, for free, by the traversal that already
-// deletes their avatars. compliance.md §4 step 9 asks for exported bundles to be
-// purged on erasure; putting them in the same namespace makes that a property of
-// where they live rather than a step somebody has to remember.
-func (e *Exports) Produce(ctx context.Context, subjectID string) (ExportResult, error) {
-	if subjectID == "" {
-		return ExportResult{}, fmt.Errorf("compliance: an export needs a subject")
-	}
-
-	fields, err := e.profile.Profile(ctx, subjectID)
-	if err != nil {
-		return ExportResult{}, fmt.Errorf("compliance: reading the personal data of %s: %w",
-			subjectID, err)
-	}
-
-	now := e.now().UTC()
-	bundle := Bundle{
-		FormatVersion: ExportFormatVersion,
-		SubjectID:     subjectID,
-		GeneratedAt:   now,
-		PersonalData:  fields,
-		Retained:      retainedRecords(e.exemptions.For(ctx, subjectID)),
-	}
-	body, err := codec.Marshal(bundle)
-	if err != nil {
-		return ExportResult{}, fmt.Errorf("compliance: encoding the bundle for %s: %w",
-			subjectID, err)
-	}
-
-	prefix := e.prefix(subjectID)
-	if prefix == "" {
-		return ExportResult{}, fmt.Errorf("compliance: no object prefix for %s; a bundle "+
-			"written outside the subject's namespace survives their erasure", subjectID)
-	}
-	// One key per REQUEST, not per subject: objects here are immutable (ADR-013),
-	// and overwriting would replace a bundle somebody may still be downloading.
-	// Every version lives under the same prefix, so erasure removes all of them.
-	key, err := blob.NewKey(prefix)
-	if err != nil {
-		return ExportResult{}, fmt.Errorf("compliance: minting an object key: %w", err)
-	}
-
-	if err := e.store.Put(ctx, key, body, "application/json"); err != nil {
-		return ExportResult{}, fmt.Errorf("compliance: storing the bundle for %s: %w",
-			subjectID, err)
-	}
-	url, err := e.store.GrantDownload(ctx, key, e.expiry)
-	if err != nil {
-		return ExportResult{}, fmt.Errorf("compliance: granting a download for %s: %w",
-			subjectID, err)
-	}
-
-	return ExportResult{
-		ObjectKey:   key.String(),
-		DownloadURL: url,
-		ExpiresAt:   now.Add(e.expiry),
-	}, nil
-}
+// So there were two export implementations and one of them was dead: live
+// duplication of the part of this system that hands a person a file containing
+// everything we hold about them. A change made to one would not have been made
+// to the other, and nothing would have failed.
+//
+// The types it shared with the async path are all still above — `Bundle`,
+// `RetainedRecord`, `ExportedObject`, `SubjectProfile`, `ExportStore` — which is
+// why this was a surgical removal rather than a file delete.
