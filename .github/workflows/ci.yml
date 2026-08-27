@@ -29,9 +29,10 @@ env:
   #   TEMPORAL_ENABLED=true built no client
   #   dial tcp [::1]:10000: connect: connection refused   (Centrifugo)
   #   dial tcp [::1]:8200: connect: connection refused    (OpenBao)
+  #   dial tcp [::1]:8333: connect: connection refused    (SeaweedFS S3)
   #
   # A job that starts less than the suite needs does not test less; it fails.
-  COMPOSE_SERVICES: postgres kurrentdb valkey openfga temporal mailpit centrifugo openbao
+  COMPOSE_SERVICES: postgres kurrentdb valkey openfga temporal mailpit centrifugo openbao seaweedfs
 
 jobs:
   build:
