@@ -1,32 +1,38 @@
-// Command checkchangelog enforces that a change a customer can observe arrives
-// with the sentence the customer will read.
+// Command checkchangelog is the changelog's half of the release procedure: it
+// says what happened since the last release tag, and it refuses to let a
+// release describe none of it.
 //
-// # Why a gate and not a convention
+// # Where the entries come from
 //
-// A changelog assembled at release time is written by whoever cuts the release,
-// from commit subjects, weeks after the fact. That person did not make the
-// change and cannot describe its effect, so the entries degrade into restated
-// commit messages — which in this repository are deliberately written for
-// engineers ("half of every API key minted could never authenticate") and are
-// the wrong sentence for a customer. The only moment the right sentence is
-// cheap to write is while the change is being made.
+// They are written at release time, from the diffs, by whoever runs the
+// release — in this repository, by Claude, following .claude/skills/release.
+// That is a deliberate trade. Writing them at change time is more faithful to
+// intent, and this tool used to enforce exactly that; it was traded away for a
+// workflow where nobody has to think about the changelog until they want a
+// release, at the cost of reconstructing intent from a diff later.
 //
-// So the rule is: a pull request that touches the wire contract, a module, a
-// migration or a service binary must add a fragment under .changes/unreleased/,
-// or state explicitly that it needs none with a `Changelog: none` trailer on
-// one of its commits. Refactors, tests, docs, generated code and internal tools
-// are exempt by path — padding a public changelog with work nobody outside can
-// observe makes it useless.
+// The cost is real, so the procedure compensates: entries are written from the
+// DIFFS, never from commit subjects. Commit subjects here are written for
+// engineers on purpose — "half of every API key minted could never
+// authenticate" is the right sentence for git log and the wrong one for a
+// customer — and a changelog that restates them either leaks internal detail or
+// reads as noise. This tool's -list mode prints the diffs to read, and its
+// validation refuses a body that is a pasted commit subject.
 //
-// # It also validates what it finds
+// # Three modes
 //
-// Every fragment is checked against .changie.yaml itself, not against a copy of
-// its rules: an unknown kind, an unknown domain, an empty body or a body that
-// is obviously a pasted commit subject fails here rather than at release, when
-// the author has moved on.
+//	checkchangelog                    validate every fragment. `make check` runs this.
+//	checkchangelog -list              the release input: every commit since the last
+//	                                  tag, which touched something a customer can
+//	                                  observe, and which declined an entry.
+//	checkchangelog -coverage          refuse a release that describes nothing while
+//	                                  observable work went into it. `make release` runs this.
 //
-// Exits non-zero on any problem. Skips, loudly, only when there is no git
-// repository or no base branch to compare against — never silently.
+// The range is `<last tag>..HEAD` unless -since says otherwise. A tag is
+// therefore load-bearing: without one the range is the whole history.
+//
+// Exits non-zero on any problem. Skips, loudly, when there is no git repository
+// — never silently.
 package main
 
 import (
@@ -46,47 +52,68 @@ import (
 )
 
 func main() {
-	base := flag.String("base", os.Getenv("CHANGELOG_BASE_REF"), "git ref to compare against; empty means autodetect")
+	since := flag.String("since", os.Getenv("CHANGELOG_SINCE"), "git ref the release starts after; empty means the most recent tag")
+	list := flag.Bool("list", false, "print the release input: every commit in the range and what it touched")
+	coverage := flag.Bool("coverage", false, "fail if observable work in the range is described by no fragment")
 	config := flag.String("config", ".changie.yaml", "the changie configuration the fragments must satisfy")
 	dir := flag.String("dir", ".changes/unreleased", "where unreleased fragments live")
 	noColor := flag.Bool("no-color", false, "never colourize the report")
 	flag.Parse()
 
-	if err := run(os.Stdout, *config, *dir, *base, useColor(*noColor)); err != nil {
+	opts := options{
+		config:   *config,
+		dir:      *dir,
+		since:    *since,
+		list:     *list,
+		coverage: *coverage,
+		colour:   useColor(*noColor),
+	}
+	if err := run(os.Stdout, opts); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, "checkchangelog:", err)
 		os.Exit(1)
 	}
 }
 
+type options struct {
+	config   string
+	dir      string
+	since    string
+	list     bool
+	coverage bool
+	colour   palette
+}
+
 // errProblems is returned when the tree is readable but wrong. The report has
 // already been printed; main only needs the exit code.
-var errProblems = errors.New("the changelog does not describe this change (see above)")
+var errProblems = errors.New("the changelog does not describe this release (see above)")
 
-func run(w io.Writer, configPath, dir, base string, colour palette) error {
-	cfg, err := loadConfig(configPath)
+func run(w io.Writer, o options) error {
+	cfg, err := loadConfig(o.config)
 	if err != nil {
 		return err
 	}
 
-	fragments, err := readFragments(dir)
+	fragments, err := readFragments(o.dir)
 	if err != nil {
 		return err
 	}
 
-	problems := validate(w, cfg, fragments, colour)
+	problems := validate(w, cfg, fragments, o.colour)
 
-	missing, err := checkCoverage(w, dir, base, fragments, colour)
-	if err != nil {
-		return err
+	if o.list || o.coverage {
+		n, err := inspectRange(w, o, fragments)
+		if err != nil {
+			return err
+		}
+		problems += n
 	}
-	problems += missing
 
 	printf(w, "\n")
 	if problems == 0 {
-		printf(w, "%schangelog OK%s (%d unreleased fragment(s))\n", colour.green, colour.reset, len(fragments))
+		printf(w, "%schangelog OK%s (%d unreleased fragment(s))\n", o.colour.green, o.colour.reset, len(fragments))
 		return nil
 	}
-	printf(w, "%s%d problem(s)%s\n", colour.red, problems, colour.reset)
+	printf(w, "%s%d problem(s)%s\n", o.colour.red, problems, o.colour.reset)
 	return errProblems
 }
 
@@ -94,7 +121,7 @@ func run(w io.Writer, configPath, dir, base string, colour palette) error {
 // configuration
 // ---------------------------------------------------------------------------
 
-// config is the subset of .changie.yaml this gate needs. Reading the real file
+// config is the subset of .changie.yaml this tool needs. Reading the real file
 // rather than restating its rules is what keeps the two from drifting: adding a
 // kind or a domain to the config is immediately accepted here, and removing one
 // is immediately rejected.
@@ -197,7 +224,7 @@ func isFragmentName(name string) bool {
 
 // commitSubject matches the Conventional Commit prefix this repository uses in
 // git. A body starting with one is a pasted commit subject, which is the exact
-// substitution the fragment exists to prevent.
+// substitution entries written at release time are most likely to become.
 var commitSubject = regexp.MustCompile(`^(feat|fix|refactor|test|docs|chore|perf|build|ci)(\([^)]*\))?!?:`)
 
 const (
@@ -257,7 +284,7 @@ func validate(w io.Writer, cfg config, fragments []fragment, colour palette) int
 }
 
 // ---------------------------------------------------------------------------
-// coverage: did this change need a fragment, and did it get one?
+// the release range
 // ---------------------------------------------------------------------------
 
 // observable lists the prefixes whose contents a customer can perceive: the
@@ -309,143 +336,213 @@ func needsFragment(path string) bool {
 	return false
 }
 
-func checkCoverage(w io.Writer, dir, base string, fragments []fragment, colour palette) (int, error) {
-	if !inGitRepo() {
-		printf(w, "  %sskip%s  not a git repository — coverage not checked\n", colour.yellow, colour.reset)
-		return 0, nil
-	}
-	if base == "" {
-		base = autodetectBase()
-	}
-	if base == "" {
-		printf(w, "  %sskip%s  no base branch yet — coverage not checked\n", colour.yellow, colour.reset)
-		return 0, nil
-	}
-
-	changed, err := changedFiles(base)
-	if err != nil {
-		return 0, err
-	}
-
-	var observed []string
-	addedFragment := false
-	for _, path := range changed {
-		if strings.HasPrefix(path, dir+"/") && isFragmentName(path) {
-			addedFragment = true
-		}
-		if needsFragment(path) {
-			observed = append(observed, path)
-		}
-	}
-
-	// An untracked fragment counts. Without this the gate would report a
-	// missing changelog for the developer who has just written one and not yet
-	// staged it, which teaches people to distrust it.
-	if !addedFragment && len(fragments) > 0 {
-		untracked, err := untrackedFiles(dir)
-		if err != nil {
-			return 0, err
-		}
-		addedFragment = len(untracked) > 0
-	}
-
-	switch {
-	case len(observed) == 0:
-		printf(w, "  %sOK%s    nothing customer-observable changed against %s\n", colour.green, colour.reset, base)
-		return 0, nil
-	case addedFragment:
-		printf(w, "  %sOK%s    %d customer-observable file(s) changed, and a fragment describes them\n",
-			colour.green, colour.reset, len(observed))
-		return 0, nil
-	}
-
-	declined, err := declinedExplicitly(base)
-	if err != nil {
-		return 0, err
-	}
-	if declined {
-		printf(w, "  %sOK%s    %d customer-observable file(s) changed; a commit declares `Changelog: none`\n",
-			colour.green, colour.reset, len(observed))
-		return 0, nil
-	}
-
-	printf(w, "  %sFAIL%s  %d customer-observable file(s) changed with no changelog fragment\n",
-		colour.red, colour.reset, len(observed))
-	for _, p := range observed[:min(len(observed), 10)] {
-		printf(w, "          %s\n", p)
-	}
-	if len(observed) > 10 {
-		printf(w, "          … and %d more\n", len(observed)-10)
-	}
-	printf(w, "        Describe it:  make changelog-new\n")
-	printf(w, "        Or say it needs none, in a commit message trailer:  Changelog: none\n")
-	return 1, nil
+// commit is one entry in the release range.
+type commit struct {
+	SHA        string
+	Subject    string
+	Body       string
+	Files      []string
+	Observable []string
 }
+
+// Declined reports whether this commit states that it needs no entry. The
+// trailer is the escape hatch, and it is deliberately a written statement
+// rather than a silent path exclusion: the decision is recorded in the history
+// next to the change it applies to.
+func (c commit) Declined() bool {
+	for _, line := range nonEmptyLines(c.Body) {
+		if strings.EqualFold(strings.TrimSpace(line), "Changelog: none") {
+			return true
+		}
+	}
+	return false
+}
+
+func (c commit) Short() string {
+	if len(c.SHA) <= 12 {
+		return c.SHA
+	}
+	return c.SHA[:12]
+}
+
+func inspectRange(w io.Writer, o options, fragments []fragment) (int, error) {
+	if !inGitRepo() {
+		printf(w, "  %sskip%s  not a git repository — the release range was not read\n", o.colour.yellow, o.colour.reset)
+		return 0, nil
+	}
+
+	since := o.since
+	if since == "" {
+		since = lastTag()
+	}
+	rangeName := "the whole history"
+	if since != "" {
+		rangeName = since + "..HEAD"
+	}
+
+	commits, err := commitsInRange(since)
+	if err != nil {
+		return 0, err
+	}
+
+	var described, declined []commit
+	for _, c := range commits {
+		if len(c.Observable) == 0 {
+			continue
+		}
+		if c.Declined() {
+			declined = append(declined, c)
+			continue
+		}
+		described = append(described, c)
+	}
+
+	if o.list {
+		printRange(w, o.colour, rangeName, commits, described, declined)
+	}
+
+	if !o.coverage {
+		return 0, nil
+	}
+	return checkCoverage(w, o.colour, rangeName, described, fragments), nil
+}
+
+func printRange(w io.Writer, colour palette, rangeName string, all, described, declined []commit) {
+	printf(w, "\n%srelease input%s — %s, %d commit(s)\n\n", colour.bold, colour.reset, rangeName, len(all))
+
+	if len(described) > 0 {
+		printf(w, "  %sNEEDS AN ENTRY%s — read the diff, write what a customer can observe:\n", colour.bold, colour.reset)
+		for _, c := range described {
+			printf(w, "    %s  %s\n", c.Short(), c.Subject)
+			for _, f := range c.Observable {
+				printf(w, "        %s\n", f)
+			}
+			printf(w, "        git show %s\n", c.Short())
+		}
+		printf(w, "\n")
+	}
+
+	if len(declined) > 0 {
+		printf(w, "  %sDECLINED%s — the commit says `Changelog: none`:\n", colour.yellow, colour.reset)
+		for _, c := range declined {
+			printf(w, "    %s  %s\n", c.Short(), c.Subject)
+		}
+		printf(w, "\n")
+	}
+
+	invisible := len(all) - len(described) - len(declined)
+	if invisible > 0 {
+		printf(w, "  %s%d commit(s) touched nothing a customer can observe%s\n\n", colour.green, invisible, colour.reset)
+	}
+}
+
+// checkCoverage refuses a release that describes nothing while observable work
+// went into it.
+//
+// It cannot tie a fragment to the commit it describes — nothing records that
+// link — so this is a floor, not a proof: it catches "the release was cut
+// without anyone writing the changelog", which is the failure that actually
+// happens, and it cannot catch "three changes shipped and one was described".
+// The -list mode exists so that reading the range is cheap enough to do.
+func checkCoverage(w io.Writer, colour palette, rangeName string, described []commit, fragments []fragment) int {
+	switch {
+	case len(described) == 0:
+		printf(w, "  %sOK%s    nothing customer-observable in %s\n", colour.green, colour.reset, rangeName)
+		return 0
+	case len(fragments) > 0:
+		printf(w, "  %sOK%s    %d commit(s) in %s changed something observable, and %d fragment(s) describe this release\n",
+			colour.green, colour.reset, len(described), rangeName, len(fragments))
+		return 0
+	}
+
+	printf(w, "  %sFAIL%s  %d commit(s) in %s changed something a customer can observe, and this release describes none of it\n",
+		colour.red, colour.reset, len(described), rangeName)
+	for _, c := range described[:min(len(described), 10)] {
+		printf(w, "          %s  %s\n", c.Short(), c.Subject)
+	}
+	if len(described) > 10 {
+		printf(w, "          … and %d more\n", len(described)-10)
+	}
+	printf(w, "        Read them:    make release-input\n")
+	printf(w, "        Describe it:  make changelog-new\n")
+	printf(w, "        Or, per commit that needs none, a `Changelog: none` trailer.\n")
+	return 1
+}
+
+// ---------------------------------------------------------------------------
+// git
+// ---------------------------------------------------------------------------
 
 func inGitRepo() bool {
 	return exec.CommandContext(context.Background(), "git", "rev-parse", "--git-dir").Run() == nil
 }
 
-func autodetectBase() string {
-	// Each candidate is a literal from this list, so nothing here is attacker
-	// controlled; git is invoked directly rather than through a shell.
-	for _, candidate := range []string{"origin/main", "origin/master", "main", "master"} {
-		cmd := exec.CommandContext(context.Background(), "git", "rev-parse", "--verify", candidate) //nolint:gosec // G204: see above
-		if cmd.Run() == nil {
-			return candidate
-		}
-	}
-	return ""
-}
-
-// changedFiles lists paths that differ from the base, deletions excluded: a
-// deleted file cannot need describing that a surviving one does not.
-func changedFiles(base string) ([]string, error) {
-	// base is a git ref from a flag or CI env; git is invoked directly, so it is
-	// an argument and never reaches a shell.
-	cmd := exec.CommandContext(context.Background(), "git", "diff", "--name-only", "--diff-filter=d", base) //nolint:gosec // G204: see above
+// lastTag is the most recent tag reachable from HEAD, which is the previous
+// release. An empty result means this is the first one.
+func lastTag() string {
+	cmd := exec.CommandContext(context.Background(), "git", "describe", "--tags", "--abbrev=0")
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("git diff against %s: %w", base, err)
+		return ""
 	}
-	return nonEmptyLines(string(out)), nil
+	return strings.TrimSpace(string(out))
 }
 
-func untrackedFiles(dir string) ([]string, error) {
-	// dir names a directory in this repository and is passed after --, so it
-	// cannot be read as an option and never reaches a shell.
-	cmd := exec.CommandContext(context.Background(), "git", "ls-files", "--others", "--exclude-standard", "--", dir) //nolint:gosec // G204: see above
+// Record and field separators that cannot occur in a commit message.
+const (
+	recordSep = "\x01"
+	fieldSep  = "\x1f"
+	bodyEnd   = "\x1e"
+)
+
+// commitsInRange reads the range in one git invocation. Merges are excluded:
+// their file lists are empty under --name-only, and the commits they merge are
+// already in the range.
+func commitsInRange(since string) ([]commit, error) {
+	args := []string{
+		"log", "--no-merges", "--name-only",
+		"--format=" + recordSep + "%H" + fieldSep + "%s" + fieldSep + "%b" + bodyEnd,
+	}
+	if since != "" {
+		args = append(args, since+"..HEAD")
+	}
+	// since is a git ref from a flag, an env var or `git describe`, passed as an
+	// argument and never through a shell.
+	cmd := exec.CommandContext(context.Background(), "git", args...) //nolint:gosec // G204: see above
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("git ls-files in %s: %w", dir, err)
+		return nil, fmt.Errorf("git log over %s..HEAD: %w", since, err)
 	}
-	var found []string
-	for _, line := range nonEmptyLines(string(out)) {
-		if isFragmentName(line) {
-			found = append(found, line)
-		}
-	}
-	return found, nil
+	return parseLog(string(out)), nil
 }
 
-// declinedExplicitly reports whether any commit in the range states that this
-// change needs no entry. The trailer is the escape hatch, and it is deliberately
-// a written statement rather than a silent path exclusion: the decision is
-// recorded in the history next to the change it applies to.
-func declinedExplicitly(base string) (bool, error) {
-	// base is a git ref from a flag or CI env, passed as an argument.
-	cmd := exec.CommandContext(context.Background(), "git", "log", "--format=%B", base+"..HEAD") //nolint:gosec // G204: see above
-	out, err := cmd.Output()
-	if err != nil {
-		// A shallow clone can lack the merge base. That is not a violation.
-		return false, nil //nolint:nilerr // an unreadable commit range is not a missing changelog
-	}
-	for _, line := range nonEmptyLines(string(out)) {
-		if strings.EqualFold(strings.TrimSpace(line), "Changelog: none") {
-			return true, nil
+// parseLog is separated from the git invocation so the parsing can be tested
+// against shapes a repository is awkward to produce on demand — an empty body,
+// a commit that touched nothing, a body containing blank lines.
+func parseLog(out string) []commit {
+	var commits []commit
+	for _, record := range strings.Split(out, recordSep) {
+		if strings.TrimSpace(record) == "" {
+			continue
 		}
+		header, files, found := strings.Cut(record, bodyEnd)
+		if !found {
+			continue
+		}
+		parts := strings.SplitN(header, fieldSep, 3)
+		if len(parts) < 3 {
+			continue
+		}
+		c := commit{SHA: strings.TrimSpace(parts[0]), Subject: strings.TrimSpace(parts[1]), Body: parts[2]}
+		for _, f := range nonEmptyLines(files) {
+			c.Files = append(c.Files, f)
+			if needsFragment(f) {
+				c.Observable = append(c.Observable, f)
+			}
+		}
+		commits = append(commits, c)
 	}
-	return false, nil
+	return commits
 }
 
 func nonEmptyLines(s string) []string {
@@ -470,18 +567,24 @@ func set(values []string) map[string]bool {
 // output
 // ---------------------------------------------------------------------------
 
-type palette struct{ green, red, yellow, reset string }
+type palette struct{ green, red, yellow, bold, reset string }
 
 func useColor(disabled bool) palette {
 	if disabled || os.Getenv("NO_COLOR") != "" {
 		return palette{}
 	}
-	return palette{green: "\033[32m", red: "\033[31m", yellow: "\033[33m", reset: "\033[0m"}
+	return palette{
+		green:  "\033[32m",
+		red:    "\033[31m",
+		yellow: "\033[33m",
+		bold:   "\033[1m",
+		reset:  "\033[0m",
+	}
 }
 
 // printf writes the report. The destination is an os.File or a test buffer;
-// neither has a failure this gate could act on, and the alternative is
-// sixteen ignored error values.
+// neither has a failure this tool could act on, and the alternative is
+// twenty ignored error values.
 func printf(w io.Writer, format string, args ...any) {
 	_, _ = fmt.Fprintf(w, format, args...)
 }

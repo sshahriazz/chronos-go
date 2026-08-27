@@ -163,3 +163,87 @@ func TestReadFragmentsIgnoresNonFragments(t *testing.T) {
 		t.Errorf("parsed wrong: %+v", got[0])
 	}
 }
+
+func TestParseLog(t *testing.T) {
+	// The shape `git log --no-merges --name-only --format=…` produces, including
+	// a commit that touched nothing observable and one that declined an entry.
+	rec := func(sha, subject, body string, files ...string) string {
+		s := recordSep + sha + fieldSep + subject + fieldSep + body + bodyEnd
+		for _, f := range files {
+			s += "\n" + f
+		}
+		return s + "\n"
+	}
+	out := rec("aaaa111122223333", "feat(billing): seats", "Adds seats.\n",
+		"internal/modules/billing/app/seat.go", "internal/modules/billing/app/seat_test.go") +
+		rec("bbbb111122223333", "refactor(api): one registry", "Tidy.\n\nChangelog: none\n",
+			"cmd/api/deps.go") +
+		rec("cccc111122223333", "docs: worklist", "", "docs/WORKLIST.md")
+
+	got := parseLog(out)
+	if len(got) != 3 {
+		t.Fatalf("got %d commits, want 3", len(got))
+	}
+
+	if got[0].Subject != "feat(billing): seats" {
+		t.Errorf("subject: %q", got[0].Subject)
+	}
+	// The test file is not observable; the app file is.
+	if len(got[0].Files) != 2 || len(got[0].Observable) != 1 {
+		t.Errorf("files %v observable %v", got[0].Files, got[0].Observable)
+	}
+	if got[0].Declined() {
+		t.Error("a commit with no trailer must not read as declined")
+	}
+	if got[0].Short() != "aaaa11112222" {
+		t.Errorf("short: %q", got[0].Short())
+	}
+
+	if !got[1].Declined() {
+		t.Error("`Changelog: none` in the body must be read as declining an entry")
+	}
+	if len(got[1].Observable) != 1 {
+		t.Errorf("cmd/api/deps.go is observable: %v", got[1].Observable)
+	}
+
+	// An empty body must not swallow the record or the file list.
+	if len(got[2].Files) != 1 || len(got[2].Observable) != 0 {
+		t.Errorf("files %v observable %v", got[2].Files, got[2].Observable)
+	}
+}
+
+func TestParseLogIgnoresJunk(t *testing.T) {
+	for _, in := range []string{"", "\n\n", "no separators at all"} {
+		if got := parseLog(in); len(got) != 0 {
+			t.Errorf("parseLog(%q) = %v, want none", in, got)
+		}
+	}
+}
+
+// A release that describes nothing while observable work went into it is the
+// failure this gate exists for; everything else must pass.
+func TestCheckCoverage(t *testing.T) {
+	observableCommit := commit{SHA: "aaaa111122223333", Subject: "feat: x", Observable: []string{"internal/modules/x.go"}}
+	oneFragment := []fragment{{Path: "f.yaml", Kind: "Added", Body: "A body."}}
+
+	cases := []struct {
+		name      string
+		described []commit
+		fragments []fragment
+		problems  int
+	}{
+		{"nothing observable, no fragments", nil, nil, 0},
+		{"observable work described", []commit{observableCommit}, oneFragment, 0},
+		{"observable work described by nothing", []commit{observableCommit}, nil, 1},
+		{"fragments with no observable work is fine", nil, oneFragment, 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := checkCoverage(io.Discard, palette{}, "v0.1.0..HEAD", tc.described, tc.fragments)
+			if got != tc.problems {
+				t.Errorf("problems: got %d want %d", got, tc.problems)
+			}
+		})
+	}
+}

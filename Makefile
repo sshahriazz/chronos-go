@@ -329,8 +329,12 @@ changelog-new: ## Describe a customer-visible change (interactive, or KIND= DOMA
 	@$(MAKE) --no-print-directory changelog-check
 
 .PHONY: changelog-check
-changelog-check: ## Fail if a customer-visible change arrived without an entry
+changelog-check: ## Validate every unreleased fragment against .changie.yaml
 	@go run ./internal/tools/checkchangelog
+
+.PHONY: release-input
+release-input: ## Every commit since the last tag, and what a customer can see in it
+	@go run ./internal/tools/checkchangelog -list
 
 .PHONY: changelog-preview
 changelog-preview: ## Show the release notes the current fragments would produce
@@ -340,7 +344,7 @@ changelog-preview: ## Show the release notes the current fragments would produce
 release: ## Assemble the next release: CHANGELOG.md and .changes/vX.Y.Z.md. No commit, no tag.
 	@test -z "$$(git status --porcelain)" || { \
 		echo "the working tree is dirty; a release is assembled from committed code"; exit 1; }
-	@$(MAKE) --no-print-directory changelog-check
+	@go run ./internal/tools/checkchangelog -coverage
 	@$(CHANGIE) batch $(BUMP) $(PRERELEASE_FLAG)
 	@$(CHANGIE) merge
 	@echo

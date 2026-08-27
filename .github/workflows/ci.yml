@@ -131,30 +131,25 @@ jobs:
           MIGRATION_BASE_REF: origin/main
 
   changelog:
-    name: a customer-visible change carries an entry
+    name: unreleased fragments are valid
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
 
-      # The gate diffs against the base branch, so the ref has to exist locally.
-      # On a push to main this makes origin/main equal to HEAD, the diff is
-      # empty, and the job passes without asserting anything — which is correct:
-      # the assertion belongs on the pull request, where the author is.
-      - name: Fetch the base branch
-        run: git fetch --no-tags --depth=1 origin main
-
-      # Written for engineers in the commit, for customers in the fragment.
-      # See docs/VERSIONING.md §4.
-      - name: A customer-visible change carries a changelog entry
+      # Entries are written at RELEASE time, from the diffs, so there is nothing
+      # to require of a pull request. What is checked here is that any fragment
+      # already sitting in .changes/unreleased/ satisfies .changie.yaml — an
+      # unknown kind or domain, an empty body or a pasted commit subject fails
+      # now rather than at 'make release', when someone is waiting on a tag.
+      #
+      # The coverage half of this tool (-coverage, "does this release describe
+      # anything?") belongs to 'make release' and runs there.
+      - name: Fragments satisfy .changie.yaml
         run: go run ./internal/tools/checkchangelog
-        env:
-          CHANGELOG_BASE_REF: origin/main
 
   integration:
     name: integration against real infrastructure
