@@ -13,3 +13,8 @@ Versions follow [semantic versioning](https://semver.org). The wire contract is
 versioned separately and independently, as `chronos.<domain>.v1` — see
 [docs/VERSIONING.md](docs/VERSIONING.md).
 
+
+## v0.1.0-alpha.1 — 2026-08-27
+
+### Fixed
+- **compliance** — Your data export and erasure confirmation now state that invoice records are retained only when your organizations were actually invoiced, instead of saying so for everyone.
