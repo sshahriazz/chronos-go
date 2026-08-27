@@ -431,6 +431,10 @@ sqlc-check: ## Fail if generated query code is stale, or a query no longer match
 sql-check: ## Fail if SQL appears in Go source outside the kernel carve-out (CONVENTIONS §8)
 	@bash scripts/check_sql.sh
 
+.PHONY: binary-check
+binary-check: ## Fail if a compiled executable is tracked in git
+	@go run ./internal/tools/checkbinaries
+
 .PHONY: bench-integration
 bench-integration: ## Benchmarks that need the live stack (make up first)
 	@set -a; [ -f .env ] && . ./.env; set +a; \
@@ -545,7 +549,7 @@ fmt-check: ## Fail if anything is unformatted — CI must VERIFY, never rewrite
 	@echo "  formatting OK"
 
 .PHONY: check
-check: fmt-check proto-lint proto-breaking api-validate authz-check proto-thirdparty-check migrate-check sqlc-check sql-check changelog-check lint vet-integration test ## Everything CI runs
+check: fmt-check proto-lint proto-breaking api-validate authz-check proto-thirdparty-check migrate-check sqlc-check sql-check binary-check changelog-check lint vet-integration test ## Everything CI runs
 
 .PHONY: vet-integration
 vet-integration: ## Type-check the integration-tagged tests without running them

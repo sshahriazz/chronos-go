@@ -59,3 +59,24 @@ client_secret_*.apps.googleusercontent.com.json
 # laptop needs. Losing it makes the local vault unreadable; committing it would
 # publish the key that protects every local account's personal data.
 infra/openbao/.bao-credentials.json
+
+# Every main package in internal/tools, by the name `go build` gives it when
+# somebody builds one from the repository root instead of running it with
+# `go run`. Nine of these were committed between 2026-08-10 and 2026-08-26 —
+# 180 MB of arm64 executables in a repository whose entire source is 6 MB, and
+# GitHub had been warning about it on every push.
+#
+# Ignoring is not enough on its own: .gitignore does nothing for a file that is
+# ALREADY tracked, which is why /gendashboards sat here while gendashboards sat
+# in the index. `make binary-check` is the part that actually holds.
+/esprobe
+/oidcsubject
+/operator
+/operatorlab
+/passkeylab
+/provisionoperator
+/releaseaddress
+/whoclaims
+/totpcheck
+/deployauthzmodel
+/genauthzmodel

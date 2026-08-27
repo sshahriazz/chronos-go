@@ -42,6 +42,12 @@ jobs:
 
       - run: go vet ./...
 
+      # 180 MB of arm64 executables were committed here between 2026-08-10 and
+      # 2026-08-26, from `go build` runs in the repository root. GitHub warned
+      # on every push and nobody read the warning, so it is a build step now.
+      - name: No compiled executable is tracked
+        run: go run ./internal/tools/checkbinaries
+
       # -race, because the projector and reactor runners are concurrent by
       # design and a data race here corrupts a read model rather than crashing.
       - name: Unit tests
