@@ -58,16 +58,35 @@ func NewPreferences(codec eventsourcing.Codec) *Preferences {
 		return nil
 	})
 
+	// An erased account loses its toggles too, and this is the weakest of the
+	// three claims in this module — so it is made explicitly rather than by
+	// following the other two.
+	//
+	// A row here holds a channel name, a boolean and a pseudonym whose key has
+	// been destroyed. Nothing in it can be read back to a person, so unlike the
+	// feed's free text and the push endpoint's device identifier this is not an
+	// Article 17 obligation.
+	//
+	// It goes anyway, because the row can never become useful again — a pseudonym
+	// is not reissued, so no future account can own these toggles, and ABSENCE
+	// MEANS ENABLED, so a stranded row is not a defensible default for anybody
+	// either. What it buys is a property that can be tested in one query: an
+	// erased subject has no rows in notification, rather than none in two of its
+	// three tables and a sentence somebody has to maintain about the third.
+	onUserErased(d, notificationdb.DeleteChannelPreferencesOfSubject)
+
 	return &Preferences{dispatch: d}
 }
 
 func (p *Preferences) Name() string { return PreferenceName }
 
-// Filter narrows to this module's own streams. One category, so a rebuild reads
-// the category stream instead of scanning the whole log.
-func (p *Preferences) Filter() eventsourcing.SubscriptionFilter {
-	return eventsourcing.SubscriptionFilter{StreamPrefixes: []string{"notification-"}}
-}
+// Filter is this module's shared subscription: its own events, plus the erasure
+// that empties this table.
+func (p *Preferences) Filter() eventsourcing.SubscriptionFilter { return subscription() }
+
+// Handles reports whether this projection has a handler for an event type, so a
+// test can assert the filter above delivers everything registered below it.
+func (p *Preferences) Handles(eventType string) bool { return p.dispatch.Handles(eventType) }
 
 func (p *Preferences) Apply(ctx context.Context, w db.Writer, env projection.Envelope) error {
 	return p.dispatch.Apply(ctx, w, env)

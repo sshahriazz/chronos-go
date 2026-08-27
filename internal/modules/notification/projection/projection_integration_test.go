@@ -12,6 +12,7 @@ import (
 	"github.com/chronos/chronos-go/internal/adapter/eventcodec"
 	kurrentadapter "github.com/chronos/chronos-go/internal/adapter/kurrentdb"
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
+	identitycontract "github.com/chronos/chronos-go/internal/modules/identity/contract"
 	"github.com/chronos/chronos-go/internal/modules/notification/contract"
 	notificationprojection "github.com/chronos/chronos-go/internal/modules/notification/projection"
 	"github.com/chronos/chronos-go/internal/platform/db"
@@ -45,6 +46,15 @@ func newHarness(t *testing.T) *harness {
 	eventcodec.Register[contract.PushSubscribed](codec)
 	eventcodec.Register[contract.PushSubscriptionExpired](codec)
 	eventcodec.Register[contract.PushSent](codec)
+	eventcodec.Register[contract.ChannelPreferenceSet](codec)
+
+	// Identity's, and it is the only event from outside this module that any of
+	// these projections consumes. Registering it HERE rather than assuming the
+	// harness inherited it matters: the codec refuses to decode an unregistered
+	// type, so a projector missing this registration stops on the erasure rather
+	// than skipping it — which is the correct direction, and which the erasure
+	// tests below would otherwise mistake for a wiring failure of their own.
+	eventcodec.Register[identitycontract.UserErased](codec)
 
 	client, err := kurrentadapter.Dial(envOr("KURRENTDB_CONNECTION_STRING", "kurrentdb://localhost:2113?tls=false"))
 	if err != nil {
@@ -498,4 +508,216 @@ func TestPushEndpointIsPerOrganization(t *testing.T) {
 			return err
 		})
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Erasure
+// ---------------------------------------------------------------------------
+
+// erase applies identity's terminal event exactly as the projector would.
+//
+// A method of its own rather than a call to apply, because two details are the
+// whole point of these tests and apply would quietly get both wrong.
+//
+// The stream is a `user-` one: the event belongs to identity's account
+// aggregate, and a notification- stream here would be testing a system that does
+// not exist.
+//
+// And the metadata names NO organization, because identity appends
+// `Metadata{OccurredAt, SubjectIDs}` and nothing else — an account is a fact
+// about a person. That is what makes the batch unscoped, and an unscoped batch
+// against these three tables is the reason migration 00052 exists: before it,
+// the DELETE reported `DELETE 0` and the row was still there afterwards.
+func (h *harness) erase(t *testing.T, p projection.Projection, subjectID string) {
+	t.Helper()
+	event := &identitycontract.UserErased{SubjectID: subjectID, ErasedAt: time.Now().UTC()}
+	payload, err := h.codec.Marshal(event)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	meta := eventsourcing.Metadata{
+		SchemaVersion: 1,
+		OccurredAt:    time.Now().UTC(),
+		SubjectIDs:    []string{subjectID},
+	}
+	env := projection.Envelope{
+		Type:    event.EventType(),
+		Stream:  eventsourcing.StreamID("user-" + subjectID),
+		Meta:    meta,
+		Payload: payload,
+	}
+	if err := h.pg.InTenantBatch(context.Background(),
+		projection.ScopeOf(meta), db.Replayable,
+		func(w db.Writer) error { return p.Apply(context.Background(), w, env) },
+	); err != nil {
+		t.Fatalf("erasing %s through %s: %v", subjectID, p.Name(), err)
+	}
+}
+
+// seed fills all three tables for one subject in one organization.
+func (h *harness) seed(t *testing.T, org, subjectID, tag string) (feed, push, prefs projection.Projection) {
+	t.Helper()
+	feed = notificationprojection.NewFeed(h.codec)
+	push = notificationprojection.NewPushSubscriptions(h.codec)
+	prefs = notificationprojection.NewPreferences(h.codec)
+
+	meta := h.meta()
+	meta.OrgID = org
+
+	h.apply(t, feed, &contract.NotificationCreated{
+		NotificationID: "notif_" + tag, SubjectID: subjectID,
+		Template: "identity.new_device", Class: "security",
+		OrgID: org, WorkspaceID: "ws_" + h.sfx,
+		// The device name the person typed, which cmd/worker/events.go puts in
+		// this jsonb. Free text, in a column no key destruction reaches.
+		Data:       map[string]any{"Label": "Rubel's laptop"},
+		OccurredAt: time.Now().UTC(),
+	}, meta)
+
+	h.apply(t, push, &contract.PushSubscribed{
+		SubscriptionID: "psub_" + tag, SubjectID: subjectID,
+		Endpoint: "https://push.example.test/" + tag,
+		P256dh:   "key", Auth: "auth", UserAgent: "Firefox",
+		SubscribedAt: time.Now().UTC(),
+	}, meta)
+
+	h.apply(t, prefs, &contract.ChannelPreferenceSet{
+		SubjectID: subjectID, OrgID: org, Channel: "email",
+		Enabled: false, ChangedAt: time.Now().UTC(),
+	}, meta)
+
+	return feed, push, prefs
+}
+
+// rows counts what a subject still owns in one organization, table by table.
+func (h *harness) rows(t *testing.T, org, subjectID string) map[string]int {
+	t.Helper()
+	counts := map[string]int{}
+	h.tenant(t, org, func(ctx context.Context, q db.Querier) error {
+		for _, table := range []string{
+			"notification_feed", "push_subscription", "notification_preference",
+		} {
+			var n int
+			// The table name is a literal from the list above, never a value: a
+			// count cannot be parameterised on its relation.
+			sql := "SELECT count(*) FROM " + table + " WHERE subject_id = $1"
+			if err := q.QueryRow(ctx, sql, subjectID).Scan(&n); err != nil {
+				return err
+			}
+			counts[table] = n
+		}
+		return nil
+	})
+	return counts
+}
+
+// Erasing a subject removes every notification row that subject owns.
+//
+// The defect this closes: `db/query/notification/push.sql` and `feed.sql`
+// contained no DELETE at all, and nothing in the module reacted to `UserErased`.
+// After an erasure the push endpoint — a stable per-browser identifier issued by
+// a third party, and not a vault reference — the user-agent string, and the feed
+// rows all remained, keyed by the subject whose key had just been destroyed.
+func TestErasingASubjectRemovesEveryNotificationRowItOwns(t *testing.T) {
+	h := newHarness(t)
+	feed, push, prefs := h.seed(t, h.org, h.subj, "erase_"+h.sfx)
+
+	before := h.rows(t, h.org, h.subj)
+	for table, n := range before {
+		if n == 0 {
+			t.Fatalf("nothing was seeded into %s, so this test would pass with the "+
+				"erasure deleted", table)
+		}
+	}
+
+	h.erase(t, feed, h.subj)
+	h.erase(t, push, h.subj)
+	h.erase(t, prefs, h.subj)
+
+	for table, n := range h.rows(t, h.org, h.subj) {
+		if n != 0 {
+			t.Errorf("%d rows survived the erasure in %s; the endpoint, the user agent "+
+				"and the free text in the feed all outlive the key that was destroyed",
+				n, table)
+		}
+	}
+}
+
+// Replaying the erasure is still an erasure.
+//
+// A projector is replayed on restart and on rebuild, so the same event WILL
+// arrive twice. The second pass must not error — an erasure that stalls the
+// projection on its own replay is an erasure that only works once, and a rebuild
+// from position zero replays it after the rows it removes have been reinserted.
+func TestReplayingAnErasureIsStillAnErasure(t *testing.T) {
+	h := newHarness(t)
+	feed, push, prefs := h.seed(t, h.org, h.subj, "replay_"+h.sfx)
+
+	for range 3 {
+		h.erase(t, feed, h.subj)
+		h.erase(t, push, h.subj)
+		h.erase(t, prefs, h.subj)
+	}
+
+	for table, n := range h.rows(t, h.org, h.subj) {
+		if n != 0 {
+			t.Errorf("%d rows in %s survived three erasures", n, table)
+		}
+	}
+}
+
+// An erasure reaches one subject and stops there.
+//
+// The policy migration 00052 adds is deliberately not "an unscoped statement may
+// delete anything": it admits exactly the rows of the ONE subject named in
+// `app.erased_subject_id`. This is the test that says so. Without the WHERE
+// clause, or with a policy keyed on nothing, both subjects would go and the
+// erasure would read as a success.
+func TestErasingOneSubjectLeavesAnothersNotificationsAlone(t *testing.T) {
+	h := newHarness(t)
+	other := "sub_other_" + h.sfx
+
+	feed, push, prefs := h.seed(t, h.org, h.subj, "mine_"+h.sfx)
+	h.seed(t, h.org, other, "theirs_"+h.sfx)
+
+	h.erase(t, feed, h.subj)
+	h.erase(t, push, h.subj)
+	h.erase(t, prefs, h.subj)
+
+	for table, n := range h.rows(t, h.org, other) {
+		if n != 1 {
+			t.Errorf("%s holds %d rows for a subject who was not erased, want 1", table, n)
+		}
+	}
+}
+
+// An erasure reaches every organization the subject belonged to.
+//
+// Not an edge case: a seat is per person per organization (workspace.md §2), so
+// belonging to several is the normal shape, and one browser produces ONE push
+// endpoint across all of them (migration 00006).
+//
+// This is also the property that decided the shape of migration 00052. The
+// erasure event names no organization, so a delete that could only reach the
+// tenant scope it was given would reach none of them — which is exactly what the
+// unpatched policy did, silently, while reporting success.
+func TestAnErasureReachesEveryOrganizationTheSubjectBelongedTo(t *testing.T) {
+	h := newHarness(t)
+	orgA, orgB := "org_a_"+h.sfx, "org_b_"+h.sfx
+
+	feed, push, prefs := h.seed(t, orgA, h.subj, "multi_a_"+h.sfx)
+	h.seed(t, orgB, h.subj, "multi_b_"+h.sfx)
+
+	h.erase(t, feed, h.subj)
+	h.erase(t, push, h.subj)
+	h.erase(t, prefs, h.subj)
+
+	for _, org := range []string{orgA, orgB} {
+		for table, n := range h.rows(t, org, h.subj) {
+			if n != 0 {
+				t.Errorf("%d rows survived in %s for %s; the erasure reached only the "+
+					"organizations it happened to be scoped to", n, table, org)
+			}
+		}
+	}
 }

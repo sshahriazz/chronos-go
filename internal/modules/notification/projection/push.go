@@ -60,13 +60,36 @@ func NewPushSubscriptions(codec eventsourcing.Codec) *PushSubscriptions {
 		return nil
 	})
 
+	// AN ERASED ACCOUNT LOSES EVERY BROWSER ENDPOINT, and this is where it
+	// happens.
+	//
+	// DELETED here, where an expiry two handlers up is only MARKED. That looks
+	// inconsistent and is not: expiry keeps the row because "why did I stop
+	// getting push?" is a real support question, and nobody asks it about an
+	// account that no longer exists. What the row holds is the reason it cannot
+	// stay — `endpoint` is a stable per-browser identifier issued by a third
+	// party, `p256dh` and `auth` are that browser's transport keys, and none of
+	// them is a vault reference, so destroying the subject's key leaves all of it
+	// intact and pointing at the same device.
+	//
+	// See onUserErased for why this belongs in the projection rather than in an
+	// erasure use case, and why the scope statement it queues first is needed at
+	// all.
+	onUserErased(d, notificationdb.DeletePushSubscriptionsOfSubject)
+
 	return &PushSubscriptions{dispatch: d}
 }
 
 func (p *PushSubscriptions) Name() string { return PushName }
 
-func (p *PushSubscriptions) Filter() eventsourcing.SubscriptionFilter {
-	return eventsourcing.SubscriptionFilter{StreamPrefixes: []string{"notification-"}}
+// Filter is this module's shared subscription: its own events, plus the erasure
+// that empties this table.
+func (p *PushSubscriptions) Filter() eventsourcing.SubscriptionFilter { return subscription() }
+
+// Handles reports whether this projection has a handler for an event type, so a
+// test can assert the filter above delivers everything registered below it.
+func (p *PushSubscriptions) Handles(eventType string) bool {
+	return p.dispatch.Handles(eventType)
 }
 
 func (p *PushSubscriptions) Apply(ctx context.Context, w db.Writer, env projection.Envelope) error {

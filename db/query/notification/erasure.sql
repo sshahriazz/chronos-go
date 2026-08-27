@@ -1,0 +1,91 @@
+-- Erasure: what leaves this module's read models when an account is destroyed.
+--
+-- All four statements are QUEUED by the notification projectors into a single
+-- pipelined round trip rather than executed one at a time, so they are used
+-- through the exported constants rather than the generated methods. Authoring
+-- them here still buys what sqlc is for: they are checked against the real
+-- schema, so a renamed column fails at generate time instead of at 3am.
+--
+-- # Why these live in the PROJECTIONS
+--
+-- The identity session projection already answers this, and its reasoning
+-- transfers unchanged (db/query/identity/session.sql,
+-- `RevokeSessionsOfSubject`).
+--
+-- Each of these tables has exactly one writer (CONVENTIONS §8) and it is the
+-- projection that owns it, so an erasure use case deleting from them would be a
+-- second path to the same rows — and a second writer makes rebuild order
+-- undefined.
+--
+-- And they must survive a REBUILD. Replaying `identity.UserErased.v1` re-runs
+-- them, so a projection rebuilt from position zero ends with the same empty set.
+-- A one-off DELETE issued by a use case would replay into rows that had been
+-- reinserted by the replay before it, and a rebuild that resurrected an erased
+-- person's push endpoint has no symptom at all — the browser simply starts
+-- receiving notifications for an account that no longer exists.
+
+-- name: ScopeErasedSubject :exec
+-- Name the subject whose rows this batch may reach, for the length of this
+-- batch only.
+--
+-- All three tables carry row security keyed on `org_id`, and `UserErased` names
+-- no organization — an account is a fact about a person. The projector scopes
+-- each batch from the event's own metadata (`projection.ScopeOf`), so
+-- `app.org_id` is simply unset here, and under `tenant_isolation` alone the
+-- DELETEs below match nothing at all: measured `DELETE 0` against the running
+-- server, with the row still readable afterwards under its owning org.
+--
+-- Migration 00052 adds a permissive SELECT and DELETE policy to each table that
+-- admits exactly the rows of the subject named in `app.erased_subject_id`. This
+-- is what names it. It MUST be queued before the DELETEs — a batch is one
+-- implicit transaction, statements execute in the order they were queued, and a
+-- policy reads the setting as it stands when the statement runs.
+--
+-- `set_config(..., true)` is SET LOCAL in function form, which is what makes the
+-- grant end with the batch. A plain SET would persist on the pooled connection
+-- and hand the next borrower a standing licence to delete that subject's rows
+-- from any table this policy covers.
+--
+-- It is spelled here rather than in Go because CONVENTIONS §8 puts SQL in .sql
+-- files; the kernel's `internal/adapter/postgres` carve-out for session settings
+-- covers the tenant scope it queues itself, not a statement a module needs.
+SELECT set_config('app.erased_subject_id', sqlc.arg(subject_id)::text, true);
+
+-- name: DeleteFeedOfSubject :execrows
+-- Remove every in-app notification belonging to an erased subject.
+--
+-- DELETE rather than a tombstone, unlike the expired push subscription two
+-- statements down, and unlike `read_at` — there is no support question a feed
+-- row for a destroyed account can answer, and `data` is an unvalidated jsonb
+-- that in practice carries free text the person typed. `identity.new_device`
+-- puts the device name they chose in it (cmd/worker/events.go), which is
+-- personal data sitting in a column no key destruction reaches.
+DELETE FROM notification_feed WHERE subject_id = $1;
+
+-- name: DeletePushSubscriptionsOfSubject :execrows
+-- Remove every browser endpoint belonging to an erased subject.
+--
+-- Deleted rather than marked expired, which is the opposite of what
+-- `ExpirePushSubscription` does and deliberately so. Expiry keeps the row
+-- because "why did I stop getting push?" is a real support question; nobody
+-- asks it about an account that no longer exists, and the row is the one place
+-- in this module holding a stable per-browser identifier issued by a third
+-- party. It is not a vault reference, so destroying the subject's key leaves it
+-- perfectly readable, and it identifies the device long after the person it
+-- belonged to has been erased.
+DELETE FROM push_subscription WHERE subject_id = $1;
+
+-- name: DeleteChannelPreferencesOfSubject :execrows
+-- Remove an erased subject's channel toggles.
+--
+-- The weakest of the three claims, and it is made explicitly rather than by
+-- omission. A row here holds a channel name, a boolean and a pseudonym whose key
+-- is gone — nothing in it can be read back to a person, so this is not the
+-- Article 17 obligation the two statements above are.
+--
+-- It is deleted because the row can never become useful again: pseudonyms are
+-- not reissued, so no future account can own these toggles, and ABSENCE MEANS
+-- ENABLED — a stranded row is not even a defensible default for anybody. What it
+-- buys is a property that can be tested in one query: an erased subject has no
+-- rows in notification, rather than none in two of its three tables.
+DELETE FROM notification_preference WHERE subject_id = $1;

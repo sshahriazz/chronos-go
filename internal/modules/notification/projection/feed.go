@@ -90,16 +90,34 @@ func NewFeed(codec eventsourcing.Codec) *Feed {
 		return nil
 	})
 
+	// AN ERASED ACCOUNT LOSES ITS FEED, and this is where it happens.
+	//
+	// `notification_feed` holds `template` and an unvalidated `data` jsonb, and
+	// that jsonb carries free text the person typed — `identity.new_device` puts
+	// the device name they chose into it (cmd/worker/events.go). None of it is a
+	// vault reference, so destroying the subject's key leaves every word of it
+	// readable (ADR-002 reaches what the vault holds, and nothing else).
+	//
+	// See onUserErased for why this belongs in the projection rather than in an
+	// erasure use case, and why the scope statement it queues first is needed at
+	// all.
+	onUserErased(d, notificationdb.DeleteFeedOfSubject)
+
 	return &Feed{dispatch: d}
 }
 
 func (f *Feed) Name() string { return FeedName }
 
-// Filter narrows to this module's own streams. One category, so a rebuild reads
-// the category stream instead of scanning the whole log (measured 14.8x).
-func (f *Feed) Filter() eventsourcing.SubscriptionFilter {
-	return eventsourcing.SubscriptionFilter{StreamPrefixes: []string{"notification-"}}
-}
+// Filter is this module's shared subscription: its own events, plus the erasure
+// that empties this table. See subscription() for what selecting on event types
+// costs a rebuild, and why no filter can avoid it.
+func (f *Feed) Filter() eventsourcing.SubscriptionFilter { return subscription() }
+
+// Handles reports whether this projection has a handler for an event type. It
+// exists so a test can assert that the filter above actually delivers everything
+// registered below it — a handler for an event the subscription never carries is
+// indistinguishable from no handler at all.
+func (f *Feed) Handles(eventType string) bool { return f.dispatch.Handles(eventType) }
 
 func (f *Feed) Apply(ctx context.Context, w db.Writer, env projection.Envelope) error {
 	return f.dispatch.Apply(ctx, w, env)
