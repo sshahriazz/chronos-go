@@ -77,12 +77,20 @@ jobs:
         run: |
           tag="${GITHUB_REF_NAME}"
           bins=(./bin/api ./bin/worker ./bin/projector ./bin/migrate)
+
+          # A tag carrying a prerelease marker is a prerelease, and GitHub has
+          # to be TOLD: without this it publishes v0.1.0-alpha.1 as a full
+          # release and labels it "Latest", which is precisely what the marker
+          # exists to prevent. Derived from the tag rather than from a workflow
+          # input, so it cannot disagree with the version it describes.
+          prerelease=""
+          case "$tag" in *-*) prerelease="--prerelease" ;; esac
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "release $tag exists; updating it to this commit"
-            gh release edit "$tag" --title "$tag" --notes-file ".changes/$tag.md"
+            gh release edit "$tag" --title "$tag" --notes-file ".changes/$tag.md" $prerelease
             gh release upload "$tag" "${bins[@]}" --clobber
           else
-            gh release create "$tag" \
+            gh release create "$tag" $prerelease \
               --title "$tag" \
               --notes-file ".changes/$tag.md" \
               "${bins[@]}"
