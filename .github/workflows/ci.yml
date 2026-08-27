@@ -17,8 +17,19 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
-  # Integration tests need the log and the read model. Nothing else.
-  COMPOSE_SERVICES: postgres kurrentdb
+  # What the integration suite actually touches, which is no longer "the log and
+  # the read model, nothing else": the tests grew Valkey (decision cache,
+  # revocation epochs, attempt ceilings), OpenFGA (tuple writes), Temporal
+  # (schedules are server-side state) and Mailpit (delivery is asserted through
+  # the real SMTP path). Every one of those was missing, and every integration
+  # failure was that absence rather than a defect:
+  #
+  #   valkey was unreachable when this process started
+  #   dial tcp [::1]:6379: connect: connection refused
+  #   TEMPORAL_ENABLED=true built no client
+  #
+  # A job that starts less than the suite needs does not test less; it fails.
+  COMPOSE_SERVICES: postgres kurrentdb valkey openfga temporal mailpit
 
 jobs:
   build:
@@ -201,6 +212,30 @@ jobs:
       # meaningful (ADR-015).
       - name: Apply migrations
         run: set -a && . ./.env && set +a && go run ./cmd/migrate -cmd=up
+
+      # OpenFGA is provisioned out-of-band, never by the server (see
+      # internal/tools/deployauthzmodel: a process that creates its own
+      # authorization store answers every check against whatever it just made).
+      # .env.example ships the ids EMPTY, which is correct for a file in git and
+      # useless to a test that writes tuples.
+      #
+      # The ids are written back into .env rather than exported to $GITHUB_ENV,
+      # because the test step sources .env afterwards — an exported id would be
+      # overwritten by the empty one a moment later, and the job would fail with
+      # the ids apparently set.
+      - name: Provision the OpenFGA store and model
+        run: |
+          set -a && . ./.env && set +a
+          go run ./internal/tools/deployauthzmodel | tee /tmp/authz.out
+          store=$(grep -m1 '^OPENFGA_STORE_ID=' /tmp/authz.out | cut -d= -f2)
+          model=$(grep -m1 '^OPENFGA_MODEL_ID=' /tmp/authz.out | cut -d= -f2)
+          if [ -z "$store" ] || [ -z "$model" ]; then
+            echo "provisioning printed no ids; refusing to run tests against an unpinned model"
+            exit 1
+          fi
+          sed -i "s|^OPENFGA_STORE_ID=.*|OPENFGA_STORE_ID=$store|" .env
+          sed -i "s|^OPENFGA_MODEL_ID=.*|OPENFGA_MODEL_ID=$model|" .env
+          echo "pinned store=$store model=$model"
 
       - name: Integration tests
         run: |

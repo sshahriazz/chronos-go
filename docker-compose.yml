@@ -242,6 +242,19 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # `temporal:7233`, not localhost: the server binds the container's network
+    # address, and a loopback probe inside the container is refused outright.
+    # Verified against the running container rather than copied from an example.
+    #
+    # auto-setup migrates schema on boot and creates the default namespace, so
+    # "the process started" is a long way from "usable" — CI waited on neither
+    # and its integration job failed on a Temporal that was still setting up.
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "temporal:7233"]
+      interval: 5s
+      timeout: 10s
+      retries: 24
+      start_period: 20s
     networks: [chronos]
 
   temporal-ui:
