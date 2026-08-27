@@ -17,11 +17,11 @@ import (
 	identitypg "github.com/chronos/chronos-go/internal/modules/identity/adapter/postgres"
 	identityapp "github.com/chronos/chronos-go/internal/modules/identity/app"
 	identitydomain "github.com/chronos/chronos-go/internal/modules/identity/domain"
-	profiledomain "github.com/chronos/chronos-go/internal/modules/profile/domain"
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/platform/pii"
 	"github.com/chronos/chronos-go/internal/platform/workflow"
+	"github.com/chronos/chronos-go/internal/subjectgraph"
 )
 
 // newAccountErasure builds identity's half of an erasure.
@@ -105,14 +105,30 @@ func newErasure(d *dependencies, log *slog.Logger) (*complianceapp.Erasure, erro
 	if err != nil {
 		return nil, fmt.Errorf("erasure confirmation: %w", err)
 	}
+	// The ONE subject graph (internal/subjectgraph), assembled here rather than
+	// listed here. It was a `subjectObjectPrefixes` in this file and a second one
+	// in cmd/api, because a main package is importable by nothing — and what held
+	// the erasure's list equal to the export's was two tests, each comparing its
+	// own copy against a third literal written inside the test.
+	//
+	// The list is also the documented extension point, and its documented failure
+	// mode was "a module that stores objects and is not added here erases
+	// incompletely, and the symptom is nothing at all". Assembly refuses an empty
+	// graph and a fragment holding nothing, and a test asserts every vault field
+	// has a declared writer — so the omission now has symptoms.
+	graph, err := subjectgraph.Assemble()
+	if err != nil {
+		return nil, err
+	}
 	objects, err := complianceapp.NewObjects(complianceapp.ObjectsDeps{
-		Store: d.blobs, Prefixes: subjectObjectPrefixes,
+		Store: d.blobs, Prefixes: graph.Prefixes,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("object erasure: %w", err)
 	}
 	log.Info("erasure orchestration constructed",
-		"object_prefixes", len(subjectObjectPrefixes("probe")))
+		"subject_graph_modules", graph.Modules(),
+		"object_prefixes", len(graph.Prefixes("probe")))
 
 	// compliance.md §4 step 2. It reads the STREAM rather than a projection,
 	// because a hold placed moments before an erasure runs would not yet be in
@@ -212,36 +228,6 @@ func newErasureReactor(d *dependencies) (*compliancereactor.Erasure, error) {
 	}
 	return compliancereactor.NewErasure(
 		d.temporal, temporaladapter.ErasureWorkflow, d.codec)
-}
-
-// subjectObjectPrefixes is compliance.md §4 step 4's subject graph, for objects.
-//
-// # This list is the extension point, and forgetting it is the failure mode
-//
-// Every module that stores an OBJECT keyed under something derived from a
-// subject belongs here. Vault fields do not: one key destruction makes all of
-// them unreadable at once, which is the whole design of ADR-002. Objects are
-// outside that, and nothing about destroying a key reaches them.
-//
-// It lives in the composition root rather than in compliance because compliance
-// may not import another module's internals (CONVENTIONS §2) — and
-// `profile.AvatarPrefix` is exactly the kind of internal detail that should not
-// cross a module boundary. Assembling the list is what a composition root is
-// for.
-//
-// A module added to this system that stores objects and is NOT added here erases
-// incompletely, and the symptom is nothing at all: the erasure reports success.
-// The compliance use case refuses an empty list for that reason, and the wiring
-// test asserts profile's prefix is present — both of which are cheaper than
-// discovering it from a subject access request.
-func subjectObjectPrefixes(subjectID string) []string {
-	return []string{
-		// profile: avatars. The prefix is a digest of the pseudonym, so this
-		// enumerates one person's objects rather than scanning a bucket — and it
-		// covers superseded avatars and abandoned uploads, which no projection
-		// names and ADR-056 left unreclaimed.
-		profiledomain.AvatarPrefix(subjectID),
-	}
 }
 
 // newErasureSweep builds the backstop for requests the reactor never picked up.

@@ -53,6 +53,7 @@ import (
 	"github.com/chronos/chronos-go/internal/server/health"
 	"github.com/chronos/chronos-go/internal/server/interceptor"
 	"github.com/chronos/chronos-go/internal/server/policy"
+	"github.com/chronos/chronos-go/internal/subjectgraph"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/valkey-io/valkey-go"
 )
@@ -805,6 +806,14 @@ func (d *dependencies) buildCompliance(log *slog.Logger) (*complianceapi.Service
 		return nil, fmt.Errorf("restriction reader: %w", err)
 	}
 
+	// The subject graph, assembled once. A failure here stops the process from
+	// starting, which is where a traversal that would miss a module belongs —
+	// the alternative is a running deployment whose exports are quietly short.
+	graph, err := subjectgraph.Assemble()
+	if err != nil {
+		return nil, err
+	}
+
 	// compliance.md §4 step 3 and §7. The SAME resolver the erasure uses in
 	// cmd/worker, against the same schedule, so an export's statement about what
 	// is retained and an erasure confirmation's cannot disagree.
@@ -844,12 +853,19 @@ func (d *dependencies) buildCompliance(log *slog.Logger) (*complianceapi.Service
 			compliancedomain.ExportCategory, compliancedomain.NewExport),
 		Profile: vaultProfile{vault: d.piiVault},
 		Objects: d.blobs,
-		// Every namespace the subject's objects live under. It MUST be the same
-		// list the erasure walks (cmd/worker's subjectObjectPrefixes) — an export
-		// that covered less than an erasure deletes would hand somebody an
-		// incomplete answer to Article 15 and then destroy the part it omitted.
-		// A test asserts the two agree.
-		Prefixes: complianceapp.SubjectPrefixes(subjectObjectPrefixes),
+		// Every namespace the subject's objects live under, from the ONE subject
+		// graph (internal/subjectgraph). It used to be a `subjectObjectPrefixes`
+		// defined in this file and a second one defined in cmd/worker, because a
+		// main package is importable by nothing — so the export walked one copy and
+		// the erasure walked the other, and what held them equal was two tests each
+		// comparing its own copy against a third literal.
+		//
+		// An export covering less than an erasure deletes hands somebody an
+		// incomplete answer to Article 15 and then destroys the part it omitted,
+		// which is the worst combination available: the file looks plausible and
+		// there is no way left to tell it was short. That is now true by
+		// construction rather than by agreement between copies.
+		Prefixes: complianceapp.SubjectPrefixes(graph.Prefixes),
 		Store:    d.blobs,
 		// The subject's OWN prefix, which is the namespace an erasure empties —
 		// so a bundle is purged by erasure structurally rather than by a step
@@ -993,26 +1009,6 @@ func (v vaultProfile) Profile(
 		out[string(field)] = value
 	}
 	return out, nil
-}
-
-// subjectObjectPrefixes is compliance.md §4 step 4's subject graph, for objects.
-//
-// # It is duplicated from cmd/worker, and a test holds the two together
-//
-// Both binaries need it and neither may own it for the other: the worker walks
-// it to ERASE and this binary walks it to EXPORT, and the two must agree
-// exactly. An export that covered less than an erasure deletes would hand
-// somebody an incomplete answer to Article 15 and then destroy the part it
-// omitted — which is the worst combination available here, because the person
-// receives a plausible-looking file and no way to know it was short.
-//
-// It lives in each composition root rather than in compliance because compliance
-// may not import another module's internals (CONVENTIONS §2), and
-// `profile.AvatarPrefix` is exactly that kind of detail. Assembling the list is
-// what a composition root is for; keeping two of them equal is what the test is
-// for.
-func subjectObjectPrefixes(subjectID string) []string {
-	return []string{profiledomain.AvatarPrefix(subjectID)}
 }
 
 // verifyKEK proves the key-encryption key still decrypts what this installation

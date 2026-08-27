@@ -19,6 +19,7 @@ import (
 	"github.com/chronos/chronos-go/internal/platform/clock"
 	"github.com/chronos/chronos-go/internal/platform/eventsourcing"
 	"github.com/chronos/chronos-go/internal/platform/pii"
+	"github.com/chronos/chronos-go/internal/subjectgraph"
 )
 
 // newExportReactor builds the reactor that turns an accepted request into a run.
@@ -67,6 +68,11 @@ func newExportActivities(d *dependencies) (*temporaladapter.ExportActivities, er
 	// event is (ADR-029).
 	codec, upcasters := newComplianceCodec()
 
+	graph, err := subjectgraph.Assemble()
+	if err != nil {
+		return nil, err
+	}
+
 	// The SAME resolver against the SAME schedule the erasure consults (see
 	// newErasure), so what a bundle says is retained and what an erasure
 	// confirmation says cannot disagree — including the invoice class, which
@@ -92,10 +98,10 @@ func newExportActivities(d *dependencies) (*temporaladapter.ExportActivities, er
 			compliancedomain.ExportCategory, compliancedomain.NewExport),
 		Profile: exportVaultProfile{vault: d.piiVault},
 		Objects: d.blobs,
-		// The SAME list the erasure walks. An export that covered less than an
-		// erasure deletes would hand somebody an incomplete answer to Article 15
-		// and then destroy the part it omitted.
-		Prefixes:     complianceapp.SubjectPrefixes(subjectObjectPrefixes),
+		// The SAME graph the erasure walks — one object, not two lists a test
+		// compares. An export covering less than an erasure deletes hands somebody
+		// an incomplete answer to Article 15 and then destroys the part it omitted.
+		Prefixes:     complianceapp.SubjectPrefixes(graph.Prefixes),
 		Store:        d.blobs,
 		Prefix:       profiledomain.AvatarPrefix,
 		Restrictions: restrictions,
