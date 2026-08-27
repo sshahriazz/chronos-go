@@ -669,6 +669,32 @@ nothing ever ran.
 
 ## Session findings and follow-ups
 
+- [ ] **Three notification projections lost the `$ce-` rebuild path, and the
+      runner already names the fix.** Closing the erasure gap below required
+      notification's projections to consume `identity.UserErased.v1`, which lives
+      on a `user-` stream. Their filter was `StreamPrefixes: {"notification-"}`,
+      which let a rebuild read the `$ce-notification` link stream — measured
+      14.8× faster than `$all`. It is now `EventTypePrefixes: {"notification.",
+      "identity.UserErased.v1"}`, and a rebuild falls back to `$all`.
+
+      The trade is FORCED, not a preference. `Runner.rebuildFromLinkStreams`
+      takes a link stream only when the filter names exactly one whole type or
+      exactly one category, and its own comment says why: "reading two link
+      streams in sequence applies every event of the first before any of the
+      second, so global commit order is lost — and a projection that joins
+      across types would rebuild into a different state than it holds live."
+
+      The same comment names the unblock: "merging them by commit position would
+      fix it and is not worth the complexity until a projection actually needs
+      it." Three now do, and every module that has to react to another module's
+      event will need it next. Merging by commit position in the runner returns
+      all three to the fast path and costs nothing at the call sites.
+
+      Not urgent — a rebuild is an operator action, not a request path, and the
+      live subscription is unaffected. Recorded because the cost was paid
+      deliberately and is otherwise invisible: nothing reports that a rebuild got
+      slower.
+
 - [x] **Session revocation is immediate now, and ADR-018's promise is kept.**
       The gap: `GetSessionByToken` refuses a row whose `session_view.revoked_at`
       is set, and the PROJECTOR writes that column. So a revocation was durable

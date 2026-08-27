@@ -101,6 +101,33 @@ The orchestration, as a Temporal workflow (ADR-017):
 11. confirm to the requester
 ```
 
+### What the key destruction does not reach
+
+Step 5 makes every VAULT field of the subject unreadable at once, and that is
+most of their personal data. Three things sit outside it, and each is erased by
+its own mechanism rather than by the key:
+
+| Outside the vault | Erased by |
+| --- | --- |
+| Objects in the bucket — avatars, and superseded or abandoned uploads | step 4's traversal, walking `internal/subjectgraph`'s prefixes |
+| Identifier reservations — the email blind index, the username | identity's own erasure: the address is released, the handle tombstoned (§4 step 7) |
+| Notification rows — push endpoints, feed items, channel toggles | the notification PROJECTIONS, applying `identity.UserErased.v1` |
+
+The third was missed until an inventory looked for it. `push_subscription`
+holds an endpoint URL — a stable per-browser identifier issued by a third-party
+push service, not a vault reference and not encrypted — plus a user agent
+string; `notification_feed` holds an unvalidated `data` jsonb that in practice
+carries free text the person typed, such as the label they gave a device. None
+of it was deleted by anything, so an erasure destroyed the key and left all of
+it keyed to the erased pseudonym.
+
+It is done in the projections rather than in the erasure workflow for the two
+reasons identity's session projection already gives: each table has exactly one
+writer (CONVENTIONS §8), and the removal must survive a REBUILD, which replaying
+`UserErased` re-runs. A workflow step would be undone by the next rebuild, which
+has no symptom at all — the browser simply starts receiving notifications for an
+account that no longer exists.
+
 Step 5 is the point of no return, and everything before it is reversible on
 failure. **Verified mechanism** (ADR-028): encrypt → decrypt → destroy key →
 decrypt fails with `encryption key not found`.
