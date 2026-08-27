@@ -129,21 +129,107 @@ func (e *Exemptions) For(ctx context.Context, subjectID string) []domain.Retenti
 	return out
 }
 
+// InvoiceRecords is billing's half of the question: does this person appear on
+// an invoice we are required to keep?
+//
+// Declared as its own one-method port rather than as a `RetainedRecords` that
+// ignores the class it is handed. A reader that accepted `class` and answered
+// the same way regardless would be a reader nothing stops from being wired for
+// the breach register.
+type InvoiceRecords interface {
+	HasInvoices(ctx context.Context, subjectID string) (bool, error)
+}
+
+// RecordsByClass routes each conditional class to whoever can answer it, and
+// states the rest.
+//
+// # This replaced AssumeRecordsExist at the composition roots
+//
+// The schedule has two conditional classes. Billing can now answer one of them
+// — `SubjectHasRetainedInvoices` joins `invoice_view` to `org_member_index`, so
+// a person whose organizations were never invoiced is no longer told that
+// invoice data may be retained about them. That is most people: every trial
+// that never converted.
+//
+// The other, the breach register, cannot be answered because the register does
+// not exist. It is STATED, unconditionally, and `Unanswered` names which class
+// that is doing — so the over-statement is scoped to one named class instead of
+// being the behaviour of the whole resolver.
+//
+// # Why an unknown conditional class is stated too
+//
+// A class added to the schedule with `Conditional: true` and no reader here
+// falls to the default, which states it and records the class in `Unanswered`.
+// That is the safe direction, and the test
+// TestEveryConditionalClassIsEitherAnsweredOrNamed fails on it — so the
+// omission is visible in CI rather than discovered in somebody's erasure
+// confirmation.
+type RecordsByClass struct {
+	invoices InvoiceRecords
+}
+
+var _ RetainedRecords = (*RecordsByClass)(nil)
+
+// NewRecordsByClass builds the router.
+//
+// The invoice reader is REQUIRED, for the reason NewExemptions requires its
+// port: a nil would silently restore the old behaviour for the one class that
+// can now be answered, and "we decided to over-state" would become
+// indistinguishable from "somebody forgot to wire billing".
+func NewRecordsByClass(invoices InvoiceRecords) (*RecordsByClass, error) {
+	if invoices == nil {
+		return nil, fmt.Errorf("compliance: a retained-invoice reader is required; " +
+			"without it every erasure confirmation states that invoice data may be " +
+			"retained, including for the majority of subjects whose organizations were " +
+			"never invoiced")
+	}
+	return &RecordsByClass{invoices: invoices}, nil
+}
+
+// HasRecords answers one class.
+func (r *RecordsByClass) HasRecords(
+	ctx context.Context, subjectID string, class domain.DataClass,
+) (bool, error) {
+	switch class {
+	case domain.ClassInvoices:
+		return r.invoices.HasInvoices(ctx, subjectID)
+	default:
+		// STATED. See Unanswered for which classes reach here and why.
+		return true, nil
+	}
+}
+
+// Unanswered is every conditional class this router cannot actually ask about.
+//
+// Derived from the schedule and the switch above rather than written out, so it
+// cannot claim to cover a class the switch does not.
+func (r *RecordsByClass) Unanswered() []domain.DataClass {
+	var out []domain.DataClass
+	for _, p := range domain.RetentionExemptions() {
+		if !p.Conditional {
+			continue
+		}
+		if p.Class == domain.ClassInvoices {
+			continue
+		}
+		out = append(out, p.Class)
+	}
+	return out
+}
+
 // AssumeRecordsExist answers every conditional class with "yes".
 //
-// # It is the honest placeholder, and it is named so it cannot hide
+// # No longer what the composition roots wire
 //
-// Nothing in this build can ask billing whether a subject appears on an invoice:
-// `invoice_view` is keyed by organization, and the person-to-invoice link would
-// be a membership join through a billing contact this system does not record.
-// The breach register does not exist at all.
+// It was, and its own doc said so. The roots now wire RecordsByClass, which
+// asks billing about invoices and states the rest — so the over-statement is
+// scoped to the classes nothing can answer instead of being the behaviour of
+// the whole resolver.
 //
-// So the conditional classes are stated for everybody. That is over-inclusive in
-// the safe direction — a person with no invoices is told invoices may be
-// retained, which is a smaller wrong than a person with invoices being told
-// everything is gone — and it is wired at the composition root rather than
-// buried behind a nil check, so replacing it is a one-line change at the place
-// that decides.
+// It is kept because it is still the correct thing to hand a process that has
+// no billing read side at all, and because the tests that assert the
+// over-inclusive direction need a reader that takes it unconditionally. It is
+// named so that a root wiring it cannot pretend to be doing anything else.
 type AssumeRecordsExist struct{}
 
 var _ RetainedRecords = AssumeRecordsExist{}

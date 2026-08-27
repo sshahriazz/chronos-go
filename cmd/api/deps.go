@@ -16,6 +16,7 @@ import (
 	"github.com/chronos/chronos-go/internal/adapter/seaweedfs"
 	valkeyadapter "github.com/chronos/chronos-go/internal/adapter/valkey"
 	"github.com/chronos/chronos-go/internal/modules/billing"
+	billingpg "github.com/chronos/chronos-go/internal/modules/billing/adapter/postgres"
 	billingapi "github.com/chronos/chronos-go/internal/modules/billing/api"
 	"github.com/chronos/chronos-go/internal/modules/compliance"
 	compliancepg "github.com/chronos/chronos-go/internal/modules/compliance/adapter/postgres"
@@ -808,12 +809,25 @@ func (d *dependencies) buildCompliance(log *slog.Logger) (*complianceapi.Service
 	// cmd/worker, against the same schedule, so an export's statement about what
 	// is retained and an erasure confirmation's cannot disagree.
 	//
-	// AssumeRecordsExist is the honest placeholder and it is wired HERE rather
-	// than defaulted inside the resolver — see its own doc. Replacing it when
-	// billing can answer "does this subject appear on an invoice" is a one-line
-	// change at this line and its twin in cmd/worker.
+	// Billing answers the invoice class. It used to be `AssumeRecordsExist` here
+	// — every conditional class stated for everybody — because `invoice_view` is
+	// keyed by organization and nothing could ask about one person. It still is,
+	// and the join through `org_member_index` is how the question gets asked
+	// anyway; see db/query/billing/retention.sql.
+	//
+	// What remains over-stated is the breach register, which does not exist.
+	// RecordsByClass.Unanswered names it, and a test fails if a third
+	// conditional class is added without a reader.
+	retainedInvoices, err := billingpg.NewRetainedInvoices(pgadapter.New(d.pool))
+	if err != nil {
+		return nil, fmt.Errorf("retained invoices: %w", err)
+	}
+	retainedRecords, err := complianceapp.NewRecordsByClass(retainedInvoices)
+	if err != nil {
+		return nil, fmt.Errorf("retained records: %w", err)
+	}
 	exemptions, err := complianceapp.NewExemptions(complianceapp.ExemptionsDeps{
-		Records: complianceapp.AssumeRecordsExist{},
+		Records: retainedRecords,
 		Log:     log,
 	})
 	if err != nil {

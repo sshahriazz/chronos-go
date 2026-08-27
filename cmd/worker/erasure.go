@@ -10,6 +10,7 @@ import (
 	"github.com/chronos/chronos-go/internal/adapter/piivault"
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
 	temporaladapter "github.com/chronos/chronos-go/internal/adapter/temporal"
+	billingpg "github.com/chronos/chronos-go/internal/modules/billing/adapter/postgres"
 	complianceadapter "github.com/chronos/chronos-go/internal/modules/compliance/adapter"
 	complianceapp "github.com/chronos/chronos-go/internal/modules/compliance/app"
 	compliancereactor "github.com/chronos/chronos-go/internal/modules/compliance/reactor"
@@ -144,14 +145,25 @@ func newErasure(d *dependencies, log *slog.Logger) (*complianceapp.Erasure, erro
 	// a statutory retention would have left the mail saying what it always said
 	// while a new category of record quietly survived the erasure.
 	//
-	// AssumeRecordsExist is the honest placeholder and it is wired HERE rather
-	// than defaulted inside the resolver, so that the day billing can answer
-	// "does this subject appear on an invoice" the change is this line and its
-	// twin in cmd/api. It is over-inclusive, which is the safe direction: telling
-	// somebody their invoices may be retained when they have none is a smaller
-	// wrong than implying total deletion when tax records survive.
+	// Billing answers the invoice class, through the join in
+	// db/query/billing/retention.sql. This was `AssumeRecordsExist` — every
+	// conditional class stated for everybody — and the majority of subjects it
+	// spoke to were trial accounts that were never invoiced at all.
+	//
+	// The breach register is still stated unconditionally, because it does not
+	// exist. That is the safe direction: telling somebody their invoices may be
+	// retained when they have none is a smaller wrong than implying total
+	// deletion when tax records survive.
+	retainedInvoices, err := billingpg.NewRetainedInvoices(pgadapter.New(d.pool))
+	if err != nil {
+		return nil, fmt.Errorf("retained invoices: %w", err)
+	}
+	retainedRecords, err := complianceapp.NewRecordsByClass(retainedInvoices)
+	if err != nil {
+		return nil, fmt.Errorf("retained records: %w", err)
+	}
 	exemptions, err := complianceapp.NewExemptions(complianceapp.ExemptionsDeps{
-		Records: complianceapp.AssumeRecordsExist{},
+		Records: retainedRecords,
 		Log:     log,
 	})
 	if err != nil {

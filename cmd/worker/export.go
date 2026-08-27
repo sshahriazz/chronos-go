@@ -9,6 +9,7 @@ import (
 	"github.com/chronos/chronos-go/internal/adapter/piivault"
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
 	temporaladapter "github.com/chronos/chronos-go/internal/adapter/temporal"
+	billingpg "github.com/chronos/chronos-go/internal/modules/billing/adapter/postgres"
 	"github.com/chronos/chronos-go/internal/modules/compliance"
 	compliancepg "github.com/chronos/chronos-go/internal/modules/compliance/adapter/postgres"
 	complianceapp "github.com/chronos/chronos-go/internal/modules/compliance/app"
@@ -68,9 +69,18 @@ func newExportActivities(d *dependencies) (*temporaladapter.ExportActivities, er
 
 	// The SAME resolver against the SAME schedule the erasure consults (see
 	// newErasure), so what a bundle says is retained and what an erasure
-	// confirmation says cannot disagree.
+	// confirmation says cannot disagree — including the invoice class, which
+	// billing now answers per subject rather than stating for everybody.
+	retainedInvoices, err := billingpg.NewRetainedInvoices(pgadapter.New(d.pool))
+	if err != nil {
+		return nil, fmt.Errorf("retained invoices: %w", err)
+	}
+	retainedRecords, err := complianceapp.NewRecordsByClass(retainedInvoices)
+	if err != nil {
+		return nil, fmt.Errorf("retained records: %w", err)
+	}
 	exemptions, err := complianceapp.NewExemptions(complianceapp.ExemptionsDeps{
-		Records: complianceapp.AssumeRecordsExist{},
+		Records: retainedRecords,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("retention exemptions: %w", err)

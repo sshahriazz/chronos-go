@@ -30,6 +30,42 @@ type Querier interface {
 	// nothing. Checking first and inserting after would leave a window in which two
 	// concurrent deliveries both see "not seen" and both apply the change.
 	RecordWebhookEvent(ctx context.Context, arg RecordWebhookEventParams) (string, error)
+	// Retention exemptions, billing's half (compliance.md §7).
+	//
+	// One question, asked once per erasure and once per export: does this person
+	// appear on a financial record that tax law requires us to keep?
+	//
+	// # Why it reads a table billing does not own
+	//
+	// `invoice_view` is keyed by ORGANIZATION, because the Stripe customer is the
+	// organization and not any one person. The link from a person to an
+	// organization is `org_member_index`, which workspace owns (ADR-020), and there
+	// is no third table that carries both — so the join is the only way to ask the
+	// question at all.
+	//
+	// It is a READ of a projection, in the module whose records are the subject of
+	// the question. The alternative is compliance reading both tables, which moves
+	// the same crossing somewhere it fits worse: "which financial records name this
+	// person" is billing's question about billing's data.
+	// Does any organization this person belongs to have an invoice?
+	//
+	// # Membership, not ownership, and the choice is deliberate
+	//
+	// Only the account owner's personal data plausibly appears ON an invoice, so
+	// `role = 'owner'` would be the narrower and more literal reading. It is not
+	// used, because it fails in the direction compliance.md §7 names as the
+	// misleading one: ownership can move, and a former owner whose name is on a
+	// two-year-old invoice would be told everything about them was destroyed.
+	//
+	// Membership over-states instead. A colleague of the person who paid is told
+	// that invoice data may be retained about them when it is not — a sentence we
+	// would rather not send, and a far smaller wrong than telling somebody their
+	// tax records are gone when they are not.
+	//
+	// What it is NOT is the old placeholder. A person whose organizations were
+	// never invoiced — every trial that never converted, which is most of them —
+	// now gets a confirmation that says nothing about invoices, because none exist.
+	SubjectHasRetainedInvoices(ctx context.Context, subjectID string) (bool, error)
 	// TRUNCATE, because a rebuild empties the table from an UNSCOPED system
 	// transaction where RLS hides every row, so DELETE would remove none (ADR-019).
 	TruncateInvoices(ctx context.Context) error
