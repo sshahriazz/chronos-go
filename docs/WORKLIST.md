@@ -508,10 +508,57 @@ nothing ever ran.
       render a legal basis as a legal basis and a translator can produce the
       "why" in their own language. The manifest's `retained` changed shape, so
       `ExportFormatVersion` is **2**.
-- [ ] **The subject graph is not traversed** (step 4). Only identity holds
-      personal data today, so erasing it is erasing everything — but that stops
-      being true the moment a second module does, and the traversal is what
-      makes the guarantee hold then.
+- [x] **The subject graph is traversed — and the premise of this entry was
+      wrong.** It said "only identity holds personal data today, so erasing it
+      is erasing everything". Six areas hold it: identity, profile, workspace,
+      compliance, notification and operator. The traversal was not a guarantee
+      being kept warm for a future second holder; there were already five.
+
+      `internal/platform/subjectdata` declares the kernel type,
+      `internal/subjectgraph` names the fragments, and each module declares what
+      it holds — the shape `AccessFragment()` and `internal/authzmodel` already
+      take, for ADR-006's reason: compliance must not know which modules exist,
+      or "add a feature" means "edit compliance".
+
+      **What the duplication cost.** `subjectObjectPrefixes` was defined twice,
+      once per binary, because a `main` package is importable by nothing. §16
+      asks for "a property test asserting the two sets are identical"; what
+      existed was two tests, one per binary, each comparing its own copy against
+      a THIRD literal written inside itself. Both callers now hold one Graph and
+      call one method, so the property is true by construction.
+
+      **Three things the inventory found that no document knew:**
+
+      - WORKSPACE writes to the PII vault. Issuing an invitation to somebody
+        with no account stores their address under a pseudonym it mints for a
+        person who has never used this system — the only place personal data
+        enters the vault for a non-user.
+      - NOTIFICATION survived erasure entirely. A push endpoint (a stable
+        per-browser identifier), a user agent string, and an unvalidated `data`
+        jsonb carrying text the person typed, all still keyed to the erased
+        pseudonym. Closed in the projections, with the RLS exception migration
+        00052 required.
+      - `pii.FieldPhone` is defined, enumerated by every subject access request,
+        and written by nothing. Now recorded in `unwrittenByDesign` with its
+        reason rather than being invisible.
+
+      **The gate answers the question this entry could not.** "What fails if a
+      new module starts holding personal data?" was: nothing. Now every
+      `pii.Field` needs a declared writer or a named reason. It closes the half a
+      machine can check — a module holding personal data in its own table is
+      still invisible to any check that does not know the module exists, which is
+      exactly how notification hid.
+
+      **One rule this work refuted mid-flight.** The first draft required one
+      module per vault field. identity and workspace both write `email`, and
+      exclusivity would encode an invariant the system does not have: erasure
+      destroys a subject's KEY, so every field of theirs dies at once whoever
+      wrote it. Fields record all writers; RESERVATIONS keep exclusivity,
+      because exactly one module releases each on erasure.
+
+      Also closed: the export refused nothing when the traversal was empty while
+      the erasure always had, so an export over no prefixes wrote a manifest
+      listing zero objects and reported READY.
 - [x] **The reconciliation sweep.** The workflow is durable, so a lost one is
       unlikely rather than impossible; a sweep over overdue requests is the
       backstop billing.md §5 case 15 uses for the same class of failure.
