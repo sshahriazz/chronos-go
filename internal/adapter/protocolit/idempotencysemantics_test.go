@@ -102,11 +102,37 @@ func TestTheIdempotencyContractHoldsForEveryAuthenticatedMutation(t *testing.T) 
 				t.Fatalf("replaying %s: %v", ic.path, err)
 			}
 			if ic.gatedReplay != 0 {
+				// POLLED, not asserted on the first reply, and the difference is a
+				// property of the design rather than a tolerance for slowness.
+				//
+				// DeactivateAccount ends its sessions by appending a
+				// `SessionRevoked` event to each session's own stream. The
+				// authenticator resolves a bearer by joining `session_view`, which
+				// the PROJECTOR writes — deliberately: a port that could revoke a
+				// session by writing the view directly would end it with no event
+				// saying so, and the view would stop being reconstructable from the
+				// log (ADR-019, and identity/app/ports.go states it on
+				// LiveSessions).
+				//
+				// So "the gate refuses the replay" is true within the projector's
+				// catch-up, not within the same instant. Asserting the first reply
+				// made this test a race against the projector: it passed while the
+				// suite ran few projections and started failing when two more were
+				// added, on a machine that had not changed.
+				//
+				// The property being pinned is unchanged and is the one that
+				// matters — a caller who may no longer make the request may not
+				// read the stored answer to it either, so the gate must answer
+				// before Idempotency.Do. What is bounded is only how long the
+				// revocation may take to become visible.
+				replayStatus, replay = awaitGatedReplay(
+					t, ctx, ic, body, bearer, key, replayStatus, replay)
 				if replayStatus != ic.gatedReplay {
 					t.Fatalf("this call's success revokes the caller's own authorization, so a "+
 						"replay must be refused by the GATE with %d — the pipeline reaches "+
-						"Idempotency.Do only after the gates pass. It answered %d.\n%s",
-						ic.gatedReplay, replayStatus, describeRaw(replayStatus, replay))
+						"Idempotency.Do only after the gates pass. It answered %d for %s.\n%s",
+						ic.gatedReplay, replayStatus, gatedReplayWindow,
+						describeRaw(replayStatus, replay))
 				}
 				t.Logf("%s: replay refused by the gate with %d, as it must be — the success "+
 					"itself ended the caller's authorization, and a stored response is still "+
@@ -422,4 +448,35 @@ func TestAPublicMutationHasNoStoredReplay(t *testing.T) {
 	}
 	t.Logf("public mutation: a reused key with a different body answered %d, not CONFLICT — "+
 		"no store, as gates.go implies", status2)
+}
+
+// gatedReplayWindow is how long a revocation may take to reach the gate.
+//
+// Generous on purpose. The number is not a claim about how fast the projector
+// is — it is the point past which "the projector has not caught up" stops being
+// a credible explanation and "the gate never refuses this" becomes the only
+// one. A tight bound here would reintroduce the race this replaced.
+const gatedReplayWindow = 20 * time.Second
+
+// awaitGatedReplay retries the replay until the gate refuses it.
+//
+// It returns the LAST status and body it saw, so the caller's failure message
+// describes what the endpoint actually kept answering rather than a stale first
+// reply.
+func awaitGatedReplay(
+	t *testing.T, ctx context.Context, ic idemCase,
+	body, bearer, key string, status int, replay string,
+) (int, string) {
+	t.Helper()
+
+	deadline := time.Now().Add(gatedReplayWindow)
+	for status != ic.gatedReplay && time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+		next, nextBody, err := rawPost(ctx, ic.path, "application/json", body, bearer, key, nil)
+		if err != nil {
+			t.Fatalf("replaying %s: %v", ic.path, err)
+		}
+		status, replay = next, nextBody
+	}
+	return status, replay
 }

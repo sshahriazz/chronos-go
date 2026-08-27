@@ -32,33 +32,16 @@ import (
 // It polls the REAL endpoint rather than the table, which is the point: the
 // question is whether a person asking "is my data ready yet" gets a true answer,
 // and that path runs through the handler, the projection and the object store.
+//
+// Sixty seconds, and the loop itself is awaitExportWithin's — one poll, one
+// place that decides what NOT_FOUND means while a projection catches up. There
+// were two, they were byte-identical, and when the tolerance was added to one
+// the other went on failing.
 func awaitExport(
 	t *testing.T, bearer, exportID string, want ...compliancev1.DataExportStatus,
 ) *compliancev1.GetDataExportResponse {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-
-	deadline := time.Now().Add(60 * time.Second)
-	var last *compliancev1.GetDataExportResponse
-	for time.Now().Before(deadline) {
-		res, err := h.compliance.GetDataExport(ctx, authed(
-			&compliancev1.GetDataExportRequest{ExportId: exportID}, bearer))
-		if err != nil {
-			t.Fatalf("GetDataExport: %v\n%s", err, h.serverLogs())
-		}
-		last = res.Msg
-		for _, w := range want {
-			if res.Msg.GetStatus() == w {
-				return res.Msg
-			}
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-	t.Fatalf("the export never reached %v within 60s; it is %v. Either no workflow is "+
-		"building it, or the projection never applied the outcome\n%s",
-		want, last.GetStatus(), h.serverLogs())
-	return nil
+	return awaitExportWithin(t, bearer, exportID, 60*time.Second, want...)
 }
 
 // A DATA-SUBJECT REQUEST IS RECORDED, AND POLLABLE, AGAINST THE REAL STACK.

@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	connectrpc "connectrpc.com/connect"
+
 	compliancev1 "github.com/chronos/chronos-go/gen/proto/chronos/compliance/v1"
 	pgadapter "github.com/chronos/chronos-go/internal/adapter/postgres"
 	temporaladapter "github.com/chronos/chronos-go/internal/adapter/temporal"
@@ -179,13 +181,27 @@ func awaitExportWithin(
 	for time.Now().Before(deadline) {
 		res, err := h.compliance.GetDataExport(ctx, authed(
 			&compliancev1.GetDataExportRequest{ExportId: exportID}, bearer))
-		if err != nil {
+		switch {
+		case connectrpc.CodeOf(err) == connectrpc.CodeNotFound:
+			// NOT an error, and treating it as one made this a race.
+			//
+			// The id came back from `ExportMyData` a moment ago, so the export
+			// exists in the log by definition. The row this polls is written by a
+			// projection, and NOT_FOUND is simply what the poll sees until the
+			// projector catches up — which takes longer whenever the suite runs
+			// more projections, so both call sites failed intermittently the day
+			// two were added.
+			//
+			// An id that is genuinely unknown still fails, on the deadline below,
+			// with the message that names every link in the chain.
+		case err != nil:
 			t.Fatalf("GetDataExport: %v\n%s", err, h.serverLogs())
-		}
-		last = res.Msg
-		for _, wanted := range want {
-			if res.Msg.GetStatus() == wanted {
-				return res.Msg
+		default:
+			last = res.Msg
+			for _, wanted := range want {
+				if res.Msg.GetStatus() == wanted {
+					return res.Msg
+				}
 			}
 		}
 		time.Sleep(500 * time.Millisecond)
