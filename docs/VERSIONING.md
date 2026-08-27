@@ -83,13 +83,21 @@ first one usually is: with no prior version a lone `Fixed` fragment computes
 
 ### The product is an unstable alpha, and says so in the version
 
-Every release carries a prerelease marker: `v0.1.0-alpha.1`, `v0.1.0-alpha.2`,
-and so on. `PRERELEASE ?= alpha.1` in the Makefile is what puts it there, and
-`make version` prints the channel so nobody has to infer it:
+Every release carries a prerelease marker: `v0.1.0-alpha`, then `v0.2.0-alpha`,
+then `v0.3.0-alpha`. `PRERELEASE ?= alpha` in the Makefile is what puts it
+there, and `make version` prints the channel so nobody has to infer it:
 
 ```
-  channel   UNSTABLE — every release is tagged -alpha.1
+  channel   UNSTABLE — every release is tagged -alpha
 ```
+
+It is a **channel label, not a counter**. The base version already moves every
+release, because the fragment kinds decide it, so a counter incrementing
+alongside it would mean nothing. `PRERELEASE=alpha.2` exists for one case:
+re-cutting the SAME base version after an alpha turned out wrong. Semver orders
+`v0.2.0-alpha` below `v0.2.0-alpha.2`, below `v0.2.0` — checked against
+`golang.org/x/mod/semver`, since `sort -V` orders the release BEFORE its own
+prereleases and believing it here would invert the whole scheme.
 
 The marker is not decoration. Semver orders `v0.1.0-alpha.1` BELOW `v0.1.0`, so
 no dependency resolver, container tag policy or upgrade check will pick up an
@@ -215,7 +223,7 @@ make changelog-new KIND=… DOMAIN=… BODY="…"
 make changelog-preview                # the notes the current fragments would produce
 make release                          # batch into .changes/vX.Y.Z-alpha.1.md, rebuild CHANGELOG.md
 make release BUMP=v0.1.0              # a number that is a decision, not a consequence
-make release PRERELEASE=alpha.2       # the next alpha
+make release PRERELEASE=alpha.2       # only to re-cut the same base version
 make release PRERELEASE=              # leave alpha — a decision, see §3
 git diff                              # read it as a customer would
 make release-tag                      # commit + annotated tag; does NOT push

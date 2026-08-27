@@ -20,13 +20,20 @@ LDFLAGS   := -X $(BUILDINFO).version=$(VERSION) -X $(BUILDINFO).commit=$(COMMIT)
 # depends on what a machine happens to have on its PATH.
 CHANGIE := go run github.com/miniscruff/changie@v1.26.0
 
-# Chronos is an UNSTABLE ALPHA. Every release carries a prerelease marker, so
-# a bare `v0.2.0` cannot be cut by accident and nothing downstream can mistake a
-# build for a supported one. Bump the counter per release: PRERELEASE=alpha.2.
+# Chronos is an UNSTABLE ALPHA. Every release carries a prerelease marker, so a
+# bare v0.2.0 cannot be cut by accident and nothing downstream can mistake a
+# build for a supported one. Semver puts v0.2.0-alpha below v0.2.0, and below
+# v0.2.0-alpha.1 — verified against golang.org/x/mod/semver, because `sort -V`
+# orders it the other way and agreeing with `sort -V` here would be wrong.
+#
+# It is a CHANNEL LABEL, not a counter. The base version already moves every
+# release — the fragment kinds decide it — so v0.2.0-alpha, v0.3.0-alpha,
+# v0.4.0-alpha. A counter that incremented alongside a moving base would mean
+# nothing. Use PRERELEASE=alpha.2 only to re-cut the SAME base version.
 #
 # Emptying this default is the deliberate act of declaring the product beta or
 # stable. It is not a cleanup. See docs/VERSIONING.md §3.
-PRERELEASE ?= alpha.1
+PRERELEASE ?= alpha
 PRERELEASE_FLAG := $(if $(PRERELEASE),-p $(PRERELEASE),)
 
 # `auto` derives the bump from the fragment kinds, which is what almost every
@@ -342,8 +349,14 @@ changelog-preview: ## Show the release notes the current fragments would produce
 
 .PHONY: release
 release: ## Assemble the next release: CHANGELOG.md and .changes/vX.Y.Z.md. No commit, no tag.
-	@test -z "$$(git status --porcelain)" || { \
-		echo "the working tree is dirty; a release is assembled from committed code"; exit 1; }
+	@# A release is assembled from COMMITTED code — except for the entries being
+	@# written for this very release. The procedure writes those into
+	@# .changes/unreleased/ minutes earlier (docs/VERSIONING.md §4), so a guard
+	@# that refused them would refuse every release it exists to protect.
+	@dirty=$$(git status --porcelain -- ':!.changes/unreleased'); \
+	 test -z "$$dirty" || { \
+		echo "the working tree is dirty; a release is assembled from committed code:"; \
+		echo "$$dirty"; exit 1; }
 	@go run ./internal/tools/checkchangelog -coverage
 	@$(CHANGIE) batch $(BUMP) $(PRERELEASE_FLAG)
 	@$(CHANGIE) merge

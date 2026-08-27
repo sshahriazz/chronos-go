@@ -117,7 +117,7 @@ only one who knows whether an entry describes what they meant to ship.
 ```bash
 make release                       # auto bump from the fragment kinds
 make release BUMP=v0.2.0           # when the number is a decision, not a consequence
-make release PRERELEASE=alpha.3    # the alpha counter; see below
+make release PRERELEASE=alpha.2     # only to RE-CUT the same base version; see below
 ```
 
 `make release` refuses a dirty tree and refuses a release that describes nothing
@@ -144,9 +144,12 @@ practice. Report what was tagged and offer the command.
 
 ## The alpha channel
 
-`PRERELEASE ?= alpha.1` in the Makefile puts a prerelease marker on every
-release. **Bump the counter each release** — `make release PRERELEASE=alpha.2`,
-then `alpha.3` — or two releases carry the same marker.
+`PRERELEASE ?= alpha` in the Makefile puts a prerelease marker on every release.
+
+**Do not bump it.** It is a channel label, not a counter: the base version
+already moves every release — v0.2.0-alpha, then v0.3.0-alpha — because the
+fragment kinds decide it. Pass `PRERELEASE=alpha.2` only to re-cut the SAME base
+version, which happens when an alpha was tagged and then found wrong.
 
 Emptying it (`make release PRERELEASE=`) declares the product beta or stable.
 That is the user's decision and it must be asked for explicitly. Never do it as

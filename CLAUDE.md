@@ -136,7 +136,7 @@ contradict a documented clamp, the bound is published as a
   change. Conventional Commits, subject in this repository's voice
   (.claude/WORKFLOW.md §4). Pushing is different: never without being asked.
 - **The product is an unstable alpha.** Every release is tagged
-  `vX.Y.Z-alpha.N` (`PRERELEASE ?= alpha.1` in the Makefile), which sorts BELOW
+  `vX.Y.Z-alpha` (`PRERELEASE ?= alpha` in the Makefile), which sorts BELOW
   the same version without it, so nothing downstream can mistake an alpha build
   for a supported one. Emptying `PRERELEASE` declares the product beta or
   stable; it is a decision, not a cleanup.

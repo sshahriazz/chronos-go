@@ -827,7 +827,7 @@ are fine; no code here takes one.
 
 Full rules in [VERSIONING.md](VERSIONING.md). What matters while writing Go:
 
-- **The product is an unstable alpha.** Releases are tagged `vX.Y.Z-alpha.N`;
+- **The product is an unstable alpha.** Releases are tagged `vX.Y.Z-alpha`;
   `PRERELEASE` in the Makefile puts the marker there, and semver sorts it below
   the same version without it. Emptying that default declares the product beta
   or stable — a decision, never a cleanup.

@@ -128,7 +128,8 @@ as editing a generated dashboard.
 is the one place a binary learns which build it is; three per-`main` copies
 existed and all three reported `dev` forever.
 
-**Chronos is an unstable alpha.** Releases are tagged `vX.Y.Z-alpha.N`. Do not
+**Chronos is an unstable alpha.** Releases are tagged `vX.Y.Z-alpha` — a channel
+label, not a counter; the base version moves, the marker does not. Do not
 remove the `PRERELEASE` default in the Makefile as tidying — emptying it is how
 the product is declared beta or stable.
 

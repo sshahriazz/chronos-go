@@ -30,8 +30,9 @@ Full rules: docs/VERSIONING.md. What an agent must not get wrong:
   add a `var version` to a `main` package.
 - The product version and the `chronos.*.v1` wire version are independent. Never
   bump one to match the other.
-- Chronos is an unstable alpha: releases are tagged `vX.Y.Z-alpha.N` via
-  `PRERELEASE` in the Makefile. Never empty that default as a cleanup.
+- Chronos is an unstable alpha: releases are tagged `vX.Y.Z-alpha` via
+  `PRERELEASE` in the Makefile — a channel label, not a counter. Never empty
+  that default as a cleanup.
 
 ## Committing
 
