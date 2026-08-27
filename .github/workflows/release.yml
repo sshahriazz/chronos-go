@@ -66,11 +66,24 @@ jobs:
             esac
           done
 
+      # Idempotent, because a tag can legitimately be re-pushed: an annotation
+      # was wrong, or history was rewritten under it. `gh release create` fails
+      # outright on an existing tag — "a release with the same tag name already
+      # exists" — which turns a corrected tag into a red build and leaves the
+      # published release describing the superseded commit.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "${GITHUB_REF_NAME}" \
-            --notes-file ".changes/${GITHUB_REF_NAME}.md" \
-            ./bin/api ./bin/worker ./bin/projector ./bin/migrate
+          tag="${GITHUB_REF_NAME}"
+          bins=(./bin/api ./bin/worker ./bin/projector ./bin/migrate)
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag exists; updating it to this commit"
+            gh release edit "$tag" --title "$tag" --notes-file ".changes/$tag.md"
+            gh release upload "$tag" "${bins[@]}" --clobber
+          else
+            gh release create "$tag" \
+              --title "$tag" \
+              --notes-file ".changes/$tag.md" \
+              "${bins[@]}"
+          fi
