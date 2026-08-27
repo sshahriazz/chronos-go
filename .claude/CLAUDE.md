@@ -94,27 +94,31 @@ Four that matter most, in short:
 Read [docs/VERSIONING.md](../docs/VERSIONING.md) before cutting a release or
 deciding whether a change needs a changelog entry. The short form:
 
-**Write the customer's sentence while the change is fresh.** Commit subjects in
-this repository are written for engineers on purpose — "half of every API key
-minted could never authenticate" belongs in `git log` and nowhere near a
-customer. So a change a customer can observe carries a fragment:
+**Entries are written at release time, by you, from the diffs.** Nobody writes
+them while working. When the user asks for a release, invoke `/release` and
+follow it: `make release-input` lists every commit since the last tag, and you
+open `git show` on each one that touched something observable.
 
-```bash
-make changelog-new KIND=Fixed DOMAIN=identity BODY="API keys created before … now authenticate."
-```
+**Never write an entry from a commit subject.** Subjects here are written for
+engineers on purpose — "half of every API key minted could never authenticate"
+belongs in `git log` and nowhere near a customer. Reading the diff is what pays
+for writing entries late; skipping it makes the whole arrangement worse than
+having no changelog.
 
-**Not every change earns one.** A refactor, a test, generated code, a dashboard,
-an internal tool or anything in the operator plane is invisible from outside.
-Say so in a commit trailer rather than inventing an entry:
+**One entry per change, not per commit.** A feature built over five commits is
+one entry.
+
+**What you owe the release while working is one trailer.** On any commit a
+customer cannot observe — a refactor, a test, generated code, an internal tool,
+the operator plane:
 
 ```
 Changelog: none
 ```
 
-`make changelog-check` (part of `make check`, and a CI job) decides which paths
-need one and validates every fragment against `.changie.yaml`. It fails on an
-unknown kind or domain, an empty body, or a body that is a pasted commit
-subject — which is the substitution it exists to prevent.
+`make changelog-check` (part of `make check`, and a CI job) validates the
+entries that exist against `.changie.yaml`: unknown kind or domain, empty body,
+or a pasted commit subject fails there.
 
 **Do not hand-edit `CHANGELOG.md` or `.changes/vX.Y.Z.md`.** Both are assembled
 by `make release` from the fragments. Editing them is the same class of mistake
@@ -130,3 +134,23 @@ the product is declared beta or stable.
 
 **Never bump `chronos.*.v1` to match a product version.** They are independent
 axes; see docs/VERSIONING.md §1.
+
+## Committing
+
+**Commit as soon as one thing is done and green** — not at the end of a session,
+and without waiting to be asked. In this repository that is a standing
+instruction. Pushing is different: never push without being asked.
+
+One commit is one reason to change. Every commit builds and its tests pass.
+Never mix a dependency bump, generated code and a behaviour change.
+
+Conventional Commits, subject in this repository's voice — a statement about the
+system, not a label:
+
+```
+fix(identity): half of every API key minted could never authenticate
+```
+
+The body carries the reasoning a reader will not recover from the diff. Add
+`Changelog: none` when a customer cannot observe the change; the release
+procedure reads it. Full rules: [WORKFLOW.md](WORKFLOW.md) §4.

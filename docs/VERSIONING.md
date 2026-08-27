@@ -114,22 +114,37 @@ the tree. Chronos is a service, not a library, so nothing external is pinned to
 that path — but the rule still applies to anything that imports it, and it is a
 real reason not to reach for a major bump casually.
 
-## 4. The changelog is written by the author, not the releaser
+## 4. The changelog is written at release time, from the diffs
 
-Commit subjects here are written for engineers — *"half of every API key minted
-could never authenticate"* is the right sentence for `git log` and the wrong one
-for a customer. A changelog generated from commits therefore either leaks
-internal detail or reads as noise, and a changelog assembled at release time is
-written by whoever cuts the release, weeks after the fact, by someone who did
-not make the change.
+Nobody writes changelog entries while working. At release, `/release` reads
+every commit since the last tag, opens the diff of each one that touched
+something a customer can observe, and writes the entries.
 
-So each customer-visible change carries one small YAML file, written while the
-change is fresh:
+**This is a trade, and it is worth naming.** Writing entries at change time is
+more faithful to intent — the author knows what they meant; a reader of the diff
+infers it. An earlier version of this repository enforced exactly that, with a
+gate that failed any pull request touching a module without a fragment. It was
+traded for a workflow where the changelog costs nothing until somebody wants a
+release.
+
+What pays for the trade is the rule that the entries come from **diffs, never
+commit subjects**. Subjects here are written for engineers on purpose —
+*"half of every API key minted could never authenticate"* is right for `git log`
+and wrong for a customer — and a changelog made of reworded subjects is the
+failure this whole document exists to avoid.
+
+The procedure is `.claude/skills/release/SKILL.md`. Its shape:
 
 ```bash
-make changelog-new                                        # prompts for kind, domain, body
-make changelog-new KIND=Added DOMAIN=billing BODY="…"     # non-interactive
+make release-input      # every commit since the last tag, sorted by what it touched
+git show <sha>          # for each one that needs an entry — the diff, not the subject
+make changelog-new KIND=Added DOMAIN=billing BODY="…"   # one entry per CHANGE, not per commit
+make changelog-preview  # read it as a customer, then approve it
 ```
+
+The fragments are an intermediate artifact now rather than a per-change
+obligation, but they are still where entries live before a release, and
+`make check` still validates any that exist.
 
 ```yaml
 # .changes/unreleased/Added-20260827-163518.yaml
@@ -140,9 +155,8 @@ custom:
     Domain: compliance
 ```
 
-One file per change, named by timestamp, so two branches merging touch two
-different files — the merge conflicts a shared `CHANGELOG.md` produces are what
-kills this practice everywhere it is tried.
+One file per entry, named by timestamp, so two releases prepared in parallel
+touch two different files.
 
 ### What earns an entry
 
@@ -152,19 +166,30 @@ anything that alters a request or a response.
 
 **Do not write one otherwise.** A refactor, a test, a generated file, a
 dashboard, an internal tool and the whole operator plane are invisible from
-outside, and padding a public changelog with them makes it useless. Say so
-explicitly with a commit trailer:
+outside, and padding a public changelog with them makes it useless.
+
+**One entry per CHANGE, not per commit.** A feature built over five commits is
+one entry. A fix and its test are one entry.
+
+### What you owe the release while working
+
+One trailer, on any commit a customer cannot observe:
 
 ```
 Changelog: none
 ```
 
-`make changelog-check` decides which paths need one — `proto/chronos/`,
-`internal/modules/`, `internal/server/`, the service binaries and the
-migrations. It runs in `make check` and in CI on every pull request. It also
-validates what it finds against `.changie.yaml` itself, so an unknown kind, an
-unknown domain, an empty body or a pasted commit subject fails while the author
-is still there.
+`make release-input` sorts the range by it. A commit without one that touched
+`proto/chronos/`, `internal/modules/`, `internal/server/`, a service binary or a
+migration is a commit the release stops and reads. The trailer is not
+decoration: it is the record that somebody decided, sitting in the history next
+to the change it applies to.
+
+`make changelog-check` validates fragments against `.changie.yaml` itself — an
+unknown kind, an unknown domain, an empty body or a pasted commit subject fails
+in `make check` and in CI, rather than at `make release` with somebody waiting.
+`make release` additionally refuses to cut a release that describes nothing
+while observable work went into the range.
 
 ### Writing the body
 
@@ -179,7 +204,14 @@ is still there.
 
 ## 5. Cutting a release
 
+Ask for one: **`/release`**. The procedure is `.claude/skills/release/SKILL.md`
+and it runs these, stopping twice — once for you to approve the wording, once
+before pushing:
+
 ```bash
+make release-input                    # every commit since the last tag
+git show <sha>                        # the diff behind each one that needs an entry
+make changelog-new KIND=… DOMAIN=… BODY="…"
 make changelog-preview                # the notes the current fragments would produce
 make release                          # batch into .changes/vX.Y.Z-alpha.1.md, rebuild CHANGELOG.md
 make release BUMP=v0.1.0              # a number that is a decision, not a consequence

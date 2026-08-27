@@ -123,7 +123,7 @@ api-validate      the OpenAPI spec is non-empty and complete
 migrate-check     migrations are append-only
 sqlc-check        generated query code is current AND matches the schema
 sql-check         no SQL in Go outside the kernel carve-out
-changelog-check   a customer-visible change carries the sentence a customer reads
+changelog-check   unreleased changelog fragments satisfy .changie.yaml
 lint              golangci-lint, including the depguard import contract
 test              go test ./... -race
 ```
@@ -134,26 +134,83 @@ transit), then `go test -tags=integration ./... -race`.
 `-race` always. The projector and reactor runners are concurrent by design; a
 data race there corrupts a read model rather than crashing.
 
-### The changelog gate is not a formality
+### The changelog is not checked here, and that is a trade
 
-Commit subjects here are written for engineers on purpose. A changelog
-generated from them either leaks internal detail or reads as noise, and one
-assembled at release time is written by whoever cuts the release — weeks later,
-about work they did not do. So the sentence a customer reads is written by the
-author, while the change is fresh:
+`changelog-check` in `make check` validates fragments that exist. It does NOT
+require one: entries are written at RELEASE time, from the diffs, by whoever
+runs `/release`. Nobody has to think about the changelog while working.
 
-```bash
-make changelog-new KIND=Fixed DOMAIN=identity BODY="…"   # a fragment, one file, no merge conflicts
+The cost is that intent gets reconstructed from a diff weeks later, so the
+release procedure pays it back — it reads `git show` for every commit that
+touched something observable, never the subject line. Commit subjects here are
+written for engineers on purpose, and a changelog made of them leaks internal
+detail or reads as noise.
+
+What you owe the release, while working, is one trailer:
+
+```
+Changelog: none
 ```
 
-If the change is invisible from outside — a refactor, a test, generated code, an
-internal tool, the operator plane — it earns no entry, and the commit says so
-with a `Changelog: none` trailer. Both paths are checked; neither is optional.
+on any commit a customer cannot observe — a refactor, a test, generated code, an
+internal tool, the operator plane. `make release-input` sorts the range by that
+trailer, so a commit without one is a commit the release has to stop and read.
 See docs/VERSIONING.md.
 
 ---
 
-## 4. Reporting
+## 4. Committing
+
+**Commit as soon as one thing is done and green.** Not at the end of a session,
+not when the user asks. In this repository that is a standing instruction: when
+a change compiles, its tests pass and it is one complete thought, commit it.
+Pushing is different — never push without being asked.
+
+A session that ends with twenty files staged is a session whose history cannot
+be read, bisected or reverted. The compliance work that produced
+`v0.1.0-alpha.1` was four commits — the billing join, the dead export deleted,
+the racing tests fixed, the docs caught up — and each of those is separately
+revertable. As one commit it would have been none of those things.
+
+**One commit is one reason to change.** Never mix:
+
+- a dependency bump with a behaviour change,
+- generated code with the source that generated it *and* an unrelated fix,
+- formatting with anything at all.
+
+**Every commit builds and its tests pass.** If a change needs two files to
+compile, those two files are one commit. `git bisect` is worthless the moment
+that stops being true.
+
+### The message
+
+Conventional Commits, with this repository's voice in the subject:
+
+```
+type(scope): what changed, as a statement about the system
+
+Why it changed. What was wrong before, or what was impossible. The body
+is for the reasoning a reader will not recover from the diff — not a
+restatement of it. Wrap at 72.
+
+Changelog: none
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+
+- `type` is one of `feat fix refactor test docs chore perf build ci`.
+- `scope` is the module or domain: `identity`, `billing`, `compliance`,
+  `projections`, `api`, `deps`. Omit it when the change is genuinely global.
+- The subject is prose, not a label. `fix(identity): half of every API key
+  minted could never authenticate` says what was wrong. `fix(identity): fix key
+  bug` says nothing. No trailing full stop; aim for 72 characters.
+- `Changelog: none` when nothing a customer can observe changed. The release
+  procedure reads that trailer (§ `docs/VERSIONING.md`), so it is not decoration
+  — it is the record that somebody decided.
+
+---
+
+## 5. Reporting
 
 State what was measured and what was assumed, separately. Report failures with
 the output. If part of a task was skipped, say which part and why.
@@ -163,7 +220,7 @@ tallying, no self-criticism beyond what changes the reader's decisions.
 
 ---
 
-## 5. Environment notes
+## 6. Environment notes
 
 - `head` on this machine is an HTTP tool, not coreutils. Use `/usr/bin/head`.
 - The shell is zsh. `$var(...)` is glob syntax there; scripts destined for CI

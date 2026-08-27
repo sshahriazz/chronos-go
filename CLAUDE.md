@@ -118,15 +118,23 @@ contradict a documented clamp, the bound is published as a
   startup.
 - **Migrations are append-only.** Never edit an applied migration; add a new
   one. `make migrate-check` enforces it (ADR-011).
-- **A change a customer can observe ships with the sentence they will read.**
-  Not a commit subject — those are written for engineers here, deliberately.
-  `make changelog-new` writes a fragment under `.changes/unreleased/`;
-  `make changelog-check` runs in `make check` and in CI and fails a change to
-  `proto/chronos/`, `internal/modules/`, `internal/server/`, a service binary or
-  a migration that carries neither a fragment nor a `Changelog: none` commit
-  trailer. Refactors, tests, generated code, internal tools and the operator
-  plane earn no entry — a public changelog padded with invisible work is
-  useless (docs/VERSIONING.md).
+- **The changelog is written at release time, from the diffs.** Not from commit
+  subjects — those are written for engineers here, deliberately, and a changelog
+  made of them leaks internal detail or reads as noise. `/release` reads every
+  commit since the last tag, opens `git show` on each one that touched something
+  observable, and writes one entry per CHANGE. Refactors, tests, generated code,
+  internal tools and the operator plane earn no entry — a public changelog padded
+  with invisible work is useless (docs/VERSIONING.md).
+- **What a commit owes the release is one trailer.** `Changelog: none`, on any
+  commit a customer cannot observe. `make release-input` sorts the range by it;
+  a commit without one that touched `proto/chronos/`, `internal/modules/`,
+  `internal/server/`, a service binary or a migration is one the release stops
+  and reads.
+- **Commit as soon as one thing is done and green** — not at the end of a
+  session, and without waiting to be asked. One commit is one reason to change,
+  every commit builds, and a dependency bump never rides along with a behaviour
+  change. Conventional Commits, subject in this repository's voice
+  (.claude/WORKFLOW.md §4). Pushing is different: never without being asked.
 - **The product is an unstable alpha.** Every release is tagged
   `vX.Y.Z-alpha.N` (`PRERELEASE ?= alpha.1` in the Makefile), which sorts BELOW
   the same version without it, so nothing downstream can mistake an alpha build
@@ -162,9 +170,10 @@ make api-docs    # OpenAPI spec + docs/api/errors.md only
 make test        # go test ./... -race
 make lint        # includes the depguard import contract (CONVENTIONS §2)
 
-make changelog-new      # describe a customer-visible change (docs/VERSIONING.md)
-make changelog-check    # fail if one arrived without an entry; part of `make check`
-make changelog-preview  # the release notes the current fragments would produce
+make release-input      # every commit since the last tag, and what a customer sees in it
+make changelog-new      # write one entry (docs/VERSIONING.md)
+make changelog-check    # validate the unreleased entries; part of `make check`
+make changelog-preview  # the release notes the current entries would produce
 make version            # what this tree builds as, and what it would release as
 make release            # assemble CHANGELOG.md + .changes/vX.Y.Z.md. No commit, no tag.
 make release-tag        # commit and tag the assembled release. Does NOT push.
@@ -196,7 +205,7 @@ go run ./internal/tools/gendocs                 # docs/api/errors.md + the OpenA
 go run ./internal/tools/fixopenapi              # -spec <file>; runs after buf generate, never by hand
 go run ./internal/tools/gendashboards           # -out <dir>
 go run ./internal/tools/checkopenapi            # -spec <file> -proto <dir>
-go run ./internal/tools/checkchangelog         # -base <ref>; the changelog gate
+go run ./internal/tools/checkchangelog         # -list, -coverage, -since <ref>
 go run ./internal/tools/checkdashboards         # -dashboards <dir> -prometheus <url>
 go run ./internal/tools/obsprobe targets|traces|status
 ```

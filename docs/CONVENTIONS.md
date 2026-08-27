@@ -839,11 +839,15 @@ Full rules in [VERSIONING.md](VERSIONING.md). What matters while writing Go:
   reads `buildinfo.Version()`, which resolves the link-time stamp, then Go's
   embedded VCS data, then `dev` — in that order. Three per-`main` copies existed
   and all reported `dev` in every log line, span and `GetStatus` response.
-- **A customer-visible change carries a fragment.** `make changelog-new`, and the
-  body is the sentence a customer reads — not the commit subject, which in this
-  repository is deliberately written for engineers. A change that is invisible
-  from outside declares `Changelog: none` in a commit trailer instead.
-  `make changelog-check` enforces both and runs in `make check`.
+- **The changelog is written at release time, from the diffs.** `/release` reads
+  every commit since the last tag and opens `git show` on each one that touched
+  something observable. Never from a commit subject: those are written for
+  engineers here on purpose. What a commit owes is `Changelog: none` when a
+  customer cannot observe it. `make changelog-check` validates entries in
+  `make check`; `make release` refuses a release that describes nothing.
+- **Commit small and often.** One reason to change per commit, every commit
+  builds, Conventional Commits with a subject that states what changed about the
+  system (.claude/WORKFLOW.md §4).
 - **`CHANGELOG.md` and `.changes/vX.Y.Z.md` are generated.** `make release`
   assembles them from the fragments. Hand-editing them is the same mistake as
   hand-editing a generated dashboard (§11).
